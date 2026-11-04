@@ -45,3 +45,4 @@
 - 安全、架构和独立adversarial复审均已关闭本轮可复现发现，未遗留已知阻断代码缺陷；真实验收仍全部未验证。
 - 最终全套验证通过：pnpm frozen install、typecheck、6单元、34集成、15浏览器e2e、build；另普通Node构建后两通道冒烟在Node24/26均通过，Edge进程资源统计实测有值。隐私扫描器已用known-good/known-bad自测。最终审查与远程交接证据记录于REVIEW.md。
 - 最终实现提交`6845d55c03409edfe704695094bcfb86c4fbd80e`。启动说明、完整实机清单、L/N/D/S/H/M及C01—C06对应表已准备；推送完成并核对远程后再集中邀请用户进入实机阶段。目标继续有效，不能把此交接记作完成。
+- 首次干净检出补验发现pnpm误触发v13 SQLite隐式node-gyp，因无VS编译链失败；已从包实际loader与官方源码确认自带Windows Node-API二进制，项目策略禁止这项不必要构建，仅保留esbuild安装脚本。不安装全局编译器、不跳过SQLite运行检查；全新检出继续复验。

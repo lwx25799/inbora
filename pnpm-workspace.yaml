@@ -1,3 +1,4 @@
 allowBuilds:
-  better-sqlite3: true
+  # v13 ships the Windows Node-API binary; avoid pnpm's implicit node-gyp path.
+  better-sqlite3: false
   esbuild: true
