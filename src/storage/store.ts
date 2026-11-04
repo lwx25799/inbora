@@ -167,6 +167,15 @@ export class EventStore {
       this.audit('HUMAN_REJECTED', id);
     }).immediate();
   }
+  invalidateApproval(id: string): void {
+    this.db.transaction(() => {
+      const d = this.draft(id);
+      requireSafe(!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(d.eventId), 'INTENT_EXISTS');
+      this.db.prepare("UPDATE reply_drafts SET status='DRAFT',approval=NULL,approved_at=NULL WHERE id=?").run(id);
+      this.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=? AND status='APPROVED'").run(d.eventId);
+      this.audit('APPROVAL_INVALIDATED', id);
+    }).immediate();
+  }
   pause(key: string, paused: boolean): void {
     this.db.prepare('INSERT INTO pauses VALUES (?,?) ON CONFLICT(target_key) DO UPDATE SET paused=excluded.paused').run(key, Number(paused));
     this.audit(paused ? 'PAUSED' : 'RESUMED', digest(key));
@@ -216,6 +225,10 @@ export class EventStore {
   }
   uncertain(): Intent[] {
     return this.db.prepare("SELECT id,event_id,target_key,status FROM send_intents WHERE status='UNCERTAIN'").all() as Intent[];
+  }
+  receiptForEvent(eventId: string): unknown {
+    return this.db.prepare(`SELECT r.id,r.result,r.proof_ref,r.verified_at FROM delivery_receipts r
+      JOIN send_intents i ON i.id=r.send_intent_id WHERE i.event_id=? ORDER BY r.rowid DESC LIMIT 1`).get(eventId);
   }
   stats(): Record<string, unknown> {
     return {

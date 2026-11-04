@@ -40,6 +40,8 @@ test('context change after approval blocks before intent; database write failure
   try {
     const id = approved(s); const c = new SendCoordinator(s, new AccountActor());
     await expect(c.send(id, adapter({ inspect: async e => ({ ...snapshot(e), contextDigest: 'changed' }) }), true)).rejects.toThrow('TARGET_CHANGED');
+    expect(s.draft(id).approval).toBeNull();
+    const draft = s.draft(id); s.approve(id, snapshot(candidate()), draft.version, draft.text);
     s.db.pragma('query_only=ON');
     await expect(c.send(id, adapter({ clickOnce: async () => { clicks++; } }), true)).rejects.toThrow();
     expect(clicks).toBe(0);

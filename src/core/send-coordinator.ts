@@ -11,15 +11,19 @@ export class SendCoordinator {
       this.store.assertSendable(event.id);
       requireSafe(draft.status === 'APPROVED' && draft.approval, 'APPROVAL_REQUIRED');
       const approved = draft.approval;
-      const before = await adapter.inspect(event.payload);
-      requireSafe(digest(before) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
-      await adapter.prepare(event.payload, draft.text);
-      const prepared = await adapter.verifyPrepared(event.payload, draft.text);
-      requireSafe(digest(prepared) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
-      const baseline = await adapter.baseline(event.payload);
-      // Re-read after baseline and immediately before committing the irreversible intent.
-      const final = await adapter.verifyPrepared(event.payload, draft.text);
-      requireSafe(digest(final) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
+      let baseline: string[];
+      let final: typeof approved.snapshot;
+      try {
+        const before = await adapter.inspect(event.payload);
+        requireSafe(digest(before) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
+        await adapter.prepare(event.payload, draft.text);
+        const prepared = await adapter.verifyPrepared(event.payload, draft.text);
+        requireSafe(digest(prepared) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
+        baseline = await adapter.baseline(event.payload);
+        // Re-read after baseline and immediately before committing the irreversible intent.
+        final = await adapter.verifyPrepared(event.payload, draft.text);
+        requireSafe(digest(final) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
+      } catch (error) { this.store.invalidateApproval(draftId); throw error; }
       const intentId = this.store.recordIntent(draftId, final, real);
       try {
         // Any error after intent commit is unknown, even if click() reports an error.
