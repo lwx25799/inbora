@@ -1,0 +1,33 @@
+{
+  "name": "inbora",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Single-account, approval-gated Douyin web PoC",
+  "bin": { "inbora": "dist/cli.js" },
+  "engines": { "node": ">=24.22.1 <25 || >=26.13.0 <27", "pnpm": "11.25.0" },
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "inbora": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "vitest run tests/e2e",
+    "test:real": "tsx src/cli.ts real-test",
+    "build": "tsc -p tsconfig.build.json",
+    "check:privacy": "node scripts/check-privacy.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "pino": "10.4.0",
+    "playwright": "1.64.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "26.6.6",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}

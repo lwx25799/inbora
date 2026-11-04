@@ -1,0 +1,59 @@
+import { expect, test } from 'vitest';
+import { AccountActor } from '../../src/browser/account-actor.js';
+import { SendCoordinator } from '../../src/core/send-coordinator.js';
+import { type ReplyAdapter } from '../../src/core/contracts.js';
+import { approved, candidate, database, snapshot } from '../helpers.js';
+
+function adapter(overrides: Partial<ReplyAdapter> = {}): ReplyAdapter {
+  return {
+    inspect: async e => snapshot(e), prepare: async () => {}, verifyPrepared: async e => snapshot(e),
+    baseline: async () => ['old'], clickOnce: async () => {},
+    readback: async (e, text) => ({ id: 'new', ownId: 'own-1', targetKey: snapshot(e).targetKey, text, pending: false }),
+    ...overrides,
+  };
+}
+test('duplicate send commands result in exactly one click and one receipt', async () => {
+  const s = database(); let clicks = 0;
+  try {
+    const id = approved(s); const coordinator = new SendCoordinator(s, new AccountActor());
+    const a = adapter({ clickOnce: async () => { clicks++; } });
+    const result = await Promise.allSettled([coordinator.send(id, a, false), coordinator.send(id, a, false)]);
+    expect(result[0]).toEqual({ status: 'fulfilled', value: 'CONFIRMED' });
+    expect(result[1]?.status).toBe('rejected'); expect(clicks).toBe(1);
+    expect(s.db.prepare('SELECT * FROM delivery_receipts').all()).toHaveLength(1);
+  } finally { s.close(); }
+});
+test('two targets serialize browser mutations and receipt lookup', async () => {
+  const s = database(); let active = 0; let maximum = 0;
+  try {
+    const first = approved(s);
+    const second = approved(s, candidate({ platformEventId: 'other', conversationId: 'conversation-2' }));
+    const coordinator = new SendCoordinator(s, new AccountActor());
+    const a = adapter({ prepare: async () => { active++; maximum = Math.max(maximum, active); await new Promise(r => setTimeout(r, 15)); },
+      readback: async (e, text) => { active--; return { id: 'new', ownId: 'own-1', targetKey: snapshot(e).targetKey, text, pending: false }; } });
+    expect(await Promise.all([coordinator.send(first, a, false), coordinator.send(second, a, false)])).toEqual(['CONFIRMED', 'CONFIRMED']);
+    expect(maximum).toBe(1);
+  } finally { s.close(); }
+});
+test('context change after approval blocks before intent; database write failure blocks click', async () => {
+  const s = database(); let clicks = 0;
+  try {
+    const id = approved(s); const c = new SendCoordinator(s, new AccountActor());
+    await expect(c.send(id, adapter({ inspect: async e => ({ ...snapshot(e), contextDigest: 'changed' }) }), true)).rejects.toThrow('TARGET_CHANGED');
+    s.db.pragma('query_only=ON');
+    await expect(c.send(id, adapter({ clickOnce: async () => { clicks++; } }), true)).rejects.toThrow();
+    expect(clicks).toBe(0);
+  } finally { s.close(); }
+});
+test.each(['timeout', 'wrong-target', 'old-id', 'pending', 'no-proof'] as const)('%s after intent stays uncertain and cannot repeat', async failure => {
+  const s = database(); let clicks = 0;
+  try {
+    const id = approved(s); const c = new SendCoordinator(s, new AccountActor());
+    const a = adapter({ clickOnce: async () => { clicks++; if (failure === 'timeout') throw new Error('browser gone'); },
+      readback: async (e, text) => failure === 'no-proof' ? null : ({ id: failure === 'old-id' ? 'old' : 'new', ownId: 'own-1',
+        targetKey: failure === 'wrong-target' ? 'dm:other' : snapshot(e).targetKey, text, pending: failure === 'pending' }) });
+    expect(await c.send(id, a, true)).toBe('UNCERTAIN');
+    await expect(c.send(id, a, true)).rejects.toThrow(); expect(clicks).toBe(1);
+    expect(s.uncertain()).toHaveLength(1);
+  } finally { s.close(); }
+});

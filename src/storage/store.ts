@@ -1,0 +1,227 @@
+import Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, existsSync } from 'node:fs';
+import { dirname } from 'node:path';
+import {
+  digest, eventBinding, eventSchema, isEligible, isStrong, requireSafe, targetKey, validText,
+  type Channel, type Draft, type InboundEvent, type StoredEvent, type TargetSnapshot,
+} from '../core/contracts.js';
+
+interface EventRow { id: string; payload: string; binding: string; status: StoredEvent['status'] }
+interface DraftRow { id: string; event_id: string; text: string; model: string; version: number;
+  status: Draft['status']; approval: string | null }
+export interface Intent { id: string; event_id: string; target_key: string; status: string }
+
+export class EventStore {
+  readonly db: Database.Database;
+  constructor(file: string, initialize = false) {
+    requireSafe(initialize || existsSync(file), 'DATABASE_MISSING_USE_INIT');
+    if (initialize) mkdirSync(dirname(file), { recursive: true });
+    this.db = new Database(file, { fileMustExist: !initialize });
+    try {
+      requireSafe(this.db.pragma('quick_check', { simple: true }) === 'ok', 'DATABASE_CORRUPT');
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('synchronous = FULL');
+      this.db.pragma('foreign_keys = ON');
+      this.db.pragma('busy_timeout = 3000');
+      const version = this.db.pragma('user_version', { simple: true });
+      requireSafe(version === 1 || (version === 0 && initialize), 'DATABASE_SCHEMA_UNSUPPORTED');
+      if (version === 0) this.schema();
+    } catch (error) { this.db.close(); throw error; }
+  }
+  private schema(): void {
+    this.db.transaction(() => {
+      // Existing unknown databases must never be interpreted as an empty PoC database.
+      const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
+      requireSafe(tables.length === 0, 'DATABASE_NOT_EMPTY');
+      this.db.exec(`
+        CREATE TABLE accounts (id TEXT PRIMARY KEY CHECK(id='account_001'), own_id TEXT NOT NULL);
+        CREATE TABLE observations (id TEXT PRIMARY KEY, channel TEXT NOT NULL, scope TEXT NOT NULL,
+          observed_at TEXT NOT NULL, count INTEGER NOT NULL, evidence_ref TEXT NOT NULL);
+        CREATE TABLE inbound_events (id TEXT PRIMARY KEY, account_id TEXT NOT NULL,
+          channel TEXT NOT NULL, source_key TEXT NOT NULL, scope TEXT NOT NULL, target_key TEXT NOT NULL,
+          binding TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL,
+          UNIQUE(account_id,channel,source_key));
+        CREATE TABLE cursors (channel TEXT NOT NULL, scope TEXT NOT NULL, cursor_data TEXT NOT NULL,
+          updated_at TEXT NOT NULL, PRIMARY KEY(channel,scope));
+        CREATE TABLE reply_drafts (id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE REFERENCES inbound_events(id),
+          text TEXT NOT NULL, model TEXT NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL,
+          approval TEXT, approved_at TEXT);
+        CREATE TABLE send_intents (id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE REFERENCES inbound_events(id),
+          draft_id TEXT NOT NULL REFERENCES reply_drafts(id), target_key TEXT NOT NULL,
+          target_digest TEXT NOT NULL, text_digest TEXT NOT NULL, status TEXT NOT NULL, attempt_started_at TEXT NOT NULL);
+        CREATE TABLE delivery_receipts (id TEXT PRIMARY KEY, send_intent_id TEXT NOT NULL REFERENCES send_intents(id),
+          result TEXT NOT NULL, proof_ref TEXT NOT NULL, verified_at TEXT NOT NULL);
+        CREATE TABLE audit_events (id TEXT PRIMARY KEY, time TEXT NOT NULL, event_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL, detail_redacted TEXT NOT NULL);
+        CREATE TABLE pauses (target_key TEXT PRIMARY KEY, paused INTEGER NOT NULL);
+        CREATE TABLE budgets (kind TEXT PRIMARY KEY, used INTEGER NOT NULL, maximum INTEGER NOT NULL);
+        INSERT INTO budgets VALUES ('MODEL',0,50),('SEND',0,20);
+        CREATE TABLE model_calls (id TEXT PRIMARY KEY, model TEXT NOT NULL, status TEXT NOT NULL,
+          input_tokens INTEGER, output_tokens INTEGER, elapsed_ms INTEGER, estimated_cost REAL);
+        PRAGMA user_version = 1;
+      `);
+    }).immediate();
+  }
+  close(): void { this.db.close(); }
+  bindAccount(ownId: string): void {
+    requireSafe(ownId.length > 0, 'ACCOUNT_REQUIRED');
+    this.db.transaction(() => {
+      const row = this.db.prepare('SELECT own_id FROM accounts WHERE id=?').get('account_001') as { own_id: string } | undefined;
+      requireSafe(!row || row.own_id === ownId, 'ACCOUNT_CHANGED');
+      this.db.prepare('INSERT OR IGNORE INTO accounts VALUES (?,?)').run('account_001', ownId);
+    }).immediate();
+  }
+  audit(code: string, id: string, detail: Record<string, number | boolean> = {}): void {
+    this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)')
+      .run(randomUUID(), new Date().toISOString(), code, id, JSON.stringify(detail));
+  }
+  observe(channel: Channel, scope: string, candidates: InboundEvent[], ownId: string, evidenceRef: string): string[] {
+    return this.db.transaction(() => {
+      this.bindAccount(ownId);
+      const events = candidates.map(e => eventSchema.parse(e));
+      requireSafe(events.every(e => e.channel === channel), 'CHANNEL_MISMATCH');
+      const cursor = this.db.prepare('SELECT cursor_data FROM cursors WHERE channel=? AND scope=?').get(channel, scope);
+      const newIds: string[] = [];
+      this.db.prepare('INSERT INTO observations VALUES (?,?,?,?,?,?)')
+        .run(randomUUID(), channel, scope, new Date().toISOString(), events.length, evidenceRef);
+      for (const e of events) {
+        if (!isEligible(e, ownId)) continue;
+        const key = e.platformEventId ?? digest([e.actorId, e.occurredAt, targetKey(e), e.text]);
+        const binding = eventBinding(e);
+        const prior = this.db.prepare('SELECT * FROM inbound_events WHERE account_id=? AND channel=? AND source_key=?')
+          .get(e.accountId, e.channel, key) as EventRow | undefined;
+        if (prior) {
+          if (prior.binding !== binding || !isStrong(e)) {
+            // A source collision or changed original cannot inherit an approval.
+            this.db.prepare("UPDATE inbound_events SET status='MANUAL_REVIEW' WHERE id=? AND status NOT IN ('CONFIRMED','UNCERTAIN','INTENT_RECORDED')").run(prior.id);
+            this.db.prepare("UPDATE reply_drafts SET status='DRAFT',approval=NULL,approved_at=NULL WHERE event_id=?").run(prior.id);
+            this.audit('SOURCE_COLLISION', prior.id);
+          }
+          continue;
+        }
+        const id = randomUUID();
+        const status = !isStrong(e) ? 'MANUAL_REVIEW' : !cursor ? 'BASELINE' : 'AWAITING_DRAFT';
+        this.db.prepare('INSERT INTO inbound_events VALUES (?,?,?,?,?,?,?,?,?)')
+          .run(id, e.accountId, channel, key, scope, targetKey(e), binding, JSON.stringify(e), status);
+        if (status === 'AWAITING_DRAFT') newIds.push(id);
+      }
+      // Watermarks are per channel and conversation, not based only on message body.
+      this.db.prepare('INSERT INTO cursors VALUES (?,?,?,?) ON CONFLICT(channel,scope) DO UPDATE SET cursor_data=excluded.cursor_data,updated_at=excluded.updated_at')
+        .run(channel, scope, JSON.stringify(events.map(eventBinding)), new Date().toISOString());
+      return newIds;
+    }).immediate();
+  }
+  event(id: string): StoredEvent {
+    const row = this.db.prepare('SELECT id,payload,binding,status FROM inbound_events WHERE id=?').get(id) as EventRow | undefined;
+    requireSafe(row, 'EVENT_NOT_FOUND');
+    return { id: row.id, payload: eventSchema.parse(JSON.parse(row.payload)), binding: row.binding, status: row.status };
+  }
+  events(): StoredEvent[] {
+    return (this.db.prepare('SELECT id FROM inbound_events ORDER BY rowid').all() as { id: string }[]).map(r => this.event(r.id));
+  }
+  draft(id: string): Draft {
+    const row = this.db.prepare('SELECT * FROM reply_drafts WHERE id=?').get(id) as DraftRow | undefined;
+    requireSafe(row, 'DRAFT_NOT_FOUND');
+    return { id: row.id, eventId: row.event_id, text: row.text, model: row.model, version: row.version,
+      status: row.status, approval: row.approval ? JSON.parse(row.approval) as Draft['approval'] : null };
+  }
+  saveDraft(eventId: string, text: string, model: string): Draft {
+    validText(text);
+    return this.db.transaction(() => {
+      const e = this.event(eventId);
+      requireSafe(['AWAITING_DRAFT', 'AWAITING_APPROVAL', 'APPROVED'].includes(e.status), 'EVENT_NOT_DRAFTABLE');
+      requireSafe(!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(eventId), 'INTENT_EXISTS');
+      const old = this.db.prepare('SELECT id FROM reply_drafts WHERE event_id=?').get(eventId) as { id: string } | undefined;
+      const id = old?.id ?? randomUUID();
+      this.db.prepare(`INSERT INTO reply_drafts VALUES (?,?,?,?,1,'DRAFT',NULL,NULL)
+        ON CONFLICT(event_id) DO UPDATE SET text=excluded.text,model=excluded.model,version=version+1,
+        status='DRAFT',approval=NULL,approved_at=NULL`).run(id, eventId, text, model);
+      this.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(eventId);
+      this.audit('DRAFT_SAVED', id);
+      return this.draft(id);
+    }).immediate();
+  }
+  approve(id: string, snapshot: TargetSnapshot, expectedVersion: number, expectedText: string): void {
+    this.db.transaction(() => {
+      const d = this.draft(id); const e = this.event(d.eventId);
+      requireSafe(d.status === 'DRAFT' && e.status === 'AWAITING_APPROVAL', 'NOT_AWAITING_APPROVAL');
+      requireSafe(d.version === expectedVersion && d.text === expectedText, 'DRAFT_CHANGED');
+      requireSafe(snapshot.accountId === e.payload.accountId && snapshot.targetKey === targetKey(e.payload) &&
+        snapshot.eventBinding === e.binding && isStrong(e.payload), 'TARGET_CHANGED');
+      const account = this.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(e.payload.accountId) as { own_id: string };
+      requireSafe(snapshot.ownId === account.own_id, 'ACCOUNT_CHANGED');
+      const approval = { snapshot, textDigest: digest(d.text), version: d.version };
+      this.db.prepare("UPDATE reply_drafts SET status='APPROVED',approval=?,approved_at=? WHERE id=?")
+        .run(JSON.stringify(approval), new Date().toISOString(), id);
+      this.db.prepare("UPDATE inbound_events SET status='APPROVED' WHERE id=?").run(e.id);
+      this.audit('HUMAN_APPROVED', id);
+    }).immediate();
+  }
+  reject(id: string): void {
+    this.db.transaction(() => {
+      const d = this.draft(id);
+      requireSafe(!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(d.eventId), 'INTENT_EXISTS');
+      this.db.prepare("UPDATE reply_drafts SET status='REJECTED',approval=NULL WHERE id=?").run(id);
+      this.db.prepare("UPDATE inbound_events SET status='REJECTED' WHERE id=?").run(d.eventId);
+      this.audit('HUMAN_REJECTED', id);
+    }).immediate();
+  }
+  pause(key: string, paused: boolean): void {
+    this.db.prepare('INSERT INTO pauses VALUES (?,?) ON CONFLICT(target_key) DO UPDATE SET paused=excluded.paused').run(key, Number(paused));
+    this.audit(paused ? 'PAUSED' : 'RESUMED', digest(key));
+  }
+  assertSendable(eventId: string): void {
+    const e = this.event(eventId); const key = targetKey(e.payload);
+    requireSafe(e.status === 'APPROVED', 'EVENT_NOT_APPROVED');
+    requireSafe(!(this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as { paused: number } | undefined)?.paused, 'TARGET_PAUSED');
+    requireSafe(!this.db.prepare("SELECT id FROM send_intents WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')").get(key), 'TARGET_FROZEN');
+    requireSafe(!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(eventId), 'INTENT_EXISTS');
+  }
+  consumeBudget(kind: 'MODEL' | 'SEND'): void {
+    const result = this.db.prepare('UPDATE budgets SET used=used+1 WHERE kind=? AND used<maximum').run(kind);
+    requireSafe(result.changes === 1, 'BUDGET_EXHAUSTED');
+  }
+  recordIntent(draftId: string, snapshot: TargetSnapshot, real: boolean): string {
+    return this.db.transaction(() => {
+      const d = this.draft(draftId); this.assertSendable(d.eventId);
+      requireSafe(d.status === 'APPROVED' && d.approval && d.approval.version === d.version &&
+        d.approval.textDigest === digest(d.text) && digest(d.approval.snapshot) === digest(snapshot), 'APPROVAL_INVALID');
+      if (real) this.consumeBudget('SEND');
+      const id = randomUUID();
+      this.db.prepare('INSERT INTO send_intents VALUES (?,?,?,?,?,?,?,?)')
+        .run(id, d.eventId, d.id, snapshot.targetKey, digest(snapshot), digest(d.text), 'INTENT_RECORDED', new Date().toISOString());
+      this.db.prepare("UPDATE inbound_events SET status='INTENT_RECORDED' WHERE id=?").run(d.eventId);
+      this.audit('CLICK_INTENT_RECORDED', id);
+      return id;
+    }).immediate();
+  }
+  receipt(intentId: string, result: 'CONFIRMED' | 'UNCERTAIN', proofRef: string): void {
+    this.db.transaction(() => {
+      const intent = this.db.prepare('SELECT * FROM send_intents WHERE id=?').get(intentId) as Intent | undefined;
+      requireSafe(intent && ['INTENT_RECORDED', 'UNCERTAIN'].includes(intent.status), 'INTENT_NOT_REVIEWABLE');
+      this.db.prepare('INSERT INTO delivery_receipts VALUES (?,?,?,?,?)')
+        .run(randomUUID(), intentId, result, proofRef, new Date().toISOString());
+      this.db.prepare('UPDATE send_intents SET status=? WHERE id=?').run(result, intentId);
+      this.db.prepare('UPDATE inbound_events SET status=? WHERE id=?').run(result, intent.event_id);
+      this.audit(result, intentId);
+    }).immediate();
+  }
+  recover(): number {
+    return this.db.transaction(() => {
+      const pending = this.db.prepare("SELECT id FROM send_intents WHERE status='INTENT_RECORDED'").all() as { id: string }[];
+      for (const i of pending) this.receipt(i.id, 'UNCERTAIN', 'RESTART_WITH_UNFINISHED_INTENT');
+      return pending.length;
+    }).immediate();
+  }
+  uncertain(): Intent[] {
+    return this.db.prepare("SELECT id,event_id,target_key,status FROM send_intents WHERE status='UNCERTAIN'").all() as Intent[];
+  }
+  stats(): Record<string, unknown> {
+    return {
+      events: this.db.prepare('SELECT status,count(*) AS count FROM inbound_events GROUP BY status').all(),
+      budgets: this.db.prepare('SELECT * FROM budgets').all(),
+      uncertain: this.uncertain().length,
+    };
+  }
+}
