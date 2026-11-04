@@ -46,3 +46,5 @@
 - 最终全套验证通过：pnpm frozen install、typecheck、6单元、34集成、15浏览器e2e、build；另普通Node构建后两通道冒烟在Node24/26均通过，Edge进程资源统计实测有值。隐私扫描器已用known-good/known-bad自测。最终审查与远程交接证据记录于REVIEW.md。
 - 最终实现提交`6845d55c03409edfe704695094bcfb86c4fbd80e`。启动说明、完整实机清单、L/N/D/S/H/M及C01—C06对应表已准备；推送完成并核对远程后再集中邀请用户进入实机阶段。目标继续有效，不能把此交接记作完成。
 - 首次干净检出补验发现pnpm误触发v13 SQLite隐式node-gyp，因无VS编译链失败；已从包实际loader与官方源码确认自带Windows Node-API二进制，项目策略禁止这项不必要构建，仅保留esbuild安装脚本。不安装全局编译器、不跳过SQLite运行检查；全新检出继续复验。
+- 独立干净检出`b1447a0`已实测：frozen首次安装550ms成功，typecheck、6单元、34集成、15浏览器、build、compiled双通道冒烟、全部历史隐私扫描均通过，结束时无跟踪文件变化。原失败检出保留本机证据，未删除用户文件。
+- Win32_OperatingSystem实际报告Windows10专业版x64（10.0.19045），原方案Windows11仍未验证；不会擅自替换验收基线，实机交接时集中核对。
