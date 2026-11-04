@@ -13,6 +13,7 @@
     "test": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
     "test:e2e": "vitest run tests/e2e",
+    "test:built": "pnpm build && node scripts/browser-smoke.mjs",
     "test:real": "tsx src/cli.ts real-test",
     "build": "tsc -p tsconfig.build.json",
     "check:privacy": "node scripts/check-privacy.mjs"

@@ -129,3 +129,15 @@ test('delayed A-to-B conversation switch verifies both pane and peer, not just a
     await expect(dm.observeDm('conversation-2', 'peer-2')).rejects.toThrow('CONVERSATION_SWITCH_UNVERIFIED');
   } finally { await owner.close(); }
 });
+
+test('dedicated profile shares state across two pages and restores it after browser close',async()=>{
+  const profile=join(privateTemp(),'profile');let owner=await BrowserProfileOwner.launch(profile,false);
+  try{
+    await owner.open(server.origin);
+    await owner.notification.evaluate(()=>{document.cookie='inbora_fixture=shared; Max-Age=300; Path=/';});
+    expect(await owner.dm.evaluate(()=>document.cookie)).toContain('inbora_fixture=shared');
+    await owner.close();owner=await BrowserProfileOwner.launch(profile,true);await owner.open(server.origin);
+    expect(await owner.notification.evaluate(()=>document.cookie)).toContain('inbora_fixture=shared');
+    expect(await owner.dm.evaluate(()=>document.cookie)).toContain('inbora_fixture=shared');
+  }finally{await owner.close();}
+});

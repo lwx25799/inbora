@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { z } from 'zod';
 import {
   digest, eventBinding, eventSchema, isEligible, isStrong, requireSafe, targetKey, validText,
   type Channel, type Draft, type InboundEvent, type StoredEvent, type TargetSnapshot,
@@ -14,7 +15,7 @@ export interface Intent { id: string; event_id: string; target_key: string; stat
 
 export class EventStore {
   readonly db: Database.Database;
-  constructor(file: string, initialize = false) {
+  constructor(file: string, initialize = false, private readonly now: () => string = () => new Date().toISOString()) {
     requireSafe(initialize || existsSync(file), 'DATABASE_MISSING_USE_INIT');
     if (initialize) mkdirSync(dirname(file), { recursive: true });
     this.db = new Database(file, { fileMustExist: !initialize });
@@ -25,7 +26,7 @@ export class EventStore {
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('busy_timeout = 3000');
       const version = this.db.pragma('user_version', { simple: true });
-      requireSafe(version === 1 || (version === 0 && initialize), 'DATABASE_SCHEMA_UNSUPPORTED');
+      requireSafe(version === 2 || (version === 0 && initialize), 'DATABASE_SCHEMA_UNSUPPORTED');
       if (version === 0) this.schema();
     } catch (error) { this.db.close(); throw error; }
   }
@@ -44,6 +45,8 @@ export class EventStore {
           UNIQUE(account_id,channel,source_key));
         CREATE TABLE cursors (channel TEXT NOT NULL, scope TEXT NOT NULL, cursor_data TEXT NOT NULL,
           updated_at TEXT NOT NULL, PRIMARY KEY(channel,scope));
+        CREATE TABLE source_collisions (id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFERENCES inbound_events(id),
+          binding TEXT NOT NULL, payload TEXT NOT NULL, evidence_ref TEXT NOT NULL, UNIQUE(event_id,binding));
         CREATE TABLE reply_drafts (id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE REFERENCES inbound_events(id),
           text TEXT NOT NULL, model TEXT NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL,
           approval TEXT, approved_at TEXT);
@@ -59,7 +62,7 @@ export class EventStore {
         INSERT INTO budgets VALUES ('MODEL',0,50),('SEND',0,20);
         CREATE TABLE model_calls (id TEXT PRIMARY KEY, model TEXT NOT NULL, status TEXT NOT NULL,
           input_tokens INTEGER, output_tokens INTEGER, elapsed_ms INTEGER, estimated_cost REAL);
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
       `);
     }).immediate();
   }
@@ -76,15 +79,24 @@ export class EventStore {
     this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)')
       .run(randomUUID(), new Date().toISOString(), code, id, JSON.stringify(detail));
   }
-  observe(channel: Channel, scope: string, candidates: InboundEvent[], ownId: string, evidenceRef: string): string[] {
+  observe(channel: Channel, scope: string, candidates: InboundEvent[], ownId: string, evidenceRef: string, observedAt = this.now()): string[] {
     return this.db.transaction(() => {
       this.bindAccount(ownId);
       const events = candidates.map(e => eventSchema.parse(e));
       requireSafe(events.every(e => e.channel === channel), 'CHANNEL_MISMATCH');
-      const cursor = this.db.prepare('SELECT cursor_data FROM cursors WHERE channel=? AND scope=?').get(channel, scope);
+      const cursor = this.db.prepare('SELECT cursor_data FROM cursors WHERE channel=? AND scope=?').get(channel, scope) as {cursor_data:string}|undefined;
+      const priorWatermark = cursor ? z.object({baselineTime:z.number().finite(),highWater:z.number().finite(),bindings:z.array(z.string())}).parse(JSON.parse(cursor.cursor_data)) : null;
+      const absoluteTime = (value: string): number | null => {
+        const parsed = z.iso.datetime({offset:true}).safeParse(value);
+        return parsed.success ? Date.parse(parsed.data) : null;
+      };
+      const baselineTime = absoluteTime(observedAt); requireSafe(baselineTime !== null,'OBSERVATION_TIME_INVALID');
+      const times = events.map(e => absoluteTime(e.occurredAt)).filter((n): n is number => n !== null);
+      const highWater = Math.max(priorWatermark?.highWater ?? baselineTime,...times);
+      const initialBoundary = priorWatermark?.baselineTime ?? highWater;
       const newIds: string[] = [];
       this.db.prepare('INSERT INTO observations VALUES (?,?,?,?,?,?)')
-        .run(randomUUID(), channel, scope, new Date().toISOString(), events.length, evidenceRef);
+        .run(randomUUID(), channel, scope, observedAt, events.length, evidenceRef);
       for (const e of events) {
         if (!isEligible(e, ownId)) continue;
         const key = e.platformEventId ?? digest([e.actorId, e.occurredAt, targetKey(e), e.text]);
@@ -96,19 +108,23 @@ export class EventStore {
             // A source collision or changed original cannot inherit an approval.
             this.db.prepare("UPDATE inbound_events SET status='MANUAL_REVIEW' WHERE id=? AND status NOT IN ('CONFIRMED','UNCERTAIN','INTENT_RECORDED')").run(prior.id);
             this.db.prepare("UPDATE reply_drafts SET status='DRAFT',approval=NULL,approved_at=NULL WHERE event_id=?").run(prior.id);
+            this.db.prepare('INSERT OR IGNORE INTO source_collisions VALUES (?,?,?,?,?)')
+              .run(randomUUID(),prior.id,binding,JSON.stringify(e),evidenceRef);
             this.audit('SOURCE_COLLISION', prior.id);
           }
           continue;
         }
         const id = randomUUID();
-        const status = !isStrong(e) ? 'MANUAL_REVIEW' : !cursor ? 'BASELINE' : 'AWAITING_DRAFT';
+        const time = absoluteTime(e.occurredAt);
+        const status = !isStrong(e) || time === null ? 'MANUAL_REVIEW' : !priorWatermark ? 'BASELINE' :
+          time > priorWatermark.highWater ? 'AWAITING_DRAFT' : time < initialBoundary ? 'BASELINE' : 'MANUAL_REVIEW';
         this.db.prepare('INSERT INTO inbound_events VALUES (?,?,?,?,?,?,?,?,?)')
           .run(id, e.accountId, channel, key, scope, targetKey(e), binding, JSON.stringify(e), status);
         if (status === 'AWAITING_DRAFT') newIds.push(id);
       }
       // Watermarks are per channel and conversation, not based only on message body.
       this.db.prepare('INSERT INTO cursors VALUES (?,?,?,?) ON CONFLICT(channel,scope) DO UPDATE SET cursor_data=excluded.cursor_data,updated_at=excluded.updated_at')
-        .run(channel, scope, JSON.stringify(events.map(eventBinding)), new Date().toISOString());
+        .run(channel, scope, JSON.stringify({baselineTime:initialBoundary,highWater,bindings:events.map(eventBinding)}), observedAt);
       return newIds;
     }).immediate();
   }
@@ -177,13 +193,20 @@ export class EventStore {
     }).immediate();
   }
   pause(key: string, paused: boolean): void {
-    this.db.prepare('INSERT INTO pauses VALUES (?,?) ON CONFLICT(target_key) DO UPDATE SET paused=excluded.paused').run(key, Number(paused));
-    this.audit(paused ? 'PAUSED' : 'RESUMED', digest(key));
+    this.db.transaction(() => {
+      this.db.prepare('INSERT INTO pauses VALUES (?,?) ON CONFLICT(target_key) DO UPDATE SET paused=excluded.paused').run(key, Number(paused));
+      if (paused) {
+        const drafts = this.db.prepare(`SELECT d.id FROM reply_drafts d JOIN inbound_events e ON e.id=d.event_id
+          WHERE e.target_key=? AND d.status='APPROVED' AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id)`).all(key) as {id:string}[];
+        for (const d of drafts) this.invalidateApproval(d.id);
+      }
+      this.audit(paused ? 'PAUSED' : 'RESUMED', digest(key));
+    }).immediate();
   }
   assertSendable(eventId: string): void {
     const e = this.event(eventId); const key = targetKey(e.payload);
-    requireSafe(e.status === 'APPROVED', 'EVENT_NOT_APPROVED');
     requireSafe(!(this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as { paused: number } | undefined)?.paused, 'TARGET_PAUSED');
+    requireSafe(e.status === 'APPROVED', 'EVENT_NOT_APPROVED');
     requireSafe(!this.db.prepare("SELECT id FROM send_intents WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')").get(key), 'TARGET_FROZEN');
     requireSafe(!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(eventId), 'INTENT_EXISTS');
   }
@@ -230,11 +253,31 @@ export class EventStore {
     return this.db.prepare(`SELECT r.id,r.result,r.proof_ref,r.verified_at FROM delivery_receipts r
       JOIN send_intents i ON i.id=r.send_intent_id WHERE i.event_id=? ORDER BY r.rowid DESC LIMIT 1`).get(eventId);
   }
+  intentBoundary(intentId: string): string {
+    const row=this.db.prepare('SELECT attempt_started_at FROM send_intents WHERE id=?').get(intentId) as {attempt_started_at:string}|undefined;
+    requireSafe(row,'INTENT_NOT_FOUND');return row.attempt_started_at;
+  }
+  history(e: InboundEvent): InboundEvent[] {
+    const incoming = this.events().filter(item => targetKey(item.payload) === targetKey(e) && item.payload.channel === e.channel).map(item => item.payload);
+    const outgoing = this.db.prepare(`SELECT e.payload,d.text,i.id,r.verified_at FROM send_intents i
+      JOIN inbound_events e ON e.id=i.event_id JOIN reply_drafts d ON d.id=i.draft_id
+      JOIN delivery_receipts r ON r.send_intent_id=i.id WHERE i.target_key=? AND r.result='CONFIRMED'
+      ORDER BY r.rowid DESC LIMIT 6`).all(targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[];
+    const combined = [...incoming,...outgoing.map(row => ({...eventSchema.parse(JSON.parse(row.payload)),text:row.text,
+      direction:'OUTGOING' as const,platformEventId:row.id,occurredAt:row.verified_at}))]
+      .sort((a,b) => a.occurredAt.localeCompare(b.occurredAt));
+    // Reserve bounded context for confirmed outgoing replies even during incoming bursts.
+    const selected = [...combined.filter(item => item.direction !== 'OUTGOING').slice(-3),
+      ...combined.filter(item => item.direction === 'OUTGOING').slice(-3)];
+    return selected.sort((a,b) => a.occurredAt.localeCompare(b.occurredAt));
+  }
   stats(): Record<string, unknown> {
     return {
       events: this.db.prepare('SELECT status,count(*) AS count FROM inbound_events GROUP BY status').all(),
       budgets: this.db.prepare('SELECT * FROM budgets').all(),
       uncertain: this.uncertain().length,
+      tasks: this.db.prepare(`SELECT e.id AS eventId,e.channel,e.status,d.id AS draftId,d.version,d.status AS draftStatus
+        FROM inbound_events e LEFT JOIN reply_drafts d ON d.event_id=e.id WHERE e.status<>'BASELINE' ORDER BY e.rowid`).all(),
     };
   }
 }

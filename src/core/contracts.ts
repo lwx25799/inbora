@@ -62,7 +62,7 @@ export interface Draft {
   approval: { snapshot: TargetSnapshot; textDigest: string; version: number } | null;
 }
 export interface SendProof {
-  id: string; ownId: string; targetKey: string; text: string; pending: boolean;
+  id: string; ownId: string; targetKey: string; text: string; pending: boolean; sentAt: string;
 }
 export interface ReplyAdapter {
   inspect(event: InboundEvent): Promise<TargetSnapshot>;
@@ -70,7 +70,7 @@ export interface ReplyAdapter {
   verifyPrepared(event: InboundEvent, text: string): Promise<TargetSnapshot>;
   baseline(event: InboundEvent): Promise<string[]>;
   clickOnce(): Promise<void>;
-  readback(event: InboundEvent, text: string, before: string[]): Promise<SendProof | null>;
+  readback(event: InboundEvent, text: string, before: string[], notBefore: string): Promise<SendProof | null>;
 }
 export function validText(text: string): string {
   requireSafe(text.trim().length > 0 && [...text].length <= 500 &&

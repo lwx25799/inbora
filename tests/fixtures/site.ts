@@ -7,8 +7,8 @@ export const html = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <div id="challenge" hidden>Challenge</div><div id="stop" hidden>Stop</div>
 <button id="notification-entry">Notifications</button><button id="dm-entry">Messages</button>
 <section id="notifications" hidden></section><section id="comment-target" hidden></section>
-<section id="dm-list" hidden><div data-conversation="conversation-1" data-peer="peer-1"><button>Select first</button></div>
-<div data-conversation="conversation-2" data-peer="peer-2"><button>Select second</button></div></section>
+<section id="dm-list" hidden><div data-conversation="conversation-1" data-peer="peer-1" data-active="true"><button>Select first</button></div>
+<div data-conversation="conversation-2" data-peer="peer-2" data-active="false"><button>Select second</button></div></section>
 <section id="dm-pane" data-active="conversation-1" data-peer="peer-1" hidden><div id="messages"></div>
 <textarea id="dm-composer" data-target="dm:conversation-1"></textarea><button id="dm-send">Send DM</button><div id="dm-outgoing"></div></section>
 <script>
@@ -24,14 +24,14 @@ let input=document.createElement('textarea');input.id='comment-composer';input.s
 let send=document.createElement('button');send.id='comment-send';send.textContent='Reply';send.onclick=()=>deliver(root.querySelector('.replies'),input);root.append(send);
 document.querySelector('#comment-target').append(root);};r.append(b);document.querySelector('#notifications').append(r);};
 function proof(parent,input){let p=document.createElement('div');p.className='outgoing';p.setAttribute('data-id','out-'+(++seq));p.setAttribute('data-own','own-1');
-p.setAttribute('data-target',input.getAttribute('data-target'));p.setAttribute('data-status',window.pending?'pending':'confirmed');p.textContent=input.value;parent.append(p);}
+p.setAttribute('data-target',input.getAttribute('data-target'));p.setAttribute('data-status',window.pending?'pending':'confirmed');p.setAttribute('data-sent-at',new Date().toISOString());p.textContent=input.value;parent.append(p);}
 function deliver(parent,input){window.clicks++;if(!window.suppress)proof(parent,input);input.value='';}
 window.addDm=(id,e)=>{messages[id].push(e);if(document.querySelector('#dm-pane').getAttribute('data-active')===id)render(id);};
 function render(id){document.querySelector('#messages').replaceChildren(...messages[id].map(e=>eventRow(e,'message')));}
 document.querySelector('#notification-entry').onclick=()=>document.querySelector('#notifications').hidden=false;
 document.querySelector('#dm-entry').onclick=()=>{document.querySelector('#dm-list').hidden=false;document.querySelector('#dm-pane').hidden=false;};
 for(let row of document.querySelectorAll('#dm-list>div'))row.querySelector('button').onclick=()=>{
-if(window.freezeSwitch)return;let id=row.getAttribute('data-conversation');setTimeout(()=>{document.querySelector('#dm-pane').setAttribute('data-active',id);
+if(window.freezeSwitch)return;let id=row.getAttribute('data-conversation');setTimeout(()=>{for(let item of document.querySelectorAll('#dm-list>div'))item.setAttribute('data-active',String(item===row));document.querySelector('#dm-pane').setAttribute('data-active',id);
 document.querySelector('#dm-pane').setAttribute('data-peer',row.getAttribute('data-peer'));document.querySelector('#dm-composer').setAttribute('data-target','dm:'+id);
 document.querySelector('#dm-outgoing').replaceChildren();render(id);},window.switchDelay);};
 document.querySelector('#dm-send').onclick=()=>deliver(document.querySelector('#dm-outgoing'),document.querySelector('#dm-composer'));
@@ -44,13 +44,13 @@ const fields = {
   commentId: attr('data-comment'), conversationId: attr('data-conversation'),
   direction: attr('data-direction'), kind: attr('data-kind'),
 };
-const proof = { id: attr('data-id'), ownId: attr('data-own'), targetKey: attr('data-target'), text: {}, pending: attr('data-status') };
+const proof = { id: attr('data-id'), ownId: attr('data-own'), targetKey: attr('data-target'), text: {}, pending: attr('data-status'), sentAt: attr('data-sent-at') };
 export function mapping(origin: string): SiteMapping {
   return {
     version: 1, environment: 'fixture', origin, observedAt: '2026-11-04T00:00:00Z', evidenceRef: 'synthetic-only', ownId: 'own-1',
     guards: { loggedIn: '#account', loginRequired: '#login', challenge: '#challenge', stopped: '#stop', ownIdentity: { selector: '#account', attribute: 'data-id' } },
     notification: { entry: '#notification-entry', panel: '#notifications', rows: '.notification', fields, jump: '.jump' },
-    dm: { entry: '#dm-entry', list: '#dm-list', rows: ':scope > div', conversationId: attr('data-conversation'), peerId: attr('data-peer'),
+    dm: { entry: '#dm-entry', list: '#dm-list', rows: ':scope > div', activeRow: ':scope > div[data-active="true"]', conversationId: attr('data-conversation'), peerId: attr('data-peer'),
       select: 'button', pane: '#dm-pane', activeId: attr('data-active'), activePeerId: attr('data-peer'), messages: '.message', fields },
     targets: {
       COMMENT_NOTIFICATION: { roots: '.comment', fields, openReply: null, composer: '#comment-composer',

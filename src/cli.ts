@@ -15,6 +15,7 @@ import { Blocked, digest, requireSafe, targetKey } from './core/contracts.js';
 import { SendCoordinator } from './core/send-coordinator.js';
 import { diagnostic } from './observability/audit.js';
 import { caseIds, pruneEvidence, recordEvidence } from './observability/evidence.js';
+import { browserMetrics } from './observability/browser-metrics.js';
 
 const help = `inbora 0.1.0 — 单账号双通道受控 PoC
 
@@ -63,7 +64,18 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const known = ['init','status','login','install-mapping','observe','draft','show','edit','approve','reject','send-once',
     'pause','resume','review-uncertain','compare-modes','real-test','authorize-model','prune-evidence'];
   requireSafe(known.includes(command), 'UNKNOWN_COMMAND');
-  const root = runtimeRoot(values.runtime); const lock = await OwnerLock.acquire(root);
+  const root = runtimeRoot(values.runtime);
+  // Dedicated control path: never calls recover() while another worker may own an active intent.
+  if (command === 'pause') {
+    requireSafe(id,'ID_REQUIRED'); await loadRuntime(root);
+    const control = await OwnerLock.acquire(join(root,'control')); let controlStore: EventStore | undefined;
+    try {
+      controlStore = new EventStore(join(root,'poc.sqlite'));
+      controlStore.pause(targetKey(controlStore.event(id).payload),true);
+      print({paused:true,inFlightIntentMayAlreadyBeCommitted:true}); return;
+    } finally { try { controlStore?.close(); } finally { await control.close(); } }
+  }
+  const lock = await OwnerLock.acquire(root);
   let store: EventStore | undefined; let browser: BrowserProfileOwner | undefined;
   const realAccess = (): void => requireSafe(values['real-account'] && values['private-access'], 'EXPLICIT_PRIVATE_ACCESS_REQUIRED');
   try {
@@ -132,14 +144,14 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
             mode: headless ? 'headless' : 'headed', taskId: null, action: 'MODE_COMPARE', result: 'PASS', source: 'AUTOMATED_REAL',
             diagnostics: ['READ_ONLY_CHANNELS_PASSED_SEND_UNVERIFIED'], proofDigest: digest(mapping) });
           results.push({ headless, evidenceId, readOnly: 'PASS', sends: 'UNVERIFIED', elapsedMs: Math.round(performance.now()-start),
-            nodeRssBytes: process.memoryUsage().rss, nodeCpuMicros: process.cpuUsage(cpu) });
+            nodeRssBytes: process.memoryUsage().rss, nodeCpuMicros: process.cpuUsage(cpu), browser:await browserMetrics() });
         } catch (error) {
           const evidenceId = await recordEvidence(join(root, 'evidence'), { caseId: 'H01', browserVersion: browser.version(),
             mode: headless ? 'headless' : 'headed', taskId: null, action: 'MODE_COMPARE', result: 'BLOCKED', source: 'AUTOMATED_REAL',
             diagnostics: [safeCode(error)], proofDigest: null }); results.push({ headless, evidenceId, result: 'BLOCKED' });
         } finally { await browser.close(); browser = undefined; }
       }
-      print({ results, browserCpuMemory: 'UNVERIFIED_USE_OS_MEASUREMENT', conclusion: 'SEND_COMPARISON_REQUIRES_INDIVIDUAL_APPROVAL' }); return;
+      print({ results, conclusion: 'SEND_COMPARISON_REQUIRES_INDIVIDUAL_APPROVAL' }); return;
     }
     browser = await BrowserProfileOwner.launch(join(root, 'profile'), values.headless ?? false); await browser.open(mapping.origin);
     const notification = new DomAdapter(browser.notification, 'COMMENT_NOTIFICATION', mapping);

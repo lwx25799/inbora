@@ -4,7 +4,7 @@ import { digest, requireSafe, targetKey, validText, type InboundEvent } from '..
 import { EventStore } from '../storage/store.js';
 
 export function sensitive(e: InboundEvent): boolean {
-  return /投诉|隐私|退款|转账|验证码|密码|身份证|银行卡|金钱|complaint|password|verification|refund|payment|\b\d{11,19}\b/iu.test(e.text);
+  return /投诉|隐私|退款|转账|验证码|密码|身份证|银行卡|金钱|complaint|password|verification|refund|payment|[\w.+-]+@[\w.-]+\.\w+|\b\d{11,19}\b/iu.test(e.text);
 }
 export function prompt(e: InboundEvent, history: InboundEvent[]): { system: string; businessData: unknown } {
   return {
@@ -65,8 +65,7 @@ export async function generateDraft(store: EventStore, eventId: string, provider
   const event = store.event(eventId);
   requireSafe(['AWAITING_DRAFT', 'AWAITING_APPROVAL', 'APPROVED'].includes(event.status), 'EVENT_NOT_DRAFTABLE');
   requireSafe(!sensitive(event.payload), 'SENSITIVE_MANUAL_HANDLING');
-  const history = store.events().filter(e => targetKey(e.payload) === targetKey(event.payload) &&
-    e.payload.channel === event.payload.channel).slice(-6).map(e => e.payload);
+  const history = store.history(event.payload);
   const text = provider ? await provider.generate(store, event.payload, history) : mockDraft(event.payload);
   return store.saveDraft(eventId, text, provider ? 'http-explicit-grant' : 'mock-deterministic').id;
 }

@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { Locator, Page } from 'playwright';
+import { z } from 'zod';
 import type { Field, SiteMapping, EventFields } from '../config/site-mapping.js';
 import { digest, eventBinding, eventSchema, isStrong, requireSafe, targetKey,
   type Channel, type InboundEvent, type ReplyAdapter, type SendProof, type TargetSnapshot } from '../core/contracts.js';
+import { captureAndGuard } from './click-guard.js';
 
 type Root = Page | Locator;
 export async function unique(root: Root, selector: string): Promise<Locator> {
@@ -29,6 +31,7 @@ async function visibleAny(page: Page, selector: string): Promise<boolean> {
 }
 export class DomAdapter implements ReplyAdapter {
   private sendButton: Locator | null = null;
+  private gateToken: string | null = null;
   constructor(readonly page: Page, readonly channel: Channel, readonly mapping: SiteMapping,
     private readonly receiptTimeoutMs = 5000) {}
   async guard(): Promise<void> {
@@ -80,8 +83,12 @@ export class DomAdapter implements ReplyAdapter {
   }
   private async selectConversation(id: string, peerId: string): Promise<void> {
     await this.openDm();
-    const activePane = await unique(this.page, this.mapping.dm.pane);
-    if (await field(activePane, this.mapping.dm.activeId) === id &&
+    const activeRows = (await unique(this.page,this.mapping.dm.list)).locator(this.mapping.dm.activeRow);
+    const activeRowMatches = await activeRows.count() === 1 && await activeRows.isVisible() &&
+      await field(activeRows,this.mapping.dm.conversationId) === id && await field(activeRows,this.mapping.dm.peerId) === peerId;
+    const panes = this.page.locator(this.mapping.dm.pane);
+    const activePane = await panes.count() === 1 && await panes.isVisible() ? panes : null;
+    if (activeRowMatches && activePane && await field(activePane, this.mapping.dm.activeId) === id &&
       await field(activePane, this.mapping.dm.activePeerId) === peerId) return;
     const list = await unique(this.page, this.mapping.dm.list); const matches: Locator[] = [];
     for (const row of await list.locator(this.mapping.dm.rows).all()) {
@@ -94,8 +101,11 @@ export class DomAdapter implements ReplyAdapter {
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
       await this.guard();
-      const pane = await unique(this.page, this.mapping.dm.pane);
-      if (await field(pane, this.mapping.dm.activeId) === id && await field(pane, this.mapping.dm.activePeerId) === peerId) return;
+      const pane = this.page.locator(this.mapping.dm.pane);
+      requireSafe(await pane.count() <= 1, 'CONVERSATION_PANE_AMBIGUOUS');
+      if (await pane.count() === 1 && await pane.isVisible() && await field(pane, this.mapping.dm.activeId) === id &&
+        await field(pane, this.mapping.dm.activePeerId) === peerId && await activeRows.count() === 1 &&
+        await field(activeRows,this.mapping.dm.conversationId) === id && await field(activeRows,this.mapping.dm.peerId) === peerId) return;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     requireSafe(false, 'CONVERSATION_SWITCH_UNVERIFIED');
@@ -147,22 +157,10 @@ export class DomAdapter implements ReplyAdapter {
     if (t.openReply && !await visibleAny(this.page, t.composer)) await (await unique(root, t.openReply)).click();
     return this.snapshot(e);
   }
-  private async snapshot(e: InboundEvent): Promise<TargetSnapshot> {
-    await this.guard(); await this.matchingRoot(e);
-    const t = this.mapping.targets[this.channel]; const composer = await unique(this.page, t.composer);
-    requireSafe(await field(composer, t.composerTarget) === targetKey(e), 'COMPOSER_OWNERSHIP_UNVERIFIED');
-    const context: string[] = [];
-    if (this.channel === 'DIRECT_MESSAGE') {
-      const pane = await unique(this.page, this.mapping.dm.pane);
-      requireSafe(await field(pane, this.mapping.dm.activeId) === e.conversationId &&
-        await field(pane, this.mapping.dm.activePeerId) === e.actorId, 'CONVERSATION_IDENTITY_CHANGED');
-      for (const row of await pane.locator(this.mapping.dm.messages).all()) if (await row.isVisible()) {
-        const message = await this.parse(row, this.mapping.dm.fields, e.evidenceId);
-        if (message.direction === 'INCOMING') context.push(eventBinding(message));
-      }
-    } else context.push(eventBinding(e));
+  private async snapshot(e: InboundEvent, text: string | null = null, token: string | null = null): Promise<TargetSnapshot> {
+    const state = await this.page.evaluate(captureAndGuard, { mapping:this.mapping,channel:this.channel,event:e,text,token });
     return { accountId: e.accountId, ownId: this.mapping.ownId, targetKey: targetKey(e),
-      eventBinding: eventBinding(e), contextDigest: digest(context), composerKey: targetKey(e), mappingDigest: digest(this.mapping) };
+      eventBinding: eventBinding(e), contextDigest: digest(state.context), composerKey: targetKey(e), mappingDigest: digest(this.mapping) };
   }
   async prepare(e: InboundEvent, text: string): Promise<void> {
     await this.snapshot(e);
@@ -174,7 +172,10 @@ export class DomAdapter implements ReplyAdapter {
     const actual = await composer.evaluate(el => el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : el.textContent);
     requireSafe(actual === text, 'APPROVED_TEXT_CHANGED');
     this.sendButton = await unique(this.page, t.send);
-    requireSafe(await this.sendButton.isEnabled(), 'SEND_BUTTON_DISABLED'); return snapshot;
+    requireSafe(await this.sendButton.isEnabled(), 'SEND_BUTTON_DISABLED');
+    this.gateToken = randomUUID();
+    const armed = await this.snapshot(e,text,this.gateToken);
+    requireSafe(digest(armed) === digest(snapshot), 'TARGET_CHANGED_REAPPROVE'); return armed;
   }
   private async proofs(e: InboundEvent): Promise<SendProof[]> {
     const t = this.mapping.targets[this.channel]; const result: SendProof[] = [];
@@ -184,8 +185,10 @@ export class DomAdapter implements ReplyAdapter {
       const id = await field(row, t.proof.id); const ownId = await field(row, t.proof.ownId);
       const key = await field(row, t.proof.targetKey); const text = await field(row, t.proof.text);
       const pending = await field(row, t.proof.pending);
-      requireSafe(id && ownId && key && text && pending !== null, 'PROOF_FIELDS_MISSING');
-      result.push({ id, ownId, targetKey: key, text, pending: pending !== 'confirmed' });
+      const sentAt = await field(row,t.proof.sentAt);
+      requireSafe(id && ownId && key && text && pending !== null && sentAt, 'PROOF_FIELDS_MISSING');
+      requireSafe(z.iso.datetime({offset:true}).safeParse(sentAt).success,'PROOF_TIME_UNVERIFIABLE');
+      result.push({ id, ownId, targetKey: key, text, pending: pending !== 'confirmed', sentAt });
     }
     requireSafe(new Set(result.map(p => p.id)).size === result.length, 'PROOF_ID_COLLISION');
     return result;
@@ -194,16 +197,22 @@ export class DomAdapter implements ReplyAdapter {
     await this.snapshot(e); return (await this.proofs(e)).map(p => p.id);
   }
   async clickOnce(): Promise<void> {
-    requireSafe(this.sendButton, 'SEND_NOT_PREPARED');
-    const button = this.sendButton; this.sendButton = null;
-    await button.click({ timeout: 3000 });
+    requireSafe(this.sendButton && this.gateToken, 'SEND_NOT_PREPARED');
+    this.sendButton = null;
+    // One browser task owns final validation and DOM submission after durable intent.
+    const accepted = await this.page.evaluate(token => {
+      const gate = (window as unknown as {__inboraGate?:{token:string;submit:()=>boolean}}).__inboraGate;
+      if (!gate || gate.token !== token) throw new Error('CLICK_GUARD_NOT_ARMED');
+      return gate.submit();
+    },this.gateToken);
+    this.gateToken = null; requireSafe(accepted,'CLICK_GUARD_BLOCKED');
   }
-  async readback(e: InboundEvent, text: string, before: string[]): Promise<SendProof | null> {
+  async readback(e: InboundEvent, text: string, before: string[], notBefore: string): Promise<SendProof | null> {
     const deadline = Date.now() + this.receiptTimeoutMs;
     do {
       await this.snapshot(e);
       const proofs = (await this.proofs(e)).filter(p => !before.includes(p.id) && p.ownId === this.mapping.ownId &&
-        p.targetKey === targetKey(e) && p.text === text && !p.pending);
+        p.targetKey === targetKey(e) && p.text === text && !p.pending && Date.parse(p.sentAt) > Date.parse(notBefore) && Date.parse(p.sentAt) <= Date.now());
       requireSafe(proofs.length <= 1, 'MULTIPLE_MATCHING_RECEIPTS');
       if (proofs[0]) return proofs[0];
       await new Promise(resolve => setTimeout(resolve, 50));

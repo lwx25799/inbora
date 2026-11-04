@@ -8,7 +8,7 @@ function adapter(overrides: Partial<ReplyAdapter> = {}): ReplyAdapter {
   return {
     inspect: async e => snapshot(e), prepare: async () => {}, verifyPrepared: async e => snapshot(e),
     baseline: async () => ['old'], clickOnce: async () => {},
-    readback: async (e, text) => ({ id: 'new', ownId: 'own-1', targetKey: snapshot(e).targetKey, text, pending: false }),
+    readback: async (e, text) => { await new Promise(r=>setTimeout(r,3));return { id:'new',ownId:'own-1',targetKey:snapshot(e).targetKey,text,pending:false,sentAt:new Date().toISOString() }; },
     ...overrides,
   };
 }
@@ -30,7 +30,7 @@ test('two targets serialize browser mutations and receipt lookup', async () => {
     const second = approved(s, candidate({ platformEventId: 'other', conversationId: 'conversation-2' }));
     const coordinator = new SendCoordinator(s, new AccountActor());
     const a = adapter({ prepare: async () => { active++; maximum = Math.max(maximum, active); await new Promise(r => setTimeout(r, 15)); },
-      readback: async (e, text) => { active--; return { id: 'new', ownId: 'own-1', targetKey: snapshot(e).targetKey, text, pending: false }; } });
+      readback: async (e, text) => { await new Promise(r=>setTimeout(r,3));active--; return { id: 'new', ownId: 'own-1', targetKey: snapshot(e).targetKey, text, pending: false,sentAt:new Date().toISOString() }; } });
     expect(await Promise.all([coordinator.send(first, a, false), coordinator.send(second, a, false)])).toEqual(['CONFIRMED', 'CONFIRMED']);
     expect(maximum).toBe(1);
   } finally { s.close(); }
@@ -47,13 +47,14 @@ test('context change after approval blocks before intent; database write failure
     expect(clicks).toBe(0);
   } finally { s.close(); }
 });
-test.each(['timeout', 'wrong-target', 'old-id', 'pending', 'no-proof'] as const)('%s after intent stays uncertain and cannot repeat', async failure => {
+test.each(['timeout', 'wrong-target', 'old-id', 'pending', 'no-proof','historical','future','invalid-time'] as const)('%s after intent stays uncertain and cannot repeat', async failure => {
   const s = database(); let clicks = 0;
   try {
     const id = approved(s); const c = new SendCoordinator(s, new AccountActor());
     const a = adapter({ clickOnce: async () => { clicks++; if (failure === 'timeout') throw new Error('browser gone'); },
       readback: async (e, text) => failure === 'no-proof' ? null : ({ id: failure === 'old-id' ? 'old' : 'new', ownId: 'own-1',
-        targetKey: failure === 'wrong-target' ? 'dm:other' : snapshot(e).targetKey, text, pending: failure === 'pending' }) });
+        targetKey: failure === 'wrong-target' ? 'dm:other' : snapshot(e).targetKey, text, pending: failure === 'pending',
+        sentAt:failure==='historical'?'2020-01-01T00:00:00Z':failure==='future'?'2099-01-01T00:00:00Z':failure==='invalid-time'?'unverifiable':new Date().toISOString() }) });
     expect(await c.send(id, a, true)).toBe('UNCERTAIN');
     await expect(c.send(id, a, true)).rejects.toThrow(); expect(clicks).toBe(1);
     expect(s.uncertain()).toHaveLength(1);

@@ -26,11 +26,13 @@ export class SendCoordinator {
       } catch (error) { this.store.invalidateApproval(draftId); throw error; }
       const intentId = this.store.recordIntent(draftId, final, real);
       try {
+        const notBefore = this.store.intentBoundary(intentId);
         // Any error after intent commit is unknown, even if click() reports an error.
         await adapter.clickOnce();
-        const proof = await adapter.readback(event.payload, draft.text, baseline);
+        const proof = await adapter.readback(event.payload, draft.text, baseline, notBefore);
         const valid = proof && proof.id && !baseline.includes(proof.id) && !proof.pending &&
-          proof.ownId === final.ownId && proof.targetKey === final.targetKey && proof.text === draft.text;
+          proof.ownId === final.ownId && proof.targetKey === final.targetKey && proof.text === draft.text &&
+          Number.isFinite(Date.parse(proof.sentAt)) && Date.parse(proof.sentAt) > Date.parse(notBefore) && Date.parse(proof.sentAt) <= Date.now();
         if (!valid) {
           this.store.receipt(intentId, 'UNCERTAIN', 'NO_UNIQUE_BOUND_PROOF');
           return 'UNCERTAIN';

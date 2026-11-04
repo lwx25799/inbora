@@ -16,14 +16,14 @@ const target = z.object({
   roots: selector, fields: eventFields,
   openReply: selector.nullable(), composer: selector, composerTarget: fieldSchema, send: selector,
   outgoingRows: selector,
-  proof: z.object({ id: fieldSchema, ownId: fieldSchema, targetKey: fieldSchema, text: fieldSchema, pending: fieldSchema }),
+  proof: z.object({ id: fieldSchema, ownId: fieldSchema, targetKey: fieldSchema, text: fieldSchema, pending: fieldSchema, sentAt: fieldSchema }),
 });
 export const mappingSchema = z.object({
   version: z.literal(1), environment: z.enum(['fixture', 'douyin']), origin: z.url(),
   observedAt: z.iso.datetime(), evidenceRef: z.string().min(1), ownId: z.string().min(1),
   guards: z.object({ loggedIn: selector, loginRequired: selector, challenge: selector, stopped: selector, ownIdentity: fieldSchema }),
   notification: z.object({ entry: selector, panel: selector, rows: selector, fields: eventFields, jump: selector.nullable() }),
-  dm: z.object({ entry: selector, list: selector, rows: selector, conversationId: fieldSchema, peerId: fieldSchema,
+  dm: z.object({ entry: selector, list: selector, rows: selector, activeRow: selector, conversationId: fieldSchema, peerId: fieldSchema,
     select: selector, pane: selector, activeId: fieldSchema, activePeerId: fieldSchema, messages: selector, fields: eventFields }),
   targets: z.object({ COMMENT_NOTIFICATION: target, DIRECT_MESSAGE: target }),
   directionValues: z.record(z.string(), z.enum(['INCOMING', 'OUTGOING', 'SYSTEM', 'UNKNOWN'])),

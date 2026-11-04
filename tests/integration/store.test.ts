@@ -8,7 +8,7 @@ test('baseline, five observations, duplicate text next date and independent chan
   const s = database();
   try {
     expect(s.observe('DIRECT_MESSAGE', 'conversation-1', [candidate()], 'own-1', 'fixture')).toEqual([]);
-    const fresh = candidate({ platformEventId: 'new', occurredAt: '2026-11-05' });
+    const fresh = candidate({ platformEventId: 'new', occurredAt: '2026-11-05T00:00:00Z' });
     for (let i = 0; i < 5; i++) s.observe('DIRECT_MESSAGE', 'conversation-1', [fresh], 'own-1', 'fixture');
     expect(s.events()).toHaveLength(2);
     expect(s.events().map(e => e.status)).toEqual(['BASELINE', 'AWAITING_DRAFT']);
@@ -63,7 +63,7 @@ test('committed intent survives restart as uncertain, freezing all later tasks o
   s = new EventStore(file);
   try {
     expect(s.recover()).toBe(1); expect(s.recover()).toBe(0); expect(s.uncertain()).toHaveLength(1);
-    const next = approved(s, candidate({ platformEventId: 'next' }));
+    const next = approved(s, candidate({ platformEventId: 'next',occurredAt:'2026-11-05T00:00:00Z' }));
     expect(() => s.assertSendable(s.draft(next).eventId)).toThrow('TARGET_FROZEN');
     expect((s.db.prepare("SELECT used FROM budgets WHERE kind='SEND'").get() as { used: number }).used).toBe(1);
   } finally { s.close(); }
@@ -96,4 +96,25 @@ test('pause persists and prevents a previously approved task', () => {
     const d = approved(s); s.pause('dm:conversation-1', true);
     expect(() => s.assertSendable(s.draft(d).eventId)).toThrow('TARGET_PAUSED');
   } finally { s.close(); }
+});
+
+test('review: later-loaded old history and unorderable timestamps cannot create new reply tasks', () => {
+  const s = database();
+  try {
+    s.observe('DIRECT_MESSAGE','conversation-1',[candidate({occurredAt:'2026-11-04T12:00:00Z'})],'own-1','fixture');
+    expect(s.observe('DIRECT_MESSAGE','conversation-1',[candidate({platformEventId:'older',occurredAt:'2020-01-01T00:00:00Z'})],'own-1','fixture')).toEqual([]);
+    expect(s.observe('DIRECT_MESSAGE','conversation-1',[candidate({platformEventId:'relative',occurredAt:'三小时前'})],'own-1','fixture')).toEqual([]);
+    expect(s.events().filter(e => e.status==='AWAITING_DRAFT')).toHaveLength(0);
+  } finally {s.close();}
+});
+
+test('review: late arrival newer than initial baseline remains actionable manual review',()=>{
+  const s=database();
+  try{
+    s.observe('DIRECT_MESSAGE','conversation-1',[candidate({occurredAt:'2026-11-04T10:00:00Z'})],'own-1','fixture');
+    s.observe('DIRECT_MESSAGE','conversation-1',[candidate({platformEventId:'b',occurredAt:'2026-11-04T10:02:00Z'})],'own-1','fixture');
+    expect(s.observe('DIRECT_MESSAGE','conversation-1',[candidate({platformEventId:'a',occurredAt:'2026-11-04T10:01:00Z'})],'own-1','fixture')).toEqual([]);
+    const late=s.events().find(e=>e.payload.platformEventId==='a');expect(late?.status).toBe('MANUAL_REVIEW');
+    expect(JSON.stringify(s.stats().tasks)).toContain(late!.id);
+  }finally{s.close();}
 });

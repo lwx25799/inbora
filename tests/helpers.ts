@@ -19,10 +19,10 @@ export function snapshot(e: InboundEvent): TargetSnapshot {
   return { accountId: e.accountId, ownId: 'own-1', targetKey: targetKey(e), eventBinding: eventBinding(e),
     contextDigest: 'context-1', composerKey: targetKey(e), mappingDigest: 'fixture' };
 }
-export function database(): EventStore { return new EventStore(join(privateTemp(), 'poc.sqlite'), true); }
+export function database(): EventStore { return new EventStore(join(privateTemp(), 'poc.sqlite'), true, () => '2026-11-03T00:00:00Z'); }
 export function pending(store: EventStore, e = candidate()): string {
   const scope = e.channel === 'DIRECT_MESSAGE' ? e.conversationId! : 'notifications';
-  store.observe(e.channel, scope, [], 'own-1', 'fixture');
+  store.observe(e.channel, scope, [], 'own-1', 'fixture',new Date(Date.parse(e.occurredAt)-1000).toISOString());
   return store.observe(e.channel, scope, [e], 'own-1', 'fixture')[0]!;
 }
 export function approved(store: EventStore, e = candidate()): string {
