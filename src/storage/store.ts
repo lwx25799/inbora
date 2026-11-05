@@ -86,7 +86,7 @@ export class EventStore {
       requireSafe(events.every(e => e.channel === channel), 'CHANNEL_MISMATCH');
       const cursor = this.db.prepare('SELECT cursor_data FROM cursors WHERE channel=? AND scope=?').get(channel, scope) as {cursor_data:string}|undefined;
       const priorWatermark = cursor ? z.object({baselineTime:z.number().finite(),highWater:z.number().finite(),bindings:z.array(z.string())}).parse(JSON.parse(cursor.cursor_data)) : null;
-      const absoluteTime = (value: string): number | null => {
+      const absoluteTime = (value: string | null): number | null => {
         const parsed = z.iso.datetime({offset:true}).safeParse(value);
         return parsed.success ? Date.parse(parsed.data) : null;
       };
@@ -95,6 +95,7 @@ export class EventStore {
       const highWater = Math.max(priorWatermark?.highWater ?? baselineTime,...times);
       const initialBoundary = priorWatermark?.baselineTime ?? highWater;
       const newIds: string[] = [];
+      const weakOccurrences = new Map<string, { eventId: string; count: number }>();
       this.db.prepare('INSERT INTO observations VALUES (?,?,?,?,?,?)')
         .run(randomUUID(), channel, scope, observedAt, events.length, evidenceRef);
       for (const e of events) {
@@ -104,6 +105,7 @@ export class EventStore {
         const prior = this.db.prepare('SELECT * FROM inbound_events WHERE account_id=? AND channel=? AND source_key=?')
           .get(e.accountId, e.channel, key) as EventRow | undefined;
         if (prior) {
+          if (!isStrong(e)) weakOccurrences.set(key, { eventId: prior.id, count: (weakOccurrences.get(key)?.count ?? 0) + 1 });
           if (prior.binding !== binding || !isStrong(e)) {
             // A source collision or changed original cannot inherit an approval.
             this.db.prepare("UPDATE inbound_events SET status='MANUAL_REVIEW' WHERE id=? AND status NOT IN ('CONFIRMED','UNCERTAIN','INTENT_RECORDED')").run(prior.id);
@@ -120,8 +122,11 @@ export class EventStore {
           time > priorWatermark.highWater ? 'AWAITING_DRAFT' : time < initialBoundary ? 'BASELINE' : 'MANUAL_REVIEW';
         this.db.prepare('INSERT INTO inbound_events VALUES (?,?,?,?,?,?,?,?,?)')
           .run(id, e.accountId, channel, key, scope, targetKey(e), binding, JSON.stringify(e), status);
+        if (!isStrong(e)) weakOccurrences.set(key, { eventId: id, count: 1 });
         if (status === 'AWAITING_DRAFT') newIds.push(id);
       }
+      for (const occurrence of weakOccurrences.values()) if (occurrence.count > 1)
+        this.audit('WEAK_SOURCE_MULTIPLICITY', occurrence.eventId, { occurrences: occurrence.count });
       // Watermarks are per channel and conversation, not based only on message body.
       this.db.prepare('INSERT INTO cursors VALUES (?,?,?,?) ON CONFLICT(channel,scope) DO UPDATE SET cursor_data=excluded.cursor_data,updated_at=excluded.updated_at')
         .run(channel, scope, JSON.stringify({baselineTime:initialBoundary,highWater,bindings:events.map(eventBinding)}), observedAt);
@@ -258,7 +263,8 @@ export class EventStore {
     requireSafe(row,'INTENT_NOT_FOUND');return row.attempt_started_at;
   }
   history(e: InboundEvent): InboundEvent[] {
-    const incoming = this.events().filter(item => targetKey(item.payload) === targetKey(e) && item.payload.channel === e.channel).map(item => item.payload);
+    const incoming = this.events().filter(item => targetKey(item.payload) === targetKey(e) && item.payload.channel === e.channel)
+      .map(item => item.payload).filter((item): item is InboundEvent & { occurredAt: string } => item.occurredAt !== null);
     const outgoing = this.db.prepare(`SELECT e.payload,d.text,i.id,r.verified_at FROM send_intents i
       JOIN inbound_events e ON e.id=i.event_id JOIN reply_drafts d ON d.id=i.draft_id
       JOIN delivery_receipts r ON r.send_intent_id=i.id WHERE i.target_key=? AND r.result='CONFIRMED'
@@ -276,7 +282,9 @@ export class EventStore {
       events: this.db.prepare('SELECT status,count(*) AS count FROM inbound_events GROUP BY status').all(),
       budgets: this.db.prepare('SELECT * FROM budgets').all(),
       uncertain: this.uncertain().length,
-      tasks: this.db.prepare(`SELECT e.id AS eventId,e.channel,e.status,d.id AS draftId,d.version,d.status AS draftStatus
+      tasks: this.db.prepare(`SELECT e.id AS eventId,e.channel,e.status,d.id AS draftId,d.version,d.status AS draftStatus,
+        COALESCE((SELECT MAX(CAST(json_extract(a.detail_redacted,'$.occurrences') AS INTEGER)) FROM audit_events a
+          WHERE a.event_type='WEAK_SOURCE_MULTIPLICITY' AND a.entity_id=e.id),1) AS maxObservedOccurrences
         FROM inbound_events e LEFT JOIN reply_drafts d ON d.event_id=e.id WHERE e.status<>'BASELINE' ORDER BY e.rowid`).all(),
     };
   }

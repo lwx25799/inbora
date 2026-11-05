@@ -22,6 +22,7 @@ export function snapshot(e: InboundEvent): TargetSnapshot {
 export function database(): EventStore { return new EventStore(join(privateTemp(), 'poc.sqlite'), true, () => '2026-11-03T00:00:00Z'); }
 export function pending(store: EventStore, e = candidate()): string {
   const scope = e.channel === 'DIRECT_MESSAGE' ? e.conversationId! : 'notifications';
+  if (e.occurredAt === null) throw new Error('PENDING_FIXTURE_REQUIRES_TIME');
   store.observe(e.channel, scope, [], 'own-1', 'fixture',new Date(Date.parse(e.occurredAt)-1000).toISOString());
   return store.observe(e.channel, scope, [e], 'own-1', 'fixture')[0]!;
 }

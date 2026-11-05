@@ -9,7 +9,7 @@ export const fieldSchema = z.object({
 export type Field = z.infer<typeof fieldSchema>;
 const eventFields = z.object({
   platformEventId: fieldSchema.nullable(), actorId: fieldSchema.nullable(), actorName: fieldSchema.nullable(),
-  text: fieldSchema, occurredAt: fieldSchema, videoId: fieldSchema.nullable(), commentId: fieldSchema.nullable(),
+  text: fieldSchema, occurredAt: fieldSchema.nullable(), videoId: fieldSchema.nullable(), commentId: fieldSchema.nullable(),
   conversationId: fieldSchema.nullable(), direction: fieldSchema, kind: fieldSchema,
 });
 const target = z.object({

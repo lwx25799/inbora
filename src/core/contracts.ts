@@ -16,7 +16,7 @@ export const eventSchema = z.object({
   actorId: z.string().min(1).nullable(),
   actorName: z.string().nullable(),
   text: z.string().min(1).max(10_000),
-  occurredAt: z.string().min(1),
+  occurredAt: z.string().min(1).nullable(),
   videoId: z.string().min(1).nullable(),
   commentId: z.string().min(1).nullable(),
   conversationId: z.string().min(1).nullable(),

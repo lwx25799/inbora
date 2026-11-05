@@ -35,6 +35,61 @@ test('three incoming messages are preserved; own/system messages never become ta
     expect(s.events()).toHaveLength(3);
   } finally { s.close(); }
 });
+test('observed messages without exposed event, conversation or time fields remain three manual records across restart', () => {
+  const file = join(privateTemp(), 'poc.sqlite');
+  let s = new EventStore(file, true);
+  const events = [1, 2, 3].map(n => candidate({
+    platformEventId: null, conversationId: null, occurredAt: null, text: `controlled-message-${n}`,
+  }));
+  try {
+    for (let n = 0; n < 5; n++)
+      expect(s.observe('DIRECT_MESSAGE', 'verified-peer-observation', events, 'own-1', `fixture-${n}`)).toEqual([]);
+    expect(s.events()).toHaveLength(3);
+    expect(s.events().every(e => e.status === 'MANUAL_REVIEW' && e.payload.occurredAt === null &&
+      e.payload.platformEventId === null && e.payload.conversationId === null)).toBe(true);
+    expect(s.db.prepare('SELECT count(*) AS n FROM observations').get()).toEqual({ n: 5 });
+    s.close(); s = new EventStore(file);
+    expect(s.recover()).toBe(0);
+    expect(s.events()).toHaveLength(3);
+    for (const event of s.events()) {
+      expect(() => s.saveDraft(event.id, 'must not become sendable', 'mock')).toThrow('EVENT_NOT_DRAFTABLE');
+      expect(() => s.assertSendable(event.id)).toThrow('EVENT_NOT_APPROVED');
+    }
+    expect(s.db.prepare('SELECT id FROM send_intents').all()).toEqual([]);
+  } finally { s.close(); }
+});
+test('missing message time remains manual even when all platform identity fields are present', () => {
+  const s = database();
+  try {
+    expect(s.observe('DIRECT_MESSAGE', 'conversation-1', [candidate({ occurredAt: null })], 'own-1', 'fixture')).toEqual([]);
+    expect(s.events()).toHaveLength(1);
+    expect(s.events()[0]!.status).toBe('MANUAL_REVIEW');
+    expect(s.events()[0]!.payload.occurredAt).toBeNull();
+    expect(s.history(candidate())).toEqual([]);
+    s.observe('DIRECT_MESSAGE', 'conversation-1', [candidate({ platformEventId: 'known-time' })], 'own-1', 'fixture');
+    expect(s.history(candidate()).map(e => e.platformEventId)).toEqual(['known-time']);
+  } finally { s.close(); }
+});
+test('indistinguishable weak messages retain their maximum observed occurrence count without inventing platform IDs', () => {
+  const file = join(privateTemp(), 'poc.sqlite');
+  let s = new EventStore(file, true);
+  const message = candidate({ platformEventId: null, conversationId: null, occurredAt: null });
+  try {
+    for (let n = 0; n < 5; n++) s.observe('DIRECT_MESSAGE', 'verified-peer', [message, message, message], 'own-1', 'fixture');
+    expect(s.events()).toHaveLength(1);
+    expect(s.events()[0]!.status).toBe('MANUAL_REVIEW');
+    expect(s.events()[0]!.payload.platformEventId).toBeNull();
+    expect((s.stats().tasks as { maxObservedOccurrences: number }[])[0]!.maxObservedOccurrences).toBe(3);
+    s.close(); s = new EventStore(file);
+    s.observe('DIRECT_MESSAGE', 'verified-peer', [message, message], 'own-1', 'fixture');
+    expect(s.events()).toHaveLength(1);
+    expect((s.stats().tasks as { maxObservedOccurrences: number }[])[0]!.maxObservedOccurrences).toBe(3);
+    const distinct = { ...message, text: 'one separate weak message' };
+    s.observe('DIRECT_MESSAGE', 'verified-peer', [distinct], 'own-1', 'fixture');
+    expect((s.stats().tasks as { maxObservedOccurrences: number }[]).map(e => e.maxObservedOccurrences)).toEqual([3, 1]);
+    expect(s.db.prepare('SELECT id FROM send_intents').all()).toEqual([]);
+  } finally { s.close(); }
+});
 test('source collision and weak key are manual review, invalidating existing approval', () => {
   const s = database();
   try {
