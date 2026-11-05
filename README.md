@@ -2,6 +2,8 @@
 
 Windows 单账号、评论通知与私信双通道的受控浏览器 PoC。当前提供 Node.js / TypeScript / Playwright / SQLite 内核和 CLI；真实抖音页面及真实收发尚未验收，最终 GO 尚未判定。
 
+2026-11-05用户允许两个已授权本人作品的有界评论读取作为补充发现源。正式源码CLI已完成受控私信、首个作品评论各五轮只读采集及SQLite去重；D02三条私信独立保留已实机通过，其余逐项见测试矩阵。顶部通知原用例仍单列，补充来源不冒称通知通过。当前使用原生有头Edge，无UA覆写；真实发送、可信回执及最终GO仍未完成。
+
 当前实现使用独立 Edge Profile、两个专用 Page 和账号级串行队列。草稿默认使用确定性 Mock。每条真实回复必须在本机交互终端核对目标及完整文本后批准；点击意图先写入 SQLite，提交一次后读取准确原评论或准确会话的新回执。未知结果冻结目标，不提供自动重发。
 
 提交在同一浏览器同步任务内核对批准状态，随后对已绑定元素调用一次 DOM click，避免鼠标事件链中的状态变化。平台是否接受此网页交互须实机确认；拒绝或无法回读时保留未知态，不自动换成另一种点击或私有请求重试。
@@ -44,9 +46,14 @@ pnpm inbora login --headed --real-account --private-access
 pnpm inbora install-mapping --file D:\Inbora\.local\site-mapping.json --real-account --private-access
 pnpm inbora observe notifications --real-account --private-access
 pnpm inbora observe dm --real-account --private-access
+# 可先安装 purpose=observation 的已校准只读映射（由开发者生成，含最多两名测试者/两个作品）：
+pnpm inbora install-mapping --file D:\Inbora\.local\observation-mapping.json --real-account --private-access
+pnpm inbora observe works --real-account --private-access
 ```
 
 首次采集以观察时刻和已见时间建立该通道/会话的可见历史基线。此后由测试者发送新事件，再采集获得任务 ID。只对可核验绝对时间严格晚于高水位的事件建新任务；首次基线前的迟加载旧历史保留为历史，首次基线后但早于高水位的迟到事件、同一时间精度或相对时间无法排序时转人工且仍出现在tasks。通知只读取当前加载的可见记录，不承诺全部历史回填；私信逐个打开已加载的可见会话。无法证明稳定账号、来源和目标身份的条目阻断或转人工。
+
+只读校准映射保存为私有`observation-mapping.json`，发送仍需要独立完整`site-mapping.json`；安装只读映射不会启用批准或发送。`observe dm`只打开映射中已授权会话，先核验列表行原生身份，再点击并核对当前头部与消息绑定；隐藏气泡或正文不读取，非纯文字消息只记本轮未支持计数，不推断内容。`observe works`仅打开映射中的两个授权作品，核对作品、作者主页、稳定评论ID及正文。两种发现源命中同一作品/原评论只保留一个任务；身份或正文冲突进入人工核对。每个新作品scope首次读取同样建基线，不把旧通知水位冒用为作品首次水位。
 
 ```powershell
 pnpm inbora draft EVENT_ID

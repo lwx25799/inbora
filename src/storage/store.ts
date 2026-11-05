@@ -102,11 +102,17 @@ export class EventStore {
         if (!isEligible(e, ownId)) continue;
         const key = e.platformEventId ?? digest([e.actorId, e.occurredAt, targetKey(e), e.text]);
         const binding = eventBinding(e);
-        const prior = this.db.prepare('SELECT * FROM inbound_events WHERE account_id=? AND channel=? AND source_key=?')
+        let prior = this.db.prepare('SELECT * FROM inbound_events WHERE account_id=? AND channel=? AND source_key=?')
           .get(e.accountId, e.channel, key) as EventRow | undefined;
+        let comparable = e;
+        if (!prior && e.channel === 'COMMENT_NOTIFICATION' && e.videoId && e.commentId) {
+          prior = this.db.prepare('SELECT * FROM inbound_events WHERE account_id=? AND channel=? AND target_key=?')
+            .get(e.accountId,e.channel,targetKey(e)) as EventRow | undefined;
+          if (prior) comparable = {...e,platformEventId:this.event(prior.id).payload.platformEventId};
+        }
         if (prior) {
           if (!isStrong(e)) weakOccurrences.set(key, { eventId: prior.id, count: (weakOccurrences.get(key)?.count ?? 0) + 1 });
-          if (prior.binding !== binding || !isStrong(e)) {
+          if (prior.binding !== eventBinding(comparable) || !isStrong(e)) {
             // A source collision or changed original cannot inherit an approval.
             this.db.prepare("UPDATE inbound_events SET status='MANUAL_REVIEW' WHERE id=? AND status NOT IN ('CONFIRMED','UNCERTAIN','INTENT_RECORDED')").run(prior.id);
             this.db.prepare("UPDATE reply_drafts SET status='DRAFT',approval=NULL,approved_at=NULL WHERE event_id=?").run(prior.id);

@@ -39,3 +39,43 @@ export function validateMapping(value: unknown, real: boolean): SiteMapping {
     ['127.0.0.1', 'localhost'].includes(url.hostname), 'LOCAL_FIXTURE_REQUIRED');
   return mapping;
 }
+
+// Read-only calibration can be installed before reply controls have been verified.
+const nativeId = z.string().regex(/^\d{1,64}$/);
+const secureId = z.string().regex(/^[A-Za-z0-9_-]{1,300}$/);
+export const observationMappingSchema = z.object({
+  version: z.literal(1), purpose: z.literal('observation'), environment: z.enum(['fixture', 'douyin']),
+  origin: z.url(), entryUrl: z.url(), observedAt: z.iso.datetime(), evidenceRef: z.string().min(1),
+  self: z.object({ uid: nativeId, secUid: secureId }),
+  peers: z.array(z.object({ uid: nativeId, secUid: secureId, conversationId: z.string().min(1).max(512), title: z.string().min(1) })).min(1).max(2),
+  works: z.array(z.object({ id: nativeId, url: z.url() })).min(1).max(2),
+  selectors: z.object({
+    selfAvatar: selector, selfFiberDepth: z.number().int().min(0).max(8),
+    dmEntry: selector, dmPanel: selector, conversationRows: selector, conversationTitle: selector,
+    conversationFiberDepth: z.number().int().min(0).max(3),
+    conversationSelectEvent: z.enum(['click','mousedown']),
+    chat: selector, chatHeader: selector, chatTitle: selector, chatBack: selector,
+    messages: selector, messageBox: selector, fromMeClass: z.string().min(1), messageText: selector,
+    commentList: selector, commentEntry: selector, commentRows: selector, commentText: selector, commentAuthor: selector, commentTooltip: selector,
+    commentFiberDepth: z.number().int().min(0).max(3),
+  }),
+});
+export type ObservationMapping = z.infer<typeof observationMappingSchema>;
+export function validateObservationMapping(value: unknown, real: boolean): ObservationMapping {
+  const mapping = observationMappingSchema.parse(value); const origin = new URL(mapping.origin);
+  requireSafe(origin.origin === mapping.origin && !origin.username && !origin.password, 'INVALID_ORIGIN');
+  requireSafe(real ? mapping.environment === 'douyin' && mapping.origin === 'https://www.douyin.com' :
+    mapping.environment === 'fixture' && origin.protocol === 'http:' && ['127.0.0.1','localhost'].includes(origin.hostname),
+  real ? 'REAL_MAPPING_REQUIRED' : 'LOCAL_FIXTURE_REQUIRED');
+  for (const url of [mapping.entryUrl, ...mapping.works.map(w => w.url)]) {
+    const parsed = new URL(url);
+    requireSafe(parsed.origin === mapping.origin && !parsed.username && !parsed.password && !parsed.hash, 'UNSAFE_OBSERVATION_URL');
+  }
+  requireSafe(mapping.works.every(w => new URL(w.url).pathname === `/video/${w.id}` || new URL(w.url).pathname === `/note/${w.id}`),
+    'OBSERVATION_WORK_ID_CONFLICT');
+  for (const key of ['uid','secUid','conversationId'] as const)
+    requireSafe(new Set(mapping.peers.map(p => p[key])).size === mapping.peers.length, 'OBSERVATION_PEER_COLLISION');
+  requireSafe(!mapping.peers.some(p => p.uid === mapping.self.uid || p.secUid === mapping.self.secUid), 'OBSERVATION_SELF_AS_PEER');
+  requireSafe(new Set(mapping.works.map(w => w.id)).size === mapping.works.length, 'OBSERVATION_WORK_COLLISION');
+  return mapping;
+}

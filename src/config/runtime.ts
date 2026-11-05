@@ -2,7 +2,7 @@ import { readFile, mkdir, writeFile, realpath } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { requireSafe } from '../core/contracts.js';
-import { validateMapping, type SiteMapping } from './site-mapping.js';
+import { validateMapping, validateObservationMapping, type SiteMapping, type ObservationMapping } from './site-mapping.js';
 
 export const runtimeSchema = z.object({ version: z.literal(1), modelGrant: z.object({
   endpoint: z.url(), model: z.string().min(1), approvedAt: z.iso.datetime() }).nullable(),
@@ -29,4 +29,10 @@ export async function loadRuntime(root: string): Promise<RuntimeConfig> {
 }
 export async function loadMapping(root: string): Promise<SiteMapping> {
   return validateMapping(JSON.parse(await readFile(join(root, 'site-mapping.json'), 'utf8')), true);
+}
+export async function loadObservationMapping(root: string): Promise<ObservationMapping | null> {
+  let raw: string;
+  try { raw = await readFile(join(root,'observation-mapping.json'),'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+  return validateObservationMapping(JSON.parse(raw),true);
 }

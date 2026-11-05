@@ -26,6 +26,23 @@ test('same-body notifications from different people and videos remain separate',
     expect(ids).toHaveLength(3);
   } finally { s.close(); }
 });
+test('the same exact comment found by notification and permitted work remains one task with both observations',()=>{
+  const s=database();
+  try {
+    const comment=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',videoId:'v1',commentId:'c1',
+      discovery:'NOTIFICATION'});
+    s.observe(comment.channel,'notifications',[],'own-1','fixture');
+    s.observe(comment.channel,'notifications',[comment],'own-1','fixture');
+    s.observe(comment.channel,'work:v1',[{...comment,platformEventId:'c1',discovery:'ALLOWED_WORK'}],'own-1','fixture');
+    expect(s.events()).toHaveLength(1);
+    expect(s.events()[0]!.status).toBe('AWAITING_DRAFT');
+    expect(s.db.prepare('SELECT count(*) AS n FROM observations').get()).toEqual({n:3});
+    s.observe(comment.channel,'work:v1',[{...comment,platformEventId:'c1',text:'changed',discovery:'ALLOWED_WORK'}],'own-1','fixture');
+    expect(s.events()).toHaveLength(1);
+    expect(s.events()[0]!.status).toBe('MANUAL_REVIEW');
+    expect(s.db.prepare('SELECT count(*) AS n FROM source_collisions').get()).toEqual({n:1});
+  } finally {s.close();}
+});
 test('three incoming messages are preserved; own/system messages never become tasks', () => {
   const s = database();
   try {

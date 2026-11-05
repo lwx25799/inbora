@@ -4,11 +4,12 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { runtimeRoot, initRuntime, loadRuntime, loadMapping } from './config/runtime.js';
-import { validateMapping } from './config/site-mapping.js';
+import { runtimeRoot, initRuntime, loadRuntime, loadMapping, loadObservationMapping } from './config/runtime.js';
+import { validateMapping, validateObservationMapping } from './config/site-mapping.js';
 import { OwnerLock } from './browser/owner-lock.js';
 import { BrowserProfileOwner } from './browser/profile-owner.js';
 import { DomAdapter } from './adapters/dom-adapter.js';
+import { ObservedReader } from './adapters/observed-reader.js';
 import { EventStore } from './storage/store.js';
 import { HttpDraftProvider, generateDraft } from './ai/draft-service.js';
 import { Blocked, digest, requireSafe, targetKey } from './core/contracts.js';
@@ -24,7 +25,7 @@ pnpm inbora <command> [id] [options]
   status                       脱敏任务状态、预算和未知态统计
   login --real-account --private-access --headed
   install-mapping --file PATH --real-account --private-access
-  observe notifications|dm --real-account --private-access
+  observe notifications|dm|works --real-account --private-access
   draft EVENT_ID                确定性 Mock 草稿；--real-model 需另行授权
   show EVENT_ID                 仅本机交互终端查看目标及草稿
   edit DRAFT_ID --file PATH     读取 UTF-8 文本，旧审批失效
@@ -40,7 +41,7 @@ pnpm inbora <command> [id] [options]
 
 通用选项：--runtime PATH（默认 %LOCALAPPDATA%\\inbora），--headed（默认），--headless。
 默认 test:e2e 只访问本地合成页面。真实网页需本次显式声明访问权限。
-尚未校准真实 site-mapping 时观察、审批和发送会阻断。帮助和 status 不访问网页。`;
+观察需已校准的只读或完整映射；审批和发送仍需完整 site-mapping。帮助和 status 不访问网页。`;
 
 async function ask(message: string): Promise<string> {
   requireSafe(stdin.isTTY && stdout.isTTY, 'INTERACTIVE_TERMINAL_REQUIRED');
@@ -86,7 +87,15 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === 'status') { print(store.stats()); return; }
     if (command === 'install-mapping') {
       realAccess(); requireSafe(values.file, 'FILE_REQUIRED');
-      const mapping = validateMapping(JSON.parse(await readFile(values.file, 'utf8')), true);
+      const raw = JSON.parse(await readFile(values.file,'utf8')) as unknown;
+      if (raw && typeof raw === 'object' && 'purpose' in raw && raw.purpose === 'observation') {
+        const mapping = validateObservationMapping(raw,true);
+        requireSafe(await ask(`安装已校准只读映射，账号摘要 ${digest(mapping.self.uid).slice(0,12)}。不会启用发送。输入 INSTALL：`) === 'INSTALL','CANCELLED');
+        store.bindAccount(mapping.self.uid);
+        await writeFile(join(root,'observation-mapping.json'),JSON.stringify(mapping,null,2),{mode:0o600});
+        print({installed:true,purpose:'observation',sendsEnabled:false}); return;
+      }
+      const mapping = validateMapping(raw, true);
       requireSafe(await ask(`仅安装已实际观察的网页映射。账号标识摘要 ${digest(mapping.ownId).slice(0,12)}。输入 INSTALL：`) === 'INSTALL', 'CANCELLED');
       store.bindAccount(mapping.ownId);
       await writeFile(join(root, 'site-mapping.json'), JSON.stringify(mapping, null, 2), { mode: 0o600 }); print({ installed: true }); return;
@@ -125,6 +134,32 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       browser = await BrowserProfileOwner.launch(join(root, 'profile'), false); await browser.open('https://www.douyin.com');
       await ask('请在可见浏览器扫码或处理验证码。完成后按回车关闭并保存专属 Profile（不代表身份核验通过）：');
       print({ profileSaved: true, identityVerified: false, browserVersion: browser.version() }); return;
+    }
+    if (command === 'observe' && ['dm','works'].includes(id ?? '')) {
+      const observation = await loadObservationMapping(root);
+      if (observation) {
+        browser = await BrowserProfileOwner.launch(join(root,'profile'),values.headless ?? false);
+        await browser.open(observation.entryUrl);
+        const reader = new ObservedReader(id === 'dm' ? browser.dm : browser.notification,observation);
+        const result = await browser.actor.run(async()=>{
+          const tasks: string[] = []; let loaded = 0, unsupported = 0;
+          const count = id === 'dm' ? observation.peers.length : observation.works.length;
+          for (let index = 0; index < count; index++) {
+            const batch = id === 'dm' ? await reader.dm(index) : await reader.comments(index);
+            const evidenceId = await recordEvidence(join(root,'evidence'),{caseId:id === 'dm'?'D01':'N01',
+              browserVersion:browser!.version(),mode:values.headless?'headless':'headed',taskId:null,action:'OBSERVE',
+              result:'UNVERIFIED',source:'AUTOMATED_REAL',diagnostics:['READ_ONLY_CAPTURE_COMPLETE',
+                id === 'dm'?'PERMITTED_CONVERSATION':'ALLOWED_WORK_FALLBACK','SEND_UNVERIFIED'],proofDigest:digest(batch)});
+            const scope = id === 'dm' ? observation.peers[index]!.conversationId : `work:${observation.works[index]!.id}`;
+            tasks.push(...store!.observe(id === 'dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION',scope,
+              batch.events.map(e=>({...e,evidenceId})),observation.self.uid,evidenceId));
+            loaded += batch.loaded; unsupported += batch.unsupported;
+          }
+          return {newEventIds:tasks,loaded,unsupported,sendsEnabled:false};
+        });
+        print(result); return;
+      }
+      requireSafe(id !== 'works','OBSERVATION_MAPPING_REQUIRED');
     }
     const mapping = await loadMapping(root);
     if (command === 'compare-modes') {

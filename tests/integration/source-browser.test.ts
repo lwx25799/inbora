@@ -24,3 +24,11 @@ console.log(await new SendCoordinator(store,owner.actor).send(draft.id,dm,false)
   const result=spawnSync(process.execPath,['--import','tsx',script,join(dir,'profile')],{encoding:'utf8',timeout:15000});
   expect(result.stderr).toBe('');expect(result.status).toBe(0);expect(result.stdout).toContain('CONFIRMED');
 });
+
+test('source runtime reads calibrated metadata after guarded conversation opening',()=>{
+  const result=spawnSync(process.execPath,['--import','tsx',resolve('scripts/observed-smoke.mjs'),'source'],
+    {encoding:'utf8',timeout:20000});
+  expect(result.stderr).toBe('');expect(result.status).toBe(0);
+  expect(result.stdout).toContain('"observedReaderSmoke":"PASS"');
+  expect(result.stdout).toContain('"sends":0');
+});

@@ -1,6 +1,8 @@
 import { expect, test } from 'vitest';
 import { eventBinding, isEligible, isStrong, validText } from '../../src/core/contracts.js';
 import { candidate } from '../helpers.js';
+import { validateObservationMapping } from '../../src/config/site-mapping.js';
+import { observedMapping } from '../fixtures/observed-site.js';
 
 test('stable identity requires exact channel-specific identifiers, never just nickname/text', () => {
   expect(isStrong(candidate())).toBe(true);
@@ -25,4 +27,17 @@ test('binding includes actual target, original text and date; evidence reference
 test('draft text validation retains approved whitespace while blocking empty/oversize/control input', () => {
   expect(validText(' reply ')).toBe(' reply ');
   for (const text of ['', '  ', 'a'.repeat(501), 'x\u0000']) expect(() => validText(text)).toThrow('INVALID_TEXT');
+});
+test('observation mapping restricts permitted identities and exact work origins independently of send mapping',()=>{
+  const base=observedMapping('http://127.0.0.1:12345');
+  expect(validateObservationMapping(base,false).purpose).toBe('observation');
+  expect(()=>validateObservationMapping(base,true)).toThrow('REAL_MAPPING_REQUIRED');
+  const self=structuredClone(base);self.peers[0]!.uid=self.self.uid;
+  expect(()=>validateObservationMapping(self,false)).toThrow('OBSERVATION_SELF_AS_PEER');
+  const duplicate=structuredClone(base);duplicate.peers.push({...duplicate.peers[0]!});
+  expect(()=>validateObservationMapping(duplicate,false)).toThrow('OBSERVATION_PEER_COLLISION');
+  const wrongWork=structuredClone(base);wrongWork.works[0]!.url=base.origin+'/video/11';
+  expect(()=>validateObservationMapping(wrongWork,false)).toThrow('OBSERVATION_WORK_ID_CONFLICT');
+  const outside=structuredClone(base);outside.entryUrl='https://example.com/';
+  expect(()=>validateObservationMapping(outside,false)).toThrow('UNSAFE_OBSERVATION_URL');
 });

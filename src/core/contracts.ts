@@ -23,6 +23,7 @@ export const eventSchema = z.object({
   direction: z.enum(['INCOMING', 'OUTGOING', 'SYSTEM', 'UNKNOWN']),
   kind: z.enum(['COMMENT', 'REPLY', 'DM', 'LIKE', 'FOLLOW', 'SYSTEM', 'UNKNOWN']),
   evidenceId: z.string().min(1),
+  discovery: z.enum(['NOTIFICATION', 'ALLOWED_WORK', 'DIRECT_MESSAGE']).optional(),
 });
 export type InboundEvent = z.infer<typeof eventSchema>;
 export function digest(value: unknown): string {
