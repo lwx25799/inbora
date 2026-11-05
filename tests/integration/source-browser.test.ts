@@ -40,3 +40,9 @@ test('source runtime performs a native SVG fixture reply through durable intent 
   expect(result.stdout).toContain('"nativeDmReplySmoke":"PASS"');
   expect(result.stdout).toContain('"realSends":0');
 });
+test('source runtime replies to an exact root comment with durable intent and bound readback',()=>{
+  const result=spawnSync(process.execPath,['--import','tsx',resolve('scripts/comment-reply-smoke.mjs'),'source'],
+    {encoding:'utf8',timeout:20000});
+  expect(result.stderr).toBe('');expect(result.status).toBe(0);
+  expect(result.stdout).toContain('"nativeCommentReplySmoke":"PASS"');expect(result.stdout).toContain('"realSends":0');
+});

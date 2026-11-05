@@ -1,5 +1,5 @@
 import type { BrowserProfileOwner } from '../../src/browser/profile-owner.js';
-import type { ObservationMapping, DmReplyMapping } from '../../src/config/site-mapping.js';
+import type { ObservationMapping, DmReplyMapping,CommentReplyMapping } from '../../src/config/site-mapping.js';
 
 // Synthetic rendered component contract; no real identities or private source data.
 export function observedMapping(origin: string): ObservationMapping {
@@ -79,6 +79,54 @@ export async function mountDmReply(owner:BrowserProfileOwner,origin:string):Prom
         conversationId:state.nativeWrongReceipt?'outside':'conv-a',sender:'100',createdAt,
         serverStatus:0,type:7,_parsedContent:{text}}}}}});
       chat.append(box);editor.textContent='';
+    });
+  });
+}
+
+export function commentReplyMapping(origin:string):CommentReplyMapping{
+  return{version:1,purpose:'comment-reply',observation:observedMapping(origin),observedAt:'2026-11-05T00:00:00Z',
+    evidenceRef:'synthetic-root-reply',blockers:'[role="dialog"]',replyAction:'.reply-action',composerScope:'#reply-controls',
+    composerFiberDepth:2,composer:'#comment-editor',send:'#comment-send',pending:'.pending',failed:'.failed',rootLevel:1,confirmedStatus:1};
+}
+/** Synthetic direct parent reply contract, separate from observed platform evidence. */
+export async function mountCommentReply(owner:BrowserProfileOwner,origin:string):Promise<void>{
+  await owner.notification.goto(origin+'/video/10');
+  await owner.notification.setContent('<a id="self">Self</a><section id="comment-list"><div class="comment" id="root-comment"><a class="author" href="/user/peer-sec">Peer</a><div class="body">root fixture input</div><div class="tooltip" id="tooltip_11">Actions</div><button class="reply-action">回复</button></div></section>');
+  await owner.notification.evaluate(()=>{
+    const root=document.querySelector('#root-comment')!;
+    Object.defineProperty(document.querySelector('#self')!,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});
+    const comment={cid:'11',text:'root fixture input',user:{uid:'200',secUid:'peer-sec'},createTime:1793836800,replyId:'0',replyTotal:0,
+      status:1,replyComment:[] as unknown[]};
+    Object.defineProperty(root,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:comment,level:1,awemeInfo:{awemeId:'10'},userInfo:{uid:'100'}}}}});
+    const state=window as unknown as {commentClicks:number;commentModel:string;commentFailure:string};
+    state.commentClicks=0;state.commentModel='';state.commentFailure='';
+    root.querySelector('.reply-action')!.addEventListener('click',()=>{
+      if(root.querySelector('#reply-controls'))return;
+      const controls=document.createElement('div');controls.id='reply-controls';
+      controls.innerHTML='<div id="comment-editor" contenteditable="true" style="white-space:pre-wrap"><div data-contents="true"><div data-block="true"><div class="public-DraftStyleDefault-block"><span><br data-text="true"></span></div></div></div></div><button id="comment-send">Publish</button>';
+      Object.defineProperty(controls,'__reactFiber$fixture',{value:{return:{return:{memoizedProps:{cid:'11',level:1,levelOneCid:undefined,awemeInfo:{awemeId:'10'}}}}}});
+      root.append(controls);
+      controls.querySelector('#comment-editor')!.addEventListener('input',event=>{
+        const input=event as InputEvent;if(input.inputType==='insertText')state.commentModel+=input.data??'';
+      });
+      controls.querySelector('#comment-editor')!.addEventListener('textInput',event=>{
+        const input=event as InputEvent;event.preventDefault();state.commentModel=input.data??'';
+        controls.querySelector('#comment-editor .public-DraftStyleDefault-block')!.textContent=state.commentModel;
+      });
+      controls.querySelector('#comment-send')!.addEventListener('click',()=>{
+        state.commentClicks++;if(state.commentFailure==='missing')return;
+        const id=String(500+state.commentClicks),text=state.commentModel;
+        const reply={cid:id,text,replyId:state.commentFailure==='wrong-parent'?'12':'11',
+          user:{uid:state.commentFailure==='wrong-self'?'300':'100',secUid:'self-sec'},status:state.commentFailure==='pending'?0:1,
+          createTime:state.commentFailure==='old'?1793836800:(Date.now()+3)/1000};
+        comment.replyComment.push(reply);comment.replyTotal++;
+        const node=document.createElement('div');node.className='comment';
+        Object.defineProperty(node,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:structuredClone(reply),level:2,awemeInfo:{awemeId:'10'}}}}});
+        const author=document.createElement('a');author.className='author';author.href='/user/self-sec';author.textContent='Self';
+        const body=document.createElement('div');body.className='body';body.textContent=state.commentFailure==='wrong-text'?'other text':text;
+        const tip=document.createElement('div');tip.className='tooltip';tip.id='tooltip_'+id;tip.textContent='Actions';
+        node.append(author,body,tip);root.append(node);controls.remove();
+      });
     });
   });
 }

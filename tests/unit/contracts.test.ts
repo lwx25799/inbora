@@ -1,8 +1,8 @@
 import { expect, test } from 'vitest';
 import { eventBinding, isEligible, isStrong, validText } from '../../src/core/contracts.js';
 import { candidate } from '../helpers.js';
-import { validateObservationMapping,validateDmReplyMapping } from '../../src/config/site-mapping.js';
-import { observedMapping,dmReplyMapping } from '../fixtures/observed-site.js';
+import { validateObservationMapping,validateDmReplyMapping,validateCommentReplyMapping } from '../../src/config/site-mapping.js';
+import { observedMapping,dmReplyMapping,commentReplyMapping } from '../fixtures/observed-site.js';
 
 test('stable identity requires exact channel-specific identifiers, never just nickname/text', () => {
   expect(isStrong(candidate())).toBe(true);
@@ -53,4 +53,11 @@ test('native DM reply mapping is explicit and cannot reuse a read-only mapping o
   const bad=structuredClone(mapping);bad.observation.entryUrl='https://example.com/';
   expect(()=>validateDmReplyMapping(bad,false)).toThrow('UNSAFE_OBSERVATION_URL');
   expect(()=>validateDmReplyMapping({...mapping,submission:'mouse-click'},false)).toThrow();
+});
+test('direct parent reply mapping cannot enable fixture or nested-level production sends',()=>{
+  const mapping=commentReplyMapping('http://127.0.0.1:12345');
+  expect(validateCommentReplyMapping(mapping,false).purpose).toBe('comment-reply');
+  expect(()=>validateCommentReplyMapping(mapping,true)).toThrow('REAL_MAPPING_REQUIRED');
+  expect(()=>validateCommentReplyMapping({...mapping,rootLevel:2},false)).toThrow();
+  expect(()=>validateCommentReplyMapping(mapping.observation,false)).toThrow();
 });

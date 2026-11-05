@@ -53,13 +53,17 @@ pnpm inbora install-mapping --file D:\Inbora\.local\observation-mapping.json --r
 pnpm inbora observe works --real-account --private-access
 # 私信回复另需开发者校准的 purpose=dm-reply 映射；不会授权任何一条发送：
 pnpm inbora install-mapping --file D:\Inbora\.local\dm-reply-mapping.json --real-account --private-access
+# 对现有一级评论的直接回复另需 purpose=comment-reply 映射：
+pnpm inbora install-mapping --file D:\Inbora\.local\comment-reply-mapping.json --real-account --private-access
 ```
 
 首次采集以观察时刻和已见时间建立该通道/会话的可见历史基线。此后由测试者发送新事件，再采集获得任务 ID。只对可核验绝对时间严格晚于高水位的事件建新任务；首次基线前的迟加载旧历史保留为历史，首次基线后但早于高水位的迟到事件、同一时间精度或相对时间无法排序时转人工且仍出现在tasks。通知只读取当前加载的可见记录，不承诺全部历史回填；私信逐个打开已加载的可见会话。无法证明稳定账号、来源和目标身份的条目阻断或转人工。
 
-只读校准映射保存为私有`observation-mapping.json`，安装它不会启用批准或发送。私信回复另需完整`dm-reply-mapping.json`或原完整`site-mapping.json`；评论仍需完整`site-mapping.json`。`observe dm`只打开映射中已授权会话，先核验列表行原生身份，再核对当前头部与消息绑定；隐藏气泡或正文不读取，非纯文字消息只记未支持计数。`observe works`仅打开映射中的两个授权作品，核对作品、作者主页、稳定评论ID及正文；必须等可见评论或显式校准的空态，不把加载中的空列表记成完成。两种发现源命中同一作品/原评论只保留一个任务；身份或正文冲突进入人工核对。每个新作品scope首次读取同样建基线。
+只读校准映射保存为私有`observation-mapping.json`，安装它不会启用批准或发送。私信回复另需完整`dm-reply-mapping.json`或原完整`site-mapping.json`；一级评论回复可用`comment-reply-mapping.json`，其他评论路径仍需完整`site-mapping.json`。`observe dm`只打开映射中已授权会话，先核验列表行原生身份，再核对当前头部与消息绑定；隐藏气泡或正文不读取，非纯文字消息只记未支持计数。`observe works`仅打开映射中的两个授权作品，核对作品、作者主页、稳定评论ID及正文；必须等可见评论或显式校准的空态，不把加载中的空列表记成完成。两种发现源命中同一作品/原评论只保留一个任务；身份或正文冲突进入人工核对。每个新作品scope首次读取同样建基线。
 
 原生私信回复还交叉核对输入区`curConversation`与聊天头部，要求最新端可验证、原消息和有界收发上下文不变。已有人工草稿会阻断；聚焦后再次核验，再在同一任务执行一次原生纯文本编辑。准备后的编辑器结构及批准全文同时绑定，变化时不继续点击。草稿在保存、展示审批之前统一CRLF/CR为LF，其余空格与首尾/连续换行保留；已有批准不会被静默改写。
+
+一级评论适配器核对原评论cid、作品、作者、正文和level1，再核对其专属输入区的cid/作品/层级；来源通知ID与原评论cid分别保留。当前只接受单行纯文本Draft.js结构；非空BR、额外块或已有人工草稿阻断。输入以一次准确元素textInput事件交给网页正常编辑器，先取消默认插字，不伪造可信事件或使用全Page键盘；完成后重核原评论、全文及结构。空态发布图标可隐藏，准备后有限等待其显示，最终仍须可见、可用。回读必须在同一个直接子回复内核验原生ID、父ID、作品、作者、全文、状态及绝对时间，不能拼借兄弟节点；字段不足保持未知，不退化为独立顶层评论。
 
 ```powershell
 pnpm inbora draft EVENT_ID

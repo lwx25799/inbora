@@ -4,13 +4,14 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { runtimeRoot, initRuntime, loadRuntime, loadMapping, loadObservationMapping, loadDmReplyMapping } from './config/runtime.js';
-import { validateMapping, validateObservationMapping, validateDmReplyMapping } from './config/site-mapping.js';
+import { runtimeRoot, initRuntime, loadRuntime, loadMapping, loadObservationMapping, loadDmReplyMapping,loadCommentReplyMapping } from './config/runtime.js';
+import { validateMapping, validateObservationMapping, validateDmReplyMapping,validateCommentReplyMapping } from './config/site-mapping.js';
 import { OwnerLock } from './browser/owner-lock.js';
 import { BrowserProfileOwner } from './browser/profile-owner.js';
 import { DomAdapter } from './adapters/dom-adapter.js';
 import { ObservedReader } from './adapters/observed-reader.js';
 import { ObservedDmReply } from './adapters/observed-dm-reply.js';
+import { ObservedCommentReply } from './adapters/observed-comment-reply.js';
 import { EventStore } from './storage/store.js';
 import { HttpDraftProvider, generateDraft } from './ai/draft-service.js';
 import { Blocked, digest, requireSafe, targetKey, type ReplyAdapter } from './core/contracts.js';
@@ -42,7 +43,7 @@ pnpm inbora <command> [id] [options]
 
 通用选项：--runtime PATH（默认 %LOCALAPPDATA%\\inbora），--headed（默认），--headless。
 默认 test:e2e 只访问本地合成页面。真实网页需本次显式声明访问权限。
-观察需已校准映射；私信审批/发送需完整 dm-reply 或 site-mapping，评论需完整 site-mapping。帮助和 status 不访问网页。`;
+观察需已校准映射；私信审批/发送需 dm-reply 或 site-mapping，一级评论回复需 comment-reply 或 site-mapping。帮助和 status 不访问网页。`;
 
 async function ask(message: string): Promise<string> {
   requireSafe(stdin.isTTY && stdout.isTTY, 'INTERACTIVE_TERMINAL_REQUIRED');
@@ -106,6 +107,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === 'install-mapping') {
       realAccess(); requireSafe(values.file, 'FILE_REQUIRED');
       const raw = JSON.parse(await readFile(values.file,'utf8')) as unknown;
+      if(raw&&typeof raw==='object'&&'purpose' in raw&&raw.purpose==='comment-reply'){
+        const mapping=validateCommentReplyMapping(raw,true);
+        requireSafe(await ask(`安装已校准一级评论回复映射，账号摘要 ${digest(mapping.observation.self.uid).slice(0,12)}。每条发送仍需独立审批。输入 INSTALL：`)==='INSTALL','CANCELLED');
+        store.bindAccount(mapping.observation.self.uid);
+        await writeFile(join(root,'comment-reply-mapping.json'),JSON.stringify(mapping,null,2),{mode:0o600});
+        print({installed:true,purpose:'comment-reply',individualApprovalRequired:true});return;
+      }
       if(raw&&typeof raw==='object'&&'purpose' in raw&&raw.purpose==='dm-reply'){
         const mapping=validateDmReplyMapping(raw,true);
         requireSafe(await ask(`安装已校准私信回复映射，账号摘要 ${digest(mapping.observation.self.uid).slice(0,12)}。每条发送仍需独立审批。输入 INSTALL：`)==='INSTALL','CANCELLED');
@@ -194,6 +202,12 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         if(native){
           browser=await BrowserProfileOwner.launch(join(root,'profile'),values.headless??false);await browser.open(native.observation.entryUrl);
           await replyCommand(command,id,store,browser,new ObservedDmReply(browser.dm,native),root,values.headless??false);return;
+        }
+      }else{
+        const native=await loadCommentReplyMapping(root);
+        if(native){
+          browser=await BrowserProfileOwner.launch(join(root,'profile'),values.headless??false);await browser.open(native.observation.entryUrl);
+          await replyCommand(command,id,store,browser,new ObservedCommentReply(browser.notification,native),root,values.headless??false);return;
         }
       }
     }

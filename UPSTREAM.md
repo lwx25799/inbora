@@ -58,6 +58,18 @@
 
 复审发现嵌套可编辑根会借用同样标记属性，修复前再核对DSH `comment-browser.mjs findCommentSubmit`的唯一编辑器范围检查；本项目保留实际绑定根作为解析参数，并拒绝嵌套contenteditable，而不以最近的同属性祖先代替绑定根。嵌套根完整链红测先复现CONFIRMED，再收紧为零意图/点击。
 
+一级评论适配的源码tsx子进程实际发现命名箭头带入模块__name辅助；再次核对本项目已修复的ObservedReader/DM对象方法及DSH页面函数序列化形式，改为函数内对象方法，不注入全局helper。源码与编译路径各自运行原评论夹具闭环；DOM元素只在浏览器任务内持有，各分支仅返回纯数据。
+
+独立复审的BR单行、跨子回复拼接和外站同路径作者反例修复前，再对照DSH `readCommentDom`的owned范围与BR处理。单行Draft.js输入只接受已观察的一条contents/block/default-block结构；非空BR、额外块、隐藏内容及innerText不一致均在意图前阻断。收据必须先按cid定位一个直接子回复，再在该行交叉核对原生cid/父id/作品/level/作者/全文/时间/状态、准确同源作者链接及DOM正文；不拼用整个root的独立字段。通知平台来源ID与原评论cid分别绑定，沿现有跨源去重语义，不再要求二者相等。对应反例红测已实际失败。
+
+实机预检两次DOM_NOT_READY后取得控件rect/style新证据：准确回复区空白时发布span为display:none，并非元素缺失。修复前核对DSH `readCommentInputState/findCommentSubmit`的归属及enabled阶段；不照搬其空态即要求可见的限制。本项目空态只核验唯一已连接的准确归属，arming有限等待图标显示，每轮重核全文/结构/原评论，最终click门禁仍强制可见/可用。异步图标红测先失败，未放宽最终提交条件。
+
+随后受控时序探针证明另有Draft.js兼容问题：execCommand产生input而未触发beforeinput，14字正确DOM在约43毫秒后重渲染为28字并卸载，无新click记录。此问题与用户先前手动收起面板分别记录。修改前重读DSH同固定MIT SHA `comment-browser.mjs`的真实文字输入路径（pressSequentially）与当前Playwright 1.64.1固定源码/官方Keyboard.insertText文档。曾在合成阶段评估一次keyboard.insertText加beforeinput门禁，受控编辑器红测后通过本地文本链；该候选因下述iframe反例被否决，不属于最终实现，也未在真实编辑器执行。发送始终保留后续持久意图和单次DOM click，不以文档说明代替实际事件验证。
+
+该原生键盘候选在进入真实填写前被独立iframe反例否定：Page级输入可以在异步间隙写入子文档人稿，顶层beforeinput不能保护，故不作为最终路线。进一步核对MIT的React v18.3.1（固定SHA f1338f8080abd1386454a10bbf93d67bfe37ce85）`packages/react-dom/src/events/plugins/BeforeInputEventPlugin.js`及Draft.js v0.11.7（固定SHA f55fa0f8da080fea74ae3fa98860c41db85cbeea）`src/component/handlers/edit/editOnBeforeInput.js`：React输入插件可从textInput事件取data，Draft在叶起点可采用受控渲染。先只在当前授权空编辑器做一次准确元素DOM事件探针，取消浏览器默认插字、不伪造isTrusted、不调用页面方法或内部EditorState，避免全Page键盘焦点写入。上游版本仅作机制参考，不宣称当前网页采用这些具体版本；未复制其实现或新增依赖，真实是否接受由本机探针决定。
+
+本机准确元素探针实际通过：defaultPrevented=true、isTrusted=false，立即DOM仍空、1秒后准确14字全文且panel仍在，无意图/点击。最终输入实现采用此已验证DOM事件路线，事件对象只创建并派发一次，window及准确editor的capture门禁必须见到同一个事件；同步聚焦、原输入、目标、上下文和选区再次核验。完成阶段只等待原空态到批准全文，最多1秒；上下文或其他输入变化立即拒绝，准备后全文和DOM结构仍在最终发送门禁核对。iframe、人工草稿恢复、伪造其他事件及旧同文结构反例由合成探针独立验证，不以该输入探针冒充真实发送回读通过。
+
 ## 启动即静音的源码先核对
 
 用户新增静音要求后，先核对LockyBee固定MIT提交的`browser-host.mjs` 125—127行；上游显式移除`--mute-audio`，与本次要求相反，未采用。再核对Playwright 1.64.1（Apache-2.0，提交`cfe490d941f992655948eee8fd4fd94e1c4234bf`）的Chromium启动参数：默认仅在headless分支添加该参数，因此本项目通过公开args选项对所有模式显式添加，未复制源函数或引入依赖。安装包`lib/coreBundle.js`和官方固定版本参数文档均已核对；Chromium的`media/base/media_switches.cc`说明该参数在设备输出端静音。启动参数在导航前生效，覆盖同进程所有标签页。

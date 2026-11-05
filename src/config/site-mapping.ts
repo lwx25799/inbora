@@ -100,3 +100,16 @@ export function validateDmReplyMapping(value: unknown, real: boolean): DmReplyMa
   validateObservationMapping(mapping.observation,real);
   return mapping;
 }
+
+/** Direct replies to a verified level-one comment; never a new top-level comment. */
+export const commentReplyMappingSchema=z.object({
+  version:z.literal(1),purpose:z.literal('comment-reply'),observation:observationMappingSchema,
+  observedAt:z.iso.datetime(),evidenceRef:z.string().min(1),blockers:selector,
+  replyAction:selector,composerScope:selector,composerFiberDepth:z.number().int().min(0).max(3),
+  composer:selector,send:selector,pending:selector,failed:selector,
+  rootLevel:z.literal(1),confirmedStatus:z.number().int(),
+});
+export type CommentReplyMapping=z.infer<typeof commentReplyMappingSchema>;
+export function validateCommentReplyMapping(value:unknown,real:boolean):CommentReplyMapping{
+  const mapping=commentReplyMappingSchema.parse(value);validateObservationMapping(mapping.observation,real);return mapping;
+}

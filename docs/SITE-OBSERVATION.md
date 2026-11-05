@@ -76,3 +76,12 @@ L01—L03 已有实机通过证据；顶部通知与消息入口已观察，H01 
 - 用户明确批准单条Mock草稿后，第一次填写因editor-kit在正文后保留结构性U+200B被逐字门禁阻断；零意图、零点击，审批失效。固定DOM证据为准确编辑器下直接ace-line末端的data-enter/data-string/data-leaf叶，仅包含一个U+200B；普通正文零宽字符不能剥除。
 - 真实结构红测及嵌套根反例修复后，重新核验同一目标/全文/上下文摘要，沿该条用户授权继续。单次持久意图/单次SVG提交后，准确原生新消息、我方身份、完整文本、确认状态及严格晚于意图的绝对发送时间通过两次回读，D05证据4588d32a。
 - 正常刷新后同一绑定收据仍唯一可见，重复发送命令在意图前拒绝，证据f0eb32ef。当前真实SEND预算1、MODEL预算0。不据此宣称评论回复、全部恢复或无头发送通过。
+
+### 一级评论直接回复预检
+
+- 用户明确本轮回复现有一级评论，不等待先发子回复，并批准该条Mock回复。原评论自身level为1、replyId为0；输入区自身fiber向上两层含同一cid/awemeInfo.awemeId/level1，levelOneCid未定义。该路径不发布独立顶层评论。
+- 编辑器实际为单行Draft.js：contenteditable下data-contents、data-block及public-DraftStyleDefault-block逐层组成一条内容；空态含一个data-text的BR。空态发布span存在但display:none，填入文字后才能核验可见发布控件。两次NOT_READY后已获取rect/style新证据并新增实际失败的异步控件回归，最终点击要求未降低。
+- 用户澄清先前只关闭/切换评论面板，没有手动发布。同一失败再次出现后，时序新证据另证明execCommand input后约43毫秒受控编辑器重复正文并卸载，无click事件；未把用户手动关闭与这个独立缺陷混同。全Page原生输入候选因iframe覆盖反例在合成阶段被否决，未用于实机。
+- 先核开源React/Draft机制后，准确编辑器textInput探针（isTrusted=false、defaultPrevented=true）被网页正常受控渲染，1秒后14字全文仍准确、面板保持。最终输入只派发该准确Event一次，不触发浏览器默认插字或调用页面方法；完整原评论、全文/结构和点击门禁继续适用。
+- 首个许可作品准确原评论/输入区C03证据2f9c3177通过。用户既有单条批准后，持久意图和单次DOM click门禁均有见证（attempted/used为true、blocked为false），N06结果UNCERTAIN，证据0ac03dc1。刷新后原评论replyTotal仍0、replyComment为空、没有可见准确子回复，证据298da985；当前未知冻结，禁止自动重发。不能仅凭没有显示断言平台一定未接收，也不能推断失败根因。
+- 子回复的独立原生字段及其与父评论数组/可见DOM的对应仍无实际样本；合成契约只用于验证严格失败行为，不据此宣称评论回读通过。真实SEND预算2（私信1、评论意图1），MODEL预算0。
