@@ -16,6 +16,7 @@ import { EventStore } from './storage/store.js';
 import { HttpDraftProvider, generateDraft } from './ai/draft-service.js';
 import { Blocked, digest, requireSafe, targetKey, type ReplyAdapter } from './core/contracts.js';
 import { SendCoordinator } from './core/send-coordinator.js';
+import { ManualCommentRetry } from './core/manual-comment-retry.js';
 import { diagnostic } from './observability/audit.js';
 import { caseIds, pruneEvidence, recordEvidence } from './observability/evidence.js';
 import { browserMetrics } from './observability/browser-metrics.js';
@@ -34,6 +35,7 @@ pnpm inbora <command> [id] [options]
   approve DRAFT_ID --real-account --private-access
   reject DRAFT_ID
   send-once DRAFT_ID --real-account --private-access
+  retry-comment-once DRAFT_ID --real-account --private-access
   pause EVENT_ID | resume EVENT_ID
   review-uncertain              查看未知态（仅人工核对，不提供自动重发）
   compare-modes --real-account --private-access
@@ -55,6 +57,20 @@ function safeCode(error: unknown): string { return error instanceof Blocked ? er
 
 async function replyCommand(command:string,id:string,store:EventStore,browser:BrowserProfileOwner,adapter:ReplyAdapter,root:string,headless:boolean):Promise<void>{
   const d=store.draft(id),e=store.event(d.eventId);
+  if(command==='retry-comment-once'){
+    requireSafe(e.payload.channel==='COMMENT_NOTIFICATION'&&e.status==='UNCERTAIN','MANUAL_RETRY_REQUIRES_UNKNOWN_COMMENT');
+    const snapshot=await browser.actor.run(()=>adapter.inspect(e.payload));
+    requireSafe(stdin.isTTY&&stdout.isTTY,'INTERACTIVE_TERMINAL_REQUIRED');
+    print({original:e.payload,retryText:d.text,version:d.version,previousResult:'UNCERTAIN',oldIntentRetained:true});
+    const challenge=`RETRY ${digest([d.id,d.version,d.text,snapshot]).slice(0,12)}`;
+    requireSafe(await ask(`只批准再提交一次，原未知结果及可能迟到回复仍保留。输入 ${challenge}：`)===challenge,'CANCELLED');
+    const grantId=store.authorizeCommentRetry(d.id,snapshot,challenge);
+    const result=await new ManualCommentRetry(store,browser.actor).send(grantId,adapter,true);
+    const evidenceId=await recordEvidence(join(root,'evidence'),{caseId:'N06',browserVersion:browser.version(),mode:headless?'headless':'headed',
+      taskId:e.id,action:'SEND',result:result==='CONFIRMED'?'PASS':'BLOCKED',source:'AUTOMATED_REAL',
+      diagnostics:['EXPLICIT_MANUAL_RETRY',result,'ORIGINAL_UNKNOWN_RETAINED'],proofDigest:digest(store.stats().manualRetries)});
+    print({result,grantId,evidenceId,originalStillFrozen:true});return;
+  }
   if(command==='approve'){
     const snapshot=await browser.actor.run(()=>adapter.inspect(e.payload));
     requireSafe(stdin.isTTY&&stdout.isTTY,'INTERACTIVE_TERMINAL_REQUIRED');
@@ -81,7 +97,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (values.help || positionals.length === 0) { stdout.write(`${help}\n`); return; }
   requireSafe(!(values.headed && values.headless), 'CONFLICTING_BROWSER_MODE');
   const command = positionals[0]!; const id = positionals[1];
-  const known = ['init','status','login','install-mapping','observe','draft','show','edit','approve','reject','send-once',
+  const known = ['init','status','login','install-mapping','observe','draft','show','edit','approve','reject','send-once','retry-comment-once',
     'pause','resume','review-uncertain','compare-modes','real-test','authorize-model','prune-evidence'];
   requireSafe(known.includes(command), 'UNKNOWN_COMMAND');
   const root = runtimeRoot(values.runtime);
@@ -194,9 +210,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       }
       requireSafe(id !== 'works','OBSERVATION_MAPPING_REQUIRED');
     }
-    if(['approve','send-once'].includes(command)){
+    if(['approve','send-once','retry-comment-once'].includes(command)){
       requireSafe(id,'DRAFT_ID_REQUIRED');
       const event=store.event(store.draft(id).eventId);
+      if(command==='retry-comment-once')requireSafe(event.payload.channel==='COMMENT_NOTIFICATION','MANUAL_RETRY_REQUIRES_UNKNOWN_COMMENT');
       if(event.payload.channel==='DIRECT_MESSAGE'){
         const native=await loadDmReplyMapping(root);
         if(native){
@@ -211,6 +228,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         }
       }
     }
+    requireSafe(command!=='retry-comment-once','NATIVE_COMMENT_REPLY_MAPPING_REQUIRED');
     const mapping = await loadMapping(root);
     if (command === 'compare-modes') {
       const results: unknown[] = [];

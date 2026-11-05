@@ -72,6 +72,12 @@
 
 用户手机端未见回复后的排查，先再读DSH同固定提交的comment-browser控件几何、findCommentSubmit、enabled和发送后双轮回执；上游的物理输入及回复拒绝限制仍使其不能直接替换本项目路径。当前准确控件实机只读观察到onClick处理器，原评论仍无子回复；没有采用替代事件或源码修复，不能由上游成功声明推断本次平台结果。
 
+用户明确再次批准该条评论重试后，实施前重读DSH固定MIT提交的`receipt-baseline.mjs preserveReceiptBaseline/matchCommentReceiptBaseline`及`comment-browser.mjs`未知收据保全。可复用保留原点击前基线、未知不重写的原则，但上游无可直接移植的本项目逐条人工重试事务；不复制宿主、文件收据或物理点击。独立使用现有SQLite WAL/FULL及账号协调器，在audit_events内追加独立授权/重试意图/结果记录，绑定旧意图、本地任务、文本/目标摘要和预算，不改schema或删除旧记录。仅显式人工入口允许本期每个旧未知评论意图一次重试；普通send与重启继续冻结，回读要求不降低。
+
+重试复审发现preflight变化或来源碰撞后旧grant仍可复用，修复前对照DSH收据基线不可覆盖及本项目普通SendCoordinator审批失效流程；不沿用候选重试授权的宽松行为。以两条实际错误CONFIRMED红测确认后，任何准备阶段变化追加撤销记录，观察来源冲突同样撤销关联grant；新意图事务再次核验撤销状态，原未知及审计不删除。
+
+本轮迟到子回复补证前再次核对同一MIT固定SHA的`receipt-baseline.mjs`不可补造/覆盖旧基线及两次只读快照比对、`comment-browser.mjs`的readCommentDom。上游只读DOM的缺状态推断不足以满足本项目绝对时间/准确父评论/原生确认状态要求，不直接复用为成功收据。仅在本机私有诊断探针中将正常页面GET响应与准确可见直接child交叉核验，追加独立补证，不修改生产适配器或原未知收据。原始响应与探针均不提交仓库。
+
 ## 启动即静音的源码先核对
 
 用户新增静音要求后，先核对LockyBee固定MIT提交的`browser-host.mjs` 125—127行；上游显式移除`--mute-audio`，与本次要求相反，未采用。再核对Playwright 1.64.1（Apache-2.0，提交`cfe490d941f992655948eee8fd4fd94e1c4234bf`）的Chromium启动参数：默认仅在headless分支添加该参数，因此本项目通过公开args选项对所有模式显式添加，未复制源函数或引入依赖。安装包`lib/coreBundle.js`和官方固定版本参数文档均已核对；Chromium的`media/base/media_switches.cc`说明该参数在设备输出端静音。启动参数在导航前生效，覆盖同进程所有标签页。

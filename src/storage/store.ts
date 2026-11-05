@@ -12,6 +12,9 @@ interface EventRow { id: string; payload: string; binding: string; status: Store
 interface DraftRow { id: string; event_id: string; text: string; model: string; version: number;
   status: Draft['status']; approval: string | null }
 export interface Intent { id: string; event_id: string; target_key: string; status: string }
+const retryGrantSchema=z.object({eventId:z.uuid(),draftId:z.uuid(),previousIntentId:z.uuid(),version:z.number().int().positive(),
+  textDigest:z.string().regex(/^[a-f0-9]{64}$/),snapshotDigest:z.string().regex(/^[a-f0-9]{64}$/),authorizationDigest:z.string().regex(/^[a-f0-9]{64}$/)});
+export type RetryGrant=z.infer<typeof retryGrantSchema>;
 
 export class EventStore {
   readonly db: Database.Database;
@@ -118,6 +121,9 @@ export class EventStore {
             this.db.prepare("UPDATE reply_drafts SET status='DRAFT',approval=NULL,approved_at=NULL WHERE event_id=?").run(prior.id);
             this.db.prepare('INSERT OR IGNORE INTO source_collisions VALUES (?,?,?,?,?)')
               .run(randomUUID(),prior.id,binding,JSON.stringify(e),evidenceRef);
+            const grants=this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_AUTHORIZED' AND json_extract(detail_redacted,'$.eventId')=?")
+              .all(prior.id) as {id:string}[];
+            for(const grant of grants)this.revokeCommentRetry(grant.id);
             this.audit('SOURCE_COLLISION', prior.id);
           }
           continue;
@@ -210,6 +216,10 @@ export class EventStore {
         const drafts = this.db.prepare(`SELECT d.id FROM reply_drafts d JOIN inbound_events e ON e.id=d.event_id
           WHERE e.target_key=? AND d.status='APPROVED' AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id)`).all(key) as {id:string}[];
         for (const d of drafts) this.invalidateApproval(d.id);
+        const grants=this.db.prepare(`SELECT g.id FROM audit_events g JOIN send_intents i ON i.id=g.entity_id
+          WHERE g.event_type='MANUAL_RETRY_AUTHORIZED' AND i.target_key=? AND NOT EXISTS
+          (SELECT 1 FROM audit_events r WHERE r.event_type='MANUAL_RETRY_REVOKED' AND r.entity_id=g.id)`).all(key) as {id:string}[];
+        for(const g of grants)this.audit('MANUAL_RETRY_REVOKED',g.id);
       }
       this.audit(paused ? 'PAUSED' : 'RESUMED', digest(key));
     }).immediate();
@@ -254,7 +264,10 @@ export class EventStore {
     return this.db.transaction(() => {
       const pending = this.db.prepare("SELECT id FROM send_intents WHERE status='INTENT_RECORDED'").all() as { id: string }[];
       for (const i of pending) this.receipt(i.id, 'UNCERTAIN', 'RESTART_WITH_UNFINISHED_INTENT');
-      return pending.length;
+      const retries=this.db.prepare(`SELECT i.id FROM audit_events i WHERE i.event_type='MANUAL_RETRY_INTENT' AND NOT EXISTS
+        (SELECT 1 FROM audit_events r WHERE r.event_type='MANUAL_RETRY_RECEIPT' AND r.entity_id=i.id)`).all() as {id:string}[];
+      for(const r of retries)this.commentRetryReceipt(r.id,'UNCERTAIN','RESTART_WITH_UNFINISHED_RETRY');
+      return pending.length+retries.length;
     }).immediate();
   }
   uncertain(): Intent[] {
@@ -268,6 +281,68 @@ export class EventStore {
     const row=this.db.prepare('SELECT attempt_started_at FROM send_intents WHERE id=?').get(intentId) as {attempt_started_at:string}|undefined;
     requireSafe(row,'INTENT_NOT_FOUND');return row.attempt_started_at;
   }
+  private retryAudit(id:string,type:string,entityId:string,detail:Record<string,unknown>):void{
+    this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)').run(id,new Date().toISOString(),type,entityId,JSON.stringify(detail));
+  }
+  retryGrant(id:string):RetryGrant{
+    const row=this.db.prepare("SELECT detail_redacted FROM audit_events WHERE id=? AND event_type='MANUAL_RETRY_AUTHORIZED'").get(id) as {detail_redacted:string}|undefined;
+    requireSafe(row,'MANUAL_RETRY_AUTHORIZATION_REQUIRED');return retryGrantSchema.parse(JSON.parse(row.detail_redacted));
+  }
+  revokeCommentRetry(grantId:string):void{
+    this.db.transaction(()=>{
+      this.retryGrant(grantId);
+      if(!this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_REVOKED' AND entity_id=?").get(grantId))
+        this.audit('MANUAL_RETRY_REVOKED',grantId);
+    }).immediate();
+  }
+  authorizeCommentRetry(draftId:string,snapshot:TargetSnapshot,authorizationRef:string):string{
+    requireSafe(authorizationRef.length>0&&authorizationRef.length<=500,'MANUAL_RETRY_AUTHORIZATION_REQUIRED');
+    return this.db.transaction(()=>{
+      const draft=this.draft(draftId),event=this.event(draft.eventId),key=targetKey(event.payload);
+      const prior=this.db.prepare("SELECT id,status FROM send_intents WHERE event_id=?").get(event.id) as {id:string;status:string}|undefined;
+      requireSafe(event.payload.channel==='COMMENT_NOTIFICATION'&&event.payload.kind==='COMMENT'&&event.status==='UNCERTAIN'&&prior?.status==='UNCERTAIN',
+        'MANUAL_RETRY_REQUIRES_UNKNOWN_COMMENT');
+      requireSafe(snapshot.accountId===event.payload.accountId&&snapshot.eventBinding===event.binding&&snapshot.targetKey===key&&snapshot.composerKey===key,
+        'MANUAL_RETRY_BINDING_CHANGED');
+      requireSafe((this.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(event.payload.accountId) as {own_id:string}|undefined)?.own_id===snapshot.ownId,
+        'MANUAL_RETRY_ACCOUNT_CHANGED');
+      requireSafe(!(this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as {paused:number}|undefined)?.paused,'TARGET_PAUSED');
+      requireSafe(!this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_INTENT' AND json_extract(detail_redacted,'$.previousIntentId')=?").get(prior.id),
+        'MANUAL_RETRY_ALREADY_ATTEMPTED');
+      const id=randomUUID(),grant:RetryGrant={eventId:event.id,draftId:draft.id,previousIntentId:prior.id,version:draft.version,
+        textDigest:digest(draft.text),snapshotDigest:digest(snapshot),authorizationDigest:digest(authorizationRef)};
+      this.retryAudit(id,'MANUAL_RETRY_AUTHORIZED',prior.id,grant);return id;
+    }).immediate();
+  }
+  recordCommentRetryIntent(grantId:string,snapshot:TargetSnapshot,real:boolean):string{
+    return this.db.transaction(()=>{
+      const grant=this.assertCommentRetryAvailable(grantId);
+      requireSafe(digest(snapshot)===grant.snapshotDigest,'MANUAL_RETRY_BINDING_CHANGED');
+      if(real)this.consumeBudget('SEND');const id=randomUUID();
+      this.retryAudit(id,'MANUAL_RETRY_INTENT',grantId,{...grant,real});return id;
+    }).immediate();
+  }
+  assertCommentRetryAvailable(grantId:string):RetryGrant{
+    const grant=this.retryGrant(grantId),draft=this.draft(grant.draftId),event=this.event(grant.eventId),key=targetKey(event.payload);
+    const prior=this.db.prepare('SELECT status,event_id FROM send_intents WHERE id=?').get(grant.previousIntentId) as {status:string;event_id:string}|undefined;
+    requireSafe(event.status==='UNCERTAIN'&&prior?.status==='UNCERTAIN'&&prior.event_id===event.id,'MANUAL_RETRY_PREVIOUS_STATE_CHANGED');
+    requireSafe(draft.eventId===event.id&&draft.version===grant.version&&digest(draft.text)===grant.textDigest,'MANUAL_RETRY_BINDING_CHANGED');
+    requireSafe(!(this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as {paused:number}|undefined)?.paused,'TARGET_PAUSED');
+    requireSafe(!this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_REVOKED' AND entity_id=?").get(grantId),'MANUAL_RETRY_AUTHORIZATION_REVOKED');
+    requireSafe(!this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_INTENT' AND json_extract(detail_redacted,'$.previousIntentId')=?")
+      .get(grant.previousIntentId),'MANUAL_RETRY_ALREADY_ATTEMPTED');return grant;
+  }
+  commentRetryBoundary(id:string):string{
+    const row=this.db.prepare("SELECT time FROM audit_events WHERE id=? AND event_type='MANUAL_RETRY_INTENT'").get(id) as {time:string}|undefined;
+    requireSafe(row,'MANUAL_RETRY_INTENT_MISSING');return row.time;
+  }
+  commentRetryReceipt(id:string,result:'CONFIRMED'|'UNCERTAIN',proofRef:string):void{
+    this.db.transaction(()=>{
+      requireSafe(this.db.prepare("SELECT id FROM audit_events WHERE id=? AND event_type='MANUAL_RETRY_INTENT'").get(id),'MANUAL_RETRY_INTENT_MISSING');
+      requireSafe(!this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_RECEIPT' AND entity_id=?").get(id),'MANUAL_RETRY_RECEIPT_EXISTS');
+      this.retryAudit(randomUUID(),'MANUAL_RETRY_RECEIPT',id,{result,proofRef});
+    }).immediate();
+  }
   history(e: InboundEvent): InboundEvent[] {
     const incoming = this.events().filter(item => targetKey(item.payload) === targetKey(e) && item.payload.channel === e.channel)
       .map(item => item.payload).filter((item): item is InboundEvent & { occurredAt: string } => item.occurredAt !== null);
@@ -275,7 +350,13 @@ export class EventStore {
       JOIN inbound_events e ON e.id=i.event_id JOIN reply_drafts d ON d.id=i.draft_id
       JOIN delivery_receipts r ON r.send_intent_id=i.id WHERE i.target_key=? AND r.result='CONFIRMED'
       ORDER BY r.rowid DESC LIMIT 6`).all(targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[];
-    const combined = [...incoming,...outgoing.map(row => ({...eventSchema.parse(JSON.parse(row.payload)),text:row.text,
+    const retried=this.db.prepare(`SELECT e.payload,d.text,i.id,r.time AS verified_at FROM audit_events i
+      JOIN audit_events r ON r.entity_id=i.id AND r.event_type='MANUAL_RETRY_RECEIPT'
+      JOIN inbound_events e ON e.id=json_extract(i.detail_redacted,'$.eventId')
+      JOIN reply_drafts d ON d.id=json_extract(i.detail_redacted,'$.draftId')
+      WHERE i.event_type='MANUAL_RETRY_INTENT' AND json_extract(r.detail_redacted,'$.result')='CONFIRMED' AND e.target_key=?
+      ORDER BY r.rowid DESC LIMIT 6`).all(targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[];
+    const combined = [...incoming,...[...outgoing,...retried].map(row => ({...eventSchema.parse(JSON.parse(row.payload)),text:row.text,
       direction:'OUTGOING' as const,platformEventId:row.id,occurredAt:row.verified_at}))]
       .sort((a,b) => a.occurredAt.localeCompare(b.occurredAt));
     // Reserve bounded context for confirmed outgoing replies even during incoming bursts.
@@ -288,6 +369,10 @@ export class EventStore {
       events: this.db.prepare('SELECT status,count(*) AS count FROM inbound_events GROUP BY status').all(),
       budgets: this.db.prepare('SELECT * FROM budgets').all(),
       uncertain: this.uncertain().length,
+      manualRetries:this.db.prepare(`SELECT i.id AS retryId,i.entity_id AS grantId,
+        json_extract(i.detail_redacted,'$.eventId') AS eventId,
+        COALESCE((SELECT json_extract(r.detail_redacted,'$.result') FROM audit_events r WHERE r.event_type='MANUAL_RETRY_RECEIPT' AND r.entity_id=i.id),'INTENT_RECORDED') AS result
+        FROM audit_events i WHERE i.event_type='MANUAL_RETRY_INTENT' ORDER BY i.rowid`).all(),
       tasks: this.db.prepare(`SELECT e.id AS eventId,e.channel,e.status,d.id AS draftId,d.version,d.status AS draftStatus,
         COALESCE((SELECT MAX(CAST(json_extract(a.detail_redacted,'$.occurrences') AS INTEGER)) FROM audit_events a
           WHERE a.event_type='WEAK_SOURCE_MULTIPLICITY' AND a.entity_id=e.id),1) AS maxObservedOccurrences

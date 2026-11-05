@@ -1,8 +1,8 @@
 # inbora
 
-Windows 单账号、评论通知与私信双通道的受控浏览器 PoC。当前提供 Node.js / TypeScript / Playwright / SQLite 内核和 CLI；真实抖音页面及真实收发尚未验收，最终 GO 尚未判定。
+Windows 单账号、评论通知与私信双通道的受控浏览器 PoC。当前提供 Node.js / TypeScript / Playwright / SQLite 内核和 CLI；首条有头私信回复已自动确认，首个许可作品的一条评论回复经用户安全验证后通过补充只读核验，完整实机验收与最终 GO 尚未完成。
 
-2026-11-05用户允许两个已授权本人作品的有界评论读取作为补充发现源。正式源码CLI已完成受控私信、首个作品评论各五轮只读采集及SQLite去重；D02三条私信独立保留已实机通过，其余逐项见测试矩阵。顶部通知原用例仍单列，补充来源不冒称通知通过。当前使用原生有头Edge，无UA覆写；真实发送、可信回执及最终GO仍未完成。
+2026-11-05用户允许两个已授权本人作品的有界评论读取作为补充发现源。正式源码CLI已完成受控私信、首个作品评论各五轮只读采集及SQLite去重；D02三条私信独立保留已实机通过，其余逐项见测试矩阵。顶部通知原用例仍单列，补充来源不冒称通知通过。当前使用原生有头Edge，无UA覆写；评论自动回读仍缺少真实子回复字段适配，不能把本轮补充证据称为自动闭环或GO。
 
 当前实现使用独立 Edge Profile、两个专用 Page 和账号级串行队列。草稿默认使用确定性 Mock。每条真实回复必须在本机交互终端核对目标及完整文本后批准；点击意图先写入 SQLite，提交一次后读取准确原评论或准确会话的新回执。未知结果冻结目标，不提供自动重发。
 
@@ -73,6 +73,8 @@ pnpm inbora edit DRAFT_ID --file D:\Inbora\.local\reply.txt
 pnpm inbora approve DRAFT_ID --real-account --private-access
 # 本机逐条核对并输入本次专属确认短语；不接受非交互式批量批准。
 pnpm inbora send-once DRAFT_ID --real-account --private-access
+# 仅在重新逐条明确批准后，允许一个旧未知评论意图一次独立重试：
+pnpm inbora retry-comment-once DRAFT_ID --real-account --private-access
 pnpm inbora review-uncertain
 pnpm inbora pause EVENT_ID
 pnpm inbora resume EVENT_ID
@@ -80,7 +82,9 @@ pnpm inbora compare-modes --real-account --private-access
 pnpm test:real --case L01 --real-account --private-access
 ```
 
-`EVENT_ID` / `DRAFT_ID` 是命令输出的本地标识，重启后可从 `status` 的 tasks 找回。`show` 和审批原文只在本机交互终端显示；不要把终端原文、数据库、Profile、页面证据上传仓库。审批绑定账号、原事件、收发上下文、输入框归属、页面映射和完整文本版本；任何变化都需要重新核对。`pause` 可从另一个终端发出且不会恢复其他进程的在途意图；暂停使未点击任务的旧批准失效。已提交的在途发送可能已经发生，暂停不能撤回已外发的消息。未知任务保持冻结；人工核对记录与后续处理需由开发者在实机阶段核验，CLI 不提供清空意图或重发开关。
+`EVENT_ID` / `DRAFT_ID` 是命令输出的本地标识，重启后可从 `status` 的 tasks 找回。`show` 和审批原文只在本机交互终端显示；不要把终端原文、数据库、Profile、页面证据上传仓库。审批绑定账号、原事件、收发上下文、输入框归属、页面映射和完整文本版本；任何变化都需要重新核对。`pause` 可从另一个终端发出且不会恢复其他进程的在途意图；暂停使未点击任务的旧批准失效。已提交的在途发送可能已经发生，暂停不能撤回已外发的消息。未知任务保持冻结，CLI不提供清空意图或自动重发。`retry-comment-once`是独立人工例外：交互核对准确原评论、全文及重试风险，追加授权、预算及单次意图；每个旧未知评论意图最多一次，旧未知记录始终保留，普通发送和重启仍不能重发。
+
+本轮评论重试触发短信安全验证，程序停止后由用户本人完成。验证后出现准确子回复，刷新并展开原评论后，以页面正常加载的同源只读响应交叉核对原生ID、父ID、作品、我方身份、全文、确认状态和意图后的绝对时间，两次可见快照一致。此为实机补充核验；现有自动回读仍为UNCERTAIN，原记录与冻结未解除，不据此继续提交。
 
 `compare-modes`目前使用完整`site-mapping`串行测量两通道；仅安装只读/native私信映射时，分别用`observe dm`和`observe works`的`--headed`/`--headless`入口复核。真实原生Headless已有受控私信及首个许可作品的有限读取证据，完整发送仍未验证，详见模式对照记录。发送对照分别逐条批准；区分输出 Node 的 RSS/CPU 与当前 Worker 所有 Edge 子进程统计，统计不可用则为null。人工 `real-test` 声明仍需完整映射，不能替代自动绑定回执。
 

@@ -4,6 +4,7 @@ import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
 import {captureObserved} from '../../src/adapters/observed-reader.js';
 import {ObservedCommentReply} from '../../src/adapters/observed-comment-reply.js';
 import {SendCoordinator} from '../../src/core/send-coordinator.js';
+import {ManualCommentRetry} from '../../src/core/manual-comment-retry.js';
 import {fixtureServer} from '../fixtures/site.js';
 import {mountCommentReply,commentReplyMapping} from '../fixtures/observed-site.js';
 import {database,privateTemp} from '../helpers.js';
@@ -195,5 +196,19 @@ test.each(['split','nested','foreign-origin','wrong-native'])('a %s child cannot
     };
     expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('UNCERTAIN');
     expect(f.store.uncertain()).toHaveLength(1);
+  }finally{await f.close();}
+});
+test.each([false,true])('explicit human comment retry retains the original unknown; missing=%s',async missing=>{
+  const f=await setup();try{
+    const snap=await f.adapter.inspect(f.event.payload);f.store.approve(f.draft.id,snap,f.draft.version,f.draft.text);
+    const original=f.store.recordIntent(f.draft.id,snap,false);f.store.receipt(original,'UNCERTAIN','OLD_UNKNOWN_FIXTURE');
+    await f.owner.notification.evaluate(missing=>(window as unknown as {commentFailure:string}).commentFailure=missing?'missing':'',missing);
+    const grant=f.store.authorizeCommentRetry(f.draft.id,await f.adapter.inspect(f.event.payload),'explicit fixture human retry');
+    const retry=new ManualCommentRetry(f.store,f.owner.actor);
+    expect(await retry.send(grant,f.adapter,false)).toBe(missing?'UNCERTAIN':'CONFIRMED');
+    expect(f.store.event(f.event.id).status).toBe('UNCERTAIN');expect(f.store.uncertain()).toHaveLength(1);
+    expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(1);
+    await expect(retry.send(grant,f.adapter,false)).rejects.toThrow('ALREADY_ATTEMPTED');
+    expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(1);
   }finally{await f.close();}
 });
