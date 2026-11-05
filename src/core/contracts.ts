@@ -74,6 +74,8 @@ export interface ReplyAdapter {
   readback(event: InboundEvent, text: string, before: string[], notBefore: string): Promise<SendProof | null>;
 }
 export function validText(text: string): string {
+  // The browser editor uses LF; canonicalize before persistence and human approval.
+  text=text.replace(/\r\n?/gu,'\n');
   requireSafe(text.trim().length > 0 && [...text].length <= 500 &&
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(text), 'INVALID_TEXT');
   return text;

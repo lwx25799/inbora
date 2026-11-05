@@ -129,8 +129,11 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     }
   } else {
     const work = m.works[index]; dom.check(work && location.href.split('?')[0] === work.url.split('?')[0], 'OBSERVATION_WORK_CHANGED');
-    const rows = Array.from(document.querySelectorAll(s.commentRows)); loaded = rows.length;
+    const list=dom.one(document,s.commentList),rows = Array.from(list.querySelectorAll(s.commentRows)); loaded = rows.length;
     dom.check(rows.length <= 100,'OBSERVATION_WINDOW_TOO_LARGE');
+    const visibleRoots=rows.filter(row=>dom.visible(row)&&!row.parentElement?.closest(s.commentRows));
+    const empty=s.commentEmpty?Array.from(list.querySelectorAll(s.commentEmpty)).filter(dom.visible):[];
+    dom.check(visibleRoots.length>0||empty.length===1,'OBSERVATION_DOM_NOT_READY');
     for (const row of rows) {
       if (!dom.visible(row) || row.parentElement?.closest(s.commentRows)) continue;
       const authors = Array.from(row.querySelectorAll(s.commentAuthor));
@@ -225,6 +228,14 @@ export class ObservedReader {
     if (!await this.page.locator(this.mapping.selectors.commentList).isVisible())
       await this.page.locator(this.mapping.selectors.commentEntry).click();
     await this.page.locator(this.mapping.selectors.commentList).waitFor({state:'visible'});
+    try {
+      await this.page.waitForFunction(({rows,empty})=>{
+        const visible={check(node:Element):boolean{const r=node.getBoundingClientRect(),style=getComputedStyle(node);
+          return r.width>0&&r.height>0&&style.display!=='none'&&style.visibility!=='hidden';}};
+        return Array.from(document.querySelectorAll(rows)).some(visible.check)||
+          Boolean(empty&&Array.from(document.querySelectorAll(empty)).some(visible.check));
+      },{rows:this.mapping.selectors.commentRows,empty:this.mapping.selectors.commentEmpty},{timeout:15000});
+    }catch{requireSafe(false,'OBSERVATION_COMMENTS_NOT_READY');}
     return this.ready('comments',index);
   }
 }

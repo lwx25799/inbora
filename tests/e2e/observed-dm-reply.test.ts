@@ -1,0 +1,178 @@
+import {expect,test} from 'vitest';
+import {join} from 'node:path';
+import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
+import {ObservedReader} from '../../src/adapters/observed-reader.js';
+import {ObservedDmReply} from '../../src/adapters/observed-dm-reply.js';
+import {SendCoordinator} from '../../src/core/send-coordinator.js';
+import {fixtureServer} from '../fixtures/site.js';
+import {mountDmReply,dmReplyMapping} from '../fixtures/observed-site.js';
+import {database,privateTemp} from '../helpers.js';
+
+async function setup(){
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true),store=database();
+  await mountDmReply(owner,server.origin);const mapping=dmReplyMapping(server.origin),adapter=new ObservedDmReply(owner.dm,mapping,250);
+  const batch=await new ObservedReader(owner.dm,mapping.observation).dm(0);
+  store.observe('DIRECT_MESSAGE','conv-a',[],'100','fixture');store.observe('DIRECT_MESSAGE','conv-a',batch.events,'100','fixture');
+  const event=store.events()[0]!,draft=store.saveDraft(event.id,'approved native fixture reply','mock');
+  return{server,owner,store,mapping,adapter,event,draft,close:async()=>{store.close();await owner.close();await server.close();}};
+}
+test.each([true,false])('native SVG reply commits one durable intent and confirms only a bound new receipt, headless=%s',async headless=>{
+  const f=await setup();
+  try{
+    if(!headless){
+      // Exercise this calibrated contract in a separate headed owner as well.
+      await f.owner.close();f.owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),false);
+      await mountDmReply(f.owner,f.server.origin);f.adapter=new ObservedDmReply(f.owner.dm,f.mapping,250);
+    }
+    const snapshot=await f.adapter.inspect(f.event.payload);f.store.approve(f.draft.id,snapshot,f.draft.version,f.draft.text);
+    const original=f.adapter.clickOnce.bind(f.adapter);
+    f.adapter.clickOnce=async()=>{expect(f.store.db.prepare('SELECT status FROM send_intents').all()).toEqual([{status:'INTENT_RECORDED'}]);await original();};
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('CONFIRMED');
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
+    await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow();
+  }finally{f.store.close();await f.owner.close();await f.server.close();}
+});
+test.each(['pending','wrong-conversation','old-time','no-receipt'])('native %s proof freezes the task and prohibits a second click',async kind=>{
+  const f=await setup();
+  try{
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    await f.owner.dm.evaluate(kind=>{
+      const state=window as unknown as {nativePending:boolean;nativeWrongReceipt:boolean;nativeOldReceipt:boolean;nativeNoReceipt:boolean};
+      state.nativePending=kind==='pending';state.nativeWrongReceipt=kind==='wrong-conversation';
+      state.nativeOldReceipt=kind==='old-time';state.nativeNoReceipt=kind==='no-receipt';
+    },kind);
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('UNCERTAIN');
+    expect(f.store.uncertain()).toHaveLength(1);
+    await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow();
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
+  }finally{await f.close();}
+});
+test('native guard blocks changed identity in document capture before the SVG handler',async()=>{
+  const f=await setup();
+  try{
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    await f.owner.dm.evaluate(()=>document.addEventListener('click',event=>{
+      if((event.target as Element).id!=='native-send')return;
+      Object.getOwnPropertyDescriptor(document.querySelector('#header')!,'__reactProps$fixture')!.value.children.props.conversation.id='outside';
+    },true));
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('UNCERTAIN');
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(0);
+  }finally{await f.close();}
+});
+test('composer native identity and disabled control cannot inherit the header approval',async()=>{
+  const f=await setup();
+  try{
+    await f.owner.dm.locator('#native-controls').evaluate(element=>{
+      Object.getOwnPropertyDescriptor(element,'__reactFiber$fixture')!.value.return.memoizedProps.curConversation.id='wrong';
+    });
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('NATIVE_REPLY_COMPOSER_CONFLICT');
+    await f.owner.dm.locator('#native-controls').evaluate(element=>{
+      Object.getOwnPropertyDescriptor(element,'__reactFiber$fixture')!.value.return.memoizedProps.curConversation.id='conv-a';
+    });
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    await f.owner.dm.locator('#native-send').evaluate(e=>e.setAttribute('aria-disabled','true'));
+    await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow('NATIVE_REPLY_GUARD_BLOCKED');
+    expect(f.store.db.prepare('SELECT * FROM send_intents').all()).toEqual([]);
+  }finally{await f.close();}
+});
+test.each(['line one\nline two','line\n','\nline','line\n\nlast',' spaced  two  ','line one\r\nline two\r\n'])('native draft preserves approved layout %j through readback',async text=>{
+  const f=await setup();
+  try{
+    const draft=f.store.saveDraft(f.event.id,text,'manual');
+    expect(draft.text).toBe(text.replace(/\r\n?/gu,'\n'));
+    f.store.approve(draft.id,await f.adapter.inspect(f.event.payload),draft.version,draft.text);
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(draft.id,f.adapter,false)).toBe('CONFIRMED');
+    expect(await f.owner.dm.locator('.message .text').last().textContent()).toBe(draft.text);
+  }finally{await f.close();}
+});
+test.each([false,true])('focus-time restored human draft is never overwritten; outside=%s',async outside=>{
+  const f=await setup();
+  try{
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    await f.owner.dm.locator('#native-editor').evaluate((editor,outside)=>editor.addEventListener('focus',()=>{
+      editor.textContent='restored human draft';
+      if(outside){
+        Object.getOwnPropertyDescriptor(document.querySelector('#header')!,'__reactProps$fixture')!.value.children.props.conversation.id='outside';
+        Object.getOwnPropertyDescriptor(document.querySelector('#native-controls')!,'__reactFiber$fixture')!.value.return.memoizedProps.curConversation.id='outside';
+      }
+    }),outside);
+    await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow();
+    expect(await f.owner.dm.locator('#native-editor').textContent()).toBe('restored human draft');
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(0);
+    expect(f.store.db.prepare('SELECT * FROM send_intents').all()).toEqual([]);
+  }finally{await f.close();}
+});
+test('new incoming context, missing latest end, login dialog, getter and existing draft block native reply',async()=>{
+  const f=await setup();
+  try{
+    await f.owner.dm.locator('#native-editor').fill('human draft');
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('NATIVE_REPLY_EXISTING_DRAFT');
+    await f.owner.dm.locator('#native-editor').fill('');
+    const snapshot=await f.adapter.inspect(f.event.payload);f.store.approve(f.draft.id,snapshot,f.draft.version,f.draft.text);
+    await f.owner.dm.locator('.text').nth(1).evaluate(text=>{
+      text.textContent='changed context';
+      Object.getOwnPropertyDescriptor(text.parentElement!,'__reactProps$fixture')!.value.children.props.message._parsedContent.text=text.textContent;
+    });
+    await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow('TARGET_CHANGED_REAPPROVE');
+    expect(f.store.draft(f.draft.id).approval).toBeNull();
+    await f.owner.dm.evaluate(()=>{const dialog=document.createElement('div');dialog.setAttribute('role','dialog');dialog.textContent='扫码登录';document.body.append(dialog);});
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('NATIVE_REPLY_PAGE_BLOCKED');
+    await f.owner.dm.locator('[role=dialog]').evaluate(e=>e.remove());
+    await f.owner.dm.locator('[data-index="0"]').evaluate(e=>e.setAttribute('data-index','30'));
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('NATIVE_REPLY_LATEST_END_MISSING');
+    await f.owner.dm.locator('[data-index="30"]').evaluate(e=>e.setAttribute('data-index','0'));
+    await f.owner.dm.locator('.message').first().evaluate(row=>{
+      const message=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
+      Object.defineProperty(message,'serverStatus',{get(){throw new Error('Getter must not execute');}});
+    });
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('NATIVE_REPLY_ACCESSOR_UNSUPPORTED');
+    expect(f.store.db.prepare('SELECT * FROM send_intents').all()).toEqual([]);
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(0);
+  }finally{await f.close();}
+});
+test.each([false,true])('unapproved inline line break introduced after intent blocks the click; nested=%s',async nested=>{
+  const f=await setup();
+  try{
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    const click=f.adapter.clickOnce.bind(f.adapter);
+    f.adapter.clickOnce=async()=>{
+      await f.owner.dm.locator('#native-editor').evaluate((editor,{text,nested})=>{
+        const span=document.createElement('span'),line=document.createElement('br');
+        if(nested){const paragraph=document.createElement('div');paragraph.append(line);span.append(paragraph);}else span.append(line);
+        editor.replaceChildren(span,document.createTextNode(text));
+        (window as unknown as {nativeEditorModel:string}).nativeEditorModel='\n'+text;
+      },{text:f.draft.text,nested});
+      await click();
+    };
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('UNCERTAIN');
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(0);
+    expect(f.store.uncertain()).toHaveLength(1);
+  }finally{await f.close();}
+});
+test.each(['pending','failed'])('a %s flag on the message box itself cannot confirm a receipt',async flag=>{
+  const f=await setup();
+  try{
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    const click=f.adapter.clickOnce.bind(f.adapter);
+    f.adapter.clickOnce=async()=>{await click();await f.owner.dm.locator('.box').last().evaluate((box,flag)=>box.classList.add(flag),flag);};
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('UNCERTAIN');
+    expect(f.store.uncertain()).toHaveLength(1);
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
+  }finally{await f.close();}
+});
+test.each([false,true])('editor layout changed after preparation cannot reuse the text approval; wrapped=%s',async wrapped=>{
+  const f=await setup();
+  try{
+    const draft=f.store.saveDraft(f.event.id,'a\nb','manual');
+    f.store.approve(draft.id,await f.adapter.inspect(f.event.payload),draft.version,draft.text);
+    const click=f.adapter.clickOnce.bind(f.adapter);
+    f.adapter.clickOnce=async()=>{
+      await f.owner.dm.locator('#native-editor').evaluate((editor,wrapped)=>{
+        editor.innerHTML=wrapped?'<span>a<br></span><div>b</div>':'a<br><div>b</div>';
+        (window as unknown as {nativeEditorModel:string}).nativeEditorModel='a\n\nb';
+      },wrapped);await click();
+    };
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(draft.id,f.adapter,false)).toBe('UNCERTAIN');
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(0);
+  }finally{await f.close();}
+});

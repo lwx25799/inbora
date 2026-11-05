@@ -32,3 +32,11 @@ test('source runtime reads calibrated metadata after guarded conversation openin
   expect(result.stdout).toContain('"observedReaderSmoke":"PASS"');
   expect(result.stdout).toContain('"sends":0');
 });
+
+test('source runtime performs a native SVG fixture reply through durable intent and readback',()=>{
+  const result=spawnSync(process.execPath,['--import','tsx',resolve('scripts/dm-reply-smoke.mjs'),'source'],
+    {encoding:'utf8',timeout:20000});
+  expect(result.stderr).toBe('');expect(result.status).toBe(0);
+  expect(result.stdout).toContain('"nativeDmReplySmoke":"PASS"');
+  expect(result.stdout).toContain('"realSends":0');
+});

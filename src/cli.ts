@@ -4,15 +4,16 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { runtimeRoot, initRuntime, loadRuntime, loadMapping, loadObservationMapping } from './config/runtime.js';
-import { validateMapping, validateObservationMapping } from './config/site-mapping.js';
+import { runtimeRoot, initRuntime, loadRuntime, loadMapping, loadObservationMapping, loadDmReplyMapping } from './config/runtime.js';
+import { validateMapping, validateObservationMapping, validateDmReplyMapping } from './config/site-mapping.js';
 import { OwnerLock } from './browser/owner-lock.js';
 import { BrowserProfileOwner } from './browser/profile-owner.js';
 import { DomAdapter } from './adapters/dom-adapter.js';
 import { ObservedReader } from './adapters/observed-reader.js';
+import { ObservedDmReply } from './adapters/observed-dm-reply.js';
 import { EventStore } from './storage/store.js';
 import { HttpDraftProvider, generateDraft } from './ai/draft-service.js';
-import { Blocked, digest, requireSafe, targetKey } from './core/contracts.js';
+import { Blocked, digest, requireSafe, targetKey, type ReplyAdapter } from './core/contracts.js';
 import { SendCoordinator } from './core/send-coordinator.js';
 import { diagnostic } from './observability/audit.js';
 import { caseIds, pruneEvidence, recordEvidence } from './observability/evidence.js';
@@ -41,7 +42,7 @@ pnpm inbora <command> [id] [options]
 
 通用选项：--runtime PATH（默认 %LOCALAPPDATA%\\inbora），--headed（默认），--headless。
 默认 test:e2e 只访问本地合成页面。真实网页需本次显式声明访问权限。
-观察需已校准的只读或完整映射；审批和发送仍需完整 site-mapping。帮助和 status 不访问网页。`;
+观察需已校准映射；私信审批/发送需完整 dm-reply 或 site-mapping，评论需完整 site-mapping。帮助和 status 不访问网页。`;
 
 async function ask(message: string): Promise<string> {
   requireSafe(stdin.isTTY && stdout.isTTY, 'INTERACTIVE_TERMINAL_REQUIRED');
@@ -50,6 +51,23 @@ async function ask(message: string): Promise<string> {
 }
 function print(value: unknown): void { stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
 function safeCode(error: unknown): string { return error instanceof Blocked ? error.code : 'OPERATION_FAILED_PRIVATE_DIAGNOSTICS'; }
+
+async function replyCommand(command:string,id:string,store:EventStore,browser:BrowserProfileOwner,adapter:ReplyAdapter,root:string,headless:boolean):Promise<void>{
+  const d=store.draft(id),e=store.event(d.eventId);
+  if(command==='approve'){
+    const snapshot=await browser.actor.run(()=>adapter.inspect(e.payload));
+    requireSafe(stdin.isTTY&&stdout.isTTY,'INTERACTIVE_TERMINAL_REQUIRED');
+    print({original:e.payload,approvedText:d.text,version:d.version,target:snapshot.targetKey});
+    const challenge=`APPROVE ${digest([d.id,d.version,d.text,snapshot]).slice(0,12)}`;
+    requireSafe(await ask(`逐条核对账号、目标和文本。输入 ${challenge}：`)===challenge,'CANCELLED');
+    store.approve(d.id,snapshot,d.version,d.text);print({approved:true});return;
+  }
+  const result=await new SendCoordinator(store,browser.actor).send(d.id,adapter,true);
+  const evidenceId=await recordEvidence(join(root,'evidence'),{caseId:e.payload.channel==='DIRECT_MESSAGE'?'D05':'N06',
+    browserVersion:browser.version(),mode:headless?'headless':'headed',taskId:e.id,action:'SEND',
+    result:result==='CONFIRMED'?'PASS':'BLOCKED',source:'AUTOMATED_REAL',diagnostics:[result],proofDigest:digest(store.receiptForEvent(e.id))});
+  print({result,evidenceId});
+}
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
@@ -88,6 +106,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === 'install-mapping') {
       realAccess(); requireSafe(values.file, 'FILE_REQUIRED');
       const raw = JSON.parse(await readFile(values.file,'utf8')) as unknown;
+      if(raw&&typeof raw==='object'&&'purpose' in raw&&raw.purpose==='dm-reply'){
+        const mapping=validateDmReplyMapping(raw,true);
+        requireSafe(await ask(`安装已校准私信回复映射，账号摘要 ${digest(mapping.observation.self.uid).slice(0,12)}。每条发送仍需独立审批。输入 INSTALL：`)==='INSTALL','CANCELLED');
+        store.bindAccount(mapping.observation.self.uid);
+        await writeFile(join(root,'dm-reply-mapping.json'),JSON.stringify(mapping,null,2),{mode:0o600});
+        print({installed:true,purpose:'dm-reply',individualApprovalRequired:true});return;
+      }
       if (raw && typeof raw === 'object' && 'purpose' in raw && raw.purpose === 'observation') {
         const mapping = validateObservationMapping(raw,true);
         requireSafe(await ask(`安装已校准只读映射，账号摘要 ${digest(mapping.self.uid).slice(0,12)}。不会启用发送。输入 INSTALL：`) === 'INSTALL','CANCELLED');
@@ -161,6 +186,17 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       }
       requireSafe(id !== 'works','OBSERVATION_MAPPING_REQUIRED');
     }
+    if(['approve','send-once'].includes(command)){
+      requireSafe(id,'DRAFT_ID_REQUIRED');
+      const event=store.event(store.draft(id).eventId);
+      if(event.payload.channel==='DIRECT_MESSAGE'){
+        const native=await loadDmReplyMapping(root);
+        if(native){
+          browser=await BrowserProfileOwner.launch(join(root,'profile'),values.headless??false);await browser.open(native.observation.entryUrl);
+          await replyCommand(command,id,store,browser,new ObservedDmReply(browser.dm,native),root,values.headless??false);return;
+        }
+      }
+    }
     const mapping = await loadMapping(root);
     if (command === 'compare-modes') {
       const results: unknown[] = [];
@@ -216,21 +252,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       print({ evidenceId, source: 'MANUAL_ATTESTATION' }); return;
     }
     requireSafe(id && ['approve','send-once'].includes(command), 'DRAFT_ID_REQUIRED');
-    const d = store.draft(id); const e = store.event(d.eventId); const adapter = e.payload.channel === 'DIRECT_MESSAGE' ? dm : notification;
-    if (command === 'approve') {
-      const snapshot = await browser.actor.run(() => adapter.inspect(e.payload));
-      requireSafe(stdin.isTTY && stdout.isTTY, 'INTERACTIVE_TERMINAL_REQUIRED');
-      print({ original: e.payload, approvedText: d.text, version: d.version, target: snapshot.targetKey });
-      const challenge = `APPROVE ${digest([d.id,d.version,d.text,snapshot]).slice(0,12)}`;
-      requireSafe(await ask(`逐条核对账号、目标和文本。输入 ${challenge}：`) === challenge, 'CANCELLED');
-      store.approve(d.id, snapshot, d.version, d.text); print({ approved: true }); return;
-    }
-    // Approval command is always interactive. Sending requires its persistent exact binding.
-    const result = await new SendCoordinator(store, browser.actor).send(d.id, adapter, true);
-    const evidenceId = await recordEvidence(join(root, 'evidence'), { caseId: e.payload.channel === 'DIRECT_MESSAGE' ? 'D05' : 'N06',
-      browserVersion: browser.version(), mode: values.headless ? 'headless' : 'headed', taskId: e.id, action: 'SEND',
-      result: result === 'CONFIRMED' ? 'PASS' : 'BLOCKED', source: 'AUTOMATED_REAL', diagnostics: [result], proofDigest: digest(store.receiptForEvent(e.id)) });
-    print({ result, evidenceId });
+    const event=store.event(store.draft(id).eventId);
+    await replyCommand(command,id,store,browser,event.payload.channel==='DIRECT_MESSAGE'?dm:notification,root,values.headless??false);
   } finally {
     try { if (browser) await browser.close(); }
     finally { try { if (store) store.close(); } finally { await lock.close(); } }

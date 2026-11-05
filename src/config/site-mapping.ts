@@ -57,6 +57,7 @@ export const observationMappingSchema = z.object({
     chat: selector, chatHeader: selector, chatTitle: selector, chatBack: selector,
     messages: selector, messageBox: selector, fromMeClass: z.string().min(1), messageText: selector,
     commentList: selector, commentEntry: selector, commentRows: selector, commentText: selector, commentAuthor: selector, commentTooltip: selector,
+    commentEmpty: selector.nullable().default(null),
     commentFiberDepth: z.number().int().min(0).max(3),
   }),
 });
@@ -77,5 +78,25 @@ export function validateObservationMapping(value: unknown, real: boolean): Obser
     requireSafe(new Set(mapping.peers.map(p => p[key])).size === mapping.peers.length, 'OBSERVATION_PEER_COLLISION');
   requireSafe(!mapping.peers.some(p => p.uid === mapping.self.uid || p.secUid === mapping.self.secUid), 'OBSERVATION_SELF_AS_PEER');
   requireSafe(new Set(mapping.works.map(w => w.id)).size === mapping.works.length, 'OBSERVATION_WORK_COLLISION');
+  return mapping;
+}
+
+/** Installed separately: an observation mapping alone never enables reply controls. */
+export const dmReplyMappingSchema = z.object({
+  version: z.literal(1), purpose: z.literal('dm-reply'),
+  observation: observationMappingSchema,
+  observedAt: z.iso.datetime(), evidenceRef: z.string().min(1),
+  blockers: selector,
+  composer: selector, send: selector, pending: selector, failed: selector,
+  composerScope: selector, composerFiberDepth: z.number().int().min(0).max(3),
+  latestIndexAncestor: selector,
+  submission: z.enum(['html-click','svg-click-event']),
+  confirmedServerStatus: z.number().int(),
+  textMessageType: z.number().int(),
+});
+export type DmReplyMapping = z.infer<typeof dmReplyMappingSchema>;
+export function validateDmReplyMapping(value: unknown, real: boolean): DmReplyMapping {
+  const mapping=dmReplyMappingSchema.parse(value);
+  validateObservationMapping(mapping.observation,real);
   return mapping;
 }

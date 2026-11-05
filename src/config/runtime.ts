@@ -2,7 +2,8 @@ import { readFile, mkdir, writeFile, realpath } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { requireSafe } from '../core/contracts.js';
-import { validateMapping, validateObservationMapping, type SiteMapping, type ObservationMapping } from './site-mapping.js';
+import { validateMapping, validateObservationMapping, validateDmReplyMapping,
+  type SiteMapping, type ObservationMapping, type DmReplyMapping } from './site-mapping.js';
 
 export const runtimeSchema = z.object({ version: z.literal(1), modelGrant: z.object({
   endpoint: z.url(), model: z.string().min(1), approvedAt: z.iso.datetime() }).nullable(),
@@ -35,4 +36,10 @@ export async function loadObservationMapping(root: string): Promise<ObservationM
   try { raw = await readFile(join(root,'observation-mapping.json'),'utf8'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
   return validateObservationMapping(JSON.parse(raw),true);
+}
+export async function loadDmReplyMapping(root:string):Promise<DmReplyMapping|null>{
+  let raw:string;
+  try{raw=await readFile(join(root,'dm-reply-mapping.json'),'utf8');}
+  catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error;}
+  return validateDmReplyMapping(JSON.parse(raw),true);
 }

@@ -145,7 +145,7 @@ test('work discovery requires exact work, author, tooltip ID and visible text', 
     owner.notification.setDefaultNavigationTimeout(5000);
     const url=server.origin+'/video/10';
     await owner.notification.route(url,route=>route.fulfill({contentType:'text/html',body:`<a id="self" style="visibility:hidden">Self</a>
-      <section id="comment-list"><div class="comment"><a class="author" href="/user/peer-sec">Fixture peer</a>
+      <section id="comment-list" style="min-height:24px"><div class="comment"><a class="author" href="/user/peer-sec">Fixture peer</a>
       <div class="tooltip" id="tooltip_50"><span class="body">one comment</span></div></div></section>`}));
     await owner.notification.addInitScript(() => {
       document.addEventListener('DOMContentLoaded',()=>{
@@ -154,9 +154,11 @@ test('work discovery requires exact work, author, tooltip ID and visible text', 
           Object.defineProperty(self,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});
           self.style.visibility='visible';
         },300);
-        Object.defineProperty(document.querySelector('.comment')!,'__reactFiber$fixture',{value:{return:{memoizedProps:{
+        const delayed=document.querySelector('.comment')!;
+        Object.defineProperty(delayed,'__reactFiber$fixture',{value:{return:{memoizedProps:{
           awemeInfo:{awemeId:'10'},userInfo:{uid:'100'},commentInfo:{cid:'50',text:'one comment',createTime:1793836800,
             user:{uid:'200',secUid:'peer-sec'}}}}}});
+        delayed.remove();setTimeout(()=>document.querySelector('#comment-list')!.append(delayed),1000);
       });
     });
     const reader=new ObservedReader(owner.notification,config(server.origin));
@@ -169,4 +171,22 @@ test('work discovery requires exact work, author, tooltip ID and visible text', 
     const outside=config(server.origin);outside.works[0]!.url='https://example.com/video/10';
     expect(()=>validateObservationMapping(outside,false)).toThrow('UNSAFE_OBSERVATION_URL');
   } finally {await owner.close();await server.close();}
+});
+test('only an explicitly mapped empty comment state permits a successful empty work observation',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await owner.notification.route(server.origin+'/video/10',route=>route.fulfill({contentType:'text/html',
+      body:'<a id="self">Self</a><section id="comment-list"><div id="empty-comments">No comments</div></section>'}));
+    await owner.notification.addInitScript(()=>document.addEventListener('DOMContentLoaded',()=>{
+      Object.defineProperty(document.querySelector('#self')!,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});
+    }));
+    const batch=await new ObservedReader(owner.notification,config(server.origin)).comments(0);
+    expect(batch.loaded).toBe(0);expect(batch.events).toEqual([]);
+    const unmapped=config(server.origin);unmapped.selectors.commentEmpty=null;
+    await expect(owner.notification.evaluate(captureObserved,{mapping:unmapped,channel:'comments' as const,index:0,evidenceId:'fixture'}))
+      .rejects.toThrow('OBSERVATION_DOM_NOT_READY');
+    await owner.notification.locator('#empty-comments').evaluate(node=>node.remove());
+    await expect(owner.notification.evaluate(captureObserved,{mapping:config(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture'}))
+      .rejects.toThrow('OBSERVATION_DOM_NOT_READY');
+  }finally{await owner.close();await server.close();}
 });

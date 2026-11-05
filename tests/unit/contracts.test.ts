@@ -1,8 +1,8 @@
 import { expect, test } from 'vitest';
 import { eventBinding, isEligible, isStrong, validText } from '../../src/core/contracts.js';
 import { candidate } from '../helpers.js';
-import { validateObservationMapping } from '../../src/config/site-mapping.js';
-import { observedMapping } from '../fixtures/observed-site.js';
+import { validateObservationMapping,validateDmReplyMapping } from '../../src/config/site-mapping.js';
+import { observedMapping,dmReplyMapping } from '../fixtures/observed-site.js';
 
 test('stable identity requires exact channel-specific identifiers, never just nickname/text', () => {
   expect(isStrong(candidate())).toBe(true);
@@ -28,6 +28,9 @@ test('draft text validation retains approved whitespace while blocking empty/ove
   expect(validText(' reply ')).toBe(' reply ');
   for (const text of ['', '  ', 'a'.repeat(501), 'x\u0000']) expect(() => validText(text)).toThrow('INVALID_TEXT');
 });
+test('draft line endings are canonicalized before approval without trimming content',()=>{
+  expect(validText(' one\r\ntwo\r')).toBe(' one\ntwo\n');
+});
 test('observation mapping restricts permitted identities and exact work origins independently of send mapping',()=>{
   const base=observedMapping('http://127.0.0.1:12345');
   expect(validateObservationMapping(base,false).purpose).toBe('observation');
@@ -40,4 +43,14 @@ test('observation mapping restricts permitted identities and exact work origins 
   expect(()=>validateObservationMapping(wrongWork,false)).toThrow('OBSERVATION_WORK_ID_CONFLICT');
   const outside=structuredClone(base);outside.entryUrl='https://example.com/';
   expect(()=>validateObservationMapping(outside,false)).toThrow('UNSAFE_OBSERVATION_URL');
+});
+
+test('native DM reply mapping is explicit and cannot reuse a read-only mapping or an outside origin',()=>{
+  const mapping=dmReplyMapping('http://127.0.0.1:12345');
+  expect(validateDmReplyMapping(mapping,false).purpose).toBe('dm-reply');
+  expect(()=>validateDmReplyMapping(mapping,true)).toThrow('REAL_MAPPING_REQUIRED');
+  expect(()=>validateDmReplyMapping(mapping.observation,false)).toThrow();
+  const bad=structuredClone(mapping);bad.observation.entryUrl='https://example.com/';
+  expect(()=>validateDmReplyMapping(bad,false)).toThrow('UNSAFE_OBSERVATION_URL');
+  expect(()=>validateDmReplyMapping({...mapping,submission:'mouse-click'},false)).toThrow();
 });

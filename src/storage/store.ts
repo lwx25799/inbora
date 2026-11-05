@@ -154,7 +154,7 @@ export class EventStore {
       status: row.status, approval: row.approval ? JSON.parse(row.approval) as Draft['approval'] : null };
   }
   saveDraft(eventId: string, text: string, model: string): Draft {
-    validText(text);
+    text=validText(text);
     return this.db.transaction(() => {
       const e = this.event(eventId);
       requireSafe(['AWAITING_DRAFT', 'AWAITING_APPROVAL', 'APPROVED'].includes(e.status), 'EVENT_NOT_DRAFTABLE');
