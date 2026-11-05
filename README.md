@@ -10,7 +10,7 @@ Windows 单账号、评论通知与私信双通道的受控浏览器 PoC。当�
 
 已在 Windows、Node 26.13.0、pnpm 11.25.0、Microsoft Edge 156.0.4314.58 验证本地夹具。pnpm 启动器内置 Node 24.22.1，项目命令实际使用 PATH 中的 Node 26.13.0；项目允许这两个受支持 LTS 系列。使用独立 Profile，不使用日常浏览器资料，不改全局浏览器或 Git 配置。
 
-实际开发机为Windows 10专业版x64（10.0.19045）。原方案写Windows 11，本轮没有该系统的实机证据；除非用户明确调整项目验收环境，否则不能把当前结果当成Windows 11通过。
+实际开发机为Windows 10专业版x64（10.0.19045）。2026-11-05用户已明确将本期完整验收调整为当前Windows 10，原Windows 11环境不再是本期门槛；不宣称Windows 11已实测。
 
 better-sqlite3 13.0.3自带Windows x64/arm64的Node-API二进制；本项目明确禁止其不必要的隐式node-gyp构建，使用包内预编译文件，esbuild仍允许自身安装脚本。不需要为此安装Visual Studio全局编译环境；SQLite实际加载、事务、持久化和恢复仍由集成测试验证。
 

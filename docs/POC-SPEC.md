@@ -2,7 +2,7 @@
 ## 单账号双通道 PoC 开发实施方案 V1.0
 
 **编制日期：2026-11-04**  
-**实施平台：Windows 11，普通抖音个人号，网页版**  
+**实施平台：Windows 10 专业版 x64（Build 19045），普通抖音个人号，网页版；2026-11-05 经用户明确调整**<br>
 **验证对象：1 个本人控制的抖音账号，2 条独立业务通道**  
 **技术内核：Node.js + TypeScript + Playwright + SQLite**  
 **后续产品形态：Tauri v2 + React 工作台**  
@@ -102,7 +102,7 @@ PoC 先采用命令行执行器及简易本地调试页面。理由：最大风�
 
 ### 2.1 首选开发环境
 
-- Windows 11，建议使用最新版受支持的 Microsoft Edge，固定一个测试版本并记录完整版本号。
+- Windows 10 专业版 x64（Build 19045，2026-11-05 用户明确调整本期验收基线），使用本机 Microsoft Edge，固定测试版本并记录完整版本号；不宣称 Windows 11 已实测。
 - Node.js 使用安装时仍受支持的 LTS 版本；项目提交锁文件以固定 Playwright、SQLite 驱动和测试工具版本。
 - 包管理器 `pnpm`；语言 TypeScript 严格模式，ESM 项目。
 - `playwright`：使用 `channel: 'msedge'` 先完成可见模式验证，再测试 `headless: true`。
