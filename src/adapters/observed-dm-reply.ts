@@ -65,12 +65,20 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     binding(e: InboundEvent): unknown[] {
       return[e.accountId,e.channel,e.platformEventId,e.actorId,e.text,e.occurredAt,e.videoId,e.commentId,e.conversationId,e.direction,e.kind];
     },
-    editableText(node: Node,budget: {remaining:number}): string {
+    editableText(node: Node,budget: {remaining:number},root:Element): string {
       dom.check(--budget.remaining>=0,'NATIVE_REPLY_EDITOR_TOO_COMPLEX');
       if(node.nodeType===Node.TEXT_NODE)return node.nodeValue??'';
       dom.check(node instanceof HTMLElement,'NATIVE_REPLY_EDITOR_UNSUPPORTED');
       const element=node as HTMLElement;
+      dom.check(element===root||!element.hasAttribute('contenteditable'),'NATIVE_REPLY_EDITOR_UNSUPPORTED');
       dom.check(['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S'].includes(element.tagName),'NATIVE_REPLY_EDITOR_UNSUPPORTED');
+      if(element.matches('span[data-enter="true"][data-string="true"][data-leaf="true"]')){
+        const line=element.parentElement;
+        dom.check(element.childNodes.length===1&&element.firstChild?.nodeType===Node.TEXT_NODE&&element.textContent==='\u200B'&&
+          line?.matches('div.ace-line[data-node="true"]')&&line.lastChild===element&&line.parentElement===root&&
+          root.matches('[data-slate-editor="true"][data-zone-container="*"]'),'NATIVE_REPLY_EDITOR_MARKER_CHANGED');
+        return''; // calibrated editor-kit line terminator; ordinary zero-width text is retained
+      }
       if(element.tagName==='BR')return'\n';
       const children=Array.from(element.childNodes);
       const paragraph=['DIV','P'].includes(element.tagName);
@@ -80,7 +88,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       let value='',previousBlock=false,previousBreak=false,hasPrevious=false;
       for(const child of children){
         const block=child instanceof HTMLElement&&['DIV','P'].includes(child.tagName);
-        const part=dom.editableText(child,budget);
+        const part=dom.editableText(child,budget,root);
         if(block){if(hasPrevious&&(previousBlock||!previousBreak))value+='\n';}
         else if(previousBlock)value+='\n';
         value+=part;previousBlock=block;previousBreak=!block&&part.endsWith('\n');hasPrevious=true;
@@ -90,7 +98,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     editorText(editor: Element): string {
       dom.check(!editor.querySelector('img,video,audio,input,[data-slate-void="true"]'),'NATIVE_REPLY_EDITOR_MEDIA');
       const raw=editor instanceof HTMLInputElement||editor instanceof HTMLTextAreaElement?editor.value:editor.textContent??'';
-      const value=editor instanceof HTMLInputElement||editor instanceof HTMLTextAreaElement?editor.value:dom.editableText(editor,{remaining:2000});
+      const value=editor instanceof HTMLInputElement||editor instanceof HTMLTextAreaElement?editor.value:dom.editableText(editor,{remaining:2000},editor);
       // An otherwise empty Slate editor contains a zero-width sentinel, not a user draft.
       return /^[\u200B\uFEFF]*$/.test(raw)?'':value;
     },

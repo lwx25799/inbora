@@ -48,6 +48,16 @@
 
 复审补充验证等待成功后行仍可能卸载，因此最终同步capture也必须在准确commentList内核验可见根评论或唯一已映射空态；无映射/空态消失时抛可等待NOT_READY。补充原子快照红测后修复，外层等待不作为单独的完成凭据。
 
+## 直接回复已有一级评论：实施前核对
+
+2026-11-05用户明确先测现有一级评论回复，不等待测试者先发子回复。实施前重读DSH固定MIT提交`7989640e340f0fd79e2de9874880d5197546e755`的`comment-browser.mjs`编辑器/原生发布标记、`readCommentDom`及草稿保护；它明确拒绝回复状态，不能直接复用为原评论回复。复用本项目已适配MIT数据描述符读取与持久发送协调器，不搬入其物理鼠标链或宽泛控件回退。
+
+同时重读watch固定提交`177810c1f1858b529e78531f837ac9677fb9f9a9`的`tools/comment-thread.mjs`：原生回复ID、作者、时间与reply_id可作为核对方向，但缺父ID的默认归根、全页fiber遍历、注入XHR/fetch与直连接口不采用。仅检查本轮已授权原评论及其实际回复组件的固定渲染路径，观察正常网页操作产生的只读响应可作补证；未经实机校准的字段保持缺失，不用猜测或上游声明代替回读。
+
+首条已批准私信在点击前因editor-kit行尾占位符被误算正文而阻断，意图/发送仍0。修复前再读DSH同SHA的`chat-browser.mjs:51 readableDraft`及调用点；其全局剥除零宽/方向字符并trim会改变真实正文，不能采用。实机固定DOM证据显示data-slate-editor/data-zone-container下的直接ace-line末端span带data-enter/data-string/data-leaf且仅含一个U+200B；仅将该完整结构识别为占位符，其他字符保留，形态不符直接阻断。对应真实结构合成红测先失败，再覆盖普通正文零宽字符及错误标记负例，不引入新依赖或网页函数调用。
+
+复审发现嵌套可编辑根会借用同样标记属性，修复前再核对DSH `comment-browser.mjs findCommentSubmit`的唯一编辑器范围检查；本项目保留实际绑定根作为解析参数，并拒绝嵌套contenteditable，而不以最近的同属性祖先代替绑定根。嵌套根完整链红测先复现CONFIRMED，再收紧为零意图/点击。
+
 ## 启动即静音的源码先核对
 
 用户新增静音要求后，先核对LockyBee固定MIT提交的`browser-host.mjs` 125—127行；上游显式移除`--mute-audio`，与本次要求相反，未采用。再核对Playwright 1.64.1（Apache-2.0，提交`cfe490d941f992655948eee8fd4fd94e1c4234bf`）的Chromium启动参数：默认仅在headless分支添加该参数，因此本项目通过公开args选项对所有模式显式添加，未复制源函数或引入依赖。安装包`lib/coreBundle.js`和官方固定版本参数文档均已核对；Chromium的`media/base/media_switches.cc`说明该参数在设备输出端静音。启动参数在导航前生效，覆盖同进程所有标签页。

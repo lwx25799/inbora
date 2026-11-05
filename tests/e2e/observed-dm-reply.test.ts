@@ -102,6 +102,54 @@ test.each([false,true])('focus-time restored human draft is never overwritten; o
     expect(f.store.db.prepare('SELECT * FROM send_intents').all()).toEqual([]);
   }finally{await f.close();}
 });
+
+test('calibrated editor terminal marker is structural while approved zero-width text is retained',async()=>{
+  const f=await setup();
+  try{
+    await f.owner.dm.locator('#native-editor').evaluate(editor=>{
+      editor.setAttribute('data-slate-editor','true');editor.setAttribute('data-zone-container','*');
+      editor.addEventListener('input',event=>{
+        const input=event as InputEvent;if(input.inputType!=='insertText')return;
+        const line=document.createElement('div');line.className='ace-line';line.setAttribute('data-node','true');
+        const text=document.createElement('span');text.setAttribute('data-string','true');text.setAttribute('data-leaf','true');text.textContent=input.data;
+        const marker=document.createElement('span');marker.setAttribute('data-string','true');marker.setAttribute('data-leaf','true');marker.setAttribute('data-enter','true');marker.textContent='\u200B';
+        line.append(text,marker);editor.replaceChildren(line);
+      });
+    });
+    const draft=f.store.saveDraft(f.event.id,'approved\u200Btext','manual');
+    f.store.approve(draft.id,await f.adapter.inspect(f.event.payload),draft.version,draft.text);
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(draft.id,f.adapter,false)).toBe('CONFIRMED');
+    expect(await f.owner.dm.locator('.message .text').last().textContent()).toBe(draft.text);
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
+  }finally{await f.close();}
+});
+
+test.each(['text','nonterminal','outside','nested'])('unverified %s editor marker blocks before intent',async variant=>{
+  const f=await setup();
+  try{
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    await f.owner.dm.locator('#native-editor').evaluate((editor,variant)=>{
+      editor.setAttribute('data-slate-editor','true');editor.setAttribute('data-zone-container','*');
+      editor.addEventListener('input',event=>{
+        const input=event as InputEvent;if(input.inputType!=='insertText')return;
+        const line=document.createElement('div');line.className='ace-line';line.setAttribute('data-node','true');
+        const text=document.createTextNode(input.data??''),marker=document.createElement('span');
+        marker.setAttribute('data-string','true');marker.setAttribute('data-leaf','true');marker.setAttribute('data-enter','true');
+        marker.textContent=variant==='text'?'unapproved':'\u200B';
+        if(variant==='nonterminal')line.append(marker,text);else line.append(text,marker);
+        if(variant==='outside')line.className='unknown';
+        if(variant==='nested'){
+          const nested=document.createElement('div');nested.contentEditable='true';nested.setAttribute('data-slate-editor','true');
+          nested.setAttribute('data-zone-container','*');nested.append(line);editor.replaceChildren(nested);
+        }else editor.replaceChildren(line);
+      });
+    },variant);
+    await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow(
+      variant==='nested'?'NATIVE_REPLY_EDITOR_UNSUPPORTED':'NATIVE_REPLY_EDITOR_MARKER_CHANGED');
+    expect(f.store.db.prepare('SELECT * FROM send_intents').all()).toEqual([]);
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(0);
+  }finally{await f.close();}
+});
 test('new incoming context, missing latest end, login dialog, getter and existing draft block native reply',async()=>{
   const f=await setup();
   try{
