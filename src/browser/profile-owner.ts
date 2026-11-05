@@ -12,7 +12,7 @@ export class BrowserProfileOwner {
     const lock = await OwnerLock.acquire(profile);
     let context: BrowserContext | undefined;
     try {
-      context = await chromium.launchPersistentContext(profile, { channel: 'msedge', headless, locale: 'zh-CN' });
+      context = await chromium.launchPersistentContext(profile, { channel: 'msedge', headless, locale: 'zh-CN', args: ['--mute-audio'] });
       context.setDefaultTimeout(5000); context.setDefaultNavigationTimeout(15_000);
       const notification = context.pages()[0] ?? await context.newPage();
       // Do not navigate or reuse the notification page as the DM page.
