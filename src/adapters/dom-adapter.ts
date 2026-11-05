@@ -54,6 +54,7 @@ export class DomAdapter implements ReplyAdapter {
     await this.guard();
     if (!await visibleAny(this.page, this.mapping.notification.panel))
       await (await unique(this.page, this.mapping.notification.entry)).click();
+    await this.page.locator(this.mapping.notification.panel).waitFor({ state: 'visible' });
     await unique(this.page, this.mapping.notification.panel); await this.guard();
   }
   async observeNotifications(): Promise<{ events: InboundEvent[]; evidenceId: string; loaded: number }> {
@@ -69,6 +70,7 @@ export class DomAdapter implements ReplyAdapter {
     await this.guard();
     if (!await visibleAny(this.page, this.mapping.dm.list))
       await (await unique(this.page, this.mapping.dm.entry)).click();
+    await this.page.locator(this.mapping.dm.list).waitFor({ state: 'visible' });
     await unique(this.page, this.mapping.dm.list); await this.guard();
   }
   async conversations(): Promise<{ id: string; peerId: string }[]> {

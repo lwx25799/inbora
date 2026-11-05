@@ -40,3 +40,4 @@
 - 消息真实入口打开`[data-e2e="im-dialog"]`，会话行是`[data-e2e="conversation-item"]`。当前版本存在`[data-stack-layer="chat"]`覆盖层，必须限定当前可见层，不能强点被覆盖的列表。点击受控会话标题可打开真实个人主页，已交叉核验其中一名测试者与用户给出的主页路径一致；临时主页随即关闭，两个专用Page保留。
 - 已观察消息正文为`[data-e2e="msg-item-content"]`，方向存在`MessageBoxContentisFromMe`/`messageMessageBoxisFromMe`样式标记；祖先仅见位置data-index，没有据此假造平台消息ID。输入区为`[data-e2e="msg-input"]`内contenteditable元素，本轮未输入或发送任何文本。
 - 用户给出的两个受控作品在我的作品列表中均可找到，其中一个实际是video、另一个是note图文作品；不把图文强称为视频。作品和测试者公开标识、基线原文仅留私有目录，不提交仓库。
+- 同一Profile串行Headless对照能复用账号。明确等待后，无头通知点击及悬停、消息悬停均未显示面板；随即恢复有头，同一控件点击可显示两面板。详见BROWSER-COMPATIBILITY，H01不能记为通过，也没有据此改变浏览器身份或继续重试验证码。

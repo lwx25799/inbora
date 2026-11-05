@@ -25,7 +25,7 @@
 | S02 | 点击后超时未知，禁止重发 | send.test；dual-channel关闭实际Page | 离线通过 | 未验证 |
 | S03 | 审批期间目标变化需重新批准 | store/send/dual-channel/review-regressions：文本版本、来源碰撞、新消息、人工回复、实际点击事件竞态 | 离线通过 | 未验证 |
 | S04 | SQLite损坏/不可写停止 | store.test；send.test断言零点击 | 离线通过 | 未验证 |
-| H01 | Headless读取通知和DM | dual-channel两模式；compare-modes实机只读入口 | 离线通过 | 未验证 |
+| H01 | Headless读取通知和DM | dual-channel两模式；compare-modes实机只读入口 | 离线通过 | 阻塞：真实无头账号可复用，通知面板点击/悬停超时、消息悬停超时；有头同控件能显示，完整增量/发送未验证 |
 | H02 | 验证码/扫码阻断、可见接管 | dual-channel challenge/login guards；login仅有头 | 离线通过 | 未验证 |
 | H03 | 暂停会话停止后续发送 | store.test持久暂停；AccountActor串行 | 离线通过 | 未验证 |
 | M01 | 重启保留各类任务/未知态 | store.test重开；cli.test初始化/状态/重启 | 离线通过 | 未验证 |
