@@ -16,7 +16,7 @@
 | N03 | 同文不同人、跨作品分别处理 | contracts/store.test | 离线通过 | 未验证 |
 | N04 | 过滤点赞、关注、系统、自发 | contracts.test / store.test | 离线通过 | 未验证 |
 | N05 | 通知跳转唯一原评论，否则人工 | dom-adapter.locateComment/matchingRoot；dual-channel | 离线通过（合成跳转） | 未验证 |
-| N06 | 原评论楼中楼，不能独立顶层 | 精确 root 范围回读；dual-channel / observed-comment-reply | 离线通过 | 阻塞：用户批准的直接一级评论回复只提交一次，结果UNCERTAIN并冻结，证据0ac03dc1；刷新后未见准确子回复证明，证据298da985，禁止重发，不能记成功 |
+| N06 | 原评论楼中楼，不能独立顶层 | 精确 root 范围回读；dual-channel / observed-comment-reply | 离线通过 | 阻塞：单次提交后UNCERTAIN并冻结，证据0ac03dc1；刷新未见准确子回复298da985。用户手机端亦未见回复，人工证据afcbc4a8；后续只读原评论replyTotal仍0。禁止重发，不能记成功或据缺失证明未接收 |
 | N07 | 延迟/审核不能立即确认 | send.test / 浏览器 pending 回读 | 离线通过 | 未验证 |
 | D01 | 新入站消息成任务，自发不触发 | store.test / dual-channel / observed-reader | 离线通过 | 实机通过：源码CLI将基线后受控入站持久化为一个AWAITING_DRAFT任务，原生身份/会话/绝对时间核验及5次实际DOM复读无重复，证据24cb8258；历史和我方消息未变成新任务 |
 | D02 | 三短消息完整保留 | store.test，逐条草稿（允许但不强制合并）；弱证据同文保留最大观察次数供人工核对 | 离线通过 | 实机通过：源码CLI五轮读取及最终选择门禁补验，三条受控入站文字按不同原生ID独立保存在SQLite，证据8b630fae/bfbc0216；首次正式读取保留BASELINE，增量任务另见D01 |
