@@ -1,5 +1,22 @@
 # inbora
 
+最小 Windows 客户端 `0.2.0` 已实现 Tauri v2 + React 单账号人工收件箱，并复用现有 Node 内核。当前交付状态是**离线及本机 Windows 10 原生测试准备完成，受控实机验收待继续**；Windows 11、真实 DeepSeek、GUI 双通道人工/AI 辅助外发仍未验证，不能据此宣布最小客户端全部完成或 PoC GO。
+
+## 最小客户端启动与日常操作
+
+运行本机交付的 `D:\Inbora\.local\delivery\inbora_0.2.0_x64-setup.exe`，或在项目执行 `pnpm desktop:build` 后安装 `desktop\src-tauri\target\release\bundle\nsis\inbora_0.2.0_x64-setup.exe`。需要 Windows 10/11 x64、WebView2 和 Edge；安装包附带 Node、SQLite 原生模块及锁定依赖，无需用户另装 Node。当前包未做商业代码签名，不自动升级。
+
+1. 启动 inbora，在连接页填写已有私有运行目录。现有实机目录为 `D:\Inbora\.local\real-acceptance`，不要勾选“初始化全新目录”。首次客户端升级会先验证一致备份、试升级和恢复，再附加 schema 3 表；原库预算、基线、暂停、意图、收据和异常保留。
+2. 在“AI 与设置”打开专属有头浏览器；必要时由本人扫码或处理平台验证。回到收件箱，分别同步私信、授权作品评论；顶部通知有单独同步入口，来源与证据不混算。浏览器从启动即静音。
+3. 选任务、核对准确本人/对方/会话或作品/父评论，然后“人工接管”，直接输入并保存。无 Key 仍可人工处理，不产生模型请求或 Token。发送前再展示完整目标和全文，明确确认后只提交一次。
+4. 初始模式仅保存草稿，未验证的通道发送禁用。开发者的显式 `calibrate-client DRAFT_ID --real-account --private-access` 只读校准当前准确草稿，生成一小时内的一条受控 GUI 试用资格；不代替人工批准，不适用于其他草稿/版本。成功回读后仅对应通道/浏览器模式登记能力，有效期24小时；环境变化、异常或到期降级。
+5. 使用 AI 时在设置输入本次 Key、保存非密钥配置并另行明确授权，再按需点击“生成 AI 建议”。Key输入随提交清空，仅后端内存持有；不保存到配置或SQLite，重启需重输。建议只作候选，需主动引用和保存，迟到建议不覆盖人稿。默认官方 `deepseek-flash`，非流式、最多512 Token、30秒超时、无自动重试。
+6. 急停始终可操作；已存意图可能已提交，随后继续回读或未知冻结，不能保证撤回。恢复账号不解除原有目标暂停、未知或矛盾。结果待核实仅只读核验，没有重发/解冻按钮。“重新连接内核”保留人稿、重新读取权威状态并在会话过期时显式续签，不重放发送。“退出工作台并保留数据”会关闭sidecar并保留数据库；重启和界面刷新不重放发送。
+
+详情与逐项实机步骤见[客户端验收与操作清单](docs/CLIENT-ACCEPTANCE.md)。schema3的CLI编辑和单次确认复用相同服务；旧独立`approve`请改在GUI或`send-once`交互确认，旧`retry-comment-once`在schema3明确禁用。schema2历史例外和旧证据不改写。
+
+开发检查：`pnpm typecheck`、`pnpm test`、`pnpm test:integration`、`pnpm test:e2e`、`pnpm build`、`pnpm test:built`、`pnpm check:privacy`。前端预览为 `pnpm desktop:dev:web`；原生开发/打包为 `pnpm desktop:dev` / `pnpm desktop:build`，需要Rust/MSVC/SDK。可复用本项目`.local/toolchains`，不改全局PATH或PowerShell策略。`scripts/native-smoke.mjs`验证原生WebView及真实IPC，仅合成数据；调试配置只保存在忽略目录，正式包不包含调试端口。
+
 Windows 单账号、评论通知与私信双通道的受控浏览器 PoC。当前提供 Node.js / TypeScript / Playwright / SQLite 内核和 CLI；有头私信、既有评论有头/无头核验、图集无头评论及新B第2条无头私信请求关联闭环已有实机证据。新私信以业务回执返回ID和刷新后同ID确认，三轮重启一致；原有时间矛盾收据与未知保留，准确会话仍暂停。完整验收与最终GO尚未完成。
 
 2026-11-05用户允许两个已授权本人作品的有界评论读取作为补充发现源。新测试者在两作品的同文评论分别保存，三条指定私信独立保存，五轮实际读取无重复任务。顶部通知原用例仍单列，补充来源不冒称通知通过。使用原生Edge、无UA覆写；完整结论见测试矩阵。
@@ -118,4 +135,4 @@ pnpm test:real --case L01 --real-account --private-access
 
 每个可验证切片提交；推送前审查所有待推送提交，运行全部检查及 `pnpm check:privacy`，推送后核对远程 SHA。历史和暂存区隐私扫描是补充检查，仍需审查夹具是否包含私人数据。审查记录见 [REVIEW.md](docs/REVIEW.md)，进度见 [PROGRESS.md](docs/PROGRESS.md)。
 
-按用户2026-11-06最新要求，P5最小客户端可基于当前进度提前开发，与PoC验收并行。按[正式版V2.1方案](Inbora_正式版实施与人工回复方案_V2.1_2026-11-06.md)交付Tauri v2 + React单账号人工工作台，支持不依赖AI的直接输入、DeepSeek建议、接管/版本/幂等和双通道发送回读。客户端与CLI共享现有Node内核、数据库和发送门禁，正式版继续扩展；本期不建设完整工作台或多账号系统。具体范围与G01—G10见[最小客户端交付要求](docs/MINIMAL-CLIENT.md)。当前GO尚未完成，客户端未交付；按通道能力开放发送，开发进度不能替代实机验收。
+按用户2026-11-06最新要求，P5最小客户端可基于当前进度提前开发，与PoC验收并行。按[正式版V2.1方案](Inbora_正式版实施与人工回复方案_V2.1_2026-11-06.md)交付Tauri v2 + React单账号人工工作台，支持不依赖AI的直接输入、DeepSeek建议、接管/版本/幂等和双通道发送回读。客户端与CLI共享现有Node内核、数据库和发送门禁，正式版继续扩展；本期不建设完整工作台或多账号系统。具体范围与G01—G10见[最小客户端交付要求](docs/MINIMAL-CLIENT.md)。当前GO尚未完成，客户端已实现并完成离线与本机原生准备；M4与Windows11仍待验，按通道能力开放发送，开发进度不能替代实机验收。

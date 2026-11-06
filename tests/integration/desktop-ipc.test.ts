@@ -1,0 +1,116 @@
+import { test, expect } from "vitest";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+import { randomBytes, randomUUID } from "node:crypto";
+import { join, resolve } from "node:path";
+import { privateTemp } from "../helpers.js";
+import Database from 'better-sqlite3';
+
+test("source sidecar authenticates IPC, rejects unbounded/extra fields, reconnects and exits without replay", async () => {
+  const secret = randomBytes(32).toString("hex"),
+    root = privateTemp("source-ipc-");
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "src/app/sidecar.ts"],
+    {
+      cwd: resolve("."),
+      env: { ...process.env, INBORA_PIPE_NONCE: secret },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  const pending = new Map<
+    string,
+    {
+      resolve: (value: Record<string, unknown>) => void;
+      reject: (error: Error) => void;
+    }
+  >();
+  let ready!: () => void;
+  const boot = new Promise<void>((r) => (ready = r));
+  let stderr = "";
+  child.stderr.on("data", (data) => (stderr += String(data)));
+  const lines = createInterface({ input: child.stdout });
+  lines.on("line", (line) => {
+    const value = JSON.parse(line) as Record<string, unknown>;
+    if (value.ready) ready();
+    if (typeof value.requestId === "string") {
+      pending.get(value.requestId)?.resolve(value);
+      pending.delete(value.requestId);
+    }
+  });
+  function call(body: unknown, nonce = secret) {
+    const requestId = randomUUID();
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
+      pending.set(requestId, { resolve, reject });
+      child.stdin.write(
+        JSON.stringify({ protocol: 1, requestId, secret: nonce, body }) + "\n",
+      );
+    });
+  }
+  const exited = new Promise<number | null>((r) => child.once("exit", r));
+  try {
+    await boot;
+    expect(await call({ command: "getStatus" }, "0".repeat(64))).toMatchObject({
+      ok: false,
+      error: "IPC_AUTHENTICATION_FAILED",
+    });
+    expect(
+      await call({
+        command: "connect",
+        runtime: root,
+        initialize: true,
+        consent: true,
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { connected: true, schema: 3, mode: "DRAFT_ONLY" },
+    });
+    expect(
+      await call({ command: "getStatus", operatorId: "forged" }),
+    ).toMatchObject({ ok: false, error: "INVALID_COMMAND" });
+    expect(await call({ command: "setMode", mode: "MANUAL" })).toMatchObject({
+      ok: false,
+      error: "CAPABILITY_UNVERIFIED",
+    });
+    expect(
+      await call({
+        command: "connect",
+        runtime: root,
+        initialize: false,
+        consent: true,
+      }),
+    ).toMatchObject({ ok: true, result: { connected: true } });
+    const control=new Database(join(root,'poc.sqlite'));control.prepare('UPDATE operator_sessions SET expires_at=0').run();control.close();
+    expect(await call({command:'getStatus'})).toMatchObject({ok:false,error:'OPERATOR_EXPIRED'});
+    expect(await call({ command: "emergencyStop" })).toMatchObject({
+      ok: true,
+      result: { paused: true },
+    });
+    expect(await call({command:'connect',runtime:root,initialize:false,consent:true})).toMatchObject({ok:true,result:{connected:true,paused:true}});
+    expect(
+      await call({
+        command: "getInbox",
+        channel: "ALL",
+        status: "ALL",
+        page: 0,
+      }),
+    ).toMatchObject({ ok: true, result: { items: [], total: 0 } });
+    child.stdin.end();
+    expect(await exited).toBe(0);
+    expect(stderr).toBe("");
+    // New process uses the same database and never consumes model/send budgets on startup.
+    const { EventStore } = await import("../../src/storage/store.js");
+    const store = new EventStore(join(root, "poc.sqlite"));
+    expect(store.stats().budgets).toEqual([
+      { kind: "MODEL", used: 0, maximum: 50 },
+      { kind: "SEND", used: 0, maximum: 20 },
+    ]);
+    store.close();
+  } finally {
+    child.kill();
+    lines.close();
+    for (const item of pending.values())
+      item.reject(new Error("IPC_TEST_ENDED"));
+  }
+}, 30_000);

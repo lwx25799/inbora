@@ -1,34 +1,51 @@
 {
   "name": "inbora",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Single-account, approval-gated Douyin web PoC",
-  "bin": { "inbora": "dist/cli.js" },
-  "engines": { "node": ">=24.22.1 <25 || >=26.13.0 <27", "pnpm": "11.25.0" },
+  "bin": {
+    "inbora": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=24.22.1 <25 || >=26.13.0 <27",
+    "pnpm": "11.25.0"
+  },
   "packageManager": "pnpm@11.25.0",
   "scripts": {
     "inbora": "tsx src/cli.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p desktop/tsconfig.json",
     "test": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
     "test:e2e": "vitest run tests/e2e",
     "test:built": "pnpm build && node scripts/browser-smoke.mjs && node scripts/observed-smoke.mjs && node scripts/dm-reply-smoke.mjs && node scripts/comment-reply-smoke.mjs && node scripts/submission-smoke.mjs",
     "test:real": "tsx src/cli.ts real-test",
     "build": "tsc -p tsconfig.build.json",
-    "check:privacy": "node scripts/check-privacy.mjs"
+    "check:privacy": "node scripts/check-privacy.mjs",
+    "desktop:dev:web": "vite --config desktop/vite.config.ts",
+    "desktop:build:web": "vite build --config desktop/vite.config.ts",
+    "desktop:prepare": "pnpm build && pnpm desktop:build:web && node scripts/stage-sidecar.mjs && node scripts/rust-notices.mjs",
+    "desktop:dev": "node scripts/desktop-build.mjs --dev",
+    "desktop:build": "node scripts/desktop-build.mjs"
   },
   "dependencies": {
+    "@tauri-apps/api": "2.12.4",
     "better-sqlite3": "13.0.3",
     "pino": "10.4.0",
     "playwright": "1.64.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "2.12.4",
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
+    "vite": "8.3.6",
     "vitest": "5.1.0"
   }
 }

@@ -20,8 +20,12 @@ import { ManualCommentRetry } from './core/manual-comment-retry.js';
 import { diagnostic } from './observability/audit.js';
 import { caseIds, pruneEvidence, recordEvidence } from './observability/evidence.js';
 import { browserMetrics } from './observability/browser-metrics.js';
+import { ClientService } from './app/service.js';
+import { BrowserService } from './app/browser-service.js';
+import { randomUUID } from 'node:crypto';
+import { WorkbenchAuthority } from './app/authority.js';
 
-const help = `inbora 0.1.0 — 单账号双通道受控 PoC
+const help = `inbora 0.2.0 — 单账号双通道受控 PoC / 最小客户端
 
 pnpm inbora <command> [id] [options]
   init                         初始化私有运行目录（只执行一次）
@@ -35,6 +39,7 @@ pnpm inbora <command> [id] [options]
   approve DRAFT_ID --real-account --private-access
   reject DRAFT_ID
   send-once DRAFT_ID --real-account --private-access
+  calibrate-client DRAFT_ID --real-account --private-access
   retry-comment-once DRAFT_ID --real-account --private-access
   verify-comment DRAFT_ID --real-account --private-access
   pause EVENT_ID | resume EVENT_ID
@@ -46,7 +51,9 @@ pnpm inbora <command> [id] [options]
 
 通用选项：--runtime PATH（默认 %LOCALAPPDATA%\\inbora），--headed（默认），--headless。
 默认 test:e2e 只访问本地合成页面。真实网页需本次显式声明访问权限。
-观察需已校准映射；私信审批/发送需 dm-reply 或 site-mapping，一级评论回复需 comment-reply 或 site-mapping。帮助和 status 不访问网页。`;
+观察需已校准映射；私信审批/发送需 dm-reply 或 site-mapping，一级评论回复需 comment-reply 或 site-mapping。帮助和 status 不访问网页。
+schema3请在客户端生成人工/AI草稿；旧draft与独立approve入口在调用模型前拒绝，send-once使用统一服务交互确认。
+calibrate-client仅校准当前准确草稿的受控GUI试用资格，不批准外发；schema3旧评论重试禁用。`;
 
 async function ask(message: string): Promise<string> {
   requireSafe(stdin.isTTY && stdout.isTTY, 'INTERACTIVE_TERMINAL_REQUIRED');
@@ -58,6 +65,38 @@ function safeCode(error: unknown): string { return error instanceof Blocked ? er
 
 async function replyCommand(command:string,id:string,store:EventStore,browser:BrowserProfileOwner,adapter:ReplyAdapter,root:string,headless:boolean):Promise<void>{
   const d=store.draft(id),e=store.event(d.eventId);
+  if(command==='calibrate-client'){
+    requireSafe(store.db.pragma('user_version',{simple:true})===3,'CLIENT_MIGRATION_REQUIRED');
+    const port=BrowserService.adopt(root,browser,headless?'headless':'headed'),handle=await port.adapter(e.payload);
+    try{
+      const snapshot=await browser.actor.run(()=>handle.adapter.inspect(e.payload));
+      const evidence=await recordEvidence(join(root,'evidence'),{caseId:e.payload.channel==='DIRECT_MESSAGE'?'D04':'C03',browserVersion:browser.version(),
+        mode:headless?'headless':'headed',taskId:e.id,action:'OBSERVE',result:'UNVERIFIED',source:'AUTOMATED_REAL',
+        diagnostics:['CONTROLLED_GUI_TRIAL_READY','ONLY_CURRENT_TARGET_DRAFT_VERSION','NO_SEND_NO_APPROVAL'],proofDigest:digest(snapshot)});
+      new WorkbenchAuthority(store).calibrateTrial(d.id,snapshot,port.identity(e.payload.channel)!,evidence);
+      print({calibrated:true,eventId:e.id,draftVersion:d.version,evidenceId:evidence,sendApproved:false,expiresInSeconds:3600});
+    }finally{handle.dispose();}return;
+  }
+  if(store.db.pragma('user_version',{simple:true})===3&&command==='approve'){
+    requireSafe(false,'CLIENT_SCHEMA_CONFIRM_IN_GUI_OR_SEND_ONCE');
+  }
+  if(store.db.pragma('user_version',{simple:true})===3&&command==='send-once'){
+    const service=new ClientService(store,BrowserService.adopt(root,browser,headless?'headless':'headed'));
+    const token=service.authority.issueSession();
+    try {
+      const ownership=service.authority.ownership(e),claimed=service.authority.claim(token,e.id,ownership.generation),selectionId=randomUUID();
+      service.authority.select(token,e.id,selectionId);
+      const params={eventId:e.id,generation:claimed.generation,draftId:d.id,draftVersion:d.version,text:d.text,
+        contextVersion:service.authority.contextVersion(e),selectionId};
+      const preview=await service.dispatch(token,{command:'previewSend',params}) as {commandId:string};
+      print({original:e.payload,approvedText:d.text,version:d.version,target:targetKey(e.payload)});
+      const challenge=`APPROVE ${digest([preview.commandId,params]).slice(0,12)}`;
+      requireSafe(await ask(`客户端统一门禁已预检。核对本条目标/全文后输入 ${challenge}：`)===challenge,'CANCELLED');
+      // In schema 3 the CLI confirmation and dispatch are one operation, never a stale portable approval.
+      await service.dispatch(token,{command:'submitManualSend',commandId:preview.commandId,params,confirmed:true});
+      await service.drain();print(await service.dispatch(token,{command:'getSendResult',commandId:preview.commandId}));
+    }finally{service.authority.revoke(token);}return;
+  }
   if(command==='retry-comment-once'){
     requireSafe(e.payload.channel==='COMMENT_NOTIFICATION'&&e.status==='UNCERTAIN','MANUAL_RETRY_REQUIRES_UNKNOWN_COMMENT');
     const snapshot=await browser.actor.run(()=>adapter.inspect(e.payload));
@@ -98,7 +137,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (values.help || positionals.length === 0) { stdout.write(`${help}\n`); return; }
   requireSafe(!(values.headed && values.headless), 'CONFLICTING_BROWSER_MODE');
   const command = positionals[0]!; const id = positionals[1];
-  const known = ['init','status','login','install-mapping','observe','draft','show','edit','approve','reject','send-once','retry-comment-once','verify-comment',
+  const known = ['init','status','login','install-mapping','observe','draft','show','edit','approve','reject','send-once','calibrate-client','retry-comment-once','verify-comment',
     'pause','resume','review-uncertain','compare-modes','real-test','authorize-model','prune-evidence'];
   requireSafe(known.includes(command), 'UNKNOWN_COMMAND');
   const root = runtimeRoot(values.runtime);
@@ -169,7 +208,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         print({ draftId: await generateDraft(store, id, provider) });
       } else if (command === 'edit') {
         requireSafe(values.file, 'FILE_REQUIRED'); const d = store.draft(id);
-        print({ draftId: store.saveDraft(d.eventId, await readFile(values.file, 'utf8'), 'manual').id });
+        const text=await readFile(values.file,'utf8');
+        if(store.db.pragma('user_version',{simple:true})===3){
+          const authority=new WorkbenchAuthority(store),token=authority.issueSession();
+          try{const generation=authority.claim(token,d.eventId,authority.ownership(store.event(d.eventId)).generation).generation;
+            print({draftId:authority.save(token,d.eventId,generation,d.version,text).id});authority.release(token,d.eventId,generation);
+          }finally{authority.revoke(token);}
+        }else print({ draftId: store.saveDraft(d.eventId, text, 'manual').id });
       } else if (command === 'show') {
         requireSafe(stdin.isTTY && stdout.isTTY, 'INTERACTIVE_TERMINAL_REQUIRED');
         const e = store.event(id); const draft = store.db.prepare('SELECT id FROM reply_drafts WHERE event_id=?').get(id) as { id: string } | undefined;
@@ -211,7 +256,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       }
       requireSafe(id !== 'works','OBSERVATION_MAPPING_REQUIRED');
     }
-    if(['approve','send-once','retry-comment-once','verify-comment'].includes(command)){
+    if(['approve','send-once','calibrate-client','retry-comment-once','verify-comment'].includes(command)){
       requireSafe(id,'DRAFT_ID_REQUIRED');
       const event=store.event(store.draft(id).eventId);
       if(command==='verify-comment'){

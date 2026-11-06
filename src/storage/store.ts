@@ -29,7 +29,7 @@ export class EventStore {
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('busy_timeout = 3000');
       const version = this.db.pragma('user_version', { simple: true });
-      requireSafe(version === 2 || (version === 0 && initialize), 'DATABASE_SCHEMA_UNSUPPORTED');
+      requireSafe(version === 2 || version === 3 || (version === 0 && initialize), 'DATABASE_SCHEMA_UNSUPPORTED');
       if (version === 0) this.schema();
     } catch (error) { this.db.close(); throw error; }
   }
@@ -160,6 +160,7 @@ export class EventStore {
       status: row.status, approval: row.approval ? JSON.parse(row.approval) as Draft['approval'] : null };
   }
   saveDraft(eventId: string, text: string, model: string): Draft {
+    requireSafe(this.db.pragma('user_version',{simple:true})!==3,'CLIENT_USE_VERSIONED_DRAFT_SERVICE');
     text=validText(text);
     return this.db.transaction(() => {
       const e = this.event(eventId);
@@ -167,7 +168,7 @@ export class EventStore {
       requireSafe(!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(eventId), 'INTENT_EXISTS');
       const old = this.db.prepare('SELECT id FROM reply_drafts WHERE event_id=?').get(eventId) as { id: string } | undefined;
       const id = old?.id ?? randomUUID();
-      this.db.prepare(`INSERT INTO reply_drafts VALUES (?,?,?,?,1,'DRAFT',NULL,NULL)
+      this.db.prepare(`INSERT INTO reply_drafts (id,event_id,text,model,version,status,approval,approved_at) VALUES (?,?,?,?,1,'DRAFT',NULL,NULL)
         ON CONFLICT(event_id) DO UPDATE SET text=excluded.text,model=excluded.model,version=version+1,
         status='DRAFT',approval=NULL,approved_at=NULL`).run(id, eventId, text, model);
       this.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(eventId);
@@ -213,6 +214,12 @@ export class EventStore {
     this.db.transaction(() => {
       this.db.prepare('INSERT INTO pauses VALUES (?,?) ON CONFLICT(target_key) DO UPDATE SET paused=excluded.paused').run(key, Number(paused));
       if (paused) {
+        if(this.db.pragma('user_version',{simple:true})===3){
+          this.db.prepare('UPDATE thread_ownership SET operator_id=NULL,generation=generation+1,lease_expires_at=0 WHERE target_key=?').run(key);
+          this.db.prepare(`UPDATE manual_send_commands SET status='FAILED_BEFORE_CLICK',reason='TARGET_PAUSED'
+            WHERE event_id IN (SELECT id FROM inbound_events WHERE target_key=?) AND intent_id IS NULL
+            AND status IN ('PREVIEW','QUEUED','PREFLIGHT')`).run(key);
+        }
         const drafts = this.db.prepare(`SELECT d.id FROM reply_drafts d JOIN inbound_events e ON e.id=d.event_id
           WHERE e.target_key=? AND d.status='APPROVED' AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id)`).all(key) as {id:string}[];
         for (const d of drafts) this.invalidateApproval(d.id);
@@ -235,8 +242,11 @@ export class EventStore {
     const result = this.db.prepare('UPDATE budgets SET used=used+1 WHERE kind=? AND used<maximum').run(kind);
     requireSafe(result.changes === 1, 'BUDGET_EXHAUSTED');
   }
-  recordIntent(draftId: string, snapshot: TargetSnapshot, real: boolean): string {
+  recordIntent(draftId: string, snapshot: TargetSnapshot, real: boolean,
+    authority?: { check(): void; committed(intentId: string): void }): string {
     return this.db.transaction(() => {
+      requireSafe(this.db.pragma('user_version', {simple:true}) !== 3 || authority, 'CLIENT_AUTHORITY_REQUIRED');
+      authority?.check();
       const d = this.draft(draftId); this.assertSendable(d.eventId);
       requireSafe(d.status === 'APPROVED' && d.approval && d.approval.version === d.version &&
         d.approval.textDigest === digest(d.text) && digest(d.approval.snapshot) === digest(snapshot), 'APPROVAL_INVALID');
@@ -246,6 +256,7 @@ export class EventStore {
         .run(id, d.eventId, d.id, snapshot.targetKey, digest(snapshot), digest(d.text), 'INTENT_RECORDED', new Date().toISOString());
       this.db.prepare("UPDATE inbound_events SET status='INTENT_RECORDED' WHERE id=?").run(d.eventId);
       this.audit('CLICK_INTENT_RECORDED', id);
+      authority?.committed(id);
       return id;
     }).immediate();
   }
@@ -302,6 +313,7 @@ export class EventStore {
     }).immediate();
   }
   authorizeCommentRetry(draftId:string,snapshot:TargetSnapshot,authorizationRef:string):string{
+    requireSafe(this.db.pragma('user_version',{simple:true})!==3,'CLIENT_UNKNOWN_READ_ONLY');
     requireSafe(authorizationRef.length>0&&authorizationRef.length<=500,'MANUAL_RETRY_AUTHORIZATION_REQUIRED');
     return this.db.transaction(()=>{
       const draft=this.draft(draftId),event=this.event(draft.eventId),key=targetKey(event.payload);
@@ -329,6 +341,7 @@ export class EventStore {
     }).immediate();
   }
   assertCommentRetryAvailable(grantId:string):RetryGrant{
+    requireSafe(this.db.pragma('user_version',{simple:true})!==3,'CLIENT_UNKNOWN_READ_ONLY');
     const grant=this.retryGrant(grantId),draft=this.draft(grant.draftId),event=this.event(grant.eventId),key=targetKey(event.payload);
     const prior=this.db.prepare('SELECT status,event_id FROM send_intents WHERE id=?').get(grant.previousIntentId) as {status:string;event_id:string}|undefined;
     requireSafe(event.status==='UNCERTAIN'&&prior?.status==='UNCERTAIN'&&prior.event_id===event.id,'MANUAL_RETRY_PREVIOUS_STATE_CHANGED');

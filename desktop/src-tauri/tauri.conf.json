@@ -1,0 +1,10 @@
+{
+  "$schema":"https://schema.tauri.app/config/2",
+  "productName":"inbora", "version":"0.2.0", "identifier":"app.inbora.desktop",
+  "build":{"beforeDevCommand":"pnpm --dir .. desktop:dev:web","devUrl":"http://127.0.0.1:1420",
+    "beforeBuildCommand":"pnpm --dir .. desktop:prepare","frontendDist":"../../.local/desktop-web"},
+  "app":{"windows":[{"label":"main","title":"inbora · 人工收件箱","width":1240,"height":800,"minWidth":900,"minHeight":640}],
+    "security":{"csp":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'self'","capabilities":["main"]}},
+  "bundle":{"active":true,"targets":["nsis"],"icon":["icons/icon.ico"],"resources":{"../../.local/staged-sidecar/":"sidecar/","../../.local/build-licenses/":"licenses/"},
+    "windows":{"webviewInstallMode":{"type":"downloadBootstrapper"},"nsis":{"installMode":"currentUser","languages":["SimpChinese","English"]}}}
+}

@@ -4,8 +4,10 @@ import { digest, requireSafe, proofTimeValid, type ReplyAdapter } from './contra
 
 export class SendCoordinator {
   constructor(private readonly store: EventStore, private readonly actor: AccountActor) {}
-  send(draftId: string, adapter: ReplyAdapter, real: boolean): Promise<'CONFIRMED' | 'UNCERTAIN'> {
+  send(draftId: string, adapter: ReplyAdapter, real: boolean,
+    authority?: { check(): void; committed(intentId: string): void }): Promise<'CONFIRMED' | 'UNCERTAIN'> {
     return this.actor.run(async () => {
+      authority?.check();
       const draft = this.store.draft(draftId);
       const event = this.store.event(draft.eventId);
       this.store.assertSendable(event.id);
@@ -24,7 +26,7 @@ export class SendCoordinator {
         final = await adapter.verifyPrepared(event.payload, draft.text);
         requireSafe(digest(final) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
       } catch (error) { this.store.invalidateApproval(draftId); throw error; }
-      const intentId = this.store.recordIntent(draftId, final, real);
+      const intentId = this.store.recordIntent(draftId, final, real, authority);
       try {
         const notBefore = this.store.intentBoundary(intentId);
         // Any error after intent commit is unknown, even if click() reports an error.

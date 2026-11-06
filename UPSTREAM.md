@@ -1,5 +1,18 @@
 # 来源与许可
 
+## 2026-11-06：最小客户端 M1—M3 实施核对
+
+原生首次测试暴露pnpm11布局差异后，先核对`pnpm/pnpm.io`固定`f9f6057f2cd214c4a0d743d1ba09d898197b55e0`的`docs/settings.md`、`docs/migration.md`和安装命令文档：仅认证/registry/TLS等仍读`.npmrc`，`nodeLinker`应在`pnpm-workspace.yaml`。据此修正暂存构建为hoisted真实目录；验证扩为导入完整ClientService/Playwright及SQLite，随后原生Tauri IPC实际连接、保存及重启通过。未复制pnpm源码或引入宿主。
+
+WebView2调试环境变量在本机提升权限宿主未生效后，核对已安装wry0.57.1的`src/webview2/mod.rs`中AdditionalBrowserArguments路径（crate来源SHA `2446feadae623d6f2ac8d2136e3ccef3d7197e0e`，包内vcs信息标记dirty，以Cargo.lock校验值为实际包依据）及微软[WebView2调试文档](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/debug-visual-studio-code)。单独QA配置通过Tauri公开additionalBrowserArgs API启用本地端口，未修改依赖源码或系统策略；正式包不含该配置。QA与正式包的证据边界见CLIENT-ACCEPTANCE。
+
+- 继续使用官方 Tauri 文档固定 `5e49cc6e48597060f1618e0b62cb91b071b1b4a9` 的 `develop/sidecar.mdx`、`develop/resources.mdx`、`learn/sidecar-nodejs.mdx`，本轮已下载逐项核对，MIT 全文保存在 `third_party/Tauri-docs-MIT.txt`。采用官方允许的“随包 Node + JS 资源”和 stdin/stdout 通信；使用 Rust 私有管道、受限业务命令和独立控制路径，不向前端开放 shell、文件系统或 SQL 插件。Node 原生依赖实际在暂存目录加载成功；这不替代 Tauri 原生启动验证。
+- React `v19.3.1` 固定提交 `61aa00df822d0eb76d0362eb8b6fdd3527693efe`，阅读 `packages/react-dom/src/client/ReactDOMRoot.js` 的 createRoot/render 生命周期；受控输入、异步 Effect 清理由官方 React 文档经 Context7 核对。采用标准受控表单和目标绑定的迟到结果丢弃，独立实现客服界面，不复制其他产品 UI。React 为 MIT，使用依赖包并保留其许可。
+- better-sqlite3 `v13.0.3` 的 tag 对象为 `0747dc94fb468715974716c6c54106ad6469d31b`，解引用提交为 `dbc2ea1165fef1f599b9be12faea33fa5e9d7ffb`。核对 `lib/methods/backup.js` 的一致性备份和错误处理，文件 SHA256 `ea29d34992bb02e006d0fdeda9675ac5d2bb227aaf57468decd997e9fc9c7dbf` 与已安装包一致。使用公开 backup API，在私有副本先验证恢复及试升级，再进行 schema 2→3 的附加迁移；不复制上游源码，不改写旧业务表/收据。
+- 再读既有 MIT DSH 固定 `7989640e340f0fd79e2de9874880d5197546e755` 的 `native-model-settings.mjs`、`tests/native-model-settings.test.mjs` 和 `tests/native-client.test.mjs`。采用配置与调用分离、内核状态权威、明确确认的组织方式；不引入 Cordis、模型目录服务或其发送实现。接管/版本/持久 commandId 按本项目 V2.1 合同独立实现。
+- DeepSeek 在本轮重新核对[接入页](https://api-docs.deepseek.com/)、[Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)及[思考模式](https://api-docs.deepseek.com/guides/thinking_mode/)。独立 fetch 适配官方 messages/choices/usage，固定官方 HTTPS 端点、非流式、max_tokens=512、thinking.disabled、30 秒超时且无自动重试；不复用旧 HttpDraftProvider 自定义请求，也不引入不必要的兼容 SDK。合成协议、错误、usage 和迟到建议测试已实际通过，真实请求仍为零。
+- 工具链重新核查后，本轮官方 rustup x64 下载与 SHA256 `38027d51d69a5d05493627a0634dbea52d6cd793c8f072d2373d3f4163eec7db` 一致；Rust 1.99.1 安装在项目 `.local/toolchains`，未改全局 PATH。Microsoft Build Tools 官方安装器 Authenticode 为 Valid / Microsoft Corporation，按最小 MSVC x64 与 Windows 10 SDK 组件准备环境。安装/原生构建的最终结果另记进度，不沿用历史拒绝作为当前结论。
+
 ## 2026-11-06：提前实现最小客户端前核对
 
 用户允许基于当前PoC进度先做客户端。再次核对下节固定MIT官方Tauri文档源码的Rust子进程stdin/stdout、资源路径和受限命令，以及已核对MIT上游LockyBee/dsh-douyin-agent固定`7989640e340f0fd79e2de9874880d5197546e755`的`native-model-settings.mjs`和`tests/native-client.test.mjs`。采用“配置与模型调用分离、状态由内核提供、明确确认后操作”的机制，独立实现最小客户端服务；不移植Cordis宿主、目录发现、原生聊天UI或其他账号能力。真实供应商未选定，先接现有显式HTTP契约与Mock，不声称完成任意供应商适配。

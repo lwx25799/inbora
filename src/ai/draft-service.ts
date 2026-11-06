@@ -62,6 +62,7 @@ export class HttpDraftProvider {
 }
 
 export async function generateDraft(store: EventStore, eventId: string, provider?: HttpDraftProvider): Promise<string> {
+  requireSafe(store.db.pragma('user_version',{simple:true})!==3,'CLIENT_USE_VERSIONED_DRAFT_SERVICE');
   const event = store.event(eventId);
   requireSafe(['AWAITING_DRAFT', 'AWAITING_APPROVAL', 'APPROVED'].includes(event.status), 'EVENT_NOT_DRAFTABLE');
   requireSafe(!sensitive(event.payload), 'SENSITIVE_MANUAL_HANDLING');

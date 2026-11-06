@@ -11,3 +11,5 @@ coverage/
 playwright-report/
 test-results/
 *.tsbuildinfo
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

@@ -5,6 +5,7 @@ import { OwnerLock } from './owner-lock.js';
 
 export class BrowserProfileOwner {
   readonly actor = new AccountActor();
+  private closing:Promise<void>|undefined;
   private constructor(readonly context: BrowserContext, readonly notification: Page, readonly dm: Page,
     private readonly lock: OwnerLock) {}
   static async launch(profile: string, headless: boolean): Promise<BrowserProfileOwner> {
@@ -18,7 +19,9 @@ export class BrowserProfileOwner {
       // Do not navigate or reuse the notification page as the DM page.
       const dm = await context.newPage();
       for (const extra of context.pages()) if (extra !== notification && extra !== dm) await extra.close();
-      return new BrowserProfileOwner(context, notification, dm, lock);
+      const owner=new BrowserProfileOwner(context, notification, dm, lock);
+      context.once('close',()=>{void owner.close().catch(()=>{});});
+      return owner;
     } catch (error) {
       if (context) await context.close().catch(() => {});
       await lock.close(); throw error;
@@ -32,6 +35,7 @@ export class BrowserProfileOwner {
   }
   version(): string { return this.context.browser()?.version() ?? 'unknown'; }
   async close(): Promise<void> {
-    try { await this.context.close(); } finally { await this.lock.close(); }
+    if(!this.closing)this.closing=(async()=>{try {await this.context.close();}finally{await this.lock.close();}})();
+    return this.closing;
   }
 }
