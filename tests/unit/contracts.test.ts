@@ -59,5 +59,7 @@ test('direct parent reply mapping cannot enable fixture or nested-level producti
   expect(validateCommentReplyMapping(mapping,false).purpose).toBe('comment-reply');
   expect(()=>validateCommentReplyMapping(mapping,true)).toThrow('REAL_MAPPING_REQUIRED');
   expect(()=>validateCommentReplyMapping({...mapping,rootLevel:2},false)).toThrow();
+  expect(()=>validateCommentReplyMapping({...mapping,portalWorkIds:['999']},false)).toThrow('COMMENT_PORTAL_WORK_SCOPE_REQUIRED');
+  expect(()=>validateCommentReplyMapping({...mapping,portalWorkIds:['10','10']},false)).toThrow('COMMENT_PORTAL_WORK_SCOPE_REQUIRED');
   expect(()=>validateCommentReplyMapping(mapping.observation,false)).toThrow();
 });

@@ -1,4 +1,4 @@
-import {expect,test} from 'vitest';
+import {expect,test,vi} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
 import {captureObserved} from '../../src/adapters/observed-reader.js';
@@ -49,6 +49,64 @@ test('visible native SMS challenge blocks inspection before input or intent',asy
     await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('COMMENT_REPLY_PAGE_BLOCKED');
     expect(f.store.stats().budgets).toMatchObject([{used:0},{used:0}]);
   }finally{await f.close();}
+});
+
+test.each([false,true])('only a calibrated exact bound portal may prepare a root reply; wrong=%s',async wrong=>{
+  const f=await setup();try{
+    Object.assign(f.mapping,{portalWorkIds:['10']});
+    await f.owner.notification.evaluate(()=>{
+      const footer=document.createElement('div');footer.id='reply-controls';footer.textContent='Empty top-level composer shell';
+      Object.defineProperty(footer,'__reactFiber$fixture',{value:{return:{return:{memoizedProps:{level:0,awemeInfo:{awemeId:'10'}}}}}});document.body.append(footer);
+    });
+    await f.owner.notification.locator('.reply-action').evaluate((action,wrong)=>action.addEventListener('click',()=>{
+      const controls=document.querySelector('#root-comment #reply-controls');if(!controls)return;
+      document.body.append(controls);
+      if(wrong)Object.getOwnPropertyDescriptor(controls,'__reactFiber$fixture')!.value.return.return.memoizedProps.cid='12';
+    }),wrong);
+    if(wrong){await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow();expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});}
+    else{
+      f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+      expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('CONFIRMED');
+      expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(1);
+    }
+  }finally{await f.close();}
+});
+
+test('seconds-rounded native receipt is strictly after the durable boundary without relaxing proof checks',async()=>{
+  const f=await setup();try{
+    await f.adapter.inspect(f.event.payload);await f.adapter.prepare(f.event.payload,f.draft.text);await f.adapter.verifyPrepared(f.event.payload,f.draft.text);
+    await f.owner.notification.locator('#comment-send').evaluate(button=>button.addEventListener('click',()=>{
+      const root=document.querySelector('#root-comment')!,p=Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture')!.value.return.memoizedProps;
+      const at=Math.floor(Date.now()/1000);p.commentInfo.replyComment[0].createTime=at;
+      Object.getOwnPropertyDescriptor(root.querySelector('.comment')!,'__reactFiber$fixture')!.value.return.memoizedProps.commentInfo.createTime=at;
+    }));
+    const boundary=new Date(Date.now()+100).toISOString();
+    await (f.adapter as unknown as {clickOnce:(notBefore:string)=>Promise<void>}).clickOnce(boundary);
+    expect(await f.adapter.readback(f.event.payload,f.draft.text,[],boundary)).toMatchObject({text:f.draft.text});
+  }finally{await f.close();}
+});
+
+test.each(['valid','missing','wrong-date','wrong-work','future','stale'])('native clock calibration must be fresh, scoped and corroborated: %s',async kind=>{
+  const f=await setup();let restoreClock=()=>{};try{
+    f.mapping.observation.environment='douyin';
+    const snap=await f.adapter.inspect(f.event.payload);f.store.approve(f.draft.id,snap,f.draft.version,f.draft.text);
+    if(kind!=='missing'){
+      const server=Math.floor(Date.now()/1000)*1000+(kind==='future'?10_000:-1000);
+      await f.owner.notification.route('**/aweme/v1/web/comment/list/**',route=>route.fulfill({headers:{date:new Date(server+(kind==='wrong-date'?2000:0)).toUTCString()},
+        json:{status_code:0,extra:{now:server},comments:[]}}));
+      await f.owner.notification.evaluate(async id=>{await(await fetch('/aweme/v1/web/comment/list/?aweme_id='+id)).json();},kind==='wrong-work'?'12':'10');
+    }
+    if(kind==='stale'){
+      await f.adapter.prepare(f.event.payload,f.draft.text);await f.adapter.verifyPrepared(f.event.payload,f.draft.text);
+      const realNow=Date.now,spy=vi.spyOn(Date,'now').mockImplementation(()=>realNow()+31_000);restoreClock=()=>spy.mockRestore();
+    }
+    if(kind==='valid')expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('CONFIRMED');
+    else{
+      await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow('CLOCK_UNVERIFIED');
+      expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
+      expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(0);
+    }
+  }finally{restoreClock();await f.close();}
 });
 
 test('root discovery excludes the fields of an already expanded direct child',async()=>{

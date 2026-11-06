@@ -138,11 +138,29 @@ export function captureCommentReply(input:Input):Frame{
       dom.check(!/[\r\n]/.test(text)&&(text===''?editor.querySelectorAll('br').length===1:editor.querySelectorAll('br').length===0&&
         (editor as HTMLElement).innerText===text),'COMMENT_REPLY_EDITOR_UNSUPPORTED');return text;
     },
+    scope(root:Element):Element|null{
+      if(root.querySelector(m.composerScope))return dom.one(root,m.composerScope);
+      if(!m.portalWorkIds.includes(e.videoId!))return null;
+      const scopes=Array.from(document.querySelectorAll(m.composerScope)).filter(dom.visible);
+      dom.check(scopes.length<=10,'COMMENT_REPLY_COMPOSER_CHANGED');const bound:Element[]=[];
+      for(const scope of scopes){
+        dom.check(scope.closest(s.commentRows)===null,'COMMENT_REPLY_COMPOSER_CHANGED');
+        const p=dom.props(scope,m.composerFiberDepth),cid=dom.data(p,'cid');
+        if(cid===undefined&&dom.data(p,'level')===0){
+          const editors=scope.querySelectorAll(m.composer);dom.check(editors.length<=1,'COMMENT_REPLY_COMPOSER_CHANGED');
+          if(editors[0])dom.check(dom.editorText(editors[0])==='','COMMENT_REPLY_EXISTING_DRAFT');continue;
+        }
+        dom.check(cid===e.commentId&&dom.data(p,'level')===m.rootLevel&&dom.data(p,'levelOneCid')===undefined&&
+          dom.data(dom.data(p,'awemeInfo'),'awemeId')===e.videoId,'COMMENT_REPLY_COMPOSER_CHANGED');bound.push(scope);
+      }
+      dom.check(bound.length<=1,'COMMENT_REPLY_COMPOSER_CHANGED');return bound[0]??null;
+    },
     capture():Frame&{root:Element;editor:HTMLElement;button:HTMLElement}{
-      const state=dom.root(),scope=dom.one(state.root,m.composerScope),p=dom.props(scope,m.composerFiberDepth);
-      dom.check(scope.closest(s.commentRows)===state.root&&dom.data(p,'cid')===e.commentId&&dom.data(p,'level')===m.rootLevel&&
+      const state=dom.root(),scope=dom.scope(state.root);dom.check(scope,'COMMENT_REPLY_DOM_NOT_READY');
+      const p=dom.props(scope!,m.composerFiberDepth);
+      dom.check((scope!.closest(s.commentRows)===state.root||m.portalWorkIds.includes(e.videoId!)&&scope!.closest(s.commentRows)===null)&&dom.data(p,'cid')===e.commentId&&dom.data(p,'level')===m.rootLevel&&
         dom.data(p,'levelOneCid')===undefined&&dom.data(dom.data(p,'awemeInfo'),'awemeId')===e.videoId,'COMMENT_REPLY_COMPOSER_CHANGED');
-      const editor=dom.one(scope,m.composer),button=dom.one(scope,m.send,false);
+      const editor=dom.one(scope!,m.composer),button=dom.one(scope!,m.send,false);
       dom.check(editor instanceof HTMLElement&&button instanceof HTMLElement&&editor.closest(m.composerScope)===scope&&
         button.closest(m.composerScope)===scope&&!button.contains(editor),'COMMENT_REPLY_COMPOSER_CHANGED');
       return{...state,editor:editor as HTMLElement,button:button as HTMLElement,editorText:dom.editorText(editor),shape:editor.innerHTML};
@@ -165,7 +183,7 @@ export function captureCommentReply(input:Input):Frame{
   }
   if(input.action==='open'){
     const state=dom.root();
-    if(!state.root.querySelector(m.composerScope)){
+    if(!dom.scope(state.root)){
       const action=dom.one(state.root,m.replyAction);dom.check(action.textContent==='回复','COMMENT_REPLY_ACTION_CHANGED');
       const gate={handle(event:Event):void{if(event.currentTarget!==action)return;try{dom.check(dom.root().root===state.root&&action.isConnected);}
         catch{event.preventDefault();event.stopImmediatePropagation();}}};
@@ -280,6 +298,11 @@ export class ObservedCommentReply implements ReplyAdapter{
   }
   async verifyPrepared(event:InboundEvent,text:string):Promise<TargetSnapshot>{
     requireSafe(this.prepared?.binding===eventBinding(event)&&this.prepared.text===text,'COMMENT_REPLY_NOT_PREPARED');
+    if(this.mapping.observation.environment!=='fixture'){
+      const deadline=Date.now()+1000;
+      while(this.responses.clockLag()===null&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));
+      requireSafe(this.responses.clockLag()!==null,'COMMENT_REPLY_CLOCK_UNVERIFIED');
+    }
     const token=randomUUID(),deadline=Date.now()+5000;let state:Frame;
     for(;;)try{state=await this.frame(event,'arm',text,token,null,this.prepared.shape);break;}catch(error){
       if(!(error instanceof Error)||!error.message.includes('COMMENT_REPLY_SEND_NOT_READY')||Date.now()>=deadline)throw error;
@@ -296,7 +319,12 @@ export class ObservedCommentReply implements ReplyAdapter{
     await this.frame(event,'expand');
     return this.poll(event,text,[],notBefore);
   }
-  async clickOnce():Promise<void>{const token=this.token;this.token=null;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
+  async clickOnce(notBefore?:string):Promise<void>{const token=this.token;this.token=null;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
+    const lag=this.responses.clockLag();requireSafe(lag!==null||this.mapping.observation.environment==='fixture','COMMENT_REPLY_CLOCK_UNVERIFIED');
+    const boundary=notBefore===undefined?Date.now():Date.parse(notBefore),deadline=(Math.floor(boundary/1000)+1)*1000+(lag??0);
+    requireSafe(Number.isFinite(boundary)&&deadline-Date.now()<=7000,'COMMENT_REPLY_CLOCK_UNVERIFIED');
+    while(Date.now()<=deadline){requireSafe(deadline-Date.now()<=7000,'COMMENT_REPLY_CLOCK_UNVERIFIED');
+      await new Promise(resolve=>setTimeout(resolve,Math.max(1,deadline-Date.now()+1)));}
     const accepted=await this.page.evaluate(token=>{const gate=(window as unknown as {__inboraCommentGate?:Gate}).__inboraCommentGate;
       if(!gate||gate.token!==token)throw Error('COMMENT_REPLY_NOT_PREPARED');try{return gate.submit();}finally{gate.remove();}},token);
     requireSafe(accepted,'COMMENT_REPLY_CLICK_BLOCKED');

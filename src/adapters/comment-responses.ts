@@ -16,27 +16,32 @@ export class CommentResponses{
   private sequence=0;
   private active=0;
   private requestedAt=0;
+  private clockSequence=0;
+  private clock:{sampledAt:number;lagMs:number}|null=null;
   private rows:NativeCommentReply[]=[];
-  private requests=new WeakMap<Request,{epoch:number;sequence:number}>();
+  private requests=new WeakMap<Request,{epoch:number;sequence:number;clock:boolean}>();
   constructor(private readonly page:Page,private readonly mapping:CommentReplyMapping){
     page.on('request',this.request);page.on('response',this.response);page.on('framenavigated',this.navigation);page.once('close',this.dispose);
   }
   watch(event:InboundEvent):void{
-    if(this.event?.commentId!==event.commentId||this.event.videoId!==event.videoId){this.epoch++;this.rows=[];this.requestedAt=0;}
+    if(this.event?.commentId!==event.commentId||this.event.videoId!==event.videoId){this.epoch++;this.rows=[];this.requestedAt=0;this.clock=null;}
     this.event=event;
   }
   snapshot(event:InboundEvent):NativeCommentReply[]{
     return this.event?.commentId===event.commentId&&this.event.videoId===event.videoId?this.rows:[];
   }
   hasRequestAfter(boundary:string):boolean{return this.requestedAt>Date.parse(boundary);}
-  private navigation=(frame:Frame):void=>{if(frame===this.page.mainFrame()){this.epoch++;this.rows=[];this.requestedAt=0;}};
+  clockLag():number|null{return this.clock&&Date.now()>=this.clock.sampledAt&&Date.now()-this.clock.sampledAt<=30_000?this.clock.lagMs:null;}
+  private navigation=(frame:Frame):void=>{if(frame===this.page.mainFrame()){this.epoch++;this.rows=[];this.requestedAt=0;this.clock=null;}};
   private request=(request:Request):void=>{
     try{
       const e=this.event,url=new URL(request.url()),o=this.mapping.observation;
       if(!e||request.method()!=='GET'||request.frame()!==this.page.mainFrame()||url.origin!==o.origin||url.username||url.password||
-        url.pathname!==nativeCommentReplyPath||url.searchParams.getAll('comment_id').length!==1||url.searchParams.get('comment_id')!==e.commentId||
         !o.works.some(w=>w.id===e.videoId&&this.page.url().split('?')[0]===w.url.split('?')[0]))return;
-      this.rows=[];this.requestedAt=Date.now();this.requests.set(request,{epoch:this.epoch,sequence:++this.sequence});
+      const clock=url.pathname==='/aweme/v1/web/comment/list/'&&url.searchParams.getAll('aweme_id').length===1&&url.searchParams.get('aweme_id')===e.videoId;
+      if(clock){this.clock=null;this.requests.set(request,{epoch:this.epoch,sequence:++this.clockSequence,clock:true});return;}
+      if(url.pathname!==nativeCommentReplyPath||url.searchParams.getAll('comment_id').length!==1||url.searchParams.get('comment_id')!==e.commentId)return;
+      this.rows=[];this.requestedAt=Date.now();this.requests.set(request,{epoch:this.epoch,sequence:++this.sequence,clock:false});
     }catch{/* Unknown/service-worker requests are not evidence. */}
   };
   private response=(response:Response):void=>{void this.capture(response);};
@@ -48,10 +53,18 @@ export class CommentResponses{
     try{
       const length=Number(response.headers()['content-length']);if(Number.isFinite(length)&&length>1_000_000)return;
       const raw=await response.text();if(raw.length>1_000_000)return;
-      const result=batch.safeParse(JSON.parse(raw)),e=this.event;
-      if(!result.success||!e||token.epoch!==this.epoch||token.sequence!==this.sequence)return;
+      const body:unknown=JSON.parse(raw),e=this.event;
+      if(!e||token.epoch!==this.epoch)return;
       const work=this.mapping.observation.works.find(w=>w.id===e.videoId);
       if(!work||this.page.url().split('?')[0]!==work.url.split('?')[0])return;
+      if(token.clock){
+        const sample=z.object({status_code:z.literal(0),extra:z.object({now:z.number().int().positive()})}).safeParse(body),at=Date.now();
+        if(!sample.success||token.sequence!==this.clockSequence)return;
+        const server=sample.data.extra.now,header=Date.parse(response.headers()['date']??''),lag=at-server;
+        if(Math.floor(server/1000)*1000===header&&lag>=0&&lag<=5000)this.clock={sampledAt:at,lagMs:lag};
+        return;
+      }
+      const result=batch.safeParse(body);if(!result.success||token.sequence!==this.sequence)return;
       const rows=result.data.comments;
       if(new Set(rows.map(r=>r.cid)).size!==rows.length||rows.some(r=>r.aweme_id!==e.videoId||r.reply_id!==e.commentId))return;
       this.rows=rows;
@@ -59,7 +72,7 @@ export class CommentResponses{
     finally{this.active--;}
   }
   dispose=():void=>{
-    this.epoch++;this.rows=[];this.event=null;
+    this.epoch++;this.rows=[];this.event=null;this.clock=null;
     this.page.off('request',this.request);this.page.off('response',this.response);this.page.off('framenavigated',this.navigation);this.page.off('close',this.dispose);
   };
 }

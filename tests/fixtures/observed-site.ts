@@ -23,7 +23,9 @@ export async function mountObserved(owner: BrowserProfileOwner, origin: string):
     <div class="box"><div class="message"><span class="text">controlled-3</span></div></div>
     <div class="box"><div class="direction from-me"><div class="message"><span class="text">owner text</span></div></div></div>
     <div class="box"><div class="message"><img alt="fixture emoji"></div></div></div></section>`);
-  await owner.dm.evaluate(() => {
+  await owner.dm.evaluate(installObservedMetadata);
+}
+function installObservedMetadata():void {
     const self = document.querySelector('#self')!;
     Object.defineProperty(self,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});
     Object.defineProperty(document.querySelector('#header')!,'__reactProps$fixture',
@@ -34,7 +36,6 @@ export async function mountObserved(owner: BrowserProfileOwner, origin: string):
       Object.defineProperty(row,'__reactProps$fixture',{value:{children:{props:{message:{
         serverId:String(index+1),conversationId:'conv-a',sender:index===3?'100':'200',
         createdAt:new Date('2026-11-05T00:00:00Z'),_parsedContent:{text:row.textContent}}}}}});
-  });
 }
 
 export function dmReplyMapping(origin:string):DmReplyMapping {
@@ -46,7 +47,12 @@ export function dmReplyMapping(origin:string):DmReplyMapping {
 /** Synthetic native component metadata and actual SVG event bubbling; no real user values. */
 export async function mountDmReply(owner:BrowserProfileOwner,origin:string):Promise<void>{
   await mountObserved(owner,origin);
-  await owner.dm.evaluate(()=>{
+  const html=await owner.dm.content();
+  await owner.dm.route(origin+'/',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:html+
+    '<script>('+installObservedMetadata.toString()+')();('+installDmReply.toString()+')();</script>'}));
+  await owner.dm.evaluate(installDmReply);
+}
+function installDmReply():void {
     for(const [index,row]of Array.from(document.querySelectorAll('.message')).entries()){
       row.closest('.box')!.setAttribute('data-index',String(index));
       const message=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
@@ -57,8 +63,10 @@ export async function mountDmReply(owner:BrowserProfileOwner,origin:string):Prom
     controls.innerHTML='<div id="native-editor" contenteditable="true" style="white-space:pre-wrap">\u200B</div><svg id="native-send" width="30" height="30"><rect width="30" height="30"/></svg>';
     Object.defineProperty(controls,'__reactFiber$fixture',{value:{return:{memoizedProps:{curConversation:{id:'conv-a',_toParticipantSecUserId:'peer-sec'}}}}});
     chat.append(controls);
-    const state=window as unknown as {nativeClicks:number;nativePending:boolean;nativeWrongReceipt:boolean;nativeOldReceipt:boolean;nativeNoReceipt:boolean;nativeEditorModel:string};
-    state.nativeClicks=0;state.nativePending=false;state.nativeWrongReceipt=false;state.nativeOldReceipt=false;state.nativeNoReceipt=false;
+    const state=window as unknown as {nativeClicks:number;nativePending:boolean;nativeWrongReceipt:boolean;nativeOldReceipt:boolean;nativeNoReceipt:boolean;nativeEditorModel:string;nativeRehydratedTime:string|null};
+    const saved=JSON.parse(sessionStorage.getItem('native-receipt')??'null') as {id:string;text:string;createdAt:string;clicks:number}|null;
+    state.nativeClicks=saved?.clicks??0;state.nativePending=false;state.nativeWrongReceipt=false;state.nativeOldReceipt=false;state.nativeNoReceipt=false;
+    state.nativeRehydratedTime=null;
     state.nativeEditorModel='';
     // Minimal synthetic editor model uses actual browser edit events, independently of the adapter's DOM reader.
     document.querySelector('#native-editor')!.addEventListener('input',event=>{
@@ -79,14 +87,23 @@ export async function mountDmReply(owner:BrowserProfileOwner,origin:string):Prom
       Object.defineProperty(row,'__reactProps$fixture',{value:{children:{props:{message:{serverId:String(800+state.nativeClicks),
         conversationId:state.nativeWrongReceipt?'outside':'conv-a',sender:'100',createdAt,
         serverStatus:0,type:7,_parsedContent:{text}}}}}});
+      sessionStorage.setItem('native-receipt',JSON.stringify({id:String(800+state.nativeClicks),text,
+        createdAt:state.nativeRehydratedTime??createdAt.toISOString(),clicks:state.nativeClicks}));
       chat.append(box);editor.textContent='';
     });
-  });
+    if(saved){
+      for(const box of chat.querySelectorAll('[data-index]'))box.setAttribute('data-index',String(Number(box.getAttribute('data-index'))+1));
+      const box=document.createElement('div');box.className='box from-me';box.setAttribute('data-index','0');
+      const row=document.createElement('div');row.className='message';const body=document.createElement('span');body.className='text';body.textContent=saved.text;
+      Object.defineProperty(row,'__reactProps$fixture',{value:{children:{props:{message:{serverId:saved.id,conversationId:'conv-a',sender:'100',
+        createdAt:new Date(saved.createdAt),serverStatus:0,type:7,_parsedContent:{text:saved.text}}}}}});
+      row.append(body);box.append(row);chat.append(box);
+    }
 }
 
 export function commentReplyMapping(origin:string):CommentReplyMapping{
   return{version:1,purpose:'comment-reply',observation:observedMapping(origin),observedAt:'2026-11-05T00:00:00Z',
-    evidenceRef:'synthetic-root-reply',blockers:'[role="dialog"]',replyAction:'.reply-action',composerScope:'#reply-controls',
+    evidenceRef:'synthetic-root-reply',blockers:'[role="dialog"]',replyAction:'.reply-action',composerScope:'#reply-controls',portalWorkIds:[],
     composerFiberDepth:2,composer:'#comment-editor',send:'#comment-send',pending:'.pending',failed:'.failed',rootLevel:1,confirmedStatus:1};
 }
 /** Synthetic direct parent reply contract, separate from observed platform evidence. */

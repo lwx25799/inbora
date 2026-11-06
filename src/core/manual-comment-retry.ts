@@ -19,7 +19,7 @@ export class ManualCommentRetry{
       }catch(error){this.store.revokeCommentRetry(grantId);throw error;}
       const id=this.store.recordCommentRetryIntent(grantId,final,real);
       try{
-        const notBefore=this.store.commentRetryBoundary(id);await adapter.clickOnce();
+        const notBefore=this.store.commentRetryBoundary(id);await adapter.clickOnce(notBefore);
         const proof=await adapter.readback(event.payload,draft.text,before,notBefore);
         const valid=proof&&proof.id&&!before.includes(proof.id)&&!proof.pending&&proof.ownId===final.ownId&&
           proof.targetKey===final.targetKey&&proof.text===draft.text&&Number.isFinite(Date.parse(proof.sentAt))&&

@@ -7,7 +7,7 @@ import { ObservedReader } from './observed-reader.js';
 
 interface ReplyCaptureInput {
   mapping: DmReplyMapping; event: InboundEvent;
-  action: 'snapshot' | 'fill' | 'arm' | 'proofs'; text: string | null; token: string | null;
+  action: 'snapshot' | 'fill' | 'arm' | 'proofs' | 'refresh'; text: string | null; token: string | null;
   before: {context:unknown[];editorText:string}|null;
   editorShape:string|null;
 }
@@ -183,6 +183,11 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     dom.check(after.editorText===text,'NATIVE_REPLY_APPROVED_TEXT_CHANGED');
     return{context:after.context,proofs:after.proofs,outgoingIds:after.outgoingIds,editorText:after.editorText,editorShape:after.editorShape};
   }
+  if(input.action==='refresh'){
+    dom.check(state.editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
+    // Initiate native navigation in the same task as the final account/target/draft check.
+    location.reload();
+  }
   if(input.action==='arm') {
     dom.check(token&&text!==null&&state.editorText===text,'NATIVE_REPLY_APPROVED_TEXT_CHANGED');
     dom.check(input.editorShape===state.editorShape,'NATIVE_REPLY_EDITOR_CHANGED');
@@ -267,13 +272,26 @@ export class ObservedDmReply implements ReplyAdapter {
     requireSafe(accepted,'NATIVE_REPLY_CLICK_BLOCKED');
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
+    const initial=await this.poll(event,text,before,notBefore);
+    if(!initial)return null;
+    // A serverId can coexist with a temporary local createdAt. Require a fresh page model.
+    requireSafe((await this.frame(event,'proofs')).editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
+    await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15_000}),this.frame(event,'refresh')]);
+    const index=this.mapping.observation.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
+    requireSafe(index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
+    await new ObservedReader(this.page,this.mapping.observation).dm(index);
+    const refreshed=await this.poll(event,text,before,notBefore);
+    return refreshed?.id===initial.id?refreshed:null;
+  }
+  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
     const deadline=Date.now()+this.receiptTimeoutMs;let previous:string|null=null;
     do {
-      const matches=(await this.frame(event,'proofs')).proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&
+      const frame=await this.frame(event,'proofs');
+      const matches=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&
         Date.parse(p.sentAt)>Date.parse(notBefore)&&Date.parse(p.sentAt)<=Date.now());
       requireSafe(matches.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
       const proof=matches[0];
-      if(proof&&digest(proof)===previous)return proof;
+      if(proof&&digest(proof)===previous)return frame.editorText===''?proof:null;
       previous=proof?digest(proof):null;
       await new Promise(resolve=>setTimeout(resolve,75));
     }while(Date.now()<deadline);

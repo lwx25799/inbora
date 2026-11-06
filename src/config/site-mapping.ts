@@ -110,9 +110,12 @@ export const commentReplyMappingSchema=z.object({
   observedAt:z.iso.datetime(),evidenceRef:z.string().min(1),blockers:selector,
   replyAction:selector,composerScope:selector,composerFiberDepth:z.number().int().min(0).max(3),
   composer:selector,send:selector,pending:selector,failed:selector,
+  portalWorkIds:z.array(nativeId).max(2).default([]),
   rootLevel:z.literal(1),confirmedStatus:z.number().int(),
 });
 export type CommentReplyMapping=z.infer<typeof commentReplyMappingSchema>;
 export function validateCommentReplyMapping(value:unknown,real:boolean):CommentReplyMapping{
-  const mapping=commentReplyMappingSchema.parse(value);validateObservationMapping(mapping.observation,real);return mapping;
+  const mapping=commentReplyMappingSchema.parse(value);validateObservationMapping(mapping.observation,real);
+  requireSafe(new Set(mapping.portalWorkIds).size===mapping.portalWorkIds.length&&mapping.portalWorkIds.every(id=>mapping.observation.works.some(w=>w.id===id)),
+    'COMMENT_PORTAL_WORK_SCOPE_REQUIRED');return mapping;
 }

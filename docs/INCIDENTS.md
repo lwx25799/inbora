@@ -2,6 +2,10 @@
 
 ## 2026-11-06增量修复
 
+- 图集回复框位于根评论外：准确portal元数据实机观察后仅按已校准作品启用；根外正确/错误父ID及空level0壳回归实际先失败再通过。
+- 评论秒级平台时间早于本机意图：保留原未知；从准确作品正常GET的extra.now/Date取得保守时差，意图后等待下一完整秒再最终门禁。`seconds-rounded native receipt`及无效/过期时钟回归防止放宽时间。
+- 私信首条确认刷新后时间回退：serverId/确认状态仍携带临时本地createdAt，原收据摘要精确匹配；同一消息刷新后的平台时间早于意图。原收据保留，反证37b0e7b9、准确目标暂停；`native DM requires a fresh receipt after normal reload`在旧实现实际错误CONFIRMED，修复后必须同ID刷新证明才确认。真实修复后新发送尚待验收。
+- 私信空输入快照到reload可丢失晚到人稿：复审新增`native DM final empty snapshot cannot authorize reload over a later human draft`实际先错误CONFIRMED，再将最终身份/目标/空输入核验和原生刷新发起合并到同一同步页面任务；红测转为零刷新、原文保留、UNCERTAIN。
 - 独立child不在根replyComment且DOM无status：旧回读实际返回null；补精确正常GET状态与同一可见child全字段交叉核验。缺状态仍保持未知，实际既有回复有头/无头自动核验通过。
 - 原生短信标题未被blockers识别：同实际类名的夹具在修改前错误放行；补采集及两通道最终门禁，验证码仍由本人处理，新平台验证码未主动触发。
 - 已展开child污染父行正文/菜单、图集隐藏旧列表：实机字段数量及布局证据后新增失败回归，限制父字段本行归属及唯一可见列表，两个可见列表仍拒绝。

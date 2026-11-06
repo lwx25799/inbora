@@ -28,7 +28,7 @@ export class SendCoordinator {
       try {
         const notBefore = this.store.intentBoundary(intentId);
         // Any error after intent commit is unknown, even if click() reports an error.
-        await adapter.clickOnce();
+        await adapter.clickOnce(notBefore);
         const proof = await adapter.readback(event.payload, draft.text, baseline, notBefore);
         const valid = proof && proof.id && !baseline.includes(proof.id) && !proof.pending &&
           proof.ownId === final.ownId && proof.targetKey === final.targetKey && proof.text === draft.text &&

@@ -15,13 +15,25 @@ const base=resolve('.local/comment-reply-smoke');await mkdir(base,{recursive:tru
 const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
 const store=new EventStore(join(dir,'poc.sqlite'),true,()=> '2026-11-03T00:00:00Z');
 try{
-  await mountCommentReply(owner,server.origin);const mapping=commentReplyMapping(server.origin);
+  await mountCommentReply(owner,server.origin);const mapping=commentReplyMapping(server.origin);mapping.portalWorkIds=['10'];
+  await owner.notification.locator('.reply-action').evaluate(action=>action.addEventListener('click',()=>{
+    const controls=document.querySelector('#root-comment #reply-controls');if(controls)document.body.append(controls);
+  }));
   const batch=await owner.actor.run(()=>owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,evidenceId:'fixture-root-snapshot'}));
   store.observe('COMMENT_NOTIFICATION','work:10',[],'100','fixture');store.observe('COMMENT_NOTIFICATION','work:10',batch.events,'100','fixture');
   const event=store.events()[0],draft=store.saveDraft(event.id,'local fixture parent reply','mock'),adapter=new ObservedCommentReply(owner.notification,mapping);
-  store.approve(draft.id,await owner.actor.run(()=>adapter.inspect(event.payload)),draft.version,draft.text);
-  const click=adapter.clickOnce.bind(adapter);adapter.clickOnce=async()=>{
-    assert.equal(store.db.prepare('SELECT status FROM send_intents').get().status,'INTENT_RECORDED');await click();};
+  const snapshot=await owner.actor.run(()=>adapter.inspect(event.payload));
+  const serverTime=Math.floor(Date.now()/1000)*1000-1000;
+  await owner.notification.route('**/aweme/v1/web/comment/list/**',route=>route.fulfill({headers:{date:new Date(serverTime).toUTCString()},json:{status_code:0,extra:{now:serverTime},comments:[]}}));
+  await owner.notification.evaluate(async()=>{await(await fetch('/aweme/v1/web/comment/list/?aweme_id=10')).json();});
+  await owner.notification.locator('#comment-send').evaluate(button=>button.addEventListener('click',()=>{
+    const root=document.querySelector('#root-comment'),info=Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture').value.return.memoizedProps.commentInfo;
+    const at=Math.floor((Date.now()-1000)/1000);info.replyComment[0].createTime=at;
+    Object.getOwnPropertyDescriptor(root.querySelector('.comment'),'__reactFiber$fixture').value.return.memoizedProps.commentInfo.createTime=at;
+  }));
+  store.approve(draft.id,snapshot,draft.version,draft.text);
+  const click=adapter.clickOnce.bind(adapter);adapter.clickOnce=async boundary=>{
+    assert.equal(store.db.prepare('SELECT status FROM send_intents').get().status,'INTENT_RECORDED');await click(boundary);};
   assert.equal(await new SendCoordinator(store,owner.actor).send(draft.id,adapter,false),'CONFIRMED');
   assert.equal(await owner.notification.evaluate(()=>window.commentClicks),1);
   // Exercise the independent rendered child + passive server-status path under source and compiled runtimes.

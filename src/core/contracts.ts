@@ -70,7 +70,7 @@ export interface ReplyAdapter {
   prepare(event: InboundEvent, text: string): Promise<void>;
   verifyPrepared(event: InboundEvent, text: string): Promise<TargetSnapshot>;
   baseline(event: InboundEvent): Promise<string[]>;
-  clickOnce(): Promise<void>;
+  clickOnce(notBefore?:string): Promise<void>;
   readback(event: InboundEvent, text: string, before: string[], notBefore: string): Promise<SendProof | null>;
 }
 export function validText(text: string): string {

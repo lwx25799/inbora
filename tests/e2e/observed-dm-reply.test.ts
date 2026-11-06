@@ -58,6 +58,54 @@ test.each(['pending','wrong-conversation','old-time','no-receipt'])('native %s p
     expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
   }finally{await f.close();}
 });
+
+test.each([false,true])('native DM requires a fresh receipt after normal reload; timestamp rolls back=%s',async rollback=>{
+  const f=await setup();let reloads=0;
+  try{
+    f.owner.dm.on('framenavigated',frame=>{if(frame===f.owner.dm.mainFrame())reloads++;});
+    if(rollback)await f.owner.dm.evaluate(()=>{(window as unknown as {nativeRehydratedTime:string}).nativeRehydratedTime='2020-01-01T00:00:00Z';});
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe(rollback?'UNCERTAIN':'CONFIRMED');
+    expect(reloads).toBe(1);
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
+    if(rollback){
+      expect(f.store.uncertain()).toHaveLength(1);
+      await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow();
+    }
+  }finally{await f.close();}
+});
+
+test('native DM receipt refresh preserves a new human draft without reloading',async()=>{
+  const f=await setup();let reloads=0;
+  try{
+    f.owner.dm.on('framenavigated',frame=>{if(frame===f.owner.dm.mainFrame())reloads++;});
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    const click=f.adapter.clickOnce.bind(f.adapter);
+    f.adapter.clickOnce=async()=>{await click();await f.owner.dm.locator('#native-editor').fill('human follow-up');};
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('UNCERTAIN');
+    expect(reloads).toBe(0);expect(await f.owner.dm.locator('#native-editor').textContent()).toBe('human follow-up');
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
+  }finally{await f.close();}
+});
+
+test('native DM final empty snapshot cannot authorize reload over a later human draft',async()=>{
+  const f=await setup();let initialComplete=false,injected=false,reloads=0;
+  try{
+    f.owner.dm.on('framenavigated',frame=>{if(frame===f.owner.dm.mainFrame())reloads++;});
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    const hooks=f.adapter as unknown as {frame:(...args:unknown[])=>Promise<unknown>;poll:(...args:unknown[])=>Promise<unknown>},original=hooks.frame.bind(hooks),poll=hooks.poll.bind(hooks);
+    hooks.poll=async(...args)=>{const result=await poll(...args);initialComplete=true;return result;};
+    hooks.frame=async(...args)=>{
+      const result=await original(...args);
+      if(args[1]==='proofs'&&initialComplete&&!injected){injected=true;await f.owner.dm.locator('#native-editor').fill('late human follow-up');}
+      return result;
+    };
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('UNCERTAIN');
+    expect(injected).toBe(true);expect(reloads).toBe(0);
+    expect(await f.owner.dm.locator('#native-editor').textContent()).toBe('late human follow-up');
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
+  }finally{await f.close();}
+});
 test('native guard blocks changed identity in document capture before the SVG handler',async()=>{
   const f=await setup();
   try{
