@@ -1,5 +1,13 @@
 # 来源与许可
 
+## 2026-11-06：提前实现最小客户端前核对
+
+用户允许基于当前PoC进度先做客户端。再次核对下节固定MIT官方Tauri文档源码的Rust子进程stdin/stdout、资源路径和受限命令，以及已核对MIT上游LockyBee/dsh-douyin-agent固定`7989640e340f0fd79e2de9874880d5197546e755`的`native-model-settings.mjs`和`tests/native-client.test.mjs`。采用“配置与模型调用分离、状态由内核提供、明确确认后操作”的机制，独立实现最小客户端服务；不移植Cordis宿主、目录发现、原生聊天UI或其他账号能力。真实供应商未选定，先接现有显式HTTP契约与Mock，不声称完成任意供应商适配。
+
+官方React createRoot/受控表单/异步Effect清理通过Context7查阅；界面不自动执行发送或调用模型。Tauri编译所需Rust/MSVC本机未找到，自动审批拒绝其下载/安装，原生构建待验证。用户随后提供V2.1并要求优化方案，本轮未完成实现草稿保留在忽略目录，未作为交付代码或已通过验证；计划中的浏览器开发预览不替代Tauri包。
+
+用户选择DeepSeek后核对[官方接入页](https://api-docs.deepseek.com/)及[Chat Completions合同](https://api-docs.deepseek.com/api/create-chat-completion)，确认官方messages/choices/usage合同与当前自定义JSON合同不同。后续实现独立适配，配置默认官方地址和当日列出的deepseek-flash，不将旧模型别名或SDK示例冒充实机兼容。此次只采用官方协议设计，未复制SDK源码、未调用真实模型，供应商适配和实机仍未验证。
+
 ## 2026-11-06：GO后最小客户端接入依据
 
 在确认新增P5范围前，通过官方文档与固定源码核对既定Tauri sidecar路线。候选为[tauri-apps/tauri-docs](https://github.com/tauri-apps/tauri-docs)，v2分支固定SHA `5e49cc6e48597060f1618e0b62cb91b071b1b4a9`：

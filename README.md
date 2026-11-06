@@ -14,7 +14,7 @@ Windows 单账号、评论通知与私信双通道的受控浏览器 PoC。当�
 
 已在 Windows、Node 26.13.0、pnpm 11.25.0、Microsoft Edge 156.0.4314.58 验证本地夹具。pnpm 启动器内置 Node 24.22.1，项目命令实际使用 PATH 中的 Node 26.13.0；项目允许这两个受支持 LTS 系列。使用独立 Profile，不使用日常浏览器资料，不改全局浏览器或 Git 配置。
 
-实际开发机为Windows 10专业版x64（10.0.19045）。2026-11-05用户已明确将本期完整验收调整为当前Windows 10，原Windows 11环境不再是本期门槛；不宣称Windows 11已实测。
+实际开发机为Windows 10专业版x64（10.0.19045）。2026-11-05用户已明确将本期完整验收调整为当前Windows 10，原Windows 11环境不再是本期门槛；不宣称Windows 11已实测。正式版与最小客户端的支持目标均为Windows 10 / Windows 11 x64，不绑定Windows 11；两系统分别记录兼容验收。
 
 better-sqlite3 13.0.3自带Windows x64/arm64的Node-API二进制；本项目明确禁止其不必要的隐式node-gyp构建，使用包内预编译文件，esbuild仍允许自身安装脚本。不需要为此安装Visual Studio全局编译环境；SQLite实际加载、事务、持久化和恢复仍由集成测试验证。
 
@@ -118,4 +118,4 @@ pnpm test:real --case L01 --real-account --private-access
 
 每个可验证切片提交；推送前审查所有待推送提交，运行全部检查及 `pnpm check:privacy`，推送后核对远程 SHA。历史和暂存区隐私扫描是补充检查，仍需审查夹具是否包含私人数据。审查记录见 [REVIEW.md](docs/REVIEW.md)，进度见 [PROGRESS.md](docs/PROGRESS.md)。
 
-只有修订基线的全部必要实机证据支持GO，才启动P5：交付可启动的Tauri v2 + React最小图形客户端，配置AI并完成评论、私信的草稿—人工审批—发送—回读试用。客户端与CLI共享现有Node内核、数据库和发送门禁，正式版继续扩展；本期不建设完整工作台或多账号系统。具体范围与G01—G06见[最小客户端交付要求](docs/MINIMAL-CLIENT.md)。当前GO尚未完成，客户端尚未实现；仅接入评审不再作为最终交付。
+按用户2026-11-06最新要求，P5最小客户端可基于当前进度提前开发，与PoC验收并行。按[正式版V2.1方案](Inbora_正式版实施与人工回复方案_V2.1_2026-11-06.md)交付Tauri v2 + React单账号人工工作台，支持不依赖AI的直接输入、DeepSeek建议、接管/版本/幂等和双通道发送回读。客户端与CLI共享现有Node内核、数据库和发送门禁，正式版继续扩展；本期不建设完整工作台或多账号系统。具体范围与G01—G10见[最小客户端交付要求](docs/MINIMAL-CLIENT.md)。当前GO尚未完成，客户端未交付；按通道能力开放发送，开发进度不能替代实机验收。
