@@ -1,5 +1,33 @@
 # 相关开源实现核对
 
+## 2026-11-06：发送时间矛盾与刷新误确认专项
+
+本次只读研究，不修改适配器、审批、未知状态或真实数据库，不打开账号页面，不发送消息。查询GitHub当前HEAD并固定SHA：LockyBee、crazyants、POKMJN、DMShoot均与前次相同；watch更新为`b3d5e36ed4ef9b8c1a7006ca2770309f820ffa46`，另补查公开源码DouAi的`f751fde0202a53c96cb14905e620ad5982d1be8f`。源码保存在忽略的`.local/upstream-review`，本轮下载索引含来源URL与文件SHA256。
+
+**结论：所核对的相关实现没有直接提供“平台时间严格晚于本机意图，且刷新后仍可靠”的现成解法。** 较完整的方案采用发送前基线、新ID、准确目标和回读，原生方案采用具体请求的业务回调；部分简单方案仅看气泡或输入框清空。依据这些判据推断，多数实现不会在平台/本机时间比较处拒绝，因为没有设置同样的门槛；这不能证明消除了旧消息误认或临时渲染状态的风险。
+
+| 固定来源 | 实际成功判据 | 对当前问题的结论 |
+| --- | --- | --- |
+| LockyBee/dsh-douyin-agent `7989640`（MIT） | `chat-browser.mjs:1614–1630`要求准确会话、新尾部、未见ID、我方全文及非失败/非pending；第4轮尚未完成且空草稿时重新挂载一次会话，但此前轮次可直接成功。`chat-message.mjs:24`指纹有意排除时间；`comment-browser.mjs:488–497`及`receipt-baseline.mjs:87–104`用两次同新ID/我方/作品/全文/发出状态，不比较平台时间与本机意图。评论执行器拒绝回复他人的状态。 | 可借鉴不重发、固定基线、准确目标及只读恢复。上游没有通过强制刷新排除临时createdAt，也没有解决跨时钟比较；不能照搬为本项目可信楼中楼收据。[私信回读](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/chat-browser.mjs#L1614-L1630)、[评论基线](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/receipt-baseline.mjs#L87-L104) |
+| miqian-nomad/dsh-douyin-watch `b3d5e3`（MIT） | `comment-api.mjs:218–266`解析内部发布响应的cid，再按cid在目标线程有限翻页；未看到只记落点未知。`304–344`记录HTTP200无cid后重发重复的历史，增加同文/近15分钟找回cid；具体实现归一化并截取60字，缺时间也未直接排除。`im-send.mjs:457–480`以我方同文或20字前缀的气泡计数增加且编辑器清空为成功，有Enter/按钮兜底。 | 精确发布返回ID与随后同ID线程核对值得参考；文本时间窗、气泡计数及多种提交兜底不足以满足本项目。内部发布、签名直连不接入当前网页交互路径。[评论源码](https://github.com/miqian-nomad/dsh-douyin-watch/blob/b3d5e36ed4ef9b8c1a7006ca2770309f820ffa46/tools/comment-api.mjs#L218-L266)、[私信源码](https://github.com/miqian-nomad/dsh-douyin-watch/blob/b3d5e36ed4ef9b8c1a7006ca2770309f820ffa46/tools/im-send.mjs#L457-L480) |
+| yudigaga/DouAi `f751fde`（公开源码，GitHub未识别许可且树中未见根LICENSE，不复制） | `NativeCommentPublisher.java:268–316`关联具体原生请求对象和回调，接受提交不等于业务成功；30秒未回执保留submitted/unknown。`607–619`要求业务状态0、非空cid、准确作品/root/direct回复关系。相应测试覆盖错作品/父评论/直接目标。[源码](https://github.com/yudigaga/DouAi/blob/f751fde0202a53c96cb14905e620ad5982d1be8f/app/src/main/java/com/douai/module/feature/NativeCommentPublisher.java#L607-L619) | 通过“本次请求→业务回执→精确返回ID”建立归因，不依赖平台时间大于本机时间。它是Android宿主hook，不能移植到Windows网页；只参考证据分层和回调关联思路，不把原生成功声明当浏览器实测。 |
+| crazyants/douyin-robot `b8eef83`（未核准可复用许可） | `douyin_chat.py:720–769`在最新3条气泡内，以左右坐标判我方，归一化并匹配前60字，超时不自动重试。[源码](https://github.com/crazyants/douyin-robot/blob/b8eef83c3db7dcb4534f6ce6de93e3b092416403/src/douyin_chat.py#L720-L769) | 无稳定消息ID及发送前时间因果证明，未解决同文旧消息误认，不采用其收据判据。 |
+| POKMJN/douyin-reply-assistant `3e215be`（未核准可复用许可） | `automation.cjs:2406–2458`以输入框清空为发送完成，未清空时重复Enter/鼠标兜底。[源码](https://github.com/POKMJN/douyin-reply-assistant/blob/3e215be1a5cd4950225a19f2bc490c5be0f0086a/app-source/electron/automation.cjs#L2406-L2458) | 本轮已证明清空或短暂本地气泡不足以确认服务端回执，不采用。 |
+| Agying3/DMShoot `4c792ea`（MIT） | `douyin_sdk.py:217–243`创建会话后使用第三方SDK的send_msg布尔结果；该包装器不暴露本次返回消息ID或刷新全绑定证明。[源码](https://github.com/Agying3/DMShoot/blob/4c792ea89c36b80a90db32615b67490126ed440f/dmshoot/utils/douyin_sdk.py#L217-L243) | 第三方协议路线不同，包装器也未证明本轮问题的解法，不接入。 |
+
+### 本机最小验证与适用边界
+
+直接导入固定版本的上游`createCommentReceiptBaseline/matchCommentReceiptBaseline`，全部使用合成输入：准确新ID可确认；同一个基线未见ID即使附加昨天的sentAt也确认；错误全文、pending及基线已有ID均拒绝。5项断言实际通过，零浏览器/外发。此结果只证明该匹配器不校验新旧时间，不能单独判定整个上游应用会在所有历史场景误发或误确认；其调用者另有读取/身份约束。它足以否定“直接移植此函数便解决隐藏旧同文及两个时钟问题”。
+
+### inbora的取舍
+
+1. 继续保留单次提交、原意图和未知冻结；刷新后的服务端状态比发送当刻的渲染状态更有参考价值。当前私信刷新门禁已实现，不把这一源码研究当成新的真实发送验收。
+2. 平台绝对时间和本机墙钟来自不同来源，直接比较会有误拒绝。若维持现有规则，应证明所用通道的时钟边界并保守等待，私信不能直接假定作品评论服务的时差也适用于IM服务。缺证据继续未知，不能随意加几秒容差或改写旧意图。
+3. 更值得验证的下一条路线是**被动观察正常单次网页提交所产生的准确业务响应**，将持久意图、具体请求/回执、服务器返回消息ID和刷新后的同ID全字段证明串起来；不生成额外写请求、不调用SDK或签名服务。当前评论曾遇空响应，私信具体回执关联字段也未校准，不能宣称已有可用实现。上游出现clientId只说明值得核对，不能声称本机已有该字段或已可关联服务端ID。
+4. 若以后以充分的请求级因果证明替代“平台时间严格大于本机意图”，会改变当前AGENTS/SPEC验收规则，需先形成具体证据与修订方案；本次研究没有实施该变化，也不重判旧收据。
+
+本节更新下列2026-11-05比较的时效和适用范围；下文保留历史记录。
+
 核对时间：2026-11-05。范围为 POC-SPEC 第 12 节的五个仓库、六项参考方向。本次通过 GitHub 读取固定提交的相关源码、测试和说明；没有安装或运行上游应用，没有采用上游自动发送授权，也没有把源码声明当成本项目的实机验收。下列路线只在现有单账号、网页交互及逐条审批范围内评估。
 
 ## 当前最有用的结论
