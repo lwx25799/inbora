@@ -1,5 +1,15 @@
 # 来源与许可
 
+## 2026-11-06：GO后最小客户端接入依据
+
+在确认新增P5范围前，通过官方文档与固定源码核对既定Tauri sidecar路线。候选为[tauri-apps/tauri-docs](https://github.com/tauri-apps/tauri-docs)，v2分支固定SHA `5e49cc6e48597060f1618e0b62cb91b071b1b4a9`：
+
+- [develop/sidecar.mdx](https://github.com/tauri-apps/tauri-docs/blob/5e49cc6e48597060f1618e0b62cb91b071b1b4a9/src/content/docs/develop/sidecar.mdx)：核对externalBin、目标平台文件命名、Rust持有子进程、CommandEvent stdout及child.write stdin；采用其官方进程接入机制作为设计依据，界面仅走受限Tauri命令，不直接开放任意shell。
+- [learn/sidecar-nodejs.mdx](https://github.com/tauri-apps/tauri-docs/blob/5e49cc6e48597060f1618e0b62cb91b071b1b4a9/src/content/docs/learn/sidecar-nodejs.mdx)：核对Node打包和随包附带运行时两类部署方式，以及stdin/stdout等通信方式。保留既有Node内核，不搬入示例应用或直接照搬示例打包依赖；本项目的Node/ESM/better-sqlite3适配须在P5实测后确定打包配置。
+- [LICENSE](https://github.com/tauri-apps/tauri-docs/blob/5e49cc6e48597060f1618e0b62cb91b071b1b4a9/LICENSE)：已读取，MIT。此次仅引用机制并独立编写范围文档，未复制示例代码、引入依赖或构建客户端；后续实际复用及分发仍保留对应许可与来源，核对真实锁定版本的传递依赖。
+
+核对结果支持“React界面 → Tauri受限命令 → Node sidecar共用业务服务”的小范围接入，范围见docs/MINIMAL-CLIENT.md。官方支持不代表本机Windows打包、SQLite原生模块、客户端重启或真实AI试用已通过；当前均未实现/未验证，P5在GO后启动。
+
 ## 2026-11-06：将请求关联路线落实前核对
 
 用户要求继续实施，并纠正开源核对必须主动完成。动手前复读MIT LockyBee `7989640e340f0fd79e2de9874880d5197546e755`的不可覆盖基线/未知记录、MIT watch `b3d5e36ed4ef9b8c1a7006ca2770309f820ffa46`的发布cid与父评论，以及仅供阅读的DouAi `f751fde0202a53c96cb14905e620ad5982d1be8f`具体请求回调绑定。原有响应证明评论正常发布返回status_code0、cid、reply_id、全文/我方及create_time，但没有aweme_id；status7不能替代刷新后的status1。故必须绑定同一个Request的准确作品/父评论/全文，随后刷新核对同cid；不单凭响应状态升级。

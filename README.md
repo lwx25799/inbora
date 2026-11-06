@@ -118,4 +118,4 @@ pnpm test:real --case L01 --real-account --private-access
 
 每个可验证切片提交；推送前审查所有待推送提交，运行全部检查及 `pnpm check:privacy`，推送后核对远程 SHA。历史和暂存区隐私扫描是补充检查，仍需审查夹具是否包含私人数据。审查记录见 [REVIEW.md](docs/REVIEW.md)，进度见 [PROGRESS.md](docs/PROGRESS.md)。
 
-只有原方案全部必要实机证据支持 GO，才开始 P5 Tauri 接入评审；本期不建设完整工作台或多账号系统。
+只有修订基线的全部必要实机证据支持GO，才启动P5：交付可启动的Tauri v2 + React最小图形客户端，配置AI并完成评论、私信的草稿—人工审批—发送—回读试用。客户端与CLI共享现有Node内核、数据库和发送门禁，正式版继续扩展；本期不建设完整工作台或多账号系统。具体范围与G01—G06见[最小客户端交付要求](docs/MINIMAL-CLIENT.md)。当前GO尚未完成，客户端尚未实现；仅接入评审不再作为最终交付。
