@@ -4,6 +4,8 @@
 
 最终包收尾：干净检出生成的安装包SHA256为`957d71b6b9d1a4c5705bac22d3dd25173827ab9a07f34ae46792a8fdb3b53e7f`，新目录安装退出0，已从最终安装目录验证完整ClientService/Playwright导入、Node26.13.0及SQLite读写。随后启动最终安装版的桌面操作被用户物理Esc中止，已停止界面自动化；这次最终包的现场窗口确认仍待恢复，不能把此前原生QA交互记成该次启动已完成。
 
+最终安装目录的独立后端复核：直接启动随包Node及sidecar，通过真实私有管道连接合成schema2库并升级至schema3；评论/私信各10条人工草稿保存，20次过期版本写入全部拒绝，重启后20条草稿保留、旧接管失效且无发送意图。能力未校准时MANUAL切换拒绝并保持DRAFT_ONLY，独立急停和暂停重启保留，正常退出释放OwnerLock并使操作员会话过期；SQLite quick_check=ok。模型请求、输入/输出Token、SEND/MODEL预算及真实发送全0。这是最终包后端验证，不补记为最终窗口启动通过；结果保存在本机忽略目录`.local/installed-sidecar-smoke`。
+
 ## 可复核交付
 
 - Windows x64安装包：`.local/delivery/inbora_0.2.0_x64-setup.exe`。版本0.2.0，最终SHA/校验值见同目录`DELIVERY.json`和审查记录。Node 26.13.0、SQLite预编译依赖随包附带；应用与私有运行资料分离。
