@@ -24,5 +24,21 @@ try{
     assert.equal(store.db.prepare('SELECT status FROM send_intents').get().status,'INTENT_RECORDED');await click();};
   assert.equal(await new SendCoordinator(store,owner.actor).send(draft.id,adapter,false),'CONFIRMED');
   assert.equal(await owner.notification.evaluate(()=>window.commentClicks),1);
+  // Exercise the independent rendered child + passive server-status path under source and compiled runtimes.
+  await mountCommentReply(owner,server.origin);const networkAdapter=new ObservedCommentReply(owner.notification,mapping);
+  await networkAdapter.inspect(event.payload);
+  const at=(Date.now()-1000)/1000;
+  await owner.notification.route('**/aweme/v1/web/comment/list/reply/**',route=>route.fulfill({json:{status_code:0,comments:[{
+    cid:'901',aweme_id:'10',reply_id:'11',text:draft.text,user:{uid:'100',sec_uid:'self-sec'},status:1,create_time:at}]}}));
+  await owner.notification.evaluate(async({at,text})=>{
+    const root=document.querySelector('#root-comment'),child=document.createElement('div');child.className='comment';
+    Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture').value.return.memoizedProps.commentInfo.replyTotal=1;
+    Object.defineProperty(child,'__reactFiber$fixture',{value:{return:{memoizedProps:{level:2,levelOneCid:'11',awemeInfo:{awemeId:'10'},
+      commentInfo:{cid:'901',replyId:'11',text,createTime:at,user:{uid:'100',secUid:'self-sec'}}}}}});
+    child.innerHTML='<a class="author" href="/user/self-sec">Self</a><div class="body"></div><div class="tooltip" id="tooltip_901">Actions</div>';
+    child.querySelector('.body').textContent=text;root.append(child);await fetch('/aweme/v1/web/comment/list/reply/?comment_id=11');
+  },{at,text:draft.text});
+  assert.equal((await networkAdapter.readback(event.payload,draft.text,[],new Date(Date.now()-5000).toISOString()))?.id,'901');
+  networkAdapter.dispose();adapter.dispose();
   console.log(JSON.stringify({nativeCommentReplySmoke:'PASS',runtime:source?'tsx-source':'compiled-node',fixtureClicks:1,realSends:0,modelCalls:0}));
 }finally{store.close();await owner.close();await server.close();}

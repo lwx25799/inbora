@@ -11,5 +11,6 @@
 | 2026-11-05 | 评论读取就绪 | 可见行或显式commentEmpty；最终同步快照重核范围和空态 | 真实loaded0→4阶段证据、延迟行及快照竞态回归 | Headless源码读取及cursor复核926af233；真实空态未校准为null |
 | 2026-11-05 | 一级评论直接回复 | 独立comment-reply映射；原评论cid/作品/作者与输入区cid/level绑定，Draft.js单行结构、隐藏发布图标分阶段核验 | SITE-OBSERVATION、UPSTREAM；本地26项评论及source/compiled链 | C03实机通过；单次提交N06为UNCERTAIN并冻结，子回复回读未通过，不由合成测试推定 |
 | 2026-11-05 | 安全验证后的真实子回复 | 观察到独立level2/levelOneCid子回复，根replyComment空、child缺status；通过正常页面GET响应交叉校验status1 | SITE-OBSERVATION；原始DOM/响应仅私有目录，未放宽生产映射 | N06/C04/C05补充核验通过；自动回读和短信弹层映射仍未完成，原未知冻结保留 |
+| 2026-11-06 | 自动回读/短信门禁/图集列表 | 独立直接child与正常精确GET补证；实际短信标题组件阻断；唯一可见列表、根字段归属及透明菜单ID锚点 | SITE-OBSERVATION；红绿回归、source/compiled及真实只读核验 | 有头源码bbffa1f0/无头编译22c10d29复核既有回复通过；第二作品加载通过，新发送/新测试者/新验证码仍待验 |
 
 后续每次真实 DOM 校准记录观察时间、浏览器完整版本、修改字段、证据摘要和回归结果，不提交私人 HTML、截图、标识或映射原件。映射内容摘要进入审批绑定；修改映射必须重新审批。

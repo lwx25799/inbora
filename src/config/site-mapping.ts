@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { requireSafe } from '../core/contracts.js';
 
 const selector = z.string().min(1).max(2000);
+export const observedSecurityBlockers='.uc-ui-verify-new_header-title,#captcha_container,[id^="captcha_container"],[data-e2e="captcha-container"]';
+export const nativeCommentReplyPath='/aweme/v1/web/comment/list/reply/';
 export const fieldSchema = z.object({
   selector: selector.optional(), attribute: z.string().min(1).optional(),
   extract: z.object({ pattern: z.string().min(1).max(500), replacement: z.string().min(1).max(500) }).optional(),
@@ -46,6 +48,7 @@ const secureId = z.string().regex(/^[A-Za-z0-9_-]{1,300}$/);
 export const observationMappingSchema = z.object({
   version: z.literal(1), purpose: z.literal('observation'), environment: z.enum(['fixture', 'douyin']),
   origin: z.url(), entryUrl: z.url(), observedAt: z.iso.datetime(), evidenceRef: z.string().min(1),
+  securityBlockers:selector.default(observedSecurityBlockers),
   self: z.object({ uid: nativeId, secUid: secureId }),
   peers: z.array(z.object({ uid: nativeId, secUid: secureId, conversationId: z.string().min(1).max(512), title: z.string().min(1) })).min(1).max(2),
   works: z.array(z.object({ id: nativeId, url: z.url() })).min(1).max(2),

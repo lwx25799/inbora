@@ -16,8 +16,10 @@ test('CLI init/status/restart/help work without touching a real site, real entry
   expect(status.events).toEqual([]); expect(status.uncertain).toBe(0);
   const denied = spawnSync(process.execPath, ['--import','tsx',cli,'login','--runtime',root], { encoding: 'utf8', timeout: 10_000 });
   expect(denied.status).toBe(1); expect(denied.stdout).toContain('EXPLICIT_PRIVATE_ACCESS_REQUIRED');
-  const retryDenied=spawnSync(process.execPath,['--import','tsx',cli,'retry-comment-once','fixture-draft','--runtime',root],{encoding:'utf8',timeout:10000});
-  expect(retryDenied.status).toBe(1);expect(retryDenied.stdout).toContain('EXPLICIT_PRIVATE_ACCESS_REQUIRED');
+  for(const command of ['retry-comment-once','verify-comment']){
+    const denied=spawnSync(process.execPath,['--import','tsx',cli,command,'fixture-draft','--runtime',root],{encoding:'utf8',timeout:10000});
+    expect(denied.status).toBe(1);expect(denied.stdout).toContain('EXPLICIT_PRIVATE_ACCESS_REQUIRED');
+  }
   expect(run(['status','--runtime',root])).toContain('budgets');
 });
 

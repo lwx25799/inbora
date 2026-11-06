@@ -24,14 +24,21 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       return own ? own.value : inherited?.value;
     },
     visible(element: Element): boolean {
-      const r = element.getBoundingClientRect(), style = getComputedStyle(element);
-      return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      if(!element.isConnected||!element.getClientRects().length)return false;
+      for(let n:Element|null=element;n;n=n.parentElement){const style=getComputedStyle(n);
+        if(style.visibility==='hidden'||style.visibility==='collapse'||style.display==='none'||Number(style.opacity)===0)return false;}
+      return true;
     },
     one(root: Document | Element, selector: string): Element {
       const found = root.querySelectorAll(selector);
       dom.check(found.length > 0,'OBSERVATION_DOM_NOT_READY');
       dom.check(found.length === 1,'OBSERVATION_DOM_NOT_UNIQUE');
       dom.check(dom.visible(found[0]!),'OBSERVATION_DOM_NOT_READY'); return found[0]!;
+    },
+    ownedOne(root:Element,selector:string,requireVisible=true):Element{
+      const found=Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root);
+      dom.check(found.length>0,'OBSERVATION_DOM_NOT_READY');dom.check(found.length===1,'OBSERVATION_DOM_NOT_UNIQUE');
+      dom.check(!requireVisible||dom.visible(found[0]!),'OBSERVATION_DOM_NOT_READY');return found[0]!;
     },
     react(element: Element, prefix: string): unknown {
       const keys = Object.getOwnPropertyNames(element).filter(key => key.startsWith(prefix));
@@ -70,6 +77,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     },
   };
   dom.check(location.origin === m.origin && !/验证码|安全验证/.test(document.title), 'OBSERVATION_PAGE_BLOCKED');
+  dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_PAGE_BLOCKED');
   const avatar = dom.one(document,s.selfAvatar), own = dom.fiberProps(avatar,s.selfFiberDepth);
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
   const events: InboundEvent[] = []; let unsupported = 0, loaded = 0;
@@ -129,14 +137,16 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     }
   } else {
     const work = m.works[index]; dom.check(work && location.href.split('?')[0] === work.url.split('?')[0], 'OBSERVATION_WORK_CHANGED');
-    const list=dom.one(document,s.commentList),rows = Array.from(list.querySelectorAll(s.commentRows)); loaded = rows.length;
+      const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);
+      dom.check(lists.length>0,'OBSERVATION_DOM_NOT_READY');dom.check(lists.length===1,'OBSERVATION_DOM_NOT_UNIQUE');
+      const list=lists[0]!,rows = Array.from(list.querySelectorAll(s.commentRows)); loaded = rows.length;
     dom.check(rows.length <= 100,'OBSERVATION_WINDOW_TOO_LARGE');
     const visibleRoots=rows.filter(row=>dom.visible(row)&&!row.parentElement?.closest(s.commentRows));
     const empty=s.commentEmpty?Array.from(list.querySelectorAll(s.commentEmpty)).filter(dom.visible):[];
     dom.check(visibleRoots.length>0||empty.length===1,'OBSERVATION_DOM_NOT_READY');
     for (const row of rows) {
       if (!dom.visible(row) || row.parentElement?.closest(s.commentRows)) continue;
-      const authors = Array.from(row.querySelectorAll(s.commentAuthor));
+      const authors = Array.from(row.querySelectorAll(s.commentAuthor)).filter(n=>n.closest(s.commentRows)===row&&dom.visible(n));
       const profiles = authors.map(a => a.getAttribute('href')).filter(Boolean).map(href => new URL(href!,location.origin));
       const peer = m.peers.find(p => profiles.some(url => url.origin === m.origin && url.pathname === `/user/${p.secUid}`));
       if (!peer) continue;
@@ -144,9 +154,9 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       const author = dom.data(comment,'user'), aweme = dom.data(props,'awemeInfo'), self = dom.data(props,'userInfo');
       dom.check(dom.data(aweme,'awemeId') === work!.id && dom.data(self,'uid') === m.self.uid,'OBSERVATION_COMMENT_WORK_CONFLICT');
       dom.check(dom.data(author,'uid') === peer.uid && dom.data(author,'secUid') === peer.secUid,'OBSERVATION_COMMENT_AUTHOR_CONFLICT');
-      const id = dom.id(dom.data(comment,'cid')), tooltip = dom.one(row,s.commentTooltip);
+      const id = dom.id(dom.data(comment,'cid')), tooltip = dom.ownedOne(row,s.commentTooltip,false);
       dom.check(id && tooltip.id === `tooltip_${id}`,'OBSERVATION_COMMENT_ID_CONFLICT');
-      const text = dom.one(row,s.commentText).textContent ?? '';
+      const text = dom.ownedOne(row,s.commentText).textContent ?? '';
       dom.check(text.length > 0 && text === dom.data(comment,'text'),'OBSERVATION_COMMENT_TEXT_CONFLICT');
       events.push({ accountId:'account_001',channel:'COMMENT_NOTIFICATION',platformEventId:id,actorId:peer.uid,
         actorName:peer.title,text,occurredAt:dom.time(dom.data(comment,'createTime'),true),videoId:work!.id,commentId:id,
@@ -225,9 +235,10 @@ export class ObservedReader {
     const work = this.mapping.works[index]; requireSafe(work,'OBSERVATION_WORK_REQUIRED');
     await this.page.goto(work.url,{waitUntil:'domcontentloaded'});
     await this.guard();
-    if (!await this.page.locator(this.mapping.selectors.commentList).isVisible())
+    if (!await this.page.evaluate(selector=>Array.from(document.querySelectorAll(selector)).some(n=>n.getClientRects().length),this.mapping.selectors.commentList))
       await this.page.locator(this.mapping.selectors.commentEntry).click();
-    await this.page.locator(this.mapping.selectors.commentList).waitFor({state:'visible'});
+    await this.page.waitForFunction(selector=>Array.from(document.querySelectorAll(selector)).filter(n=>n.getClientRects().length).length===1,
+      this.mapping.selectors.commentList);
     try {
       await this.page.waitForFunction(({rows,empty})=>{
         const visible={check(node:Element):boolean{const r=node.getBoundingClientRect(),style=getComputedStyle(node);

@@ -36,6 +36,7 @@ pnpm inbora <command> [id] [options]
   reject DRAFT_ID
   send-once DRAFT_ID --real-account --private-access
   retry-comment-once DRAFT_ID --real-account --private-access
+  verify-comment DRAFT_ID --real-account --private-access
   pause EVENT_ID | resume EVENT_ID
   review-uncertain              查看未知态（仅人工核对，不提供自动重发）
   compare-modes --real-account --private-access
@@ -97,7 +98,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (values.help || positionals.length === 0) { stdout.write(`${help}\n`); return; }
   requireSafe(!(values.headed && values.headless), 'CONFLICTING_BROWSER_MODE');
   const command = positionals[0]!; const id = positionals[1];
-  const known = ['init','status','login','install-mapping','observe','draft','show','edit','approve','reject','send-once','retry-comment-once',
+  const known = ['init','status','login','install-mapping','observe','draft','show','edit','approve','reject','send-once','retry-comment-once','verify-comment',
     'pause','resume','review-uncertain','compare-modes','real-test','authorize-model','prune-evidence'];
   requireSafe(known.includes(command), 'UNKNOWN_COMMAND');
   const root = runtimeRoot(values.runtime);
@@ -210,9 +211,26 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       }
       requireSafe(id !== 'works','OBSERVATION_MAPPING_REQUIRED');
     }
-    if(['approve','send-once','retry-comment-once'].includes(command)){
+    if(['approve','send-once','retry-comment-once','verify-comment'].includes(command)){
       requireSafe(id,'DRAFT_ID_REQUIRED');
       const event=store.event(store.draft(id).eventId);
+      if(command==='verify-comment'){
+        requireSafe(event.payload.channel==='COMMENT_NOTIFICATION','COMMENT_REPLY_SCOPE_REQUIRED');
+        const native=await loadCommentReplyMapping(root);requireSafe(native,'NATIVE_COMMENT_REPLY_MAPPING_REQUIRED');
+        const retry=(store.stats().manualRetries as {retryId:string;eventId:string}[]).find(r=>r.eventId===event.id);
+        const intent=store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(event.id) as {id:string}|undefined;
+        requireSafe(intent,'COMMENT_REPLY_INTENT_REQUIRED');
+        const boundary=retry?store.commentRetryBoundary(retry.retryId):store.intentBoundary(intent.id);
+        browser=await BrowserProfileOwner.launch(join(root,'profile'),values.headless??false);
+        const adapter=new ObservedCommentReply(browser.notification,native);
+        try{
+          const proof=await browser.actor.run(()=>adapter.verifyExisting(event.payload,store!.draft(id).text,boundary));
+          const evidenceId=await recordEvidence(join(root,'evidence'),{caseId:'C05',browserVersion:browser.version(),mode:values.headless?'headless':'headed',
+            taskId:event.id,action:'OBSERVE',result:proof?'PASS':'BLOCKED',source:'AUTOMATED_REAL',
+            diagnostics:['AUTOMATED_READ_ONLY_RECHECK',proof?'BOUND_PROOF':'NO_BOUND_PROOF','ORIGINAL_RECEIPTS_RETAINED'],proofDigest:proof?digest(proof):null});
+          print({verified:!!proof,evidenceId,originalReceiptsRetained:true});
+        }finally{adapter.dispose();}return;
+      }
       if(command==='retry-comment-once')requireSafe(event.payload.channel==='COMMENT_NOTIFICATION','MANUAL_RETRY_REQUIRES_UNKNOWN_COMMENT');
       if(event.payload.channel==='DIRECT_MESSAGE'){
         const native=await loadDmReplyMapping(root);

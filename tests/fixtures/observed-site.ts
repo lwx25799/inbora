@@ -4,6 +4,7 @@ import type { ObservationMapping, DmReplyMapping,CommentReplyMapping } from '../
 // Synthetic rendered component contract; no real identities or private source data.
 export function observedMapping(origin: string): ObservationMapping {
   return {version:1,purpose:'observation',environment:'fixture',origin,entryUrl:origin,
+    securityBlockers:'[data-fixture-challenge],.uc-ui-verify-new_header-title',
     observedAt:'2026-11-05T00:00:00Z',evidenceRef:'synthetic-rendered-only',self:{uid:'100',secUid:'self-sec'},
     peers:[{uid:'200',secUid:'peer-sec',conversationId:'conv-a',title:'Fixture peer'}],works:[{id:'10',url:origin+'/video/10'}],
     selectors:{selfAvatar:'#self',selfFiberDepth:1,dmEntry:'#dm-open',dmPanel:'#dm-panel',conversationRows:'.conversation',

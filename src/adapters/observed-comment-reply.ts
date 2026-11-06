@@ -4,10 +4,11 @@ import type {CommentReplyMapping} from '../config/site-mapping.js';
 import {digest,eventBinding,isStrong,requireSafe,targetKey,validText,
   type InboundEvent,type ReplyAdapter,type SendProof,type TargetSnapshot} from '../core/contracts.js';
 import {ObservedReader} from './observed-reader.js';
+import {CommentResponses,type NativeCommentReply} from './comment-responses.js';
 
-interface Input{mapping:CommentReplyMapping;event:InboundEvent;action:'open'|'snapshot'|'fill'|'finish'|'arm'|'proofs';text:string|null;
-  token:string|null;before:{context:unknown[];editorText:string}|null;shape:string|null}
-interface Frame{context:unknown[];proofs:SendProof[];ids:string[];editorText:string;shape:string}
+interface Input{mapping:CommentReplyMapping;event:InboundEvent;action:'open'|'expand'|'snapshot'|'fill'|'finish'|'arm'|'proofs';text:string|null;
+  token:string|null;before:{context:unknown[];editorText:string}|null;shape:string|null;receipts?:NativeCommentReply[]}
+interface Frame{context:unknown[];proofs:SendProof[];ids:string[];editorText:string;shape:string;needsResponse?:boolean}
 
 /** Fixed, bounded rendered paths. No calls to website handlers, getters or private endpoints. */
 export function captureCommentReply(input:Input):Frame{
@@ -48,14 +49,17 @@ export function captureCommentReply(input:Input):Frame{
     owned(root:Element,selector:string):Element[]{
       return Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root);
     },
-    root():{root:Element;context:unknown[];proofs:SendProof[];ids:string[]}{
+    root():{root:Element;context:unknown[];proofs:SendProof[];ids:string[];needsResponse:boolean}{
       const work=o.works.find(w=>w.id===e.videoId),peer=o.peers.find(p=>p.uid===e.actorId);
       dom.check(work&&peer&&e.channel==='COMMENT_NOTIFICATION'&&e.kind==='COMMENT'&&e.direction==='INCOMING','COMMENT_REPLY_SCOPE_REQUIRED');
       dom.check(location.origin===o.origin&&location.href.split('?')[0]===work!.url.split('?')[0]&&
         !/验证码|安全验证|访问受限/.test(document.title)&&!Array.from(document.querySelectorAll(m.blockers)).some(dom.visible),'COMMENT_REPLY_PAGE_BLOCKED');
+      dom.check(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.visible),'COMMENT_REPLY_PAGE_BLOCKED');
       const own=dom.props(dom.one(document,s.selfAvatar),s.selfFiberDepth);
       dom.check(dom.data(own,'uid')===o.self.uid&&dom.data(own,'secUid')===o.self.secUid,'COMMENT_REPLY_ACCOUNT_CHANGED');
-      const list=dom.one(document,s.commentList),rows=Array.from(list.querySelectorAll(s.commentRows));
+      const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);
+      dom.check(lists.length===1,'COMMENT_REPLY_LIST_NOT_UNIQUE');
+      const list=lists[0]!,rows=Array.from(list.querySelectorAll(s.commentRows));
       dom.check(rows.length<=100,'COMMENT_REPLY_WINDOW_TOO_LARGE');
       const roots=rows.filter(n=>!n.parentElement?.closest(s.commentRows)&&dom.visible(n)&&
         dom.data(dom.data(dom.props(n,s.commentFiberDepth),'commentInfo'),'cid')===e.commentId);
@@ -80,16 +84,38 @@ export function captureCommentReply(input:Input):Frame{
         if(input.action!=='proofs')dom.check(strong,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
         if(typeof id==='string'){dom.check(!seen.has(id),'COMMENT_REPLY_ID_COLLISION');seen.add(id);ids.push(id);}
         context.push([id,text,parent,uid,sec,at,status]);
-        if(!strong||uid!==o.self.uid||sec!==o.self.secUid||status!==m.confirmedStatus)continue;
-        const tooltip=Array.from(root.querySelectorAll(s.commentTooltip)).filter(n=>n.id===`tooltip_${id}`&&dom.visible(n));
-        if(tooltip.length!==1)continue;
-        const child=tooltip[0]!.closest(s.commentRows);
-        if(!child||child===root||!dom.visible(child)||child.parentElement?.closest(s.commentRows)!==root)continue;
+      }
+      const children=Array.from(root.querySelectorAll(s.commentRows)).filter(n=>n.parentElement?.closest(s.commentRows)===root&&dom.visible(n));
+      dom.check(children.length<=100,'COMMENT_REPLY_WINDOW_TOO_LARGE');
+      const childIds=new Set<string>();
+      let needsResponse=false;
+      for(const child of children){
         const childProps=dom.props(child,s.commentFiberDepth),native=dom.data(childProps,'commentInfo'),nativeUser=dom.data(native,'user');
-        if(dom.data(childProps,'level')!==2||dom.data(dom.data(childProps,'awemeInfo'),'awemeId')!==e.videoId||
-          dom.data(native,'cid')!==id||dom.data(native,'replyId')!==e.commentId||dom.data(native,'text')!==text||
-          dom.data(nativeUser,'uid')!==uid||dom.data(nativeUser,'secUid')!==sec||dom.time(dom.data(native,'createTime'))!==at||
-          dom.data(native,'status')!==status)continue;
+        const id=dom.data(native,'cid'),text=dom.data(native,'text'),uid=dom.data(nativeUser,'uid'),sec=dom.data(nativeUser,'secUid'),
+          at=dom.time(dom.data(native,'createTime')),status=dom.data(native,'status'),parent=dom.data(native,'replyId');
+        const strong=typeof id==='string'&&/^[1-9]\d{0,63}$/.test(id)&&typeof text==='string'&&typeof uid==='string'&&at&&parent===e.commentId&&
+          dom.data(childProps,'level')===2&&dom.data(dom.data(childProps,'awemeInfo'),'awemeId')===e.videoId&&
+          (dom.data(childProps,'levelOneCid')===undefined||dom.data(childProps,'levelOneCid')===e.commentId);
+        if(input.action!=='proofs')dom.check(strong,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
+        if(typeof id!=='string')continue;
+        dom.check(!childIds.has(id),'COMMENT_REPLY_ID_COLLISION');childIds.add(id);
+        if(!seen.has(id)){seen.add(id);ids.push(id);}
+        context.push(['visible',id,text,parent,uid,sec,at,status??null]);
+        if(!strong||uid!==o.self.uid||sec!==o.self.secUid)continue;
+        if(status===undefined)needsResponse=true;
+        const responses=(input.receipts??[]).filter(r=>r.cid===id);
+        const server=responses.length===1?responses[0]:null;
+        const serverMatches=server&&server.aweme_id===e.videoId&&server.reply_id===e.commentId&&server.text===text&&
+          server.user.uid===uid&&server.user.sec_uid===sec&&dom.time(server.create_time)===at;
+        if(server&&(!serverMatches||server.status!==m.confirmedStatus))continue;
+        if(status!==undefined&&status!==m.confirmedStatus||status===undefined&&!(serverMatches&&server.status===m.confirmedStatus))continue;
+        const tooltip=Array.from(root.querySelectorAll(s.commentTooltip)).filter(n=>n.id===`tooltip_${id}`);
+        if(tooltip.length!==1)continue;
+        if(tooltip[0]!.closest(s.commentRows)!==child)continue;
+        const prior=(replies as unknown[]).filter(r=>dom.data(r,'cid')===id);
+        if(prior.length){const r=prior[0],u=dom.data(r,'user');if(dom.data(r,'text')!==text||dom.data(r,'replyId')!==parent||
+          dom.data(u,'uid')!==uid||dom.data(u,'secUid')!==sec||dom.time(dom.data(r,'createTime'))!==at||
+          dom.data(r,'status')!==undefined&&dom.data(r,'status')!==m.confirmedStatus)continue;}
         const bodies=dom.owned(child,s.commentText).filter(dom.visible),authors=dom.owned(child,s.commentAuthor).filter(dom.visible);
         const authorUrl=authors.length===1?new URL(authors[0]!.getAttribute('href')??'',location.origin):null;
         const flagged=Array.from(child.querySelectorAll(`${m.pending},${m.failed}`)).some(dom.visible)||child.matches(`${m.pending},${m.failed}`);
@@ -97,7 +123,8 @@ export function captureCommentReply(input:Input):Frame{
           authorUrl.pathname===`/user/${o.self.secUid}`&&!flagged)
           proofs.push({id:id as string,ownId:o.self.uid,targetKey:`comment:${e.videoId}:${e.commentId}`,text:text as string,pending:false,sentAt:at as string});
       }
-      return{root,context,proofs,ids};
+      dom.check(typeof total==='number'&&total>=ids.length,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
+      return{root,context,proofs,ids,needsResponse};
     },
     editorText(editor:Element):string{
       dom.check(editor instanceof HTMLElement&&editor.isContentEditable&&!editor.querySelector('img,video,audio,input,[contenteditable]'),'COMMENT_REPLY_EDITOR_UNSUPPORTED');
@@ -120,9 +147,22 @@ export function captureCommentReply(input:Input):Frame{
         button.closest(m.composerScope)===scope&&!button.contains(editor),'COMMENT_REPLY_COMPOSER_CHANGED');
       return{...state,editor:editor as HTMLElement,button:button as HTMLElement,editorText:dom.editorText(editor),shape:editor.innerHTML};
     },
-    frame(state:Frame):Frame{return{context:state.context,proofs:state.proofs,ids:state.ids,editorText:state.editorText,shape:state.shape};},
+    frame(state:Frame):Frame{return{context:state.context,proofs:state.proofs,ids:state.ids,editorText:state.editorText,shape:state.shape,needsResponse:state.needsResponse??false};},
   };
   if(input.action==='proofs'){const state=dom.root();return dom.frame({...state,editorText:'',shape:''});}
+  if(input.action==='expand'){
+    const state=dom.root(),buttons=Array.from(state.root.querySelectorAll('span,button,div')).filter(n=>
+      n.closest(s.commentRows)===state.root&&!n.childElementCount&&dom.visible(n)&&/^展开\d+条回复$/.test(n.textContent??''));
+    dom.check(buttons.length<=1,'COMMENT_REPLY_EXPAND_NOT_UNIQUE');
+    const button=buttons[0];
+    if(button){
+      const gate={handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root().root===state.root&&button.isConnected);}
+        catch{event.preventDefault();event.stopImmediatePropagation();}}};
+      button.addEventListener('click',gate.handle,true);
+      try{dom.check(button instanceof HTMLElement);(button as HTMLElement).click();}finally{button.removeEventListener('click',gate.handle,true);}
+    }
+    return dom.frame({...state,editorText:'',shape:''});
+  }
   if(input.action==='open'){
     const state=dom.root();
     if(!state.root.querySelector(m.composerScope)){
@@ -196,19 +236,23 @@ export function captureCommentReply(input:Input):Frame{
 export class ObservedCommentReply implements ReplyAdapter{
   private prepared:{binding:string;text:string;shape:string}|null=null;
   private token:string|null=null;
-  constructor(readonly page:Page,readonly mapping:CommentReplyMapping,private readonly timeoutMs=5000){}
+  private readonly responses:CommentResponses;
+  constructor(readonly page:Page,readonly mapping:CommentReplyMapping,private readonly timeoutMs=5000){this.responses=new CommentResponses(page,mapping);}
+  dispose():void{this.responses.dispose();}
   private async frame(event:InboundEvent,action:Input['action']='snapshot',text:string|null=null,token:string|null=null,
     before:Input['before']=null,shape:string|null=null):Promise<Frame>{
-    try{return await this.page.evaluate(captureCommentReply,{mapping:this.mapping,event,action,text,token,before,shape});}
+    try{return await this.page.evaluate(captureCommentReply,{mapping:this.mapping,event,action,text,token,before,shape,receipts:this.responses.snapshot(event)});}
     catch(error){const code=error instanceof Error?error.message.match(/COMMENT_REPLY_[A-Z_]+/)?.[0]:null;if(code)requireSafe(false,code);throw error;}
   }
   private snapshot(event:InboundEvent,state:Frame):TargetSnapshot{return{accountId:event.accountId,ownId:this.mapping.observation.self.uid,
     targetKey:targetKey(event),eventBinding:eventBinding(event),composerKey:targetKey(event),contextDigest:digest(state.context),mappingDigest:digest(this.mapping)};}
   async inspect(event:InboundEvent):Promise<TargetSnapshot>{
+    this.responses.watch(event);
     this.token=null;const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);
     requireSafe(isStrong(event)&&index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
     if(this.page.url().split('?')[0]!==this.mapping.observation.works[index]!.url.split('?')[0])
       await new ObservedReader(this.page,this.mapping.observation).comments(index);
+    await this.frame(event,'expand');
     await this.frame(event,'open');const deadline=Date.now()+5000;let frame:Frame;
     for(;;)try{frame=await this.frame(event);break;}catch(error){
       if(!(error instanceof Error)||!error.message.includes('COMMENT_REPLY_DOM_NOT_READY')||Date.now()>=deadline)throw error;
@@ -244,12 +288,30 @@ export class ObservedCommentReply implements ReplyAdapter{
     this.token=token;return this.snapshot(event,state);
   }
   async baseline(event:InboundEvent):Promise<string[]>{return(await this.frame(event)).ids;}
+  async verifyExisting(event:InboundEvent,text:string,notBefore:string):Promise<SendProof|null>{
+    requireSafe(isStrong(event)&&Number.isFinite(Date.parse(notBefore)),'COMMENT_REPLY_SCOPE_REQUIRED');
+    const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
+    this.responses.watch(event);
+    await new ObservedReader(this.page,this.mapping.observation).comments(index);
+    await this.frame(event,'expand');
+    return this.poll(event,text,[],notBefore);
+  }
   async clickOnce():Promise<void>{const token=this.token;this.token=null;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
     const accepted=await this.page.evaluate(token=>{const gate=(window as unknown as {__inboraCommentGate?:Gate}).__inboraCommentGate;
       if(!gate||gate.token!==token)throw Error('COMMENT_REPLY_NOT_PREPARED');try{return gate.submit();}finally{gate.remove();}},token);
     requireSafe(accepted,'COMMENT_REPLY_CLICK_BLOCKED');
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
+    const proof=await this.poll(event,text,before,notBefore);if(proof)return proof;
+    const state=await this.frame(event,'proofs');
+    // A normal refresh/expand may expose server status absent from the rendered child. No second submission.
+    if(state.needsResponse&&!this.responses.hasRequestAfter(notBefore)&&state.ids.some(id=>!before.includes(id))){
+      await new ObservedReader(this.page,this.mapping.observation).comments(this.mapping.observation.works.findIndex(w=>w.id===event.videoId));
+      await this.frame(event,'expand');return this.poll(event,text,before,notBefore);
+    }
+    return null;
+  }
+  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
     const deadline=Date.now()+this.timeoutMs;let previous:string|null=null;
     do{const matches=(await this.frame(event,'proofs')).proofs.filter(p=>!before.includes(p.id)&&p.text===text&&
       Date.parse(p.sentAt)>Date.parse(notBefore)&&Date.parse(p.sentAt)<=Date.now());

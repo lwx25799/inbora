@@ -2,6 +2,7 @@ import {expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
 import {captureObserved} from '../../src/adapters/observed-reader.js';
+import {ObservedReader} from '../../src/adapters/observed-reader.js';
 import {ObservedCommentReply} from '../../src/adapters/observed-comment-reply.js';
 import {SendCoordinator} from '../../src/core/send-coordinator.js';
 import {ManualCommentRetry} from '../../src/core/manual-comment-retry.js';
@@ -17,6 +18,94 @@ async function setup(){
   const event=store.events()[0]!,draft=store.saveDraft(event.id,'approved root reply','mock');
   return{owner,store,server,mapping,adapter,event,draft,close:async()=>{store.close();await owner.close();await server.close();}};
 }
+
+test.each(['valid','wrong-parent','wrong-text','pending','missing','duplicate'])('independent rendered child cross-checks its normal response: %s',async failure=>{
+  const f=await setup();try{
+    await f.adapter.inspect(f.event.payload);
+    await f.owner.notification.route('**/aweme/v1/web/comment/list/reply/**',route=>route.fulfill({json:{status_code:0,comments:[{
+      cid:'501',aweme_id:'10',reply_id:failure==='wrong-parent'?'12':'11',text:failure==='wrong-text'?'other':f.draft.text,
+      user:{uid:'100',sec_uid:'self-sec'},...(failure==='missing'?{}:{status:failure==='pending'?0:1}),create_time:Date.now()/1000-1},
+      ...(failure==='duplicate'?[{cid:'501',aweme_id:'10',reply_id:'11',text:f.draft.text,user:{uid:'100',sec_uid:'self-sec'},status:1,create_time:Date.now()/1000-1}]:[])]}}));
+    const boundary=new Date(Date.now()-3000).toISOString();
+    await f.owner.notification.evaluate(async text=>{
+      const root=document.querySelector('#root-comment')!,p=Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture')!.value.return.memoizedProps;
+      p.commentInfo.replyTotal=1;p.commentInfo.replyComment=[];
+      const child=document.createElement('div');child.className='comment';
+      const response=await(await fetch('/aweme/v1/web/comment/list/reply/?comment_id=11')).json(),r=response.comments[0];
+      Object.defineProperty(child,'__reactFiber$fixture',{value:{return:{memoizedProps:{level:2,levelOneCid:'11',awemeInfo:{awemeId:'10'},
+        commentInfo:{cid:r.cid,text,replyId:'11',createTime:r.create_time,user:{uid:'100',secUid:'self-sec'}}}}}});
+      child.innerHTML='<a class="author" href="/user/self-sec">Self</a><div class="body"></div><div class="tooltip" id="tooltip_501">Actions</div>';
+      child.querySelector('.body')!.textContent=text;root.append(child);
+    },f.draft.text);
+    expect(await f.adapter.baseline(f.event.payload)).toContain('501');
+    if(failure==='valid')expect(await f.adapter.readback(f.event.payload,f.draft.text,[],boundary)).toMatchObject({id:'501',text:f.draft.text});
+    else expect(await f.adapter.readback(f.event.payload,f.draft.text,[],boundary)).toBeNull();
+  }finally{await f.close();}
+});
+
+test('visible native SMS challenge blocks inspection before input or intent',async()=>{
+  const f=await setup();try{
+    await f.owner.notification.evaluate(()=>{const node=document.createElement('div');node.className='uc-ui-verify-new_header-title';node.textContent='接收短信验证码';document.body.append(node);});
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('COMMENT_REPLY_PAGE_BLOCKED');
+    expect(f.store.stats().budgets).toMatchObject([{used:0},{used:0}]);
+  }finally{await f.close();}
+});
+
+test('root discovery excludes the fields of an already expanded direct child',async()=>{
+  const f=await setup();try{
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('CONFIRMED');
+    const batch=await f.owner.notification.evaluate(captureObserved,{mapping:f.mapping.observation,channel:'comments' as const,index:0,evidenceId:'expanded-fixture'});
+    expect(batch.events).toHaveLength(1);expect(batch.events[0]).toMatchObject({commentId:'11',text:'root fixture input'});
+  }finally{await f.close();}
+});
+
+test('one hidden stale comment list cannot block the unique active list or lend fields',async()=>{
+  const f=await setup();try{
+    await f.owner.notification.locator('#comment-list').evaluate(list=>{const clone=list.cloneNode(true) as HTMLElement;clone.style.display='none';document.body.append(clone);});
+    const batch=await f.owner.notification.evaluate(captureObserved,{mapping:f.mapping.observation,channel:'comments' as const,index:0,evidenceId:'hidden-list'});
+    expect(batch.events).toHaveLength(1);expect(await f.adapter.inspect(f.event.payload)).toHaveProperty('ownId','100');
+    await f.owner.notification.locator('#comment-list').last().evaluate(n=>(n as HTMLElement).style.display='');
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow();
+  }finally{await f.close();}
+});
+
+test('a hover-only child menu does not hide an otherwise fully verified visible reply',async()=>{
+  const f=await setup();try{
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    const click=f.adapter.clickOnce.bind(f.adapter);f.adapter.clickOnce=async()=>{await click();await f.owner.notification.locator('#tooltip_501').evaluate(n=>{
+      const hover=document.createElement('div');hover.style.opacity='0';n.replaceWith(hover);hover.append(n);
+    });};
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('CONFIRMED');
+  }finally{await f.close();}
+});
+
+test('a transparent root menu does not block discovery of its visible original comment',async()=>{
+  const f=await setup();try{
+    await f.owner.notification.locator('#tooltip_11').evaluate(n=>{const wrapper=document.createElement('div');wrapper.style.opacity='0';n.replaceWith(wrapper);wrapper.append(n);});
+    const batch=await f.owner.notification.evaluate(captureObserved,{mapping:f.mapping.observation,channel:'comments' as const,index:0,evidenceId:'root-hover-menu'});
+    expect(batch.events).toHaveLength(1);expect(batch.events[0]).toHaveProperty('commentId','11');
+  }finally{await f.close();}
+});
+
+test('a reply-list request from before intent cannot suppress the one bounded read-only refresh',async()=>{
+  const f=await setup(),original=ObservedReader.prototype.comments;
+  try{
+    await f.adapter.inspect(f.event.payload);
+    await f.owner.notification.route('**/aweme/v1/web/comment/list/reply/**',route=>route.fulfill({json:{status_code:0,comments:[]}}));
+    await f.owner.notification.evaluate(async()=>{await fetch('/aweme/v1/web/comment/list/reply/?comment_id=11');});
+    const boundary=new Date(Date.now()+1).toISOString();
+    await f.owner.notification.evaluate(()=>{
+      const root=document.querySelector('#root-comment')!,p=Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture')!.value.return.memoizedProps;
+      p.commentInfo.replyTotal=1;const child=document.createElement('div');child.className='comment';
+      Object.defineProperty(child,'__reactFiber$fixture',{value:{return:{memoizedProps:{level:2,levelOneCid:'11',awemeInfo:{awemeId:'10'},
+        commentInfo:{cid:'501',replyId:'11',text:'approved root reply',createTime:Date.now()/1000,user:{uid:'100',secUid:'self-sec'}}}}}});root.append(child);
+    });
+    let refreshes=0;ObservedReader.prototype.comments=async()=>{refreshes++;throw Error('EXPECTED_READ_ONLY_REFRESH');};
+    await expect(f.adapter.readback(f.event.payload,f.draft.text,[],boundary)).rejects.toThrow('EXPECTED_READ_ONLY_REFRESH');
+    expect(refreshes).toBe(1);expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(0);
+  }finally{ObservedReader.prototype.comments=original;await f.close();}
+});
 test('direct level-one reply records intent before one click and confirms only its exact child',async()=>{
   const f=await setup();try{
     f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
