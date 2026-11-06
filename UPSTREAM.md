@@ -2,6 +2,8 @@
 
 ## 2026-11-06：独立子回复回读及短信验证识别前核对
 
+本轮新测试者身份校准复用既有固定渲染字段读取，不新增应用功能。双会话返回实机strict2匹配后，实施校准前重读同固定MIT提交`chat-browser.mjs`当前会话身份/有界导航及回到会话列表处理；只修正私有chatBack为准确当前chat层内控件，未复制宽泛回退、整页返回或宿主操作。修正前2匹配实际拒绝，修正后四次A/B切换逐轮核对原生会话；不据此宣称延迟竞态或最终发送通过。
+
 实施前重读LockyBee/dsh-douyin-agent固定MIT提交`7989640e340f0fd79e2de9874880d5197546e755`的`receipt-baseline.mjs:matchCommentReceiptBaseline/preserveReceiptBaseline`、`comment-browser.mjs:readCommentDom`及`chat-browser.mjs:readChatBlockers`，并读取保留的LICENSE。借鉴两次只读快照、不可改写原未知及可见验证阻断原则；上游的仅DOM状态推断、通用文本扫描、物理点击和宿主不能直接满足本项目准确父评论/绝对时间要求，不移植。独立扩展既有精确DOM读取，将正常页面同源GET子回复响应作为缺失确认状态的补证；只监听当前准确原评论，不生成请求、不保存无关响应。短信验证使用上轮已实机观察的固定可见标题组件，覆盖读取及两通道最终发送门禁。Playwright 1.64.1官方network/Page.response文档核对了响应先于body完成及listener移除机制；需要正文读取完成后才能采用证据，目标切换/销毁须失效。红绿回归、源码/编译及真实只读验证另记，不由上游声明推定通过。
 
 本轮实机重复出现OBSERVATION_DOM_NOT_UNIQUE后，先量得父行内正文/菜单各2个且含1个子行，再重读同一MIT固定文件`comment-browser.mjs:readCommentDom`的owned选择。独立采集器对根行的查询未排除子回复；在修改前追加展开子回复回归，采用与本项目发送回读相同的closest(commentRows)归属约束，不放宽唯一性或回退首个元素。
