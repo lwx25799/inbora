@@ -60,3 +60,15 @@ test.each(['timeout', 'wrong-target', 'old-id', 'pending', 'no-proof','historica
     expect(s.uncertain()).toHaveLength(1);
   } finally { s.close(); }
 });
+
+test('a fresh request acknowledgement plus refreshed native ID can prove delivery across wall clocks',async()=>{
+  const s=database();try{
+    const id=approved(s),a=adapter({readback:async(e,text,_before,boundary)=>({id:'new',ownId:'own-1',targetKey:snapshot(e).targetKey,text,pending:false,
+      sentAt:new Date(Date.parse(boundary)-1500).toISOString(),submission:{boundary,requestAt:boundary,responseAt:new Date().toISOString(),
+        requestDigest:'a'.repeat(64),responseDigest:'b'.repeat(64)}})});
+    expect(await new SendCoordinator(s,new AccountActor()).send(id,a,false)).toBe('CONFIRMED');
+    const record=s.db.prepare("SELECT detail_redacted FROM audit_events WHERE event_type='SUBMISSION_PROOF'").get() as {detail_redacted:string};
+    expect(JSON.parse(record.detail_redacted)).toMatchObject({requestDigest:'a'.repeat(64),responseDigest:'b'.repeat(64)});
+    expect(record.detail_redacted).not.toContain(s.draft(id).text);
+  }finally{s.close();}
+});

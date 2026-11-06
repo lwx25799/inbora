@@ -1,5 +1,6 @@
 import type { BrowserProfileOwner } from '../../src/browser/profile-owner.js';
 import type { ObservationMapping, DmReplyMapping,CommentReplyMapping } from '../../src/config/site-mapping.js';
+import type {Page} from 'playwright';
 
 // Synthetic rendered component contract; no real identities or private source data.
 export function observedMapping(origin: string): ObservationMapping {
@@ -42,7 +43,7 @@ export function dmReplyMapping(origin:string):DmReplyMapping {
   return{version:1,purpose:'dm-reply',observation:observedMapping(origin),observedAt:'2026-11-05T00:00:00Z',
     evidenceRef:'synthetic-native-dm-reply',blockers:'[role="dialog"]',composer:'#native-editor',send:'#native-send',
     pending:'.pending',failed:'.failed',composerScope:'#native-controls',composerFiberDepth:1,
-    latestIndexAncestor:'[data-index]',submission:'svg-click-event',confirmedServerStatus:0,textMessageType:7};
+    latestIndexAncestor:'[data-index]',submission:'svg-click-event',confirmedServerStatus:0,textMessageType:7,submissionReceipts:false};
 }
 /** Synthetic native component metadata and actual SVG event bubbling; no real user values. */
 export async function mountDmReply(owner:BrowserProfileOwner,origin:string):Promise<void>{
@@ -101,10 +102,27 @@ function installDmReply():void {
     }
 }
 
+/** A normal synthetic refresh reconstructs native fields independently of product readers. */
+export async function mountFreshCommentPage(page:Page,origin:string,text:string,at:number):Promise<void>{
+  await page.route(origin+'/video/10',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:
+    '<a id="self">Self</a><section id="comment-list"><div class="comment" id="root-comment"><a class="author" href="/user/peer-sec">Peer</a>'+
+    '<div class="body">root fixture input</div><div class="tooltip" id="tooltip_11">Actions</div><div class="comment">'+
+    '<a class="author" href="/user/self-sec">Self</a><div class="body" id="fresh-body"></div><div class="tooltip" id="tooltip_501">Actions</div></div></div></section>'}));
+  await page.addInitScript(({text,at})=>document.addEventListener('DOMContentLoaded',()=>{
+    document.querySelector('#fresh-body')!.textContent=text;
+    Object.defineProperty(document.querySelector('#self')!,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});
+    const root=document.querySelector('#root-comment')!,child=root.querySelector('.comment')!;
+    Object.defineProperty(root,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:{cid:'11',text:'root fixture input',
+      user:{uid:'200',secUid:'peer-sec'},createTime:1793836800,replyId:'0',replyTotal:1,status:1,replyComment:[]},level:1,awemeInfo:{awemeId:'10'},userInfo:{uid:'100'}}}}});
+    Object.defineProperty(child,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:{cid:'501',text,replyId:'11',createTime:at,
+      user:{uid:'100',secUid:'self-sec'},status:1},level:2,awemeInfo:{awemeId:'10'}}}}});
+  }),{text,at});
+}
+
 export function commentReplyMapping(origin:string):CommentReplyMapping{
   return{version:1,purpose:'comment-reply',observation:observedMapping(origin),observedAt:'2026-11-05T00:00:00Z',
     evidenceRef:'synthetic-root-reply',blockers:'[role="dialog"]',replyAction:'.reply-action',composerScope:'#reply-controls',portalWorkIds:[],
-    composerFiberDepth:2,composer:'#comment-editor',send:'#comment-send',pending:'.pending',failed:'.failed',rootLevel:1,confirmedStatus:1};
+    composerFiberDepth:2,composer:'#comment-editor',send:'#comment-send',pending:'.pending',failed:'.failed',rootLevel:1,confirmedStatus:1,submissionReceipts:false};
 }
 /** Synthetic direct parent reply contract, separate from observed platform evidence. */
 export async function mountCommentReply(owner:BrowserProfileOwner,origin:string):Promise<void>{

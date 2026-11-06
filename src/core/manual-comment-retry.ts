@@ -1,6 +1,6 @@
 import {AccountActor} from '../browser/account-actor.js';
 import {EventStore} from '../storage/store.js';
-import {digest,requireSafe,type ReplyAdapter} from './contracts.js';
+import {digest,requireSafe,proofTimeValid,type ReplyAdapter} from './contracts.js';
 
 /** Explicit human-only exception; original unknown intent and normal-send freeze are never cleared. */
 export class ManualCommentRetry{
@@ -22,9 +22,8 @@ export class ManualCommentRetry{
         const notBefore=this.store.commentRetryBoundary(id);await adapter.clickOnce(notBefore);
         const proof=await adapter.readback(event.payload,draft.text,before,notBefore);
         const valid=proof&&proof.id&&!before.includes(proof.id)&&!proof.pending&&proof.ownId===final.ownId&&
-          proof.targetKey===final.targetKey&&proof.text===draft.text&&Number.isFinite(Date.parse(proof.sentAt))&&
-          Date.parse(proof.sentAt)>Date.parse(notBefore)&&Date.parse(proof.sentAt)<=Date.now();
-        const result=valid?'CONFIRMED':'UNCERTAIN';this.store.commentRetryReceipt(id,result,valid?digest(proof):'NO_UNIQUE_BOUND_PROOF');return result;
+          proof.targetKey===final.targetKey&&proof.text===draft.text&&proofTimeValid(proof,notBefore);
+        const result=valid?'CONFIRMED':'UNCERTAIN';this.store.commentRetryReceipt(id,result,valid?digest(proof):'NO_UNIQUE_BOUND_PROOF',valid?proof:undefined);return result;
       }catch{this.store.commentRetryReceipt(id,'UNCERTAIN','POST_RETRY_INTENT_FAILURE');return'UNCERTAIN';}
     });
   }

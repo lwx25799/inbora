@@ -5,7 +5,7 @@ import { dirname } from 'node:path';
 import { z } from 'zod';
 import {
   digest, eventBinding, eventSchema, isEligible, isStrong, requireSafe, targetKey, validText,
-  type Channel, type Draft, type InboundEvent, type StoredEvent, type TargetSnapshot,
+  type Channel, type Draft, type InboundEvent, type StoredEvent, type TargetSnapshot,type SendProof,
 } from '../core/contracts.js';
 
 interface EventRow { id: string; payload: string; binding: string; status: StoredEvent['status'] }
@@ -249,10 +249,16 @@ export class EventStore {
       return id;
     }).immediate();
   }
-  receipt(intentId: string, result: 'CONFIRMED' | 'UNCERTAIN', proofRef: string): void {
+  private submissionProof(id:string,proof:SendProof|undefined):void{
+    if(!proof?.submission)return;
+    this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)').run(randomUUID(),new Date().toISOString(),'SUBMISSION_PROOF',id,
+      JSON.stringify({...proof.submission,nativeIdDigest:digest(proof.id),proofDigest:digest(proof)}));
+  }
+  receipt(intentId: string, result: 'CONFIRMED' | 'UNCERTAIN', proofRef: string,proof?:SendProof): void {
     this.db.transaction(() => {
       const intent = this.db.prepare('SELECT * FROM send_intents WHERE id=?').get(intentId) as Intent | undefined;
       requireSafe(intent && ['INTENT_RECORDED', 'UNCERTAIN'].includes(intent.status), 'INTENT_NOT_REVIEWABLE');
+      if(result==='CONFIRMED')this.submissionProof(intentId,proof);
       this.db.prepare('INSERT INTO delivery_receipts VALUES (?,?,?,?,?)')
         .run(randomUUID(), intentId, result, proofRef, new Date().toISOString());
       this.db.prepare('UPDATE send_intents SET status=? WHERE id=?').run(result, intentId);
@@ -336,10 +342,11 @@ export class EventStore {
     const row=this.db.prepare("SELECT time FROM audit_events WHERE id=? AND event_type='MANUAL_RETRY_INTENT'").get(id) as {time:string}|undefined;
     requireSafe(row,'MANUAL_RETRY_INTENT_MISSING');return row.time;
   }
-  commentRetryReceipt(id:string,result:'CONFIRMED'|'UNCERTAIN',proofRef:string):void{
+  commentRetryReceipt(id:string,result:'CONFIRMED'|'UNCERTAIN',proofRef:string,proof?:SendProof):void{
     this.db.transaction(()=>{
       requireSafe(this.db.prepare("SELECT id FROM audit_events WHERE id=? AND event_type='MANUAL_RETRY_INTENT'").get(id),'MANUAL_RETRY_INTENT_MISSING');
       requireSafe(!this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_RECEIPT' AND entity_id=?").get(id),'MANUAL_RETRY_RECEIPT_EXISTS');
+      if(result==='CONFIRMED')this.submissionProof(id,proof);
       this.retryAudit(randomUUID(),'MANUAL_RETRY_RECEIPT',id,{result,proofRef});
     }).immediate();
   }

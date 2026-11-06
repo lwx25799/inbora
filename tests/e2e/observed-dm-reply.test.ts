@@ -7,6 +7,7 @@ import {SendCoordinator} from '../../src/core/send-coordinator.js';
 import {fixtureServer} from '../fixtures/site.js';
 import {mountDmReply,dmReplyMapping} from '../fixtures/observed-site.js';
 import {database,privateTemp} from '../helpers.js';
+import {dmRequest,dmResponse} from '../fixtures/submission.js';
 
 async function setup(){
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true),store=database();
@@ -105,6 +106,46 @@ test('native DM final empty snapshot cannot authorize reload over a later human 
     expect(await f.owner.dm.locator('#native-editor').textContent()).toBe('late human follow-up');
     expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
   }finally{await f.close();}
+});
+
+test.each(['valid','wrong-client','wrong-sequence','wrong-owner','async','duplicate','wrong-id','missing'])('native DM request acknowledgement and refreshed ID agree across wall clocks: %s',async failure=>{
+  const f=await setup();try{
+    f.mapping.submissionReceipts=true;f.adapter.dispose();f.adapter=new ObservedDmReply(f.owner.dm,f.mapping,300);
+    const response=dmResponse({...(failure==='wrong-client'?{client:'outside'}:{}),...(failure==='wrong-sequence'?{sequence:100}:{}),
+      ...(failure==='wrong-owner'?{owner:200}:{}),...(failure==='async'?{async:true}:{}),...(failure==='wrong-id'?{id:802n}:{})});
+    await f.owner.dm.route('https://imapi.douyin.com/v1/message/send',route=>route.fulfill({headers:{'access-control-allow-origin':f.server.origin,
+      'access-control-allow-headers':'content-type'},contentType:'application/octet-stream',body:route.request().method()==='OPTIONS'?Buffer.alloc(0):response}));
+    await f.owner.dm.evaluate(({request,failure})=>{
+      (window as unknown as {nativeRehydratedTime:string}).nativeRehydratedTime=new Date(Date.now()-1500).toISOString();
+      document.querySelector('#native-send')!.addEventListener('click',()=>{
+        if(failure==='missing')return;
+        const bytes=Uint8Array.from(atob(request),c=>c.charCodeAt(0));
+        for(let n=0;n<(failure==='duplicate'?2:1);n++)void fetch('https://imapi.douyin.com/v1/message/send',{method:'POST',body:bytes});
+      });
+    },{request:dmRequest(f.draft.text).toString('base64'),failure});
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe(failure==='valid'?'CONFIRMED':'UNCERTAIN');
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
+    await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow();
+  }finally{f.adapter.dispose();await f.close();}
+});
+
+test('a second native request after the first acknowledgement revokes the cached proof',async()=>{
+  const f=await setup();try{
+    f.mapping.submissionReceipts=true;f.adapter.dispose();f.adapter=new ObservedDmReply(f.owner.dm,f.mapping,300);
+    await f.owner.dm.route('https://imapi.douyin.com/v1/message/send',route=>route.fulfill({headers:{'access-control-allow-origin':f.server.origin,
+      'access-control-allow-headers':'content-type'},body:route.request().method()==='OPTIONS'?Buffer.alloc(0):dmResponse()}));
+    const request=dmRequest(f.draft.text).toString('base64');
+    await f.owner.dm.locator('#native-send').evaluate((button,request)=>button.addEventListener('click',()=>void fetch('https://imapi.douyin.com/v1/message/send',{
+      method:'POST',body:Uint8Array.from(atob(request),c=>c.charCodeAt(0))})),request);
+    const hooks=f.adapter as unknown as {poll:(...args:unknown[])=>Promise<unknown>},poll=hooks.poll.bind(hooks);let injected=false;
+    hooks.poll=async(...args)=>{const proof=await poll(...args);if(!injected){injected=true;await f.owner.dm.evaluate(async request=>{
+      await fetch('https://imapi.douyin.com/v1/message/send',{method:'POST',body:Uint8Array.from(atob(request),c=>c.charCodeAt(0))});
+    },request);}return proof;};
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('UNCERTAIN');
+    expect(injected).toBe(true);
+  }finally{f.adapter.dispose();await f.close();}
 });
 test('native guard blocks changed identity in document capture before the SVG handler',async()=>{
   const f=await setup();

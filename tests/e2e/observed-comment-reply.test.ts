@@ -7,7 +7,7 @@ import {ObservedCommentReply} from '../../src/adapters/observed-comment-reply.js
 import {SendCoordinator} from '../../src/core/send-coordinator.js';
 import {ManualCommentRetry} from '../../src/core/manual-comment-retry.js';
 import {fixtureServer} from '../fixtures/site.js';
-import {mountCommentReply,commentReplyMapping} from '../fixtures/observed-site.js';
+import {mountCommentReply,commentReplyMapping,mountFreshCommentPage} from '../fixtures/observed-site.js';
 import {database,privateTemp} from '../helpers.js';
 
 async function setup(){
@@ -107,6 +107,41 @@ test.each(['valid','missing','wrong-date','wrong-work','future','stale'])('nativ
       expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(0);
     }
   }finally{restoreClock();await f.close();}
+});
+
+test.each(['valid','wrong-parent','wrong-text','wrong-owner','duplicate','missing','wrong-id'])('comment submission response must bind the request and refreshed child: %s',async failure=>{
+  const f=await setup();try{
+    f.mapping.submissionReceipts=true;f.adapter.dispose();f.adapter=new ObservedCommentReply(f.owner.notification,f.mapping,300);
+    const at=Math.floor(Date.now()/1000)-2;
+    await f.owner.notification.route('**/aweme/v1/web/comment/publish',route=>route.fulfill({json:{status_code:0,comment:{
+      cid:failure==='wrong-id'?'502':'501',reply_id:failure==='wrong-parent'?'12':'11',reply_to_reply_id:'0',
+      text:failure==='wrong-text'?'other':f.draft.text,user:{uid:failure==='wrong-owner'?'200':'100',sec_uid:'self-sec'},status:7,create_time:at}}}));
+    await mountFreshCommentPage(f.owner.notification,f.server.origin,f.draft.text,at);
+    await f.adapter.inspect(f.event.payload);
+    await f.owner.notification.locator('#comment-send').evaluate((button,{text,failure})=>button.addEventListener('click',()=>{
+      if(failure==='missing')return;const body=new URLSearchParams({aweme_id:'10',reply_id:'11',text});
+      for(let n=0;n<(failure==='duplicate'?2:1);n++)void fetch('/aweme/v1/web/comment/publish',{method:'POST',body});
+    }),{text:f.draft.text,failure});
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe(failure==='valid'?'CONFIRMED':'UNCERTAIN');
+    await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow();
+  }finally{f.adapter.dispose();await f.close();}
+});
+
+test('comment refresh cannot discard a top-level draft outside the replied parent',async()=>{
+  const f=await setup();let navigations=0;try{
+    f.owner.notification.on('framenavigated',()=>navigations++);
+    await f.adapter.inspect(f.event.payload);
+    await f.owner.notification.evaluate(()=>{
+      document.querySelector('#reply-controls')!.remove();
+      const scope=document.createElement('div');scope.id='reply-controls';
+      scope.innerHTML='<div id="comment-editor" contenteditable="true"><div data-contents="true"><div data-block="true"><div class="public-DraftStyleDefault-block">human top-level draft</div></div></div></div>';
+      Object.defineProperty(scope,'__reactFiber$fixture',{value:{return:{return:{memoizedProps:{level:0,awemeInfo:{awemeId:'10'}}}}}});document.body.append(scope);
+    });
+    const hooks=f.adapter as unknown as {frame:(event:unknown,action:string)=>Promise<unknown>};
+    await expect(hooks.frame(f.event.payload,'refresh')).rejects.toThrow('EXISTING_DRAFT');
+    expect(navigations).toBe(0);expect(await f.owner.notification.locator('#comment-editor').textContent()).toBe('human top-level draft');
+  }finally{await f.close();}
 });
 
 test('root discovery excludes the fields of an already expanded direct child',async()=>{

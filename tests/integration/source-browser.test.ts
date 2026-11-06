@@ -46,3 +46,9 @@ test('source runtime replies to an exact root comment with durable intent and bo
   expect(result.stderr).toBe('');expect(result.status).toBe(0);
   expect(result.stdout).toContain('"nativeCommentReplySmoke":"PASS"');expect(result.stdout).toContain('"realSends":0');
 });
+
+test('source runtime correlates both native submission responses through a fresh page model',()=>{
+  const result=spawnSync(process.execPath,['--import','tsx',resolve('scripts/submission-smoke.mjs'),'source'],{encoding:'utf8',timeout:20000});
+  expect(result.stderr).toBe('');expect(result.status).toBe(0);
+  expect(result.stdout).toContain('"submissionSmoke":"PASS"');expect(result.stdout).toContain('"refreshedCrossClockProofs":2');
+});

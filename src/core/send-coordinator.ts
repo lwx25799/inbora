@@ -1,6 +1,6 @@
 import { AccountActor } from '../browser/account-actor.js';
 import { EventStore } from '../storage/store.js';
-import { digest, requireSafe, type ReplyAdapter } from './contracts.js';
+import { digest, requireSafe, proofTimeValid, type ReplyAdapter } from './contracts.js';
 
 export class SendCoordinator {
   constructor(private readonly store: EventStore, private readonly actor: AccountActor) {}
@@ -32,12 +32,12 @@ export class SendCoordinator {
         const proof = await adapter.readback(event.payload, draft.text, baseline, notBefore);
         const valid = proof && proof.id && !baseline.includes(proof.id) && !proof.pending &&
           proof.ownId === final.ownId && proof.targetKey === final.targetKey && proof.text === draft.text &&
-          Number.isFinite(Date.parse(proof.sentAt)) && Date.parse(proof.sentAt) > Date.parse(notBefore) && Date.parse(proof.sentAt) <= Date.now();
+          proofTimeValid(proof,notBefore);
         if (!valid) {
           this.store.receipt(intentId, 'UNCERTAIN', 'NO_UNIQUE_BOUND_PROOF');
           return 'UNCERTAIN';
         }
-        this.store.receipt(intentId, 'CONFIRMED', digest(proof));
+        this.store.receipt(intentId, 'CONFIRMED', digest(proof),proof);
         return 'CONFIRMED';
       } catch {
         // A receipt write failure leaves the committed intent for restart recovery.

@@ -2,6 +2,9 @@
 
 ## 2026-11-06增量修复
 
+- 跨墙钟比较误拒绝已发记录：新增`a fresh request acknowledgement plus refreshed native ID can prove delivery across wall clocks`实际先UNCERTAIN，后使用唯一准确Request/业务回执/刷新同ID证明，原生时间保留；默认模式仍严格比较。DM与评论来源/目标/状态/重复请求/异常wire均有正反例，未取得实机回执前不启用真实映射。
+- 回执后延迟第二POST可借用缓存ack：审查新增`a second native request after the first acknowledgement revokes the cached proof`先错误CONFIRMED，再保留观察至刷新后最终证明并重核同一ack；重复请求持续撤销。
+- 评论刷新清掉根外人稿：`comment refresh cannot discard a top-level draft outside the replied parent`先实际误导航，再在同步页面任务扫描全部已校准可见输入范围，非空人稿阻断。
 - 图集回复框位于根评论外：准确portal元数据实机观察后仅按已校准作品启用；根外正确/错误父ID及空level0壳回归实际先失败再通过。
 - 评论秒级平台时间早于本机意图：保留原未知；从准确作品正常GET的extra.now/Date取得保守时差，意图后等待下一完整秒再最终门禁。`seconds-rounded native receipt`及无效/过期时钟回归防止放宽时间。
 - 私信首条确认刷新后时间回退：serverId/确认状态仍携带临时本地createdAt，原收据摘要精确匹配；同一消息刷新后的平台时间早于意图。原收据保留，反证37b0e7b9、准确目标暂停；`native DM requires a fresh receipt after normal reload`在旧实现实际错误CONFIRMED，修复后必须同ID刷新证明才确认。真实修复后新发送尚待验收。

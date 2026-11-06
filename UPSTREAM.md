@@ -1,5 +1,13 @@
 # 来源与许可
 
+## 2026-11-06：将请求关联路线落实前核对
+
+用户要求继续实施，并纠正开源核对必须主动完成。动手前复读MIT LockyBee `7989640e340f0fd79e2de9874880d5197546e755`的不可覆盖基线/未知记录、MIT watch `b3d5e36ed4ef9b8c1a7006ca2770309f820ffa46`的发布cid与父评论，以及仅供阅读的DouAi `f751fde0202a53c96cb14905e620ad5982d1be8f`具体请求回调绑定。原有响应证明评论正常发布返回status_code0、cid、reply_id、全文/我方及create_time，但没有aweme_id；status7不能替代刷新后的status1。故必须绑定同一个Request的准确作品/父评论/全文，随后刷新核对同cid；不单凭响应状态升级。
+
+进一步只读核对cv-cat/DouYin_Spider `d151f9c2980abc304c1ae4918c2272675cd9e4c2`的`static/Request.proto`、`static/Response.proto`、`dy_live/protobuf/proto/default/im_proto.proto`及`builder/proto.py`，GitHub未核准可复制许可，不复制协议生成代码/SDK。较旧Response.proto与当前网页类型不一致；当前网页实际加载的公开IM包同时核对了Request/Response和SendMessageRequestBody/ResponseBody的字段号、sequence/client/server ID、业务status/check_code以及forceHttp发送路径。只独立实现有界被动解码，不生成请求、不读凭证、不调用网页getter/SDK。Playwright 1.64.1官方网络文档确认响应头先于正文完成，必须等待正文并以同一Request对象关联。已授权会话只读探针零发送，数据库状态未变；未观察到真实发送请求前不得将协议匹配宣称实机通过。
+
+落实后typecheck/隔离219项、两通道source/compiled因果链通过。用户另批一条新私信后，真实正常HTTP请求/127字节业务回执匹配，刷新同返回ID证明CONFIRMED（2ed4876f），三重启d01de11a证明摘要一致；平台时间原值仍早于本机意图252ms。只在本机校准DM映射，原有未知/矛盾不升级、会话重新暂停。评论同路线只有离线证据，不以真实DM替代；上游来源只指导机制，实际通过来自本机独立证据。
+
 ## 2026-11-06：当前收据问题专项开源比较
 
 用户要求查看开源方案如何处理本轮时间矛盾。已联网核对六个候选的当前HEAD，下载并读固定源码与相关测试；详细文件、SHA、许可、采用/不采用原因、纯函数实测和后续验证方向见[专项比较](docs/UPSTREAM-COMPARISON.md#2026-11-06发送时间矛盾与刷新误确认专项)。LockyBee/dsh-douyin-agent仍为MIT `7989640e340f0fd79e2de9874880d5197546e755`；watch当前MIT `b3d5e36ed4ef9b8c1a7006ca2770309f820ffa46`；DouAi公开源码`f751fde0202a53c96cb14905e620ad5982d1be8f`未核准可复制许可，仅阅读，不复制或执行宿主代码。另重读crazyants、POKMJN、DMShoot原固定SHA的确认入口；未引入依赖、SDK、签名、原生hook或其他提交方式。

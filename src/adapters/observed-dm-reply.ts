@@ -4,6 +4,7 @@ import type { DmReplyMapping } from '../config/site-mapping.js';
 import { digest, eventBinding, isStrong, requireSafe, targetKey, validText,
   type InboundEvent, type ReplyAdapter, type SendProof, type TargetSnapshot } from '../core/contracts.js';
 import { ObservedReader } from './observed-reader.js';
+import {SubmissionResponse} from './submission-response.js';
 
 interface ReplyCaptureInput {
   mapping: DmReplyMapping; event: InboundEvent;
@@ -228,7 +229,12 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
 export class ObservedDmReply implements ReplyAdapter {
   private gateToken:string|null=null;
   private prepared:{binding:string;text:string;editorShape:string}|null=null;
-  constructor(readonly page:Page,readonly mapping:DmReplyMapping,private readonly receiptTimeoutMs=5000){}
+  private pendingEvent:InboundEvent|null=null;
+  private readonly submission:SubmissionResponse|null;
+  constructor(readonly page:Page,readonly mapping:DmReplyMapping,private readonly receiptTimeoutMs=5000){
+    this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;
+  }
+  dispose():void{this.submission?.dispose();}
   private async frame(event:InboundEvent,action:ReplyCaptureInput['action']='snapshot',text:string|null=null,token:string|null=null,
     before:ReplyCaptureInput['before']=null,editorShape:string|null=null):Promise<ReplyFrame>{
     try{return await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape});}
@@ -255,6 +261,7 @@ export class ObservedDmReply implements ReplyAdapter {
     requireSafe(after.editorText===text,'NATIVE_REPLY_APPROVED_TEXT_CHANGED');
     requireSafe(digest(frame.context)===digest(after.context),'NATIVE_REPLY_CONTEXT_CHANGED');
     this.prepared={binding:eventBinding(event),text,editorShape:after.editorShape};
+    this.pendingEvent=event;
   }
   async verifyPrepared(event:InboundEvent,text:string):Promise<TargetSnapshot>{
     requireSafe(this.prepared?.binding===eventBinding(event)&&this.prepared.text===text,'NATIVE_REPLY_NOT_PREPARED');
@@ -262,8 +269,10 @@ export class ObservedDmReply implements ReplyAdapter {
     this.gateToken=token;return this.snapshot(event,frame);
   }
   async baseline(event:InboundEvent):Promise<string[]>{return(await this.frame(event)).outgoingIds;}
-  async clickOnce():Promise<void>{
+  async clickOnce(notBefore?:string):Promise<void>{
     const token=this.gateToken;this.gateToken=null;requireSafe(token,'NATIVE_REPLY_NOT_PREPARED');
+    if(this.submission){requireSafe(notBefore&&this.pendingEvent&&this.prepared,'NATIVE_REPLY_INTENT_REQUIRED');
+      this.submission.arm(this.pendingEvent,this.prepared.text,notBefore);}
     const accepted=await this.page.evaluate(token=>{
       const gate=(window as unknown as {__inboraDmReplyGate?:{token:string;submit:()=>boolean;remove:()=>void}}).__inboraDmReplyGate;
       if(!gate||gate.token!==token)throw new Error('NATIVE_REPLY_NOT_PREPARED');
@@ -272,23 +281,31 @@ export class ObservedDmReply implements ReplyAdapter {
     requireSafe(accepted,'NATIVE_REPLY_CLICK_BLOCKED');
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
-    const initial=await this.poll(event,text,before,notBefore);
+    let ack=null;
+    if(this.submission){const deadline=Date.now()+this.receiptTimeoutMs;
+      while(!(ack=this.submission.current())&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));
+      if(!ack)return null;
+    }
+    const initial=await this.poll(event,text,before,notBefore,ack?.id);
     if(!initial)return null;
     // A serverId can coexist with a temporary local createdAt. Require a fresh page model.
     requireSafe((await this.frame(event,'proofs')).editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
+    if(ack)requireSafe(this.submission!.expectRefresh(ack),'NATIVE_REPLY_ACK_REVOKED');
     await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15_000}),this.frame(event,'refresh')]);
     const index=this.mapping.observation.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
     requireSafe(index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
     await new ObservedReader(this.page,this.mapping.observation).dm(index);
-    const refreshed=await this.poll(event,text,before,notBefore);
-    return refreshed?.id===initial.id?refreshed:null;
+    const refreshed=await this.poll(event,text,before,notBefore,ack?.id);
+    if(ack&&this.submission!.current()!==ack)return null;
+    const result=refreshed?.id===initial.id?{...refreshed,...(ack?{submission:ack.submission}:{})}:null;
+    this.submission?.dispose();return result;
   }
-  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
+  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string):Promise<SendProof|null>{
     const deadline=Date.now()+this.receiptTimeoutMs;let previous:string|null=null;
     do {
       const frame=await this.frame(event,'proofs');
       const matches=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&
-        Date.parse(p.sentAt)>Date.parse(notBefore)&&Date.parse(p.sentAt)<=Date.now());
+        (ackId?p.id===ackId:Date.parse(p.sentAt)>Date.parse(notBefore))&&Date.parse(p.sentAt)<=Date.now());
       requireSafe(matches.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
       const proof=matches[0];
       if(proof&&digest(proof)===previous)return frame.editorText===''?proof:null;

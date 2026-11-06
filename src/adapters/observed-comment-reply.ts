@@ -5,8 +5,9 @@ import {digest,eventBinding,isStrong,requireSafe,targetKey,validText,
   type InboundEvent,type ReplyAdapter,type SendProof,type TargetSnapshot} from '../core/contracts.js';
 import {ObservedReader} from './observed-reader.js';
 import {CommentResponses,type NativeCommentReply} from './comment-responses.js';
+import {SubmissionResponse} from './submission-response.js';
 
-interface Input{mapping:CommentReplyMapping;event:InboundEvent;action:'open'|'expand'|'snapshot'|'fill'|'finish'|'arm'|'proofs';text:string|null;
+interface Input{mapping:CommentReplyMapping;event:InboundEvent;action:'open'|'expand'|'snapshot'|'fill'|'finish'|'arm'|'proofs'|'refresh';text:string|null;
   token:string|null;before:{context:unknown[];editorText:string}|null;shape:string|null;receipts?:NativeCommentReply[]}
 interface Frame{context:unknown[];proofs:SendProof[];ids:string[];editorText:string;shape:string;needsResponse?:boolean}
 
@@ -181,6 +182,13 @@ export function captureCommentReply(input:Input):Frame{
     }
     return dom.frame({...state,editorText:'',shape:''});
   }
+  if(input.action==='refresh'){
+    const state=dom.root(),scopes=Array.from(document.querySelectorAll(m.composerScope)).filter(dom.visible);
+    dom.check(scopes.length<=10,'COMMENT_REPLY_COMPOSER_CHANGED');
+    for(const scope of scopes){const editors=scope.querySelectorAll(m.composer);dom.check(editors.length<=1,'COMMENT_REPLY_COMPOSER_CHANGED');
+      if(editors[0])dom.check(dom.editorText(editors[0])==='','COMMENT_REPLY_EXISTING_DRAFT');}
+    location.reload();return dom.frame({...state,editorText:'',shape:''});
+  }
   if(input.action==='open'){
     const state=dom.root();
     if(!dom.scope(state.root)){
@@ -255,8 +263,11 @@ export class ObservedCommentReply implements ReplyAdapter{
   private prepared:{binding:string;text:string;shape:string}|null=null;
   private token:string|null=null;
   private readonly responses:CommentResponses;
-  constructor(readonly page:Page,readonly mapping:CommentReplyMapping,private readonly timeoutMs=5000){this.responses=new CommentResponses(page,mapping);}
-  dispose():void{this.responses.dispose();}
+  private readonly submission:SubmissionResponse|null;
+  private pendingEvent:InboundEvent|null=null;
+  constructor(readonly page:Page,readonly mapping:CommentReplyMapping,private readonly timeoutMs=5000){this.responses=new CommentResponses(page,mapping);
+    this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;}
+  dispose():void{this.responses.dispose();this.submission?.dispose();}
   private async frame(event:InboundEvent,action:Input['action']='snapshot',text:string|null=null,token:string|null=null,
     before:Input['before']=null,shape:string|null=null):Promise<Frame>{
     try{return await this.page.evaluate(captureCommentReply,{mapping:this.mapping,event,action,text,token,before,shape,receipts:this.responses.snapshot(event)});}
@@ -291,6 +302,7 @@ export class ObservedCommentReply implements ReplyAdapter{
         await new Promise(resolve=>setTimeout(resolve,25));
       }
       this.prepared={binding:eventBinding(event),text,shape:after.shape};
+      this.pendingEvent=event;
     }finally{
       await this.page.evaluate(token=>{const gate=(window as unknown as {__inboraCommentInputGate?:{token:string;remove:()=>void}}).__inboraCommentInputGate;
         if(gate?.token===token)gate.remove();},token).catch(()=>{});
@@ -298,7 +310,7 @@ export class ObservedCommentReply implements ReplyAdapter{
   }
   async verifyPrepared(event:InboundEvent,text:string):Promise<TargetSnapshot>{
     requireSafe(this.prepared?.binding===eventBinding(event)&&this.prepared.text===text,'COMMENT_REPLY_NOT_PREPARED');
-    if(this.mapping.observation.environment!=='fixture'){
+    if(!this.submission&&this.mapping.observation.environment!=='fixture'){
       const deadline=Date.now()+1000;
       while(this.responses.clockLag()===null&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));
       requireSafe(this.responses.clockLag()!==null,'COMMENT_REPLY_CLOCK_UNVERIFIED');
@@ -320,16 +332,31 @@ export class ObservedCommentReply implements ReplyAdapter{
     return this.poll(event,text,[],notBefore);
   }
   async clickOnce(notBefore?:string):Promise<void>{const token=this.token;this.token=null;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
+    if(this.submission){requireSafe(notBefore&&this.pendingEvent&&this.prepared,'COMMENT_REPLY_INTENT_REQUIRED');
+      this.submission.arm(this.pendingEvent,this.prepared.text,notBefore);
+    }else{
     const lag=this.responses.clockLag();requireSafe(lag!==null||this.mapping.observation.environment==='fixture','COMMENT_REPLY_CLOCK_UNVERIFIED');
     const boundary=notBefore===undefined?Date.now():Date.parse(notBefore),deadline=(Math.floor(boundary/1000)+1)*1000+(lag??0);
     requireSafe(Number.isFinite(boundary)&&deadline-Date.now()<=7000,'COMMENT_REPLY_CLOCK_UNVERIFIED');
     while(Date.now()<=deadline){requireSafe(deadline-Date.now()<=7000,'COMMENT_REPLY_CLOCK_UNVERIFIED');
       await new Promise(resolve=>setTimeout(resolve,Math.max(1,deadline-Date.now()+1)));}
+    }
     const accepted=await this.page.evaluate(token=>{const gate=(window as unknown as {__inboraCommentGate?:Gate}).__inboraCommentGate;
       if(!gate||gate.token!==token)throw Error('COMMENT_REPLY_NOT_PREPARED');try{return gate.submit();}finally{gate.remove();}},token);
     requireSafe(accepted,'COMMENT_REPLY_CLICK_BLOCKED');
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
+    if(this.submission){
+      const deadline=Date.now()+this.timeoutMs;let ack=this.submission.current();
+      while(!ack&&Date.now()<deadline){await new Promise(resolve=>setTimeout(resolve,25));ack=this.submission.current();}
+      if(!ack||before.includes(ack.id))return null;
+      requireSafe(this.submission.expectRefresh(ack),'COMMENT_REPLY_ACK_REVOKED');
+      await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15_000}),this.frame(event,'refresh')]);
+      await this.refreshComments(event);
+      const proof=await this.poll(event,text,before,notBefore,ack.id);
+      const result=proof&&this.submission.current()===ack?{...proof,submission:ack.submission}:null;
+      this.submission.dispose();return result;
+    }
     const proof=await this.poll(event,text,before,notBefore);if(proof)return proof;
     const state=await this.frame(event,'proofs');
     // A normal refresh/expand may expose server status absent from the rendered child. No second submission.
@@ -339,10 +366,17 @@ export class ObservedCommentReply implements ReplyAdapter{
     }
     return null;
   }
-  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
+  private async refreshComments(event:InboundEvent):Promise<void>{
+    await new ObservedReader(this.page,this.mapping.observation).guard();
+    const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
+    const s=this.mapping.observation.selectors;
+    if(!await this.page.locator(s.commentList).isVisible())await this.page.locator(s.commentEntry).click();
+    await this.page.locator(s.commentRows).first().waitFor({state:'visible'});await this.frame(event,'expand');
+  }
+  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string):Promise<SendProof|null>{
     const deadline=Date.now()+this.timeoutMs;let previous:string|null=null;
     do{const matches=(await this.frame(event,'proofs')).proofs.filter(p=>!before.includes(p.id)&&p.text===text&&
-      Date.parse(p.sentAt)>Date.parse(notBefore)&&Date.parse(p.sentAt)<=Date.now());
+      (ackId?p.id===ackId:Date.parse(p.sentAt)>Date.parse(notBefore))&&Date.parse(p.sentAt)<=Date.now());
       requireSafe(matches.length<=1,'COMMENT_REPLY_PROOF_AMBIGUOUS');const proof=matches[0];if(proof&&digest(proof)===previous)return proof;
       previous=proof?digest(proof):null;await new Promise(resolve=>setTimeout(resolve,75));
     }while(Date.now()<deadline);return null;

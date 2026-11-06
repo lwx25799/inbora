@@ -96,6 +96,7 @@ export const dmReplyMappingSchema = z.object({
   submission: z.enum(['html-click','svg-click-event']),
   confirmedServerStatus: z.number().int(),
   textMessageType: z.number().int(),
+  submissionReceipts:z.boolean().default(false),
 });
 export type DmReplyMapping = z.infer<typeof dmReplyMappingSchema>;
 export function validateDmReplyMapping(value: unknown, real: boolean): DmReplyMapping {
@@ -111,6 +112,7 @@ export const commentReplyMappingSchema=z.object({
   replyAction:selector,composerScope:selector,composerFiberDepth:z.number().int().min(0).max(3),
   composer:selector,send:selector,pending:selector,failed:selector,
   portalWorkIds:z.array(nativeId).max(2).default([]),
+  submissionReceipts:z.boolean().default(false),
   rootLevel:z.literal(1),confirmedStatus:z.number().int(),
 });
 export type CommentReplyMapping=z.infer<typeof commentReplyMappingSchema>;
