@@ -128,20 +128,28 @@ function installDmReply():void {
 }
 
 /** A normal synthetic refresh reconstructs native fields independently of product readers. */
-export async function mountFreshCommentPage(page:Page,origin:string,text:string,at:number):Promise<void>{
+export async function mountFreshCommentPage(page:Page,origin:string,text:string,at:number,failure=''):Promise<void>{
   await page.route(origin+'/video/10',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:
     '<a id="self">Self</a><section id="comment-list"><div class="comment" id="root-comment"><a class="author" href="/user/peer-sec">Peer</a>'+
     '<div class="body">root fixture input</div><div class="tooltip" id="tooltip_11">Actions</div><div class="comment">'+
     '<a class="author" href="/user/self-sec">Self</a><div class="body" id="fresh-body"></div><div class="tooltip" id="tooltip_501">Actions</div></div></div></section>'}));
-  await page.addInitScript(({text,at})=>document.addEventListener('DOMContentLoaded',()=>{
-    document.querySelector('#fresh-body')!.textContent=text;
+  await page.addInitScript(({text,at,failure})=>document.addEventListener('DOMContentLoaded',()=>{
+    const list=Array.from(document.querySelectorAll<HTMLElement>('#comment-list')).find(n=>n.style.display!=='none')!;
+    list.querySelector('#fresh-body')!.textContent=text;
     Object.defineProperty(document.querySelector('#self')!,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});
-    const root=document.querySelector('#root-comment')!,child=root.querySelector('.comment')!;
+    const root=list.querySelector('#root-comment')!,child=root.querySelector('.comment')!;
     Object.defineProperty(root,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:{cid:'11',text:'root fixture input',
       user:{uid:'200',secUid:'peer-sec'},createTime:1793836800,replyId:'0',replyTotal:1,status:1,replyComment:[]},level:1,awemeInfo:{awemeId:'10'},userInfo:{uid:'100'}}}}});
     Object.defineProperty(child,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:{cid:'501',text,replyId:'11',createTime:at,
       user:{uid:'100',secUid:'self-sec'},status:1},level:2,awemeInfo:{awemeId:'10'}}}}});
-  }),{text,at});
+    const p=Object.getOwnPropertyDescriptor(child,'__reactFiber$fixture')!.value.return.memoizedProps,c=p.commentInfo;
+    if(failure==='still-pending')c.status=0;
+    if(failure==='old')c.createTime=1793836800;
+    if(failure==='wrong-parent')c.replyId='12';
+    if(failure==='wrong-text'){c.text='other text';child.querySelector('.body')!.textContent=c.text;}
+    if(failure==='wrong-owner')c.user.uid='300';
+    if(failure==='duplicate'){const copy=child.cloneNode(true);Object.defineProperty(copy,'__reactFiber$fixture',{value:{return:{memoizedProps:p}}});child.after(copy);}
+  }),{text,at,failure});
 }
 
 export function commentReplyMapping(origin:string):CommentReplyMapping{
@@ -158,7 +166,7 @@ export function initializeCommentReplyFixture():void{
       status:1,replyComment:[] as unknown[]};
     Object.defineProperty(root,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:comment,level:1,awemeInfo:{awemeId:'10'},userInfo:{uid:'100'}}}}});
     const state=window as unknown as {commentClicks:number;commentModel:string;commentFailure:string};
-    state.commentClicks=0;state.commentModel='';state.commentFailure='';
+    state.commentClicks=Number(sessionStorage.getItem('fixture-comment-clicks')??0);state.commentModel='';state.commentFailure='';
     root.querySelector('.reply-action')!.addEventListener('click',()=>{
       if(root.querySelector('#reply-controls'))return;
       const controls=document.createElement('div');controls.id='reply-controls';
@@ -173,7 +181,7 @@ export function initializeCommentReplyFixture():void{
         controls.querySelector('#comment-editor .public-DraftStyleDefault-block')!.textContent=state.commentModel;
       });
       controls.querySelector('#comment-send')!.addEventListener('click',()=>{
-        state.commentClicks++;if(state.commentFailure==='missing')return;
+        state.commentClicks++;sessionStorage.setItem('fixture-comment-clicks',String(state.commentClicks));if(state.commentFailure==='missing')return;
         const id=String(500+state.commentClicks),text=state.commentModel;
         const reply={cid:id,text,replyId:state.commentFailure==='wrong-parent'?'12':'11',
           user:{uid:state.commentFailure==='wrong-self'?'300':'100',secUid:'self-sec'},status:state.commentFailure==='pending'?0:1,
@@ -191,9 +199,10 @@ export function initializeCommentReplyFixture():void{
 export async function mountCommentReply(owner:BrowserProfileOwner,origin:string):Promise<void>{
   await owner.notification.goto(origin+'/video/10');
   await owner.notification.setContent(commentReplyHtml);
+  await owner.notification.evaluate(()=>sessionStorage.removeItem('fixture-comment-clicks'));
   await owner.notification.evaluate(initializeCommentReplyFixture);
 }
 export async function reloadableCommentReply(page:Page,origin:string):Promise<void>{
   await page.route(origin+'/video/10',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:commentReplyHtml}));
-  await page.addInitScript({content:`document.addEventListener('DOMContentLoaded',(${initializeCommentReplyFixture.toString()}));`});
+  await page.addInitScript({content:`document.addEventListener('DOMContentLoaded',()=>{if(document.querySelector('#root-comment .reply-action'))(${initializeCommentReplyFixture.toString()})();});`});
 }

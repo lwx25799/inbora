@@ -309,6 +309,19 @@ test.each([
       expect(await service.dispatch(token,{command:'getStatus'})).toMatchObject({mode:'DRAFT_ONLY',configuredMode:'MANUAL'});
       identityAvailable=true;
       await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+      for(const state of ['READ_OK','SEND_REVIEW_ONLY','BLOCKED','SEND_AVAILABLE'] as const){
+        service.authority.attest('COMMENT_NOTIFICATION',state,service.browser.identity('COMMENT_NOTIFICATION')!,'synthetic-capability-state');
+        await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+        const capability=page.locator('dl > div').filter({has:page.getByText('评论能力',{exact:true})});
+        const labels={READ_OK:'已验证读取',SEND_REVIEW_ONLY:'发送待验证',BLOCKED:'通道已阻断',SEND_AVAILABLE:'发送已开通'};
+        await expect.poll(()=>capability.textContent()).toContain(labels[state]);
+        expect(await capability.textContent()).not.toContain('此通道当前禁止发送');
+      }
+      identityAvailable=false;
+      await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+      await expect.poll(()=>page.locator('dl > div').filter({has:page.getByText('评论能力',{exact:true})}).textContent()).toContain('请先打开专属浏览器并同步此通道');
+      identityAvailable=true;
+      await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
       await page
         .getByRole("textbox", { name: "本次 API Key" })
         .fill("synthetic-ui-memory-key");

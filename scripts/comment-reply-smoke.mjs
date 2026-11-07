@@ -3,7 +3,7 @@ import {mkdir,mkdtemp} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
-import {mountCommentReply,commentReplyMapping,reloadableCommentReply} from '../tests/fixtures/observed-site.ts';
+import {mountCommentReply,commentReplyMapping,reloadableCommentReply,mountFreshCommentPage} from '../tests/fixtures/observed-site.ts';
 const source=process.argv[2]==='source',root=source?'src':'dist';
 const url=name=>pathToFileURL(resolve(root,name.replace(/\.js$/,source?'.ts':'.js'))).href;
 const {BrowserProfileOwner}=await import(url('browser/profile-owner.js'));
@@ -76,5 +76,32 @@ try{
       assert.equal(refreshes,1);assert.equal(await owner.notification.evaluate(()=>window.commentClicks),1);
     }finally{owner.notification.off('framenavigated',onNavigation);}
   }finally{freshAdapter.dispose();freshStore.close();}
-  console.log(JSON.stringify({nativeCommentReplySmoke:'PASS',runtime:source?'tsx-source':'compiled-node',fixtureClicks:2,freshSenderRefreshes:1,realSends:0,modelCalls:0}));
+  await mountCommentReply(owner,server.origin);
+  const reconciledStore=new EventStore(join(dir,'reconciled.sqlite'),true,()=> '2026-11-03T00:00:00Z');
+  const reconciledAdapter=new ObservedCommentReply(owner.notification,commentReplyMapping(server.origin),250);
+  try{
+    reconciledStore.observe('COMMENT_NOTIFICATION','work:10',[],'100','fixture');reconciledStore.observe('COMMENT_NOTIFICATION','work:10',batch.events,'100','fixture');
+    const e=reconciledStore.events()[0],d=reconciledStore.saveDraft(e.id,'delayed native status fixture','mock');
+    reconciledStore.approve(d.id,await reconciledAdapter.inspect(e.payload),d.version,d.text);
+    const submit=reconciledAdapter.clickOnce.bind(reconciledAdapter);
+    reconciledAdapter.clickOnce=async boundary=>{
+      assert.equal(reconciledStore.db.prepare('SELECT status FROM send_intents').get().status,'INTENT_RECORDED');await submit(boundary);
+      const sentAt=await owner.notification.evaluate(()=>{
+        const root=document.querySelector('#root-comment'),c=Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture').value.return.memoizedProps.commentInfo;
+        const child=Object.getOwnPropertyDescriptor(root.querySelector('.comment'),'__reactFiber$fixture').value.return.memoizedProps.commentInfo;
+        c.replyComment[0].status=0;child.status=0;return child.createTime;
+      });
+      await owner.notification.route('**/aweme/v1/web/comment/list/reply/**',route=>route.fulfill({json:{status_code:0,comments:[{
+        cid:'501',aweme_id:'10',reply_id:'11',text:d.text,user:{uid:'100',sec_uid:'self-sec'},status:0,create_time:sentAt}]}}));
+      await owner.notification.evaluate(async()=>{await(await fetch('/aweme/v1/web/comment/list/reply/?comment_id=11')).json();});
+      await mountFreshCommentPage(owner.notification,server.origin,d.text,sentAt);
+    };
+    let refreshes=0;const onNavigation=()=>refreshes++;owner.notification.on('framenavigated',onNavigation);
+    try{
+      assert.equal(await new SendCoordinator(reconciledStore,owner.actor).send(d.id,reconciledAdapter,false),'CONFIRMED');
+      assert.equal(refreshes,1);assert.equal(await owner.notification.evaluate(()=>sessionStorage.getItem('fixture-comment-clicks')),'1');
+      await assert.rejects(new SendCoordinator(reconciledStore,owner.actor).send(d.id,reconciledAdapter,false));
+    }finally{owner.notification.off('framenavigated',onNavigation);}
+  }finally{reconciledAdapter.dispose();reconciledStore.close();}
+  console.log(JSON.stringify({nativeCommentReplySmoke:'PASS',runtime:source?'tsx-source':'compiled-node',fixtureClicks:3,freshSenderRefreshes:1,reconciledRefreshes:1,realSends:0,modelCalls:0}));
 }finally{store.close();await owner.close();await server.close();}

@@ -576,7 +576,7 @@ export class WorkbenchAuthority {
     return valid
       ? {
           state: row.state,
-          reason: row.state === "SEND_AVAILABLE" ? "" : "CHANNEL_NOT_SENDABLE",
+          reason: ({SEND_AVAILABLE:"",READ_OK:"CAPABILITY_READ_ONLY",SEND_REVIEW_ONLY:"CAPABILITY_SEND_UNVERIFIED",BLOCKED:"CAPABILITY_BLOCKED"} as Record<string,string>)[row.state] ?? "CHANNEL_NOT_SENDABLE",
           evidence: row.evidence_ref,
         }
       : {

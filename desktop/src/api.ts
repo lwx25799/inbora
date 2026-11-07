@@ -112,8 +112,11 @@ export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
 export const reasons: Record<string, string> = {
-  CAPABILITY_UNVERIFIED: "此通道尚未核验发送能力",
+  CAPABILITY_UNVERIFIED: "请先打开专属浏览器并同步此通道",
   CAPABILITY_EXPIRED_OR_CHANGED: "通道证据已过期或环境已变化",
+  CAPABILITY_READ_ONLY: "读取已核验，发送尚未核验",
+  CAPABILITY_SEND_UNVERIFIED: "尚无已确认发送证据；受控测试资格按准确任务单独生效",
+  CAPABILITY_BLOCKED: "最近一次同步或核验未通过，请查看操作审计并重新同步",
   CHANNEL_NOT_SENDABLE: "此通道当前禁止发送",
   MODE_DRAFT_ONLY: "当前模式仅允许保存草稿",
   ACCOUNT_PAUSED: "账号已暂停",
@@ -156,6 +159,12 @@ export const statusNames: Record<string, string> = {
   SENDING: "发送中",
   FAILED_BEFORE_CLICK: "发送前失败",
   PREVIEW: "待确认",
+};
+export const capabilityNames: Record<string, string> = {
+  READ_OK: "已验证读取",
+  SEND_REVIEW_ONLY: "发送待验证",
+  SEND_AVAILABLE: "发送已开通",
+  BLOCKED: "通道已阻断",
 };
 export const sourceNames: Record<string, string> = {
   DIRECT_MESSAGE: "私信入口",

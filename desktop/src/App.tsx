@@ -6,6 +6,7 @@ import {
   explain,
   reasons,
   statusNames,
+  capabilityNames,
   sourceNames,
   type Status,
   type Inbox,
@@ -1269,11 +1270,13 @@ function Settings({
                 {c.channel === "DIRECT_MESSAGE" ? "私信能力" : "评论能力"}
               </dt>
               <dd>
-                {c.state} · {reasons[c.reason] ?? c.reason ?? "已核验"}
+                {capabilityNames[c.state] ?? c.state}
+                {c.reason && <> · {reasons[c.reason] ?? c.reason}</>}
               </dd>
             </div>
           ))}
         </dl>
+        <p className="hint">通道状态与 AI Key 分别生效；未配置 Key 仍可人工编辑和保存。</p>
         <button
           disabled={!!busy}
           onClick={() =>

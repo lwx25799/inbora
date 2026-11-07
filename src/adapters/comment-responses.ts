@@ -15,7 +15,6 @@ export class CommentResponses{
   private epoch=0;
   private sequence=0;
   private active=0;
-  private requestedAt=0;
   private clockSequence=0;
   private clock:{sampledAt:number;lagMs:number}|null=null;
   private rows:NativeCommentReply[]=[];
@@ -24,15 +23,14 @@ export class CommentResponses{
     page.on('request',this.request);page.on('response',this.response);page.on('framenavigated',this.navigation);page.once('close',this.dispose);
   }
   watch(event:InboundEvent):void{
-    if(this.event?.commentId!==event.commentId||this.event.videoId!==event.videoId){this.epoch++;this.rows=[];this.requestedAt=0;this.clock=null;}
+    if(this.event?.commentId!==event.commentId||this.event.videoId!==event.videoId){this.epoch++;this.rows=[];this.clock=null;}
     this.event=event;
   }
   snapshot(event:InboundEvent):NativeCommentReply[]{
     return this.event?.commentId===event.commentId&&this.event.videoId===event.videoId?this.rows:[];
   }
-  hasRequestAfter(boundary:string):boolean{return this.requestedAt>Date.parse(boundary);}
   clockLag():number|null{return this.clock&&Date.now()>=this.clock.sampledAt&&Date.now()-this.clock.sampledAt<=30_000?this.clock.lagMs:null;}
-  private navigation=(frame:Frame):void=>{if(frame===this.page.mainFrame()){this.epoch++;this.rows=[];this.requestedAt=0;this.clock=null;}};
+  private navigation=(frame:Frame):void=>{if(frame===this.page.mainFrame()){this.epoch++;this.rows=[];this.clock=null;}};
   private request=(request:Request):void=>{
     try{
       const e=this.event,url=new URL(request.url()),o=this.mapping.observation;
@@ -41,7 +39,7 @@ export class CommentResponses{
       const clock=url.pathname==='/aweme/v1/web/comment/list/'&&url.searchParams.getAll('aweme_id').length===1&&url.searchParams.get('aweme_id')===e.videoId;
       if(clock){this.clock=null;this.requests.set(request,{epoch:this.epoch,sequence:++this.clockSequence,clock:true});return;}
       if(url.pathname!==nativeCommentReplyPath||url.searchParams.getAll('comment_id').length!==1||url.searchParams.get('comment_id')!==e.commentId)return;
-      this.rows=[];this.requestedAt=Date.now();this.requests.set(request,{epoch:this.epoch,sequence:++this.sequence,clock:false});
+      this.rows=[];this.requests.set(request,{epoch:this.epoch,sequence:++this.sequence,clock:false});
     }catch{/* Unknown/service-worker requests are not evidence. */}
   };
   private response=(response:Response):void=>{void this.capture(response);};

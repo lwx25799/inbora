@@ -9,7 +9,7 @@ import {SubmissionResponse} from './submission-response.js';
 
 interface Input{mapping:CommentReplyMapping;event:InboundEvent;action:'open'|'expand'|'snapshot'|'fill'|'finish'|'arm'|'proofs'|'refresh';text:string|null;
   token:string|null;before:{context:unknown[];editorText:string}|null;shape:string|null;receipts?:NativeCommentReply[]}
-interface Frame{context:unknown[];proofs:SendProof[];ids:string[];editorText:string;shape:string;needsResponse?:boolean}
+interface Frame{context:unknown[];proofs:SendProof[];ids:string[];editorText:string;shape:string}
 
 /** Fixed, bounded rendered paths. No calls to website handlers, getters or private endpoints. */
 export function captureCommentReply(input:Input):Frame{
@@ -50,7 +50,7 @@ export function captureCommentReply(input:Input):Frame{
     owned(root:Element,selector:string):Element[]{
       return Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root);
     },
-    root():{root:Element;context:unknown[];proofs:SendProof[];ids:string[];needsResponse:boolean}{
+    root():{root:Element;context:unknown[];proofs:SendProof[];ids:string[]}{
       const work=o.works.find(w=>w.id===e.videoId),peer=o.peers.find(p=>p.uid===e.actorId);
       dom.check(work&&peer&&e.channel==='COMMENT_NOTIFICATION'&&e.kind==='COMMENT'&&e.direction==='INCOMING','COMMENT_REPLY_SCOPE_REQUIRED');
       dom.check(location.origin===o.origin&&location.href.split('?')[0]===work!.url.split('?')[0]&&
@@ -82,14 +82,13 @@ export function captureCommentReply(input:Input):Frame{
         const id=dom.data(r,'cid'),text=dom.data(r,'text'),parent=dom.data(r,'replyId'),user=dom.data(r,'user'),uid=dom.data(user,'uid');
         const sec=dom.data(user,'secUid'),at=dom.time(dom.data(r,'createTime')),status=dom.data(r,'status');
         const strong=typeof id==='string'&&/^[1-9]\d{0,63}$/.test(id)&&typeof text==='string'&&typeof uid==='string'&&at&&parent===e.commentId;
-        if(input.action!=='proofs')dom.check(strong,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
+        if(input.action!=='proofs'&&input.action!=='refresh')dom.check(strong,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
         if(typeof id==='string'){dom.check(!seen.has(id),'COMMENT_REPLY_ID_COLLISION');seen.add(id);ids.push(id);}
         context.push([id,text,parent,uid,sec,at,status]);
       }
       const children=Array.from(root.querySelectorAll(s.commentRows)).filter(n=>n.parentElement?.closest(s.commentRows)===root&&dom.visible(n));
       dom.check(children.length<=100,'COMMENT_REPLY_WINDOW_TOO_LARGE');
       const childIds=new Set<string>();
-      let needsResponse=false;
       for(const child of children){
         const childProps=dom.props(child,s.commentFiberDepth),native=dom.data(childProps,'commentInfo'),nativeUser=dom.data(native,'user');
         const id=dom.data(native,'cid'),text=dom.data(native,'text'),uid=dom.data(nativeUser,'uid'),sec=dom.data(nativeUser,'secUid'),
@@ -97,13 +96,12 @@ export function captureCommentReply(input:Input):Frame{
         const strong=typeof id==='string'&&/^[1-9]\d{0,63}$/.test(id)&&typeof text==='string'&&typeof uid==='string'&&at&&parent===e.commentId&&
           dom.data(childProps,'level')===2&&dom.data(dom.data(childProps,'awemeInfo'),'awemeId')===e.videoId&&
           (dom.data(childProps,'levelOneCid')===undefined||dom.data(childProps,'levelOneCid')===e.commentId);
-        if(input.action!=='proofs')dom.check(strong,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
+        if(input.action!=='proofs'&&input.action!=='refresh')dom.check(strong,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
         if(typeof id!=='string')continue;
         dom.check(!childIds.has(id),'COMMENT_REPLY_ID_COLLISION');childIds.add(id);
         if(!seen.has(id)){seen.add(id);ids.push(id);}
         context.push(['visible',id,text,parent,uid,sec,at,status??null]);
         if(!strong||uid!==o.self.uid||sec!==o.self.secUid)continue;
-        if(status===undefined)needsResponse=true;
         const responses=(input.receipts??[]).filter(r=>r.cid===id);
         const server=responses.length===1?responses[0]:null;
         const serverMatches=server&&server.aweme_id===e.videoId&&server.reply_id===e.commentId&&server.text===text&&
@@ -125,7 +123,7 @@ export function captureCommentReply(input:Input):Frame{
           proofs.push({id:id as string,ownId:o.self.uid,targetKey:`comment:${e.videoId}:${e.commentId}`,text:text as string,pending:false,sentAt:at as string});
       }
       dom.check(typeof total==='number'&&total>=ids.length,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
-      return{root,context,proofs,ids,needsResponse};
+      return{root,context,proofs,ids};
     },
     editorText(editor:Element):string{
       dom.check(editor instanceof HTMLElement&&editor.isContentEditable&&!editor.querySelector('img,video,audio,input,[contenteditable]'),'COMMENT_REPLY_EDITOR_UNSUPPORTED');
@@ -166,7 +164,7 @@ export function captureCommentReply(input:Input):Frame{
         button.closest(m.composerScope)===scope&&!button.contains(editor),'COMMENT_REPLY_COMPOSER_CHANGED');
       return{...state,editor:editor as HTMLElement,button:button as HTMLElement,editorText:dom.editorText(editor),shape:editor.innerHTML};
     },
-    frame(state:Frame):Frame{return{context:state.context,proofs:state.proofs,ids:state.ids,editorText:state.editorText,shape:state.shape,needsResponse:state.needsResponse??false};},
+    frame(state:Frame):Frame{return{context:state.context,proofs:state.proofs,ids:state.ids,editorText:state.editorText,shape:state.shape};},
   };
   if(input.action==='proofs'){const state=dom.root();return dom.frame({...state,editorText:'',shape:''});}
   if(input.action==='expand'){
@@ -374,13 +372,11 @@ export class ObservedCommentReply implements ReplyAdapter{
       this.submission.dispose();return result;
     }
     const proof=await this.poll(event,text,before,notBefore);if(proof)return proof;
-    const state=await this.frame(event,'proofs');
-    // A normal refresh/expand may expose server status absent from the rendered child. No second submission.
-    if(state.needsResponse&&!this.responses.hasRequestAfter(notBefore)&&state.ids.some(id=>!before.includes(id))){
-      await new ObservedReader(this.page,this.mapping.observation).comments(this.mapping.observation.works.findIndex(w=>w.id===event.videoId));
-      await this.frame(event,'expand');return this.poll(event,text,before,notBefore);
-    }
-    return null;
+    // A GET or pending native row does not mean the server's latest state has rendered.
+    // Re-read once through the same atomic empty-editor guard; never submit again.
+    await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15_000}),this.frame(event,'refresh')]);
+    await this.refreshComments(event);
+    return this.poll(event,text,before,notBefore);
   }
   private async refreshComments(event:InboundEvent):Promise<void>{
     try{

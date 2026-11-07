@@ -191,6 +191,13 @@ describe("workbench authority and application contracts, synthetic only", () => 
         .state,
     ).toBe("BLOCKED");
   });
+  test.each(['READ_OK','BLOCKED'] as const)('capability %s explains its own denial without opening sends',async state=>{
+    const c=await setup(),p=saveAndSelect(c);
+    c.service.authority.attest('DIRECT_MESSAGE',state,c.browser.identity(),'synthetic-denial-evidence');
+    await expect(preview(c,p)).rejects.toThrow(state==='READ_OK'?'CAPABILITY_READ_ONLY':'CAPABILITY_BLOCKED');
+    expect(c.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
+    expect(c.service.authority.capability('DIRECT_MESSAGE',c.browser.identity()).state).toBe(state);
+  });
   test("explicit backend calibration is limited to one exact draft, gives no approval, and promotes only its verified channel", async () => {
     const c = await setup(),
       p = saveAndSelect(c);
@@ -201,7 +208,7 @@ describe("workbench authority and application contracts, synthetic only", () => 
         c.browser.identity(),
         "synthetic-unverified",
       );
-    await expect(preview(c, p)).rejects.toThrow("CHANNEL_NOT_SENDABLE");
+    await expect(preview(c, p)).rejects.toThrow("CAPABILITY_SEND_UNVERIFIED");
     c.service.authority.calibrateTrial(
       p.draftId,
       snapshot(c.store.event(c.eventId).payload),

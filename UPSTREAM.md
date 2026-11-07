@@ -1,5 +1,21 @@
 # 来源与许可
 
+## 2026-11-07：延迟评论回执与通道状态取舍
+
+本轮在修改前重新查询三个仓库的实际分支 SHA，读取固定版本具体源码和许可，原始源码仅存 `.local/upstream-review/2026-11-07-receipts`。用户明确要求同时检查本应用是否过严，不能把更多校验等同于更可靠。
+
+| 候选与固定提交 | 具体实现与许可 | 本轮取舍 |
+| --- | --- | --- |
+| [DSH](https://github.com/LockyBee/dsh-douyin-agent/tree/7989640e340f0fd79e2de9874880d5197546e755) `7989640e340f0fd79e2de9874880d5197546e755` | MIT；`chat-browser.mjs:1613-1625` 在单次提交后空框时重挂原会话一次；`comment-browser.mjs:488-500` 用新本人 ID、正文及两轮稳定读取确认 | 采用有限轮询和一次原对象正常重挂；本项目旧分支仅在缺 status 且无意图后 GET 时补读，GET 存在并不能证明新状态已渲染，这两个前提是冗余限制。正常补读仍同步保护所有可见人稿，不复制物理鼠标提交或把无状态推定为成功。上游评论发布与本项目准确父评论回复不同，不能当本机已通过。 |
+| [Chatwoot](https://github.com/chatwoot/chatwoot/tree/625d5964e3cb3f1d917b43c3b8332219e525a4b8) `625d5964e3cb3f1d917b43c3b8332219e525a4b8` | 所读非 enterprise 文件为 MIT Expat；`app/models/message.rb:84,104,157` 关联 echo_id，区分 sent/delivered/read/failed；`app/javascript/dashboard/store/modules/conversations/actions.js:406-438` 及 `index.js:246-269` 处理发送回调和事件更新 | 采用后台权威结果与状态分别表达的思路，现有持久 commandId/意图继续承担关联；不引入 Rails/Vue 或第二发送路径。当前代码仍将创建响应硬设 SENT，公开问题 [#16351](https://github.com/chatwoot/chatwoot/issues/16351) 报告覆盖较新状态；不照搬其乐观状态覆盖或自动重试。通道的只读、待校验、已开通和阻断分别显示，不能统一称为禁止发送，更不能与 AI Key 混淆。 |
+| [MediaCrawler](https://github.com/NanmiCoder/MediaCrawler/tree/54a3d92412f4b20c06b45f1d542b78dd92049d6d) `54a3d92412f4b20c06b45f1d542b78dd92049d6d` | `NON-COMMERCIAL LEARNING LICENSE 1.1`，不是无限制商业许可；`media_platform/douyin/client.py:260-279` 按作品/父评论分批读取；`store/douyin/__init__.py:135-150` 保存原生 ID/父 ID/时间 | 仅比较读取与父子评论的数据关系；不复制代码、引入依赖、直接请求其私有接口或沿用正文日志。采集能力不能替代发送确认。 |
+
+路线结论为调整现有适配器，不替换统一发送架构。即时缺证明时统一尝试一次受保护的正常刷新，无需先证明缺哪个字段或先判断是否发生过 GET；刷新后仍核对同一新原生 ID、准确父评论、我方身份、全文、原生确认状态和两轮一致性。秒级跨时钟条件不能单独代表发送失败，本条后续只读证明的时间晚于原意图，未复现原回读缺失字段，不能把本次错误归因于毫秒差，也不补造请求关联。既有未知收据保留，只追加补充证据。
+
+验证先以合成 pending 状态、缺状态且已有 GET、刷新前尚无子回复三种时序运行未修复源码红测，再覆盖刷新后仍 pending、旧时间、错误父评论/作者/全文、歧义及网页人稿保护。无真实新发送或模型调用。
+
+部分子回复元数据缺失的刷新条件也在旧隔离源码实际红测；最终干净 308 项、source/compiled 冒烟、新目录安装及随包 20 条零 Key 合成任务通过。单次提交后补读由同一适配器完成，不新增通用重试框架、依赖或后台发送路径；后续新版本真实即时回读仍单列待验。
+
 ## 2026-11-07：刷新后只等待可见评论
 
 修改前核对 Playwright 1.64.1/Apache-2.0 固定 SHA `cfe490d941f992655948eee8fd4fd94e1c4234bf` 的 `packages/playwright-core/src/client/locator.ts`：`first()` 仅追加 nth=0，不会跳过隐藏节点；`filter({visible:true})` 每次定位时重新过滤。官方对应版本文档同步核对。采用现有可见性过滤，先要求唯一可见评论列表，再在其内部等待可见评论；不引入依赖、放宽准确父评论校验或物理点击。MIT DSH 固定 SHA `7989640e340f0fd79e2de9874880d5197546e755` 的 `chat-browser.mjs:1613-1625` 继续仅参考限定原目标的一次正常重挂，不复用宽松收据。

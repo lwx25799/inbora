@@ -2,7 +2,6 @@ import {expect,test,vi} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
 import {captureObserved} from '../../src/adapters/observed-reader.js';
-import {ObservedReader} from '../../src/adapters/observed-reader.js';
 import {ObservedCommentReply} from '../../src/adapters/observed-comment-reply.js';
 import {SendCoordinator} from '../../src/core/send-coordinator.js';
 import {ManualCommentRetry} from '../../src/core/manual-comment-retry.js';
@@ -12,7 +11,8 @@ import {database,privateTemp} from '../helpers.js';
 
 async function setup(){
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true),store=database();
-  await mountCommentReply(owner,server.origin);const mapping=commentReplyMapping(server.origin),adapter=new ObservedCommentReply(owner.notification,mapping,250);
+  await mountCommentReply(owner,server.origin);await reloadableCommentReply(owner.notification,server.origin);
+  const mapping=commentReplyMapping(server.origin),adapter=new ObservedCommentReply(owner.notification,mapping,250);
   const batch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,evidenceId:'fixture-root-snapshot'});
   store.observe('COMMENT_NOTIFICATION','work:10',[],'100','fixture');store.observe('COMMENT_NOTIFICATION','work:10',batch.events,'100','fixture');
   const event=store.events()[0]!,draft=store.saveDraft(event.id,'approved root reply','mock');
@@ -244,9 +244,8 @@ test('a transparent root menu does not block discovery of its visible original c
   }finally{await f.close();}
 });
 
-test('a reply-list request from before intent cannot suppress the one bounded read-only refresh',async()=>{
-  const f=await setup(),original=ObservedReader.prototype.comments;
-  try{
+test('a reply-list request from before intent still permits one normal refresh without submitting',async()=>{
+  const f=await setup();try{
     await f.adapter.inspect(f.event.payload);
     await f.owner.notification.route('**/aweme/v1/web/comment/list/reply/**',route=>route.fulfill({json:{status_code:0,comments:[]}}));
     await f.owner.notification.evaluate(async()=>{await fetch('/aweme/v1/web/comment/list/reply/?comment_id=11');});
@@ -257,10 +256,50 @@ test('a reply-list request from before intent cannot suppress the one bounded re
       Object.defineProperty(child,'__reactFiber$fixture',{value:{return:{memoizedProps:{level:2,levelOneCid:'11',awemeInfo:{awemeId:'10'},
         commentInfo:{cid:'501',replyId:'11',text:'approved root reply',createTime:Date.now()/1000,user:{uid:'100',secUid:'self-sec'}}}}}});root.append(child);
     });
-    let refreshes=0;ObservedReader.prototype.comments=async()=>{refreshes++;throw Error('EXPECTED_READ_ONLY_REFRESH');};
-    await expect(f.adapter.readback(f.event.payload,f.draft.text,[],boundary)).rejects.toThrow('EXPECTED_READ_ONLY_REFRESH');
+    let refreshes=0;f.owner.notification.on('framenavigated',frame=>{if(frame===f.owner.notification.mainFrame())refreshes++;});
+    expect(await f.adapter.readback(f.event.payload,f.draft.text,[],boundary)).toBeNull();
     expect(refreshes).toBe(1);expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(0);
-  }finally{ObservedReader.prototype.comments=original;await f.close();}
+  }finally{await f.close();}
+});
+
+test.each(['pending','missing-status','partial-native','not-rendered','still-pending','old','wrong-parent','wrong-text','wrong-owner','duplicate','human-draft','sibling-draft'])
+('one automatic comment reconciliation handles stale %s without another submission',async kind=>{
+  const f=await setup();let refreshes=0;try{
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    const click=f.adapter.clickOnce.bind(f.adapter);
+    f.adapter.clickOnce=async boundary=>{
+      await click(boundary);
+      const at=await f.owner.notification.evaluate(kind=>{
+        const root=document.querySelector('#root-comment')!,p=Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture')!.value.return.memoizedProps;
+        const child=root.querySelector('.comment')!,c=Object.getOwnPropertyDescriptor(child,'__reactFiber$fixture')!.value.return.memoizedProps.commentInfo;
+        const at=c.createTime as number;
+        if(kind==='missing-status'){delete c.status;delete p.commentInfo.replyComment[0].status;}
+        else{c.status=0;p.commentInfo.replyComment[0].status=0;}
+        if(kind==='partial-native'){delete c.createTime;delete p.commentInfo.replyComment[0].createTime;}
+        if(kind==='not-rendered'){child.remove();p.commentInfo.replyComment=[];p.commentInfo.replyTotal=0;}
+        if(kind==='human-draft'||kind==='sibling-draft'){
+          (root.querySelector('.reply-action') as HTMLElement).click();
+          document.querySelector('#comment-editor .public-DraftStyleDefault-block')!.textContent='human draft must remain';
+          if(kind==='sibling-draft')document.body.append(document.querySelector('#reply-controls')!);
+        }
+        sessionStorage.setItem('reconciliation-clicks',String((window as unknown as {commentClicks:number}).commentClicks));
+        return at;
+      },kind);
+      await f.owner.notification.route('**/aweme/v1/web/comment/list/reply/**',route=>route.fulfill({json:{status_code:0,comments:[{
+        cid:'501',aweme_id:'10',reply_id:'11',text:f.draft.text,user:{uid:'100',sec_uid:'self-sec'},status:0,create_time:at}]}}));
+      // An ordinary page GET can arrive while the rendered reply is still pending or absent.
+      await f.owner.notification.evaluate(async()=>{await(await fetch('/aweme/v1/web/comment/list/reply/?comment_id=11')).json();});
+      await mountFreshCommentPage(f.owner.notification,f.server.origin,f.draft.text,at,kind);
+      f.owner.notification.on('framenavigated',frame=>{if(frame===f.owner.notification.mainFrame())refreshes++;});
+    };
+    const result=await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false);
+    expect(result).toBe(['pending','missing-status','partial-native','not-rendered'].includes(kind)?'CONFIRMED':'UNCERTAIN');
+    expect(refreshes).toBe(['human-draft','sibling-draft'].includes(kind)?0:1);
+    expect(await f.owner.notification.evaluate(()=>sessionStorage.getItem('reconciliation-clicks'))).toBe('1');
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:1});
+    await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow();
+    if(kind==='human-draft'||kind==='sibling-draft')expect(await f.owner.notification.locator('#comment-editor').textContent()).toBe('human draft must remain');
+  }finally{await f.close();}
 });
 test('direct level-one reply records intent before one click and confirms only its exact child',async()=>{
   const f=await setup();try{
