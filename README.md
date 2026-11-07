@@ -1,12 +1,12 @@
 # inbora
 
-最小 Windows 客户端 `0.2.9` 已实现 Tauri v2 + React 单账号人工收件箱，并复用现有 Node 内核。用户已实测该版原生启动、连接、一键双通道同步及期间切页；真实 DeepSeek 建议生成、Token 记录、人稿保留、引用修改保存，以及重启后草稿保留/Key 清空也已通过。同步在后台串行读取，评论缺证明时正常补读一次，通道状态与 AI Key 分开说明。GUI 人工评论和私信已有单次提交及后续只读证明，原即时未知收据及冻结保留。当前是**受控实机验收继续中**；AI 双通道实际发送、新即时回读、Windows 11 及完整 PoC GO 仍待对应实测。
+最小 Windows 客户端 `0.2.9` 已交付单账号原生人工收件箱，复用现有 Node 内核。真实双通道提交/后续证明、同步与期间导航、DeepSeek 生成/usage/编辑保存、重启保稿与 Key 清空均已有证据。**本轮核心功能验证收尾，工程推进结论为 CONDITIONAL GO，可进入正式版开发；原完整 PoC 实机矩阵未全部通过。** 用户已将额外 Windows 系统/版本兼容测试移至正式版，本期按已实测 Windows 10 收尾。证据与限制见 [PoC 结论](docs/POC-GO-DECISION.md) 和 [客户端验收总表](docs/CLIENT-ACCEPTANCE.md)；旧未知及冻结保留，不宣称自动回复或正式产品可上线。
 
 0.2.4私信回读允许最多2秒时钟偏差，并结合发送前上下文、最新原生消息及刷新记录核验；上述消息早763毫秒的后续只读补证已通过。原异常记录保留，不需要重新发送。
 
 ## 最小客户端启动与日常操作
 
-运行本机交付的 `D:\Inbora\.local\delivery\inbora_0.2.9_x64-setup.exe`，或在项目执行 `pnpm desktop:build` 后安装 `desktop\src-tauri\target\release\bundle\nsis\inbora_0.2.9_x64-setup.exe`。需要 Windows 10/11 x64、WebView2 和 Edge；安装包附带 Node、SQLite 原生模块及锁定依赖，无需用户另装 Node。当前包未做商业代码签名，不自动升级。包构建、安装与实际窗口启动分别记录于 `docs/CLIENT-ACCEPTANCE.md`。
+运行本机交付的 `D:\Inbora\.local\delivery\inbora_0.2.9_x64-setup.exe`，或在项目执行 `pnpm desktop:build` 后安装 `desktop\src-tauri\target\release\bundle\nsis\inbora_0.2.9_x64-setup.exe`。本轮在 Windows 10 x64、WebView2 和 Edge 上实测，Windows 11 兼容正式版再验；安装包附带 Node、SQLite 原生模块及锁定依赖，无需用户另装 Node。当前包未做商业代码签名，不自动升级。包构建、安装与实际窗口启动分别记录于 `docs/CLIENT-ACCEPTANCE.md`。
 
 1. 启动 inbora，在连接页填写已有私有运行目录。现有实机目录为 `D:\Inbora\.local\real-acceptance`，不要勾选“初始化全新目录”。首次客户端升级会先验证一致备份、试升级和恢复，再附加 schema 3 表；原库预算、基线、暂停、意图、收据和异常保留。
 2. 直接点右上“同步收件箱”，内核按需打开专属浏览器，依次读取授权作品评论和私信，并显示各自结果；必要时由本人扫码或处理平台验证。同步中可继续浏览，重复启动合并到当前任务；“AI 与设置”保留顶部通知独立同步入口，来源与证据不混算。工作模式保留已选配置，有效模式及原因另行显示。浏览器从启动即静音。
