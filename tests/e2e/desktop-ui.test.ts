@@ -30,7 +30,6 @@ test.each([
   async (viewport) => {
     const root = privateTemp("desktop-ui-"),
       store = database();
-    await migrateClient(store, join(root, "backup.sqlite"));
     const comment = pending(
       store,
       candidate({
@@ -52,6 +51,8 @@ test.each([
         text: "这是一条合成测试私信。",
       }),
     );
+    const legacyDraft = store.saveDraft(comment, "此前保存的合成 Mock 草稿。", "mock-deterministic");
+    await migrateClient(store, join(root, "backup.sqlite"));
     let clicks = 0;
     class UiBrowser extends BrowserService {
       private uiActor = new AccountActor();
@@ -136,7 +137,7 @@ test.each([
         "fixtureInvoke",
         async (command: string, args: { body: unknown }) => {
           if (command === "desktop_info")
-            return { runtime: root, version: "0.2.1-synthetic" };
+            return { runtime: root, version: "0.2.2-synthetic" };
           if (command !== "client_request")
             throw new Error("UNEXPECTED_NATIVE_COMMAND");
           const body = args.body as { command: string; eventId?: string };
@@ -197,6 +198,7 @@ test.each([
           page.getByRole("heading", { name: "合成私信作者" }).isVisible(),
         )
         .toBe(true);
+      await expect.poll(() => page.locator(".editor-title").innerText()).toContain("尚未保存");
       await page.getByRole("button", { name: "人工接管", exact: true }).click();
       const editor = page.getByRole("textbox", { name: "人工回复草稿" });
       await editor.fill("急停时必须保留的未保存人稿");
@@ -242,6 +244,9 @@ test.each([
       holdCommentReads = false;
       releaseCommentReads.forEach(release => release());
       await expect.poll(() => page.getByRole("heading", { name: "合成评论作者" }).count()).toBe(1);
+      await expect.poll(() => page.locator(".editor-title").innerText()).toContain("历史草稿");
+      expect(await editor.inputValue()).toBe(legacyDraft.text);
+      expect(service.authority.draftFor(comment)?.origin).toBe("LEGACY");
       await page.getByRole("button", { name: /合成私信作者/ }).click();
       await expect
         .poll(() => editor.inputValue())
@@ -250,6 +255,7 @@ test.each([
       await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
       await expect.poll(()=>editor.inputValue()).toBe('人工编写的合成回复，不需要模型。');
       await page.getByRole("button", { name: "保存草稿", exact: true }).click();
+      await expect.poll(() => page.locator(".editor-title").innerText()).toContain("人工输入");
       await page
         .getByRole("button", { name: "核对并发送", exact: true })
         .click();
@@ -307,7 +313,7 @@ test.each([
         store.db.prepare("SELECT count(*) AS n FROM model_calls").get(),
       ).toEqual({ n: 0 });
       expect(errors).toEqual([]);
-      expect(store.event(comment).status).toBe("AWAITING_DRAFT");
+      expect(store.event(comment).status).toBe("AWAITING_APPROVAL");
       // A renderer refresh only reads the live authority. No command replay and no second click.
       await page.reload();
       await expect

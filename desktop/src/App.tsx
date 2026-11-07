@@ -25,6 +25,11 @@ const modes = {
   MANUAL: "纯人工回复",
   AI_ASSISTED: "AI 辅助回复",
 };
+const draftOrigins = new Map([
+  ["HUMAN_TYPED", "人工输入"],
+  ["AI_ASSISTED_APPROVED", "已引用 AI 建议"],
+  ["LEGACY", "历史草稿"],
+]);
 interface BufferDraft {
   text: string;
   version: number;
@@ -917,9 +922,9 @@ export function App() {
                       <h3>回复草稿</h3>
                       <small>
                         版本 {thread.draft?.version ?? 0} ·{" "}
-                        {thread.draft?.origin === "AI_ASSISTED_APPROVED"
-                          ? "已引用 AI 建议"
-                          : "人工输入"}{" "}
+                        {thread.draft
+                          ? draftOrigins.get(thread.draft.origin) ?? "来源待核对"
+                          : "尚未保存"}{" "}
                         · {[...text].length}/500 字
                       </small>
                     </div>

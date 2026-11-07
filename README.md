@@ -1,10 +1,10 @@
 # inbora
 
-最小 Windows 客户端 `0.2.1` 已实现 Tauri v2 + React 单账号人工收件箱，并复用现有 Node 内核。0.2.1修复已暂停时再次急停后接管详情未刷新的问题；当前交付状态是**离线及本机 Windows 10 原生测试准备完成，受控实机验收待继续**；Windows 11、真实 DeepSeek、GUI 双通道人工/AI 辅助外发仍未验证，不能据此宣布最小客户端全部完成或 PoC GO。
+最小 Windows 客户端 `0.2.2` 已实现 Tauri v2 + React 单账号人工收件箱，并复用现有 Node 内核。0.2.1修复已暂停时再次急停后接管详情未刷新的问题，0.2.2准确区分历史草稿、人工输入及未保存状态；当前交付状态是**离线及本机 Windows 10 原生测试准备完成，受控实机验收待继续**；Windows 11、真实 DeepSeek、GUI 双通道人工/AI 辅助外发仍未验证，不能据此宣布最小客户端全部完成或 PoC GO。
 
 ## 最小客户端启动与日常操作
 
-运行本机交付的 `D:\Inbora\.local\delivery\inbora_0.2.1_x64-setup.exe`，或在项目执行 `pnpm desktop:build` 后安装 `desktop\src-tauri\target\release\bundle\nsis\inbora_0.2.1_x64-setup.exe`。需要 Windows 10/11 x64、WebView2 和 Edge；安装包附带 Node、SQLite 原生模块及锁定依赖，无需用户另装 Node。当前包未做商业代码签名，不自动升级。
+运行本机交付的 `D:\Inbora\.local\delivery\inbora_0.2.2_x64-setup.exe`，或在项目执行 `pnpm desktop:build` 后安装 `desktop\src-tauri\target\release\bundle\nsis\inbora_0.2.2_x64-setup.exe`。需要 Windows 10/11 x64、WebView2 和 Edge；安装包附带 Node、SQLite 原生模块及锁定依赖，无需用户另装 Node。当前包未做商业代码签名，不自动升级。
 
 1. 启动 inbora，在连接页填写已有私有运行目录。现有实机目录为 `D:\Inbora\.local\real-acceptance`，不要勾选“初始化全新目录”。首次客户端升级会先验证一致备份、试升级和恢复，再附加 schema 3 表；原库预算、基线、暂停、意图、收据和异常保留。
 2. 在“AI 与设置”打开专属有头浏览器；必要时由本人扫码或处理平台验证。回到收件箱，分别同步私信、授权作品评论；顶部通知有单独同步入口，来源与证据不混算。浏览器从启动即静音。

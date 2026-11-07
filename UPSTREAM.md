@@ -1,5 +1,9 @@
 # 来源与许可
 
+## 2026-11-07：历史草稿来源标签
+
+动手前再读已固定MIT React v19.3.1 `61aa00df822d0eb76d0362eb8b6fdd3527693efe`的`packages/react-dom/src/client/ReactDOMRoot.js` render入口及MIT DSH `7989640e340f0fd79e2de9874880d5197546e755`的`native-model-settings.mjs`。上游不提供本项目迁移稿来源合同，不能从当前无Key/未授权反推旧稿来源；采用现有应用的状态映射写法，独立小范围显示映射，不复制上游代码或引入库。后端已准确返回LEGACY，前端旧二分分支误把非AI全部标为人工；修复只按现有来源显示历史/人工/AI，未知来源和无稿明确展示。带schema2旧Mock稿的双尺寸正式UI回归实际先红后绿，数据库及发送资格不随标签变更。
+
 ## 2026-11-07：重复急停后的接管详情刷新
 
 动手前复查React v19.3.1固定`61aa00df822d0eb76d0362eb8b6fdd3527693efe`的`packages/react-reconciler/src/ReactFiberHooks.js`：`areHookInputsEqual`逐项比较依赖，`updateEffectImpl`在全部相同时不标记Effect执行；MIT许可与已安装React LICENSE核对。官方useEffect文档经Context7复核。另复读MIT DSH固定`7989640e340f0fd79e2de9874880d5197546e755`的`native-model-settings.mjs`（私有只读源码归档tree目录），其配置/服务身份重核没有可直接复用的React急停刷新实现；不引入宿主、缓存框架或新依赖。
