@@ -5,6 +5,7 @@ import { z } from "zod";
 import { OwnerLock } from "../browser/owner-lock.js";
 import { EventStore } from "../storage/store.js";
 import { migrateClient } from "../storage/client-migration.js";
+import { migrateAutomation } from "../storage/automation-migration.js";
 import { runtimeRoot, initRuntime, loadRuntime } from "../config/runtime.js";
 import { requireSafe } from "../core/contracts.js";
 import { BrowserService } from "./browser-service.js";
@@ -28,6 +29,7 @@ const connectSchema = z
   })
   .strict();
 const secret = process.env.INBORA_PIPE_NONCE;
+const firstRunAt = Math.floor(Date.now() - process.uptime() * 1000);
 requireSafe(secret?.length === 64, "TRUSTED_DESKTOP_PARENT_REQUIRED");
 delete process.env.INBORA_PIPE_NONCE;
 let service: ClientService | undefined,
@@ -73,7 +75,8 @@ async function connect(raw: unknown): Promise<unknown> {
       store,
       join(root, "backups", `client-v2-${randomUUID()}.sqlite`),
     );
-    service = new ClientService(store, new BrowserService(root));
+    await migrateAutomation(store,join(root,'backups',`automation-before-${randomUUID()}.sqlite`));
+    service = new ClientService(store, new BrowserService(root), undefined, Date.now, firstRunAt);
     await service.loadSettings();
     token = service.authority.issueSession();
     service.events.on("update", (event) => output({ protocol: 1, event }));
@@ -143,6 +146,7 @@ input.on("line", (line) => {
         finally{service.authority.revoke(stopToken);}
       } else {
         requireSafe(service, "CONNECT_RUNTIME_FIRST");
+        service.authority.renewTrustedSession(token);
         result = await service.dispatch(token, raw);
       }
       output({ protocol: 1, requestId: id, ok: true, result });

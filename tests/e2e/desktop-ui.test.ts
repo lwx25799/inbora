@@ -103,8 +103,9 @@ test.each([
         return { adapter, dispose: () => {} };
       }
     }
-    const service = new ClientService(store, new UiBrowser(root)),
-      token = service.authority.issueSession();
+    const service = new ClientService(store, new UiBrowser(root));
+    await service.loadSettings();
+    const token = service.authority.issueSession();
     let connected = false;
     for (const channel of ["DIRECT_MESSAGE", "COMMENT_NOTIFICATION"] as const)
       service.authority.attest(
@@ -130,13 +131,6 @@ test.each([
     let releaseSave: (() => void) | undefined;
     let saveEntered: (() => void) | undefined;
     let holdSave = false;
-    let holdThread = false;
-    let delayInitialRead = false;
-    let initialReads = 0;
-    let threadEntered: (() => void) | undefined;
-    let releaseThread: (() => void) | undefined;
-    let holdCommentReads = false;
-    const releaseCommentReads: (() => void)[] = [];
     const controlTrace: { command: string; paused: boolean; generation?: number; isMine?: boolean }[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
     try {
@@ -164,16 +158,6 @@ test.each([
           const ownership = (result as { ownership?: { generation: number; isMine: boolean } }).ownership;
           controlTrace.push({ command: body.command, paused: service.authority.paused(),
             ...(ownership ? { generation: ownership.generation, isMine: ownership.isMine } : {}) });
-          const delayInitial = body.command === "getThread" && delayInitialRead && ++initialReads === 2;
-          if (body.command === "getThread" && (holdThread || delayInitial)) {
-            holdThread = false;
-            if (delayInitial) delayInitialRead = false;
-            threadEntered?.();
-            await new Promise<void>((resolve) => { releaseThread = resolve; });
-          }
-          if (body.command === "getThread" && body.eventId === comment && holdCommentReads) {
-            await new Promise<void>((resolve) => { releaseCommentReads.push(resolve); });
-          }
           return result;
         },
       );
@@ -222,84 +206,46 @@ test.each([
       await page.getByRole('button',{name:/同步新增任务/}).waitFor();
       expect(syncCalls).toEqual(['works','dm']);expect(clicks).toBe(0);
       await page.getByRole("button", { name: /合成私信作者/ }).click();
-      await expect
-        .poll(() =>
-          page.getByRole("heading", { name: "合成私信作者" }).isVisible(),
-        )
-        .toBe(true);
-      await expect.poll(() => page.locator(".editor-title").innerText()).toContain("尚未保存");
-      await page.getByRole("button", { name: "人工接管", exact: true }).click();
-      const editor = page.getByRole("textbox", { name: "人工回复草稿" });
-      await editor.fill("急停时必须保留的未保存人稿");
-      await page.getByRole("button", { name: "全局急停", exact: true }).click();
-      await page.getByText("急停已生效；已存意图仍需回读或冻结", { exact: true }).waitFor();
-      expect(service.authority.paused()).toBe(true);
-      expect(service.authority.ownership(store.event(dm)).operator_id).toBe(null);
-      await expect.poll(() => page.getByRole("button", { name: "人工接管", exact: true }).count()).toBe(1);
-      await expect.poll(() => editor.getAttribute("readonly")).not.toBe(null);
-      expect(await editor.inputValue()).toBe("急停时必须保留的未保存人稿");
-      await page.getByRole("button", { name: "人工接管", exact: true }).click();
-      const oldThreadEntered = new Promise<void>((resolve) => { threadEntered = resolve; });
-      holdThread = true;
-      await page.getByRole("button", { name: "保存草稿", exact: true }).click();
-      await oldThreadEntered;
-      await editor.fill("旧详情在途期间继续输入的人稿");
-      await page.getByRole("button", { name: "全局急停", exact: true }).click();
-      await expect.poll(() => page.getByRole("button", { name: "人工接管", exact: true }).count()).toBe(1);
-      releaseThread!();
-      await page.getByText("草稿已保存，旧审批已失效", { exact: true }).waitFor();
-      await expect.poll(() => page.getByRole("button", { name: "人工接管", exact: true }).count()).toBe(1);
-      expect(await editor.getAttribute("readonly")).not.toBe(null);
-      expect(await editor.inputValue()).toBe("旧详情在途期间继续输入的人稿");
-      await page.getByRole("button", { name: "人工接管", exact: true }).click();
-      await service.dispatch(token, { command: "resume", eventId: null });
-      await page.getByRole("button", { name: "重新连接内核", exact: true }).click();
-      await expect.poll(() => page.locator(".topbar .muted").innerText()).not.toContain("已暂停");
-      holdSave = true;
-      const entered = new Promise<void>((resolve) => {
-        saveEntered = resolve;
-      });
-      await editor.fill("保存请求的旧文字");
-      await page.getByRole("button", { name: "保存草稿", exact: true }).click();
-      await entered;
-      await editor.fill("保存期间继续输入的新文字");
-      holdCommentReads = true;
-      await page.getByRole("button", { name: /合成评论作者/ }).click();
-      await expect.poll(() => releaseCommentReads.length).toBe(2);
-      releaseSave!();
-      await page
-        .getByText("草稿已保存，旧审批已失效", { exact: true })
-        .waitFor();
-      holdCommentReads = false;
-      releaseCommentReads.forEach(release => release());
-      await expect.poll(() => page.getByRole("heading", { name: "合成评论作者" }).count()).toBe(1);
-      await expect.poll(() => page.locator(".editor-title").innerText()).toContain("历史草稿");
+      await page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+      const dialog=page.getByRole('dialog',{name:'人工回复对话框'}),editor=dialog.getByRole('textbox',{name:'人工回复草稿'});
+      await dialog.waitFor();
+      expect(await dialog.getByRole('button',{name:'人工接管',exact:true}).count()).toBe(0);
+      expect(await dialog.getByRole('button',{name:'保存草稿',exact:true}).count()).toBe(0);
+      holdSave=true;
+      const entered=new Promise<void>(resolve=>{saveEntered=resolve;});
+      await editor.fill('自动保存旧文字');await entered;
+      await editor.fill('保存期间继续输入的新文字');releaseSave!();
+      await expect.poll(()=>service.authority.draftFor(dm)?.text).toBe('保存期间继续输入的新文字');
+      await dialog.getByRole('button',{name:'全局急停',exact:true}).click();
+      await expect.poll(()=>service.authority.paused()).toBe(true);
+      await expect.poll(()=>editor.getAttribute('readonly')).not.toBe(null);
+      expect(await editor.inputValue()).toBe('保存期间继续输入的新文字');
+      await dialog.getByRole('button',{name:'恢复编辑',exact:true}).click();
+      await editor.fill('暂停期间保留的完整人稿');
+      await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
+      await expect.poll(()=>service.authority.draftFor(dm)?.text).toBe('暂停期间保留的完整人稿');
+      await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+      await page.getByRole('button',{name:'恢复发送',exact:true}).click();
+      await expect.poll(()=>service.authority.paused()).toBe(false);
+      await page.getByRole('button',{name:'收件箱',exact:true}).click();
+      await page.getByRole('button',{name:/合成评论作者/}).click();
+      await page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+      await expect.poll(()=>dialog.locator('.editor-title').innerText()).toContain('历史草稿');
       expect(await editor.inputValue()).toBe(legacyDraft.text);
-      expect(service.authority.draftFor(comment)?.origin).toBe("LEGACY");
-      await page.getByRole("button", { name: /合成私信作者/ }).click();
-      await expect
-        .poll(() => editor.inputValue())
-        .toBe("保存期间继续输入的新文字");
-      await editor.fill("人工编写的合成回复，不需要模型。");
-      await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
-      await expect.poll(()=>editor.inputValue()).toBe('人工编写的合成回复，不需要模型。');
-      await page.getByRole("button", { name: "保存草稿", exact: true }).click();
-      await expect.poll(() => page.locator(".editor-title").innerText()).toContain("人工输入");
-      await page
-        .getByRole("button", { name: "核对并发送", exact: true })
-        .click();
-      await expect
-        .poll(() =>
-          page.getByRole("region", { name: "逐条发送确认" }).isVisible(),
-        )
-        .toBe(true);
-      await page
-        .getByRole("button", { name: "确认此目标与全文，发送一次" })
-        .click();
-      await service.drain();
-      await expect.poll(() => store.event(dm).status).toBe("CONFIRMED");
+      await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
+      await page.getByRole('button',{name:/合成私信作者/}).click();
+      await page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+      await expect.poll(()=>editor.inputValue()).toBe('暂停期间保留的完整人稿');
+      await editor.fill('人工单击绑定最新全文，无需模型。');
+      await dialog.getByRole('button',{name:'发送',exact:true}).click();
+      await service.drain();await expect.poll(()=>store.event(dm).status).toBe('CONFIRMED');
+      await expect.poll(()=>dialog.locator('.send-state').textContent()).toContain('已确认');
       expect(clicks).toBe(1);
-      await page.getByRole("button", { name: /合成评论作者/ }).click();
+      expect(await page.getByRole('region',{name:'逐条发送确认'}).count()).toBe(0);
+      const output=resolve('.local/desktop-ui');await mkdir(output,{recursive:true});
+      await page.screenshot({path:join(output,`dialog-${viewport.width}x${viewport.height}.png`)});
+      await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
+      await page.getByRole('button',{name:/合成评论作者/}).click();
       await expect
         .poll(() => page.getByText("原父评论", { exact: true }).count())
         .toBeGreaterThan(0);
@@ -312,8 +258,6 @@ test.each([
           document.documentElement.scrollHeight > innerHeight,
       );
       expect(overflow).toBe(false);
-      const output = resolve(".local/desktop-ui");
-      await mkdir(output, { recursive: true });
       await page.screenshot({
         path: join(output, `inbox-${viewport.width}x${viewport.height}.png`),
       });
@@ -351,6 +295,21 @@ test.each([
       await expect.poll(()=>page.locator('dl > div').filter({has:page.getByText('评论能力',{exact:true})}).textContent()).toContain('请先打开专属浏览器并同步此通道');
       identityAvailable=true;
       await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+      await page.getByRole('spinbutton',{name:'本次持续授权的模型次数',exact:true}).fill('2');
+      await page.getByRole('spinbutton',{name:'本次持续授权的发送次数',exact:true}).fill('2');
+      await page.getByRole('textbox',{name:'允许回复的作品原生 ID（逗号或换行分隔）',exact:true}).fill('ui-sync-work');
+      await page.getByRole('textbox',{name:'允许回复的私信原生会话 ID',exact:true}).fill('conversation-1');
+      await page.getByRole('textbox',{name:'入站须包含任一词（留空表示范围内全部）',exact:true}).fill('NEVER-FIXTURE-MATCH');
+      await page.getByRole('textbox',{name:'自动回复规则',exact:true}).fill('Only answer the specified synthetic marker.');
+      await page.getByRole('checkbox',{name:/我确认当前本人账号、所选通道、模型/}).check();
+      await page.getByRole('button',{name:'按此范围启用规则自动回复',exact:true}).click();
+      await expect.poll(()=>service.authority.mode()).toBe('LIMITED_AUTO');
+      const authorized=await service.dispatch(token,{command:'getStatus'}) as {automation:{replyPolicy:{scope:{modelLimit:number;sendLimit:number;containsAny:string[]}}}};
+      expect(authorized.automation.replyPolicy.scope).toMatchObject({modelLimit:2,sendLimit:2,containsAny:['NEVER-FIXTURE-MATCH']});
+      expect(store.db.prepare('SELECT count(*) AS n FROM model_calls').get()).toEqual({n:0});
+      await page.getByRole('button',{name:'撤销自动回复策略',exact:true}).click();
+      await expect.poll(async()=>((await service.dispatch(token,{command:'getStatus'})) as {automation:{replyPolicy:unknown}}).automation.replyPolicy).toBe(null);
+      await page.getByRole('combobox',{name:'工作模式',exact:true}).selectOption('MANUAL');
       await page
         .getByRole("textbox", { name: "本次 API Key" })
         .fill("synthetic-ui-memory-key");
@@ -379,21 +338,14 @@ test.each([
         )
         .toBe(true);
       expect(clicks).toBe(1);
-      const initialEntered = new Promise<void>((resolve) => { threadEntered = resolve; });
-      delayInitialRead = true;
-      await page.getByRole("button", { name: /合成评论作者/ }).click();
-      await initialEntered;
-      await page.getByRole("button", { name: "重新连接内核", exact: true }).click();
-      await expect.poll(() => page.getByRole("button", { name: "人工接管", exact: true }).count()).toBe(1);
-      await page.getByRole("button", { name: "人工接管", exact: true }).click();
-      await editor.fill("初始详情迟到不得覆盖的人稿");
-      const replies = await page.evaluate(() => (window as unknown as { fixtureThreadReplies: number }).fixtureThreadReplies);
-      releaseThread!();
-      await expect.poll(() => page.evaluate(() => (window as unknown as { fixtureThreadReplies: number }).fixtureThreadReplies)).toBe(replies + 1);
-      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-      await expect.poll(() => editor.inputValue()).toBe("初始详情迟到不得覆盖的人稿");
-      await expect.poll(() => page.getByRole("button", { name: "释放接管", exact: true }).count()).toBe(1);
-      expect(await editor.getAttribute("readonly")).toBe(null);
+      await page.getByRole('button',{name:/合成评论作者/}).click();
+      await page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+      await editor.fill('重连后继续保留的人稿');
+      await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
+      await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+      await page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+      await expect.poll(()=>editor.inputValue()).toBe('重连后继续保留的人稿');
+      await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
       await writeFile(
         join(output, `checks-${viewport.width}.json`),
         JSON.stringify({

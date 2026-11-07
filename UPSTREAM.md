@@ -8,6 +8,18 @@ SQLite使用已锁定better-sqlite3 v13.0.3；远程tag解引用提交为 `dbc2e
 
 本切片仅落地持久合同、调度器和公平队列，尚未接入产品后台；测试及真实库私有副本迁移结果见 `docs/AUTOMATION-ACCEPTANCE.md`，不把上游能力或合成通过当作新作品/会话实机通过。
 
+## 2026-11-07：自动收取、持续策略、人工单次操作与凭据接入
+
+继续复读上述DSH固定提交的 `chat-browser.mjs:303-337` 原生会话身份、`:337-402` 消息绑定及 `receipt-baseline.mjs:62-83` 不可补造旧基线；watch固定 `177810c1f1858b529e78531f837ac9677fb9f9a9` 的 `tools/work-comments.mjs:67-85` 作品归属/原生发布时间和发现机制。独立实现正常本人主页GET响应与可见原生链接交叉绑定、正常列表滚动、原生会话及消息发送方交叉绑定；不运行上游内部fetch或签名服务。候选字段在夹具验证，实际新本人作品页字段尚须本轮用户原生差异验收，不能把源码候选称作已校准实机能力。
+
+后台一次业务操作复用现有ClientService/WorkbenchAuthority/SendCoordinator，不复制上游发送入口。只读适配器检查准确原文、上下文、本人及输入框归属后才能登记当前映射/浏览器能力；普通读取成功不直接提升。新意图事务同时写入只读核验资格，后续证据追加，旧未知/收据不改写。相关Chatwoot后台权威结果/事件更新的固定MIT文件已在上文记录，本轮沿用该思路，不引入其宿主。
+
+DPAPI先核对[微软官方ProtectedData.Protect文档](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.protecteddata.protect?view=windowsdesktop-10.0)，随后审查固定.NET MIT源码 `5535e31a712343a63f5d7d796cd874e563e5ac14` 的 `src/libraries/System.Security.Cryptography.ProtectedData/src/System/Security/Cryptography/ProtectedData.cs:1-124`，确认CurrentUser与LocalMachine分支、UI禁止及CryptProtectData/UnprotectData边界。本项目调用Windows已有.NET，不复制实现或添加密码学依赖；合成Key在本机真实DPAPI往返/删除及竞争验证，真实Key不进命令行、环境变量、脚本文件或日志。磁盘只写密文；同目录操作串行，异步完成绑定凭据代际。
+
+DeepSeek继续沿用锁定的官方Chat Completions/choices/usage合同，复核[当前官方接口](https://api-docs.deepseek.com/api/create-chat-completion/)，保持有限上下文、512 Token、30秒及无付费自动重试。模型只提供正文，后端策略独立匹配账号/通道/对象/规则/时段和额度。
+
+原生合成验收复用项目已有QA配置路线，核对官方Tauri配置合并文档及锁定 `tauri-runtime-wry 2.12.3` 的 `src/lib.rs:4982-4986`、`tauri-utils 2.10.2` 的 `src/config.rs:2128-2137`。crate携带Git提交 `993038c49185307dfc895ab7657d77ca0d5ed7c7`，许可沿用锁定crate的MIT/Apache-2.0与随包notice；additionalBrowserArgs通过原生API生效且使用独立dataDirectory。QA覆盖只放忽略目录，正常交付配置不增加调试端口，不将环境变量未打开调试目标归因为产品业务崩溃。
+
 ## 2026-11-07：一个入口同步双通道及后台进度
 
 修改前重新核对两仓当前 SHA，读取固定源码，不以旧印象代替比较。MIT DSH [7989640e340f0fd79e2de9874880d5197546e755](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/autonomous-watch.mjs#L125-L154) 的 `autonomous-watch.mjs:125-154` 使用 running/completion 防止重复启动、异步执行并立即返回 state；`:92-93` 暴露 phase，`:422-430` 处理停止。采用“单个后台操作、立即回状态、可查询阶段及完成”的组织方式，独立复用本项目现有 pending/drain 和账号 actor；不引入其自动观看、文件任务系统、AI 调用或发送路线。

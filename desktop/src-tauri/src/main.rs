@@ -132,6 +132,15 @@ async fn client_request(
         "reconcileUncertain",
         "configureAi",
         "authorizeAi",
+        "configureCollection",
+        "setModelGrant",
+        "setReplyPolicy",
+        "resumeAutomation",
+        "clearModelKey",
+        "openHumanDialog",
+        "closeHumanDialog",
+        "sendHumanReply",
+        "setKeyStorage",
     ];
     if !ALLOWED.contains(&command) || body.to_string().len() > 90_000 {
         return Err("INVALID_COMMAND".into());

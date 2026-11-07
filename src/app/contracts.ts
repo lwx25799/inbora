@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { collectionSchema, modelGrantSchema, replyPolicySchema } from "./automation-contracts.js";
 
 export const protocolVersion = 1;
 export const modeSchema = z.enum([
@@ -6,6 +7,7 @@ export const modeSchema = z.enum([
   "DRAFT_ONLY",
   "MANUAL",
   "AI_ASSISTED",
+  "LIMITED_AUTO",
 ]);
 export type Mode = z.infer<typeof modeSchema>;
 export const settingsSchema = z
@@ -39,7 +41,18 @@ export const sendParamsSchema = z
   })
   .strict();
 export type SendParams = z.infer<typeof sendParamsSchema>;
+export const humanReplySchema=z.object({...owned,expectedVersion:z.number().int().nonnegative(),text:z.string().min(1).max(2000),
+  contextVersion:z.string().regex(/^[a-f0-9]{64}$/),selectionId:z.uuid(),suggestionId:z.uuid().nullable()}).strict();
 export const commandSchema = z.discriminatedUnion("command", [
+  z.object({command:z.literal('openHumanDialog'),...event,selectionId:z.uuid()}).strict(),
+  z.object({command:z.literal('closeHumanDialog'),...owned}).strict(),
+  z.object({command:z.literal('sendHumanReply'),commandId:z.uuid(),input:humanReplySchema}).strict(),
+  z.object({command:z.literal("configureCollection"),settings:collectionSchema}).strict(),
+  z.object({command:z.literal("setModelGrant"),scope:modelGrantSchema.nullable(),confirmed:z.literal(true)}).strict(),
+  z.object({command:z.literal("setReplyPolicy"),policy:replyPolicySchema.nullable(),confirmed:z.literal(true)}).strict(),
+  z.object({command:z.literal("resumeAutomation"),...event}).strict(),
+  z.object({command:z.literal("clearModelKey")}).strict(),
+  z.object({command:z.literal('setKeyStorage'),storage:z.enum(['MEMORY','DPAPI','DELETE'])}).strict(),
   z.object({ command: z.literal("getStatus") }).strict(),
   z
     .object({

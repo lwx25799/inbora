@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { AutomationSettings } from './AutomationSettings';
 import {
   request,
   desktopInfo,
@@ -11,8 +12,6 @@ import {
   type Status,
   type Inbox,
   type Thread,
-  type Review,
-  type SendParams,
 } from "./api";
 
 function time(value: string | number | null | undefined) {
@@ -25,6 +24,7 @@ const modes = {
   DRAFT_ONLY: "仅保存草稿",
   MANUAL: "纯人工回复",
   AI_ASSISTED: "AI 辅助回复",
+  LIMITED_AUTO: "规则自动回复",
 };
 const syncNames={works:'评论',dm:'私信'};
 const syncStates={PENDING:'等待同步',RUNNING:'同步中',SUCCEEDED:'同步完成',FAILED:'同步失败',SKIPPED:'未继续同步',CANCELLED:'同步已停止'};
@@ -66,7 +66,7 @@ export function App() {
   const [busy, setBusy] = useState(""),
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
-    [review, setReview] = useState<Review | null>(null);
+    [, setReview] = useState<null>(null);
   const [send, setSend] = useState<{
     commandId: string;
     status: string;
@@ -89,10 +89,16 @@ export function App() {
   const detailElement = useRef<HTMLElement | null>(null);
   const sending = useRef(false),
     connected = !!status;
+  const [dialogOpen,setDialogOpen]=useState(false),[saving,setSaving]=useState(false);
+  const saveTask=useRef<Promise<unknown>|null>(null),dialogElement=useRef<HTMLDialogElement|null>(null);
   const dirty =
     !!thread && (text !== (thread.draft?.text ?? "") || suggestionId !== null);
   const latestEditor = useRef({ eventId: selected, text, suggestionId });
   latestEditor.current = { eventId: selected, text, suggestionId };
+  useEffect(() => {
+    if(dialogOpen&&!dialogElement.current?.open)dialogElement.current?.showModal();
+    if(!dialogOpen&&dialogElement.current?.open)dialogElement.current.close();
+  },[dialogOpen]);
   useEffect(() => {
     if (detailElement.current) detailElement.current.scrollTop = 0;
   }, [thread?.event.id]);
@@ -104,12 +110,13 @@ export function App() {
         setVersion(i.version);
       })
       .catch((e) => setError(explain(e)));
+    const previous=localStorage.getItem('inbora-runtime');
     void request<Status>({ command: "getStatus" })
       .then((s) => {
         setRuntime(s.runtime);
         setStatus(s);
       })
-      .catch(() => {});
+      .catch(() => {if(previous)void request<Status>({command:'connect',runtime:previous,initialize:false,consent:true}).then(s=>{setRuntime(s.runtime);setStatus(s);}).catch(e=>setError(explain(e)));});
   }, []);
   useEffect(() => {
     if (!connected) return;
@@ -147,7 +154,7 @@ export function App() {
       ignore = true;
     };
   }, [connected, channel, filter, pageNumber, notice, send?.status,status?.sync.runId,status?.sync.running,
-    status?.sync.results.map(result=>result.state).join('|')]);
+    status?.sync.results.map(result=>result.state).join('|'),status?.automation?.inboxRevision]);
   useEffect(() => {
     if (!connected || !selected) return;
     let ignore = false;
@@ -158,6 +165,7 @@ export function App() {
     setText("");
     const selectionId = crypto.randomUUID();
     selection.current = selectionId;
+    setDialogOpen(false);
     void request({ command: "selectTarget", eventId: selected, selectionId })
       .then(() => {
         if (!ignore) return refreshThread(selected);
@@ -170,6 +178,11 @@ export function App() {
       detailRequest.current++;
     };
   }, [connected, selected]);
+  useEffect(()=>{
+    if(!dialogOpen||!dirty||!thread?.ownership.isMine||saving||sending.current)return;
+    const id=setTimeout(()=>{void saveDraft().catch(e=>setError(explain(e)));},500);
+    return()=>clearTimeout(id);
+  },[dialogOpen,dirty,text,suggestionId,thread?.ownership.isMine,thread?.draft?.version,saving]);
   useEffect(() => {
     if (!connected || !selected) return;
     const eventId = selected;
@@ -181,6 +194,7 @@ export function App() {
     status?.paused,
     status?.browser.version,
     status?.capabilities.map((c) => c.state + ":" + c.reason).join("|"),
+    status?.automation?.inboxRevision,
   ]);
   useEffect(() => {
     if (!connected || !thread?.ownership.isMine || !selected) return;
@@ -214,7 +228,7 @@ export function App() {
     thread?.ownership.generation,
   ]);
   useEffect(() => {
-    if (!send || !["QUEUED", "PREFLIGHT", "SENDING"].includes(send.status))
+    if (!send || !["PREPARING", "QUEUED", "PREFLIGHT", "SENDING"].includes(send.status))
       return;
     let ignore = false;
     const id = setInterval(
@@ -227,7 +241,7 @@ export function App() {
             if (ignore || !result) return;
             setSend(result);
             if (
-              !["QUEUED", "PREFLIGHT", "SENDING"].includes(result.status) &&
+              !["PREPARING", "QUEUED", "PREFLIGHT", "SENDING"].includes(result.status) &&
               selectedRef.current
             ) {
               await refreshThread(selectedRef.current);
@@ -313,11 +327,13 @@ export function App() {
     setNotice("");
   }
   async function saveDraft() {
+    if(saveTask.current){await saveTask.current;return;}
     if (!thread) return;
     const eventId = thread.event.id,
       submittedText = text,
       submittedSuggestion = suggestionId;
-    const saved = await request<NonNullable<Thread["draft"]>>({
+    setSaving(true);
+    const task=request<NonNullable<Thread["draft"]>>({
       command: "saveDraft",
       eventId: thread.event.id,
       generation: thread.ownership.generation,
@@ -325,6 +341,9 @@ export function App() {
       text,
       suggestionId,
     });
+    saveTask.current=task;
+    let saved:NonNullable<Thread['draft']>;
+    try{saved=await task;}finally{saveTask.current=null;setSaving(false);}
     const buffered = buffers.current.get(eventId);
     if (buffered) {
       if (
@@ -366,9 +385,9 @@ export function App() {
       status.capabilities.find(
         (c) => c.channel === thread.event.payload.channel,
       ) ?? thread.capability;
-    if (capability.state !== "SEND_AVAILABLE" && !thread.controlledTrial)
+    if (!status.automation&&capability.state !== "SEND_AVAILABLE" && !thread.controlledTrial)
       return reasons[capability.reason] ?? "通道尚未开放发送";
-    if (!["MANUAL", "AI_ASSISTED"].includes(status.mode))
+    if (!["MANUAL", "AI_ASSISTED", "LIMITED_AUTO"].includes(status.configuredMode))
       return reasons.MODE_DRAFT_ONLY;
     if (
       !thread.ownership.isMine ||
@@ -377,42 +396,44 @@ export function App() {
       return "请先接管此目标";
     if (!status.operator.permissions.includes("SEND"))
       return "当前操作员没有发送权限";
-    if (dirty) return "请先保存当前修改";
-    if (!text.trim()) return "请输入并保存回复";
+    if (!text.trim()) return "请输入回复";
     return "";
   }
-  async function prepareReview() {
-    if (!thread) return;
-    const params: SendParams = {
-      eventId: thread.event.id,
-      generation: thread.ownership.generation,
-      draftId: thread.draft!.id,
-      draftVersion: thread.draft!.version,
-      text: thread.draft!.text,
-      contextVersion: thread.contextVersion,
-      selectionId: selection.current,
-    };
-    const current = selectedRef.current,
-      r = await request<Review>({ command: "previewSend", params });
-    if (current === selectedRef.current) setReview(r);
+  async function openDialog(){
+    if(!thread)return;
+    const id=thread.event.id,selectionId=selection.current;
+    const detail=await request<Thread>({command:'openHumanDialog',eventId:id,selectionId});
+    if(selectedRef.current===id&&selection.current===selectionId){setThread(detail);setDialogOpen(true);}
   }
-  async function confirm() {
-    if (!review || sending.current) return;
-    sending.current = true;
-    const r = review;
-    setReview(null);
-    setSend({ commandId: r.commandId, status: "QUEUED", reason: null });
-    try {
-      const result = await request<NonNullable<typeof send>>({
-        command: "submitManualSend",
-        commandId: r.commandId,
-        params: r.params,
-        confirmed: true,
-      });
-      setSend(result);
-    } finally {
-      sending.current = false;
+  async function closeDialog(){
+    await saveTask.current;
+    if(thread&&latestEditor.current.eventId===thread.event.id){
+      const detail=await request<Thread>({command:'getThread',eventId:thread.event.id});
+      const latest=latestEditor.current;
+      if(detail.ownership.isMine&&latest.text!==(detail.draft?.text??''))await request({command:'saveDraft',eventId:detail.event.id,
+        generation:detail.ownership.generation,expectedVersion:detail.draft?.version??0,text:latest.text,suggestionId:latest.suggestionId});
     }
+    if(thread?.ownership.isMine)await request({command:'closeHumanDialog',eventId:thread.event.id,generation:thread.ownership.generation});
+    setDialogOpen(false);await refreshThread();
+  }
+  async function emergencyStop(){
+    await request({command:'emergencyStop'});setStatus(s=>s?{...s,paused:true}:s);setReview(null);
+    setNotice('急停已生效；已存意图仍需回读或冻结');await refreshThread();
+  }
+  async function sendCurrentText(){
+    if(!thread||sending.current)return;
+    sending.current=true;
+    const eventId=thread.event.id,selectionId=selection.current;
+    const submittedText=latestEditor.current.text,submittedSuggestion=latestEditor.current.suggestionId;
+    try{
+      await saveTask.current;
+      const detail=await request<Thread>({command:'getThread',eventId});
+      if(selectedRef.current!==eventId||selection.current!==selectionId)throw Error('TARGET_SELECTION_CHANGED');
+      const commandId=crypto.randomUUID();setSend({commandId,status:'PREPARING',reason:null});
+      const result=await request<NonNullable<typeof send>>({command:'sendHumanReply',commandId,input:{eventId,generation:detail.ownership.generation,
+        expectedVersion:detail.draft?.version??0,text:submittedText,contextVersion:detail.contextVersion,selectionId,suggestionId:submittedSuggestion}});
+      setSend(result);await refreshThread(eventId);
+    }finally{sending.current=false;}
   }
 
   if (!status)
@@ -450,22 +471,20 @@ export function App() {
             我确认这是已授权账号的本地运行目录，允许读取并升级数据库
           </label>
           <p className="hint">
-            升级前会验证备份、试升级和恢复；保留预算、旧意图和冻结。连接不会自动打开网页、发送或调用模型。
+            升级前验证备份与恢复，保留预算、旧意图和冻结。连接后恢复已启用的后台收取；外发仅在你已启用的准确策略内执行。
           </p>
           <button
             className="primary"
             disabled={!runtime || !consent || !!busy}
             onClick={() =>
-              void act("连接中", async () =>
-                setStatus(
-                  await request<Status>({
+              void act("连接中", async () => {
+                const result=await request<Status>({
                     command: "connect",
                     runtime,
                     initialize,
                     consent: true,
-                  }),
-                ),
-              )
+                  });setStatus(result);localStorage.setItem('inbora-runtime',result.runtime);
+              })
             }
           >
             {busy || "连接收件箱"}
@@ -554,13 +573,7 @@ export function App() {
           <button
             className="danger"
             onClick={() =>
-              void request<{paused:boolean}>({ command: "emergencyStop" })
-                .then(async () => {
-                  setStatus(s=>s?{...s,paused:true}:s);
-                  setReview(null);
-                  setNotice("急停已生效；已存意图仍需回读或冻结");
-                  await refreshThread();
-                })
+              void emergencyStop()
                 .catch((e) => setError(explain(e)))
             }
           >
@@ -732,7 +745,7 @@ export function App() {
                 {!inbox.items.length && (
                   <div className="empty">
                     <strong>当前没有这类待办</strong>
-                    <p>使用上方同步按钮读取已授权范围，或更换筛选。</p>
+                    <p>后台会按已启用范围自动收取，也可以立即同步或更换筛选。</p>
                   </div>
                 )}
               </div>
@@ -763,7 +776,7 @@ export function App() {
                   <h2>
                     {selected ? "正在读取准确目标" : "从左侧选择一条消息"}
                   </h2>
-                  <p>先查看原文与目标，再接管、编辑和确认发送。</p>
+                  <p>查看原文与准确目标，打开人工回复后输入并发送。</p>
                 </div>
               ) : (
                 <>
@@ -872,42 +885,18 @@ export function App() {
                       </article>
                     ))}
                   </details>
-                  <div className="takeover">
-                    <div>
-                      <strong>
-                        {thread.ownership.isMine
-                          ? "由你接管"
-                          : thread.ownership.operator_id
-                            ? "由其他会话接管"
-                            : "尚未接管"}
-                      </strong>
-                      <small>
-                        代际 {thread.ownership.generation}
-                        {thread.ownership.isMine
-                          ? " · 租约至 " +
-                            time(thread.ownership.lease_expires_at)
-                          : ""}
-                      </small>
-                    </div>
-                    <button
-                      disabled={!!busy}
-                      onClick={() =>
-                        void act("更新接管", async () => {
-                          await request({
-                            command: thread.ownership.isMine
-                              ? "releaseHuman"
-                              : "claimHuman",
-                            eventId: thread.event.id,
-                            generation: thread.ownership.generation,
-                          });
-                          await refreshThread();
-                          setReview(null);
-                        })
-                      }
-                    >
-                      {thread.ownership.isMine ? "释放接管" : "人工接管"}
-                    </button>
-                  </div>
+                  <button className="primary" onClick={()=>void act('打开人工回复',openDialog)}>打开人工回复</button>
+                  <dialog ref={dialogElement} className="human-dialog" aria-label="人工回复对话框" onCancel={e=>{e.preventDefault();void act('保存并关闭',closeDialog);}}>
+                    <div className="dialog-heading"><h2>回复 {thread.event.payload.actorName || '当前目标'}</h2>
+                      <button className="danger" onClick={()=>void emergencyStop().catch(e=>setError(explain(e)))}>全局急停</button>
+                      <button onClick={()=>void act('保存并关闭',closeDialog)}>关闭并保留草稿</button></div>
+                    {!thread.ownership.isMine&&!thread.intent&&<button onClick={()=>void act('恢复编辑',openDialog)}>恢复编辑</button>}
+                    <p className="identity">本人：{status.account?.identity} · 对方：{thread.event.payload.actorId}<br/>
+                      {thread.event.payload.channel==='DIRECT_MESSAGE'?'会话：'+thread.event.payload.conversationId:'作品：'+thread.event.payload.videoId+' · 父评论：'+thread.event.payload.commentId}</p>
+                    <blockquote>{thread.event.payload.text}</blockquote>
+                    <details><summary>上下文 · {thread.history.length} 条</summary>{thread.history.map((h,i)=><p key={i}>{h.direction==='OUTGOING'?'我方：':'对方：'}{h.text}</p>)}</details>
+                    <p className="hint">{thread.ownership.isMine?'编辑期间自动接管、续期与保存':'此目标当前只读'}{saving?' · 正在保存':dirty?' · 等待自动保存':' · 修改已保存'}</p>
+                    {(error||notice||busy)&&<p role={error?'alert':'status'} className={error?'error':'hint'}>{error||busy||notice}</p>}
                   <section className="editor">
                     <div className="editor-title">
                       <h3>回复草稿</h3>
@@ -935,17 +924,6 @@ export function App() {
                     />
                     <div className="editor-actions">
                       <div>
-                        <button
-                          disabled={
-                            !!busy ||
-                            readOnly ||
-                            !dirty ||
-                            [...text].length > 500
-                          }
-                          onClick={() => void act("保存草稿", saveDraft)}
-                        >
-                          保存草稿
-                        </button>
                         <button
                           disabled={readOnly || !!busy || !text}
                           onClick={() => {
@@ -1030,6 +1008,8 @@ export function App() {
                       <small>原收据保留；异常或未知不会因刷新被解冻。</small>
                     </section>
                   )}
+                  {thread.verification&&<p className="receipt">{thread.verification.verified?'后续核验已确认送达，原异常与冻结保留':thread.verification.state==='REVIEW'?'后台补证结束，需要核对结果':'后台正在有界补证，无需重复发送'} · 已核验 {thread.verification.attempts} 次</p>}
+                  {thread.automationJob&&<p className="hint">自动处理：{statusNames[thread.automationJob.state]??thread.automationJob.state}{thread.automationJob.reason?' · '+(reasons[thread.automationJob.reason]??thread.automationJob.reason):''}</p>}
                   {send && (
                     <p role="status" className="send-state">
                       {statusNames[send.status] ?? send.status}
@@ -1038,48 +1018,19 @@ export function App() {
                         : ""}
                     </p>
                   )}
-                  {review ? (
-                    <section className="review" aria-label="逐条发送确认">
-                      <h3>核对后，仅提交这一次</h3>
-                      <p>本人账号：{review.account}</p>
-                      <p>对方：{review.target.actorId}</p>
-                      <p>
-                        {review.target.channel === "DIRECT_MESSAGE"
-                          ? "会话：" + review.target.conversationId
-                          : "作品：" +
-                            review.target.videoId +
-                            "，父评论：" +
-                            review.target.commentId}
-                      </p>
-                      <div className="approved-text">{review.params.text}</div>
-                      <small>
-                        草稿 v{review.params.draftVersion} · 60 秒内有效 ·
-                        不自动重试
-                      </small>
-                      <div>
-                        <button
-                          className="primary"
-                          disabled={!!busy || Date.now() >= review.expiresAt}
-                          onClick={() => void act("提交中", confirm)}
-                        >
-                          确认此目标与全文，发送一次
-                        </button>
-                        <button onClick={() => setReview(null)}>取消</button>
-                      </div>
-                    </section>
-                  ) : (
                     <div className="send-footer">
                       <p className="hint">
                         {block ||
-                          "已保存。下一步会重新核验网页，并展示完整目标和全文。"}
+                          "点击发送即确认当前目标与完整回复，后台自动核验并提交一次。"}
                       </p>
                       <div>
+                        <small>Ctrl+Enter 也可发送当前全文</small>
                         <button
                           className="primary"
                           disabled={!!block || !!busy}
-                          onClick={() => void act("发送前核验", prepareReview)}
+                          onClick={() => void act("发送中", sendCurrentText)}
                         >
-                          核对并发送
+                          发送
                         </button>
                         <button
                           onClick={() =>
@@ -1120,9 +1071,10 @@ export function App() {
                             只读核验
                           </button>
                         )}
+                        {!thread.intent&&status.automation&&<button onClick={()=>void act('恢复自动处理',async()=>{const eventId=thread.event.id;await closeDialog();await request({command:'resumeAutomation',eventId});await refreshThread();})}>恢复此目标自动处理</button>}
                       </div>
                     </div>
-                  )}
+                  </dialog>
                 </>
               )}
             </section>
@@ -1147,11 +1099,11 @@ function Settings({
   update: (s: Status) => void;
 }) {
   const [settings, setSettings] = useState(status.settings),
-    [key, setKey] = useState(""),
-    [allow, setAllow] = useState(false);
+    [key, setKey] = useState("");
   const [browserMode, setBrowserMode] = useState(status.browser.mode);
   return (
     <section className="settings scroll">
+      {status.automation&&<AutomationSettings status={status} busy={busy} act={act} update={update}/>}
       <div className="settings-section">
         <h2>回复模式与运行</h2>
         <label>
@@ -1234,14 +1186,14 @@ function Settings({
               void act("更新账号暂停", async () =>
                 update(
                   await request<Status>({
-                    command: status.paused ? "resume" : "pause",
+                    command: status.paused||status.automation?.emergencyStopped ? "resume" : "pause",
                     eventId: null,
                   }),
                 ),
               )
             }
           >
-            {status.paused ? "恢复账号" : "暂停账号"}
+            {status.paused||status.automation?.emergencyStopped ? "恢复发送" : "暂停发送"}
           </button>
         </div>
         <p>
@@ -1286,8 +1238,7 @@ function Settings({
       <div className="settings-section">
         <h2>DeepSeek 辅助回复</h2>
         <p>
-          只有显式点击“生成 AI 建议”才请求模型。Key
-          仅保留在后端本次进程内存，保存配置会撤销旧调用授权。
+          手工建议与规则自动回复分别受已启用授权约束。Key 默认只留后端内存，普通配置保存保留现有 Key 与持续授权。
         </p>
         <label>
           模型
@@ -1319,7 +1270,7 @@ function Settings({
             onChange={(e) => setKey(e.target.value)}
             placeholder={
               status.keyPresent
-                ? "后端本次进程已持有 Key，重新保存需重新输入"
+                ? "已持有 Key，留空保存可保留"
                 : "不填写也可人工回复"
             }
           />
@@ -1337,57 +1288,20 @@ function Settings({
                   key: submitted,
                 }),
               );
-              setAllow(false);
             })
           }
         >
           保存配置并清空 Key 输入
         </button>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={allow}
-            onChange={(e) => setAllow(e.target.checked)}
-          />
-          我授权将有限的同目标上下文发送至 DeepSeek，可能产生费用，沿用累计 50
-          次上限
-        </label>
-        <div className="row">
-          <button
-            disabled={!allow || !status.keyPresent || !!busy}
-            onClick={() =>
-              void act("授权模型", async () =>
-                update(
-                  await request<Status>({
-                    command: "authorizeAi",
-                    authorized: true,
-                  }),
-                ),
-              )
-            }
-          >
-            明确授权本次模型调用
-          </button>
-          <button
-            disabled={!status.modelAuthorized}
-            onClick={() =>
-              void act("撤销模型授权", async () =>
-                update(
-                  await request<Status>({
-                    command: "authorizeAi",
-                    authorized: false,
-                  }),
-                ),
-              )
-            }
-          >
-            撤销授权
-          </button>
-        </div>
         <p>
-          模型：{status.modelAuthorized ? "本次已授权" : "未授权"} · Key：
-          {status.keyPresent ? "仅后端内存持有" : "未配置"}
+          模型：{status.modelAuthorized ? "持续授权有效" : "未授权"} · Key：
+          {status.keyPresent ? status.keyStored?'当前用户 DPAPI 安全保存':'仅后端内存持有' : "未配置"}
         </p>
+        <label className="check"><input type="checkbox" checked={!!status.keyStored} disabled={!status.keyPresent||!!busy}
+          onChange={e=>void act('更新安全保存',async()=>update(await request<Status>({command:'setKeyStorage',storage:e.target.checked?'DPAPI':'MEMORY'})))}/>
+          在本机安全保存 Key（Windows 当前用户 DPAPI，默认关闭）</label>
+        {status.keyStorageError&&<p className="error">{reasons[status.keyStorageError]??status.keyStorageError}</p>}
+        <button disabled={!status.keyPresent&&!status.keyStored&&!status.keyStorageError} onClick={()=>void act('删除 Key',async()=>update(await request<Status>({command:'setKeyStorage',storage:'DELETE'})))}>删除已保存 Key 并清除内存</button>
         <div className="budget">
           {status.budgets.map((b) => (
             <p key={b.kind}>

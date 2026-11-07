@@ -67,6 +67,14 @@ export class AutomationStore {
     return {version: row.version, kind, scope, createdAt: row.created_at};
   }
   /** Called inside the same transaction as the global model reservation or send intent. No refunds/replays. */
+  allowance(version:number,kind:'MODEL'|'SEND'):boolean {
+    const row=this.store.db.prepare('SELECT kind FROM automation_grants WHERE version=? AND revoked_at IS NULL').get(version) as {kind:'MODEL'|'AUTO_REPLY'}|undefined;
+    if(!row)return false;
+    const grant=this.active(row.kind);if(grant?.version!==version)return false;
+    const used=this.store.db.prepare('SELECT count(*) AS used FROM grant_reservations WHERE grant_version=? AND kind=?').get(version,kind) as {used:number};
+    const global=this.store.db.prepare('SELECT used,maximum FROM budgets WHERE kind=?').get(kind) as {used:number;maximum:number};
+    return used.used<(kind==='MODEL'?grant.scope.modelLimit:(grant.scope as ReplyPolicy).sendLimit)&&global.used<global.maximum;
+  }
   reserve(version: number, kind: "MODEL" | "SEND", jobKey: string): void {
     this.store.db.transaction(() => {
       const row = this.store.db.prepare("SELECT kind FROM automation_grants WHERE version=? AND revoked_at IS NULL").get(version) as {kind: "MODEL" | "AUTO_REPLY"} | undefined;
@@ -82,9 +90,10 @@ export class AutomationStore {
       this.store.db.prepare("INSERT INTO grant_reservations VALUES(?,?,?,?)").run(version, kind, jobKey, this.now());
     }).immediate();
   }
-  policyMatches(grant: Grant<ReplyPolicy>, e: StoredEvent): boolean {
+  policyMatches(grant: Grant<ReplyPolicy>, e: StoredEvent, status: 'NEW'|'DRAFT'='NEW'): boolean {
     const active = this.active("AUTO_REPLY");
-    if (active?.version !== grant.version || this.state().emergencyStopped || !isStrong(e.payload) || e.status !== "AWAITING_DRAFT") return false;
+    if (active?.version !== grant.version || this.state().emergencyStopped || !isStrong(e.payload) ||
+      !(status==='NEW'?['AWAITING_DRAFT']:['AWAITING_APPROVAL','APPROVED']).includes(e.status)) return false;
     const p = active.scope as ReplyPolicy;
     this.requireAccount(p.ownId);
     const client = this.store.db.prepare("SELECT paused,mode FROM client_state WHERE id=1").get() as {paused: number; mode: string};

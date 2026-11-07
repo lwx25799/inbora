@@ -1,0 +1,183 @@
+import { expect, test } from "vitest";
+import { join } from "node:path";
+import { BrowserProfileOwner } from "../../src/browser/profile-owner.js";
+import { ObservedReader } from "../../src/adapters/observed-reader.js";
+import { OwnWorksDiscovery } from "../../src/adapters/own-works-discovery.js";
+import { AutomationStore } from "../../src/storage/automation-store.js";
+import { migrateClient } from "../../src/storage/client-migration.js";
+import { migrateAutomation } from "../../src/storage/automation-migration.js";
+import { CollectionScheduler } from "../../src/app/collection-scheduler.js";
+import { InboxCollector } from "../../src/app/inbox-collector.js";
+import { database, privateTemp } from "../helpers.js";
+import { fixtureServer } from "../fixtures/site.js";
+import { mountObserved, mountDmReply, observedMapping } from "../fixtures/observed-site.js";
+
+test("unknown native peer is discovered and collected by the background timer without AI or manual sync", async () => {
+  const server=await fixtureServer(),root=privateTemp('auto-dm-'),owner=await BrowserProfileOwner.launch(join(root,'profile'),true),store=database();
+  let scheduler:CollectionScheduler|undefined,collector:InboxCollector|undefined;
+  try {
+    await migrateClient(store,join(root,'schema3.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
+    const data=new AutomationStore(store);data.initialize(Date.now()-10_000);store.bindAccount('100');
+    data.configureCollection({ownId:'100',comments:false,inbox:true,commentIntervalMs:30_000,dmIntervalMs:15_000});
+    store.db.prepare("UPDATE client_state SET paused=1,mode='DRAFT_ONLY'").run();
+    await mountObserved(owner,server.origin);
+    await owner.dm.evaluate(()=>{
+      const read=(node:Element,key:string)=>Object.getOwnPropertyDescriptor(node,key)!.value;
+      const row=document.querySelector('.conversation')!,chat=document.querySelector('#chat') as HTMLElement;
+      const native=read(row,'__reactFiber$fixture').return.memoizedProps.conversation;
+      native.id='new-conversation';native._toParticipantSecUserId='new-sec';
+      row.querySelector('.title')!.textContent='New native peer';
+      const head=read(document.querySelector('#header')!,'__reactProps$fixture').children.props.conversation;
+      head.id='new-conversation';head._toParticipantSecUserId='new-sec';
+      document.querySelector('#chat-title')!.textContent='New native peer';
+      for(const message of document.querySelectorAll('.message')) {
+        const model=read(message,'__reactProps$fixture').children.props.message;
+        model.conversationId='new-conversation';if(model.sender!=='100')model.sender='300';model.createdAt=new Date(Date.now()-1000);
+      }
+      document.querySelector('#back')!.addEventListener('click',()=>{chat.hidden=true;});
+      row.addEventListener('click',()=>{chat.hidden=false;});
+    });
+    collector=new InboxCollector(owner,observedMapping(server.origin),data,root,'headless');
+    scheduler=new CollectionScheduler(data,(source,signal)=>collector!.collect(source,signal));
+    scheduler.start();
+    await expect.poll(()=>store.events().length,{timeout:10_000}).toBe(3);
+    expect(store.events().every(e=>e.status==='AWAITING_DRAFT'&&e.payload.actorId==='300'&&e.payload.conversationId==='new-conversation')).toBe(true);
+    expect(store.db.prepare('SELECT uid,sec_uid FROM discovered_conversations').get()).toEqual({uid:'300',sec_uid:'new-sec'});
+    expect(store.db.prepare('SELECT count(*) AS n FROM collection_targets').get()).toEqual({n:1});
+    store.db.prepare('UPDATE collection_progress SET next_at=0').run();await scheduler.tick();
+    expect(store.events()).toHaveLength(3);
+    expect(store.db.prepare('SELECT used FROM budgets').all()).toEqual([{used:0},{used:0}]);
+  } finally {await scheduler?.close();collector?.dispose();store.close();await owner.close();await server.close();}
+});
+
+test("background conversation discovery preserves a nonempty page editor before switching targets", async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp('auto-human-input-'),'profile'),true);
+  try {
+    await mountObserved(owner,server.origin);
+    await owner.dm.evaluate(()=>{const editor=document.createElement('textarea');editor.value='unsent human input';document.querySelector('#chat')!.append(editor);});
+    await expect(new ObservedReader(owner.dm,observedMapping(server.origin)).conversations()).rejects.toThrow('OBSERVATION_EXISTING_HUMAN_INPUT');
+    expect(await owner.dm.locator('textarea').inputValue()).toBe('unsent human input');
+  }finally{await owner.close();await server.close();}
+});
+
+test("own-profile normal GET and native links discover a post-start video without adding its ID to the mapping",async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp('auto-works-'),'profile'),true);
+  const mapping=observedMapping(server.origin);
+  let discovery:OwnWorksDiscovery|undefined;
+  try {
+    await owner.notification.goto(server.origin);
+    await owner.notification.setContent('<a id="self">Self</a>');
+    await owner.notification.evaluate(()=>Object.defineProperty(document.querySelector('#self')!,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}}));
+    const published=Math.floor(Date.now()/1000)-1;
+    await owner.notification.route(server.origin+'/aweme/v1/web/aweme/post/?sec_user_id=self-sec',route=>route.fulfill({contentType:'application/json',body:JSON.stringify({
+      status_code:0,has_more:0,aweme_list:[{aweme_id:'20',create_time:published,author:{uid:'100',sec_uid:'self-sec'}}],
+    })}));
+    await owner.notification.route(server.origin+'/user/self-sec',route=>route.fulfill({contentType:'text/html',body:
+      `<a id="self">Self</a><a href="/video/20">New own work</a><script>
+      Object.defineProperty(document.querySelector('#self'),'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});
+      fetch('/aweme/v1/web/aweme/post/?sec_user_id=self-sec');</script>`}));
+    discovery=new OwnWorksDiscovery(owner.notification,mapping);
+    const result=await discovery.scan(new ObservedReader(owner.notification,mapping),true,new AbortController().signal);
+    expect(mapping.works.map(w=>w.id)).toEqual(['10']);
+    expect(result).toEqual({works:[{id:'20',ownId:'100',url:server.origin+'/video/20',publishedAt:published*1000,precisionMs:1000}],pending:[],complete:true});
+  }finally{discovery?.dispose();await owner.close();await server.close();}
+});
+
+test("SQLite collection resumes discovery after restart and includes downtime works/comments without replaying old tasks",async()=>{
+  const server=await fixtureServer(),root=privateTemp('auto-resume-'),owner=await BrowserProfileOwner.launch(join(root,'profile'),true),store=database();
+  let collector:InboxCollector|undefined;
+  try {
+    await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
+    const start=Date.now()-20_000,published=Math.floor((start+3000)/1000),works=['20'];
+    const data=new AutomationStore(store);data.initialize(start);store.bindAccount('100');
+    data.configureCollection({ownId:'100',comments:true,inbox:false,commentIntervalMs:15_000,dmIntervalMs:15_000});
+    await owner.notification.goto(server.origin);await owner.notification.setContent('<a id="self">Self</a>');
+    const selfScript="Object.defineProperty(document.querySelector('#self'),'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});";
+    await owner.notification.evaluate(()=>Object.defineProperty(document.querySelector('#self')!,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}}));
+    await owner.notification.route(server.origin+'/aweme/v1/web/aweme/post/?sec_user_id=self-sec',route=>route.fulfill({contentType:'application/json',body:JSON.stringify({status_code:0,has_more:0,
+      aweme_list:works.map(id=>({aweme_id:id,create_time:published,author:{uid:'100',sec_uid:'self-sec'}}))})}));
+    await owner.notification.route(server.origin+'/user/self-sec',route=>route.fulfill({contentType:'text/html',body:
+      `<a id="self">Self</a>${works.map(id=>`<a href="/video/${id}">Own native work</a>`).join('')}<script>${selfScript}fetch('/aweme/v1/web/aweme/post/?sec_user_id=self-sec');</script>`}));
+    await owner.notification.route(server.origin+'/video/*',route=>{
+      const id=new URL(route.request().url()).pathname.split('/').at(-1)!,cid=String(Number(id)+100);
+      const message='new comment '+id;
+      return route.fulfill({contentType:'text/html',body:`<a id="self">Self</a><section id="comment-list">${id==='10'?'<div id="empty-comments">No comments</div>':
+        `<div class="comment"><a class="author" href="/user/new-commenter-sec">New commenter</a><div class="body">${message}</div><div class="tooltip" id="tooltip_${cid}">Menu</div></div>`}</section><script>${selfScript}
+        const row=document.querySelector('.comment');if(row)Object.defineProperty(row,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:{cid:'${cid}',text:'${message}',
+          createTime:${published+1},user:{uid:'400',secUid:'new-commenter-sec'}},awemeInfo:{awemeId:'${id}'},userInfo:{uid:'100'}}}}});</script>`});
+    });
+    const mapping=observedMapping(server.origin),signal=new AbortController().signal;
+    collector=new InboxCollector(owner,mapping,data,root,'headless');
+    for(let turn=0;turn<5;turn++)await collector.collect('works',signal);
+    expect(store.events().filter(e=>e.status==='AWAITING_DRAFT')).toHaveLength(1);
+    expect(store.events()[0]!.payload).toMatchObject({videoId:'20',actorId:'400'});
+    collector.dispose();works.push('21');
+    const restarted=new AutomationStore(store);restarted.initialize(Date.now());
+    collector=new InboxCollector(owner,mapping,restarted,root,'headless');
+    for(let turn=0;turn<7;turn++)await collector.collect('works',signal);
+    expect(restarted.state().startedAt).toBe(start);
+    expect(store.events().map(e=>e.payload.videoId).sort()).toEqual(['20','21']);
+    expect(store.db.prepare("SELECT count(*) AS n FROM discovered_works WHERE state='INCLUDED'").get()).toEqual({n:2});
+    expect(store.db.prepare("SELECT count(*) AS n FROM model_calls").get()).toEqual({n:0});
+    expect(store.db.prepare("SELECT count(*) AS n FROM send_intents").get()).toEqual({n:0});
+  }finally{collector?.dispose();store.close();await owner.close();await server.close();}
+});
+
+test('calibrated empty Slate marker permits discovery while unsent media and ordinary zero-width input block it',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp('collector-editor-shape-'),'profile'),true);
+  try{
+    await mountDmReply(owner,server.origin);
+    await owner.dm.evaluate(()=>{const editor=document.querySelector('#native-editor')!;editor.setAttribute('data-slate-editor','true');editor.setAttribute('data-zone-container','*');
+      editor.innerHTML='<div class="ace-line" data-node="true"><span data-enter="true" data-string="true" data-leaf="true">\u200B</span></div>';});
+    await owner.dm.evaluate(()=>document.querySelector('#back')!.addEventListener('click',()=>{(document.querySelector('#chat') as HTMLElement).hidden=true;}));
+    const reader=new ObservedReader(owner.dm,observedMapping(server.origin));
+    expect((await reader.conversations()).peers).toHaveLength(1);
+    await owner.dm.evaluate(()=>{(document.querySelector('#chat') as HTMLElement).hidden=false;document.querySelector('#native-editor')!.innerHTML='<img src="data:,unsent">';});
+    await expect(reader.conversations()).rejects.toThrow('OBSERVATION_EXISTING_HUMAN_INPUT');
+    expect(await owner.dm.locator('#native-editor img').count()).toBe(1);
+    await owner.dm.evaluate(()=>{const editor=document.querySelector('#native-editor')!;editor.removeAttribute('data-slate-editor');editor.textContent='\u200B';});
+    await expect(reader.conversations()).rejects.toThrow('OBSERVATION_EXISTING_HUMAN_INPUT');
+  }finally{await owner.close();await server.close();}
+});
+
+test('normal profile scrolling follows another response page and unresolved links do not prevent a complete scan',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp('own-two-pages-'),'profile'),true);
+  let discovery:OwnWorksDiscovery|undefined;
+  try{
+    await mountObserved(owner,server.origin);
+    await owner.notification.goto(server.origin);await owner.notification.setContent('<a id="self">Self</a>');
+    await owner.notification.evaluate(()=>Object.defineProperty(document.querySelector('#self')!,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}}));
+    await owner.notification.route(server.origin+'/aweme/v1/web/aweme/post/**',route=>{
+      const second=new URL(route.request().url()).searchParams.has('next');
+      return route.fulfill({contentType:'application/json',body:JSON.stringify({status_code:0,has_more:second?0:1,
+        aweme_list:(second?['21','22']:['20']).map(id=>({aweme_id:id,create_time:Math.floor(Date.now()/1000)-1,author:{uid:'100',sec_uid:'self-sec'}}))})});
+    });
+    await owner.notification.route(server.origin+'/user/self-sec',route=>route.fulfill({contentType:'text/html',body:`<a id="self">Self</a><a href="/video/20">First work</a><div style="height:2000px"></div><script>
+      Object.defineProperty(document.querySelector('#self'),'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});
+      fetch('/aweme/v1/web/aweme/post/?sec_user_id=self-sec');let loaded=false;window.addEventListener('scroll',()=>{if(loaded)return;loaded=true;
+      const link=document.createElement('a');link.href='/video/21';link.textContent='Second work';document.body.append(link);fetch('/aweme/v1/web/aweme/post/?sec_user_id=self-sec&next=1');});</script>`}));
+    const mapping=observedMapping(server.origin),reader=new ObservedReader(owner.notification,mapping);discovery=new OwnWorksDiscovery(owner.notification,mapping);
+    const first=await discovery.scan(reader,true,new AbortController().signal);expect(first.complete).toBe(false);expect(first.works.map(w=>w.id)).toEqual(['20']);
+    const second=await discovery.scan(reader,false,new AbortController().signal,first.pending);
+    expect(second.complete).toBe(true);expect(second.works.map(w=>w.id)).toEqual(['21']);expect(second.pending.map(w=>w.aweme_id)).toEqual(['22']);
+  }finally{discovery?.dispose();await owner.close();await server.close();}
+});
+
+test('comment collection continues a native virtual list across bounded turns and protects page input on continuation',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp('comment-continuation-'),'profile'),true);
+  try{
+    await owner.notification.goto(server.origin);await owner.notification.setContent('<a id="self">Self</a>');
+    await owner.notification.evaluate(()=>Object.defineProperty(document.querySelector('#self')!,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}}));
+    await owner.notification.route(server.origin+'/video/10',route=>route.fulfill({contentType:'text/html',body:`<a id="self">Self</a><section id="comment-list" style="height:100px;overflow-y:auto"><div style="height:700px"><div id="viewport" style="position:sticky;top:0"></div></div></section><script>
+      Object.defineProperty(document.querySelector('#self'),'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});
+      function mount(id){const row=document.createElement('div');row.className='comment';row.innerHTML='<a class="author" href="/user/new-sec">Native author</a><div class="body">Comment '+id+'</div><div class="tooltip" id="tooltip_'+id+'">Menu</div>';
+      Object.defineProperty(row,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:{cid:id,text:'Comment '+id,createTime:Math.floor(Date.now()/1000)-1,user:{uid:'400',secUid:'new-sec'}},awemeInfo:{awemeId:'10'},userInfo:{uid:'100'}}}}});document.querySelector('#viewport').replaceChildren(row);}
+      mount('120');document.querySelector('#comment-list').addEventListener('scroll',()=>mount('121'));</script>`}));
+    const reader=new ObservedReader(owner.notification,observedMapping(server.origin));
+    const first=await reader.comments(0,true);expect(first.events.map(e=>e.platformEventId)).toEqual(['120']);expect(first.scroll!.top).toBeGreaterThan(0);
+    const next=await reader.comments(0,true,first.scroll!.top);expect(next.events.map(e=>e.platformEventId)).toEqual(['121']);
+    await owner.notification.evaluate(()=>{const input=document.createElement('textarea');input.value='pending human draft';document.body.prepend(input);});
+    await expect(reader.comments(0,true,next.scroll!.top)).rejects.toThrow('OBSERVATION_EXISTING_HUMAN_INPUT');
+    expect(await owner.notification.locator('textarea').inputValue()).toBe('pending human draft');
+  }finally{await owner.close();await server.close();}
+});

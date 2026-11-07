@@ -4,6 +4,7 @@ import { readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import {
   Blocked,
+  digest,
   isStrong,
   requireSafe,
   targetKey,
@@ -18,10 +19,18 @@ import {
   type AiSettings,
   type SendParams,
   type InboxSync,
+  humanReplySchema,
 } from "./contracts.js";
 import { WorkbenchAuthority } from "./authority.js";
 import { BrowserService } from "./browser-service.js";
 import { DeepSeekProvider } from "../ai/deepseek.js";
+import { AutomationStore } from "../storage/automation-store.js";
+import { migrateAutomation } from "../storage/automation-migration.js";
+import { CollectionScheduler, collectionStops } from "./collection-scheduler.js";
+import type { z } from "zod";
+import { VerificationScheduler } from "./verification-scheduler.js";
+import type { Grant, ReplyPolicy } from "./automation-contracts.js";
+import { CredentialStore } from "./credentials.js";
 
 export function clientError(error: unknown): string {
   return error instanceof Blocked
@@ -42,6 +51,18 @@ export class ClientService {
   private closing = false;
   private syncTask: Promise<void> | null = null;
   private observing = false;
+  private automation: AutomationStore | null = null;
+  private collector: CollectionScheduler | null = null;
+  private inboxRevision = 0;
+  private readonly startedAt: number;
+  private dialogs=new Map<string,{token:string;generation:number}>();
+  private leaseTimer:ReturnType<typeof setInterval>|undefined;
+  private verification:VerificationScheduler|null=null;
+  private autoTimer:ReturnType<typeof setInterval>|undefined;
+  private autoTask:Promise<void>|null=null;
+  private keyStored=false;
+  private keyStorageError:string|null=null;
+  private keyGeneration=0;
   private sync: InboxSync = {
     runId: null, running: false, cancelled: false, source: null, results: [],
   };
@@ -50,11 +71,25 @@ export class ClientService {
     readonly browser: BrowserService,
     private readonly provider = new DeepSeekProvider(),
     now: () => number = Date.now,
+    startedAt = now(),
   ) {
+    this.startedAt = startedAt;
     this.authority = new WorkbenchAuthority(store, now);
     this.authority.recover();
   }
   async loadSettings(): Promise<void> {
+    if(!this.automation) {
+      await migrateAutomation(this.store,join(this.browser.root,"backups",`automation-${randomUUID()}.sqlite`));
+      this.automation=new AutomationStore(this.store,this.authority.now);
+      this.automation.initialize(this.startedAt);
+      this.store.db.prepare(`UPDATE automation_jobs SET state=COALESCE((SELECT status FROM send_intents WHERE event_id=automation_jobs.event_id),'REVIEW'),
+        reason='RESTART_NO_REPLAY',updated_at=? WHERE state IN ('QUALIFYING','GENERATING','PREPARING','QUEUED','PREFLIGHT','SENDING')`).run(this.authority.now());
+      this.collector=new CollectionScheduler(this.automation,async(source,signal)=>{
+        requireSafe(!this.syncTask&&!this.observing,'INBOX_SYNC_IN_PROGRESS');
+        await this.browser.collect(this.automation!,source,signal);
+      },()=>{this.inboxRevision++;this.emit('inbox_updated');});
+      this.verification=new VerificationScheduler(this.automation,(eventId,signal)=>this.browser.verifyExisting(this.store,eventId,{signal,background:true}),()=>{this.inboxRevision++;this.emit('send_status_updated');});
+    }
     try {
       this.settings = settingsSchema.parse(
         JSON.parse(
@@ -67,6 +102,15 @@ export class ClientService {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    this.collector?.start();
+    this.verification?.start();
+    if(!this.autoTimer){this.autoTimer=setInterval(()=>{if(!this.autoTask){const task=this.runAutomaticReply().catch(()=>{}).finally(()=>{this.autoTask=null;});this.autoTask=task;this.track(task);}},1000);this.autoTimer.unref();}
+    if(!this.leaseTimer){this.leaseTimer=setInterval(()=>{
+      for(const [id,dialog]of this.dialogs)try{this.authority.renew(dialog.token,id,dialog.generation);}catch{this.dialogs.delete(id);}
+    },30_000);this.leaseTimer.unref();}
+    const keyGeneration=this.keyGeneration;
+    try{const key=await new CredentialStore(this.browser.root).load();if(key&&!this.closing&&keyGeneration===this.keyGeneration){this.key=key;this.keyStored=true;}}
+    catch{this.keyStorageError='DPAPI_RESTORE_FAILED';}
   }
   private emit(event: string): void {
     this.events.emit("update", { event });
@@ -189,6 +233,9 @@ export class ClientService {
       intent,
       receipt: this.store.receiptForEvent(eventId) ?? null,
       suggestions,
+      verification:this.automation?this.store.db.prepare(`SELECT j.state,j.attempts,j.last_error,r.verified,r.evidence_ref,r.checked_at FROM verification_jobs j
+        LEFT JOIN verification_results r ON r.intent_id=j.intent_id WHERE j.event_id=? ORDER BY r.checked_at DESC LIMIT 1`).get(eventId)??null:null,
+      automationJob:this.automation?this.store.db.prepare('SELECT state,reason,grant_version FROM automation_jobs WHERE event_id=?').get(eventId)??null:null,
     };
   }
   private status(token: string) {
@@ -234,7 +281,15 @@ export class ClientService {
         .get(),
       settings: this.settings,
       keyPresent: !!this.key,
-      modelAuthorized: this.modelAuthorized,
+      keyStored:this.keyStored,keyStorageError:this.keyStorageError,
+      modelAuthorized: this.modelAuthorized || this.automation?.active('MODEL')?.scope.model===this.settings.model,
+      automation:this.automation?{
+        ...this.automation.state(),modelGrant:this.automation.active('MODEL'),replyPolicy:this.automation.active('AUTO_REPLY'),
+        collector:this.collector?.status(),inboxRevision:this.inboxRevision,
+        pendingWorks:this.store.db.prepare("SELECT count(*) AS count FROM discovered_works WHERE state='REVIEW'").get(),
+        autoStopReason:this.automation.active('AUTO_REPLY')?(!this.key?'MODEL_KEY_REQUIRED':!this.automation.allowance(this.automation.active('AUTO_REPLY')!.version,'SEND')?'SEND_GRANT_EXHAUSTED':
+          !this.automation.allowance(this.automation.active('AUTO_REPLY')!.version,'MODEL')?'MODEL_GRANT_EXHAUSTED':this.authority.paused()?'ACCOUNT_PAUSED':null):null,
+      }:null,
       modelBusy: this.modelPending.size > 0,
       sync:structuredClone(this.sync),
       go: "UNVERIFIED",
@@ -246,6 +301,51 @@ export class ClientService {
     const c = commandSchema.parse(raw);
     this.authority.operator(token);
     switch (c.command) {
+      case 'openHumanDialog': {
+        this.authority.operator(token,'EDIT');
+        this.authority.select(token,c.eventId,c.selectionId);
+        this.closeOtherDialogs(token,c.eventId);
+        const event=this.store.event(c.eventId);
+        if(!this.store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(c.eventId)) {
+          const current=this.authority.ownership(event);
+          const owner=this.authority.claim(token,c.eventId,current.generation);
+          this.dialogs.set(c.eventId,{token,generation:owner.generation});
+        }
+        this.emit('takeover_updated');return this.thread(token,c.eventId);
+      }
+      case 'closeHumanDialog':
+        this.authority.release(token,c.eventId,c.generation);this.dialogs.delete(c.eventId);return this.thread(token,c.eventId);
+      case 'sendHumanReply': {
+        requireSafe(this.automation,'AUTOMATION_NOT_READY');
+        const input={...c.input,text:c.input.text.replace(/\r\n?/gu,'\n')};
+        const fresh=this.queueHumanInput(token,c.commandId,input);
+        if(fresh)this.track(this.prepareHumanSend(token,c.commandId));
+        return this.result(token,c.commandId);
+      }
+      case 'configureCollection':
+        this.authority.operator(token,'CONTROL');requireSafe(this.automation,'AUTOMATION_NOT_READY');
+        this.automation.configureCollection(c.settings);this.collector?.cancel();
+        this.emit('status_updated');return this.status(token);
+      case 'setModelGrant':
+        this.authority.operator(token,'CONTROL');requireSafe(this.automation,'AUTOMATION_NOT_READY');
+        this.modelAuthorized=false;
+        if(c.scope)this.automation.grant('MODEL',c.scope);else {this.automation.revoke('MODEL');this.modelAbort.abort();this.modelAbort=new AbortController();}
+        return this.status(token);
+      case 'setReplyPolicy':
+        this.authority.operator(token,'CONTROL');requireSafe(this.automation,'AUTOMATION_NOT_READY');
+        if(c.policy)this.automation.grant('AUTO_REPLY',c.policy);else {this.automation.revoke('AUTO_REPLY');this.modelAbort.abort();this.modelAbort=new AbortController();}
+        return this.status(token);
+      case 'resumeAutomation':
+        this.authority.resumeAutomation(token,c.eventId);return this.thread(token,c.eventId);
+      case 'clearModelKey':
+        this.authority.operator(token,'CONTROL');this.keyGeneration++;this.key='';this.modelAbort.abort();this.modelAbort=new AbortController();return this.status(token);
+      case 'setKeyStorage': {
+        this.authority.operator(token,'CONTROL');const credentials=new CredentialStore(this.browser.root);
+        const generation=++this.keyGeneration;
+        if(c.storage==='DPAPI'){requireSafe(this.key,'MODEL_KEY_REQUIRED');await credentials.save(this.key);if(generation===this.keyGeneration&&!this.closing)this.keyStored=true;}
+        else {await credentials.delete();if(generation===this.keyGeneration&&!this.closing){this.keyStored=false;if(c.storage==='DELETE'){this.key='';this.modelAbort.abort();this.modelAbort=new AbortController();}}}
+        this.keyStorageError=null;this.store.audit('MODEL_KEY_STORAGE_CHANGED','account_001',{stored:this.keyStored});return this.status(token);
+      }
       case "getStatus":
         for (const channel of [
           "COMMENT_NOTIFICATION",
@@ -258,12 +358,13 @@ export class ClientService {
           ...this.thread(token, c.eventId),
           workUrl: await this.browser.workUrl(
             this.store.event(c.eventId).payload,
+            this.store,
           ),
         };
       case "openTarget": {
         this.authority.operator(token, "CONTROL");
         const event = this.store.event(c.eventId),
-          handle = await this.browser.adapter(event.payload);
+          handle = await this.browser.adapter(event.payload,this.store);
         try {
           await this.browser.actor.run(() =>
             handle.adapter.inspect(event.payload),
@@ -313,6 +414,7 @@ export class ClientService {
         };
       }
       case "selectTarget":
+        this.closeOtherDialogs(token,c.eventId);
         this.authority.select(token, c.eventId, c.selectionId);
         return { selected: true };
       case "claimHuman": {
@@ -351,10 +453,14 @@ export class ClientService {
           c.command !== "resume",
         );
         if (c.command === "emergencyStop") {
+          this.dialogs.clear();
+          this.automation?.stop(true);this.collector?.cancel();
+          this.verification?.cancel();
           this.stopSync();
           this.modelAbort.abort();
           this.modelAbort = new AbortController();
         }
+        if(c.command==='resume'&&c.eventId===null)this.automation?.stop(false);
         this.emit("takeover_updated");
         this.emit("send_status_updated");
         return this.status(token);
@@ -362,7 +468,7 @@ export class ClientService {
       case "browser": {
         this.authority.operator(token, "CONTROL");
         if (c.open) await this.browser.open(c.mode);
-        else {this.stopSync();await this.browser.close();}
+        else {this.stopSync();this.collector?.cancel();await this.browser.close();}
         this.emit("status_updated");
         return this.status(token);
       }
@@ -390,7 +496,7 @@ export class ClientService {
       case "previewSend": {
         this.authority.operator(token, "SEND");
         const e = this.store.event(c.params.eventId);
-        const handle = await this.browser.adapter(e.payload);
+        const handle = await this.browser.adapter(e.payload,this.store);
         try {
           const snapshot = await this.browser.actor.run(async () => {
             await this.browser.refreshIdentity(e.payload.channel);
@@ -437,6 +543,7 @@ export class ClientService {
       case "configureAi": {
         this.authority.operator(token, "CONTROL");
         requireSafe(!/[\r\n]/u.test(c.key), "INVALID_MODEL_KEY");
+        const generation=c.key?++this.keyGeneration:this.keyGeneration;
         const file = join(this.browser.root, "client-settings.json"),
           temporary = `${file}.${randomUUID()}.tmp`;
         await writeFile(temporary, JSON.stringify(c.settings), {
@@ -444,13 +551,15 @@ export class ClientService {
           mode: 0o600,
         });
         await rename(temporary, file);
+        const modelChanged=this.settings.model!==c.settings.model;
         this.settings = c.settings;
-        this.key = c.key;
-        this.modelAuthorized = false;
+        if(c.key&&generation===this.keyGeneration&&!this.closing){if(this.keyStored)await new CredentialStore(this.browser.root).save(c.key);if(generation===this.keyGeneration&&!this.closing)this.key = c.key;}
+        if(modelChanged)this.modelAuthorized=false;
         return this.status(token);
       }
       case "authorizeAi":
         this.authority.operator(token, "CONTROL");
+        requireSafe(!this.automation,'USE_PERSISTENT_MODEL_GRANT');
         requireSafe(!c.authorized || this.key, "MODEL_KEY_REQUIRED");
         this.modelAuthorized = c.authorized;
         this.store.audit(
@@ -480,6 +589,11 @@ export class ClientService {
         );
         requireSafe(!this.modelPending.has(e.id), "MODEL_ALREADY_PENDING");
         const context = this.authority.contextVersion(e);
+        const grant=this.automation?.active('MODEL');
+        if(grant) {
+          this.automation!.requireAccount(grant.scope.ownId);
+          requireSafe(grant.scope.model===this.settings.model&&grant.scope.channels.includes(e.payload.channel),'MODEL_OUTSIDE_GRANT');
+        }
         this.modelPending.add(e.id);
         try {
           const result = await this.provider.generate(
@@ -488,8 +602,9 @@ export class ClientService {
             this.store.history(e.payload),
             this.settings,
             this.key,
-            this.modelAuthorized,
+            this.modelAuthorized||!!grant,
             this.modelAbort.signal,
+            grant?()=>this.automation!.reserve(grant.version,'MODEL',randomUUID()):undefined,
           );
           const id = randomUUID();
           this.store.db
@@ -534,6 +649,125 @@ export class ClientService {
       reason: row.reason,
     };
   }
+  private closeOtherDialogs(token:string,current:string|null):void {
+    for(const [id,dialog]of this.dialogs)if(id!==current&&dialog.token===token) {
+      try{this.authority.release(token,id,dialog.generation);}catch{/* Pause may already have invalidated the lease. */}
+      this.dialogs.delete(id);
+    }
+  }
+  async runAutomaticReply():Promise<void> {
+    if(this.closing||!this.automation||!this.key||this.modelPending.size)return;
+    const grant=this.automation.active('AUTO_REPLY') as Grant<ReplyPolicy>|null;
+    if(!grant||grant.scope.model!==this.settings.model)return;
+    if(!this.automation.allowance(grant.version,'MODEL')||!this.automation.allowance(grant.version,'SEND'))return;
+    const event=this.store.events().find(e=>!this.store.db.prepare('SELECT event_id FROM automation_jobs WHERE event_id=?').get(e.id)&&
+      !this.authority.draftFor(e.id)&&this.automation!.policyMatches(grant,e));
+    if(!event)return;
+    const generation=this.authority.ownership(event).generation,context=this.authority.contextVersion(event),now=this.authority.now();
+    this.store.db.prepare('INSERT INTO automation_jobs VALUES(?,?,?,?,?,?,NULL,NULL,?,?)').run(event.id,grant.version,'QUALIFYING',context,generation,0,now,now);
+    this.modelPending.add(event.id);
+    try {
+      const signal=this.modelAbort.signal;
+      const handle=await this.browser.adapter(event.payload,this.store,signal);
+      try{await this.browser.actor.run(async()=>{
+        requireSafe(!signal.aborted&&this.automation!.policyMatches(grant,this.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
+        const prior=await this.browser.refreshIdentity(event.payload.channel),proof=await handle.adapter.inspect(event.payload),identity=await this.browser.refreshIdentity(event.payload.channel);
+        requireSafe(!signal.aborted&&prior&&identity&&digest(prior)===digest(identity),'CAPABILITY_CHANGED_DURING_CHECK');
+        requireSafe(proof.ownId===grant.scope.ownId&&identity.identityDigest===digest(proof.ownId),'ACCOUNT_CHANGED');
+        requireSafe(proof.accountId===event.payload.accountId&&proof.eventBinding===event.binding&&
+          proof.targetKey===targetKey(event.payload)&&proof.composerKey===proof.targetKey,'TARGET_CHANGED');
+      });}finally{handle.dispose();}
+      requireSafe(this.automation!.policyMatches(grant,this.store.event(event.id))&&this.authority.contextVersion(event)===context&&this.authority.ownership(event).generation===generation,'AUTO_RESULT_STALE');
+      this.store.db.prepare("UPDATE automation_jobs SET state='GENERATING',updated_at=? WHERE event_id=?").run(this.authority.now(),event.id);
+      const result=await this.provider.generate(this.store,event.payload,this.store.history(event.payload),
+        {...this.settings,rules:grant.scope.instructions},this.key,true,signal,()=>{
+          requireSafe(this.automation!.policyMatches(grant,this.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
+          requireSafe(this.automation!.allowance(grant.version,'SEND'),'SEND_GRANT_EXHAUSTED');
+          this.automation!.reserve(grant.version,'MODEL',event.id);
+        });
+      requireSafe(!signal.aborted,'MODEL_CANCELLED');
+      const commandId=randomUUID(),selectionId=randomUUID();
+      const token=this.authority.issueSession();
+      try {
+        this.store.db.transaction(()=>{
+          requireSafe(!this.closing&&this.automation!.policyMatches(grant,this.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
+          requireSafe(this.authority.ownership(event).generation===generation&&this.authority.contextVersion(event)===context&&!this.authority.draftFor(event.id),'AUTO_RESULT_STALE');
+          const draftId=randomUUID();
+          this.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,?,1,'DRAFT',NULL,NULL)").run(draftId,event.id,result.text,result.model);
+          this.store.db.prepare("INSERT INTO draft_revisions VALUES(?,1,'AUTO_POLICY',?,?,?)").run(draftId,result.text,`policy:${grant.version}`,this.authority.now());
+          this.store.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(event.id);
+          const params:SendParams={eventId:event.id,generation,draftId,draftVersion:1,text:result.text,contextVersion:context,selectionId};
+          this.store.db.prepare("INSERT INTO manual_send_commands VALUES(?,?,?,?,?,'PREPARING',NULL,NULL,?)").run(commandId,event.id,
+            this.authority.operator(token).id,digest(params),JSON.stringify(params),this.authority.now());
+          this.store.db.prepare('INSERT INTO policy_commands VALUES(?,?,?)').run(commandId,grant.version,generation);
+          this.store.db.prepare("UPDATE automation_jobs SET state='PREPARING',draft_version=1,command_id=?,updated_at=? WHERE event_id=?").run(commandId,this.authority.now(),event.id);
+        }).immediate();
+        await this.prepareHumanSend(token,commandId);
+        const command=this.authority.command(commandId);
+        this.store.db.prepare('UPDATE automation_jobs SET state=?,reason=?,updated_at=? WHERE event_id=?').run(command.status,command.reason,this.authority.now(),event.id);
+      }finally{this.authority.revoke(token);}
+    }catch(error){
+      const code=clientError(error);
+      this.store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE event_id=?").run(code,this.authority.now(),event.id);
+      if(collectionStops.has(code)){this.automation.stop(true);this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}
+      this.store.audit('AUTO_REPLY_STOPPED',event.id);
+    }finally{this.modelPending.delete(event.id);this.inboxRevision++;this.emit('inbox_updated');}
+  }
+  private queueHumanInput(token:string,id:string,input:z.infer<typeof humanReplySchema>):boolean {
+    this.authority.operator(token,'SEND');
+    return this.store.db.transaction(()=>{
+      const previous=this.store.db.prepare('SELECT input_digest FROM manual_send_inputs WHERE command_id=?').get(id) as {input_digest:string}|undefined;
+      if(previous){requireSafe(previous.input_digest===digest(input),'COMMAND_PARAMETERS_CONFLICT');return false;}
+      this.authority.requireSelection(token,input.eventId,input.selectionId);
+      const event=this.store.event(input.eventId);
+      this.authority.requireOwner(token,event,input.generation);
+      requireSafe(this.authority.contextVersion(event)===input.contextVersion,'CONTEXT_VERSION_CONFLICT');
+      const old=this.authority.draftFor(input.eventId);
+      requireSafe((old?.version??0)===input.expectedVersion,'DRAFT_VERSION_CONFLICT');
+      const draft=old&&old.text===input.text&&!input.suggestionId?old:this.authority.save(token,input.eventId,input.generation,input.expectedVersion,input.text,input.suggestionId);
+      const params:SendParams={eventId:input.eventId,generation:input.generation,draftId:draft.id,draftVersion:draft.version,
+        text:draft.text,contextVersion:input.contextVersion,selectionId:input.selectionId};
+      this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
+      this.store.db.prepare('INSERT INTO manual_send_commands VALUES(?,?,?,?,?,?,?,?,?)').run(id,event.id,this.authority.operator(token).id,
+        digest(params),JSON.stringify(params),'PREPARING',null,null,this.authority.now());
+      this.store.db.prepare('INSERT INTO manual_send_inputs VALUES(?,?)').run(id,digest(input));
+      this.store.audit('HUMAN_SEND_REQUESTED',id);
+      return true;
+    }).immediate();
+  }
+  private async prepareHumanSend(token:string,id:string):Promise<void> {
+    const row=this.authority.command(id),params=JSON.parse(row.params) as SendParams,event=this.store.event(params.eventId);
+    let dispose=()=>{};
+    try {
+      const handle=await this.browser.adapter(event.payload,this.store);dispose=handle.dispose;
+      await this.browser.refreshIdentity(event.payload.channel);
+      await this.browser.actor.run(async()=>{
+        requireSafe(!this.closing,'CLIENT_CLOSING');
+        requireSafe(this.authority.command(id).status==='PREPARING','COMMAND_NOT_QUEUED');
+        this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
+        const priorIdentity=digest(this.browser.identity(event.payload.channel));
+        const before=digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel));
+        const snapshot=await handle.adapter.inspect(event.payload);
+        requireSafe(!this.closing,'CLIENT_CLOSING');
+        requireSafe(this.authority.command(id).status==='PREPARING','COMMAND_NOT_QUEUED');
+        this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
+        const identity=await this.browser.refreshIdentity(event.payload.channel);
+        requireSafe(digest(identity)===priorIdentity,'CAPABILITY_CHANGED_DURING_CHECK');
+        const account=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string};
+        requireSafe(identity&&snapshot.ownId===account.own_id&&identity.identityDigest===digest(account.own_id)&&snapshot.accountId===event.payload.accountId&&
+          snapshot.eventBinding===event.binding&&snapshot.targetKey===targetKey(event.payload)&&snapshot.composerKey===snapshot.targetKey,'TARGET_CHANGED');
+        requireSafe(before===digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel)),'CAPABILITY_CHANGED_DURING_CHECK');
+        this.authority.attest(event.payload.channel,'SEND_AVAILABLE',identity,`readonly-contract:${digest(snapshot)}`);
+        this.store.audit('READ_ONLY_SEND_CONTRACT_VERIFIED',id);
+        this.authority.approvePreparedCommand(token,id,snapshot,identity);
+      });
+      dispose();dispose=()=>{};
+      await this.deliver(token,id,params);
+    }catch(error){
+      if(this.authority.command(id).intent_id===null)this.authority.finish(id,'FAILED_BEFORE_CLICK',clientError(error));
+      this.emit('send_status_updated');
+    }finally{dispose();}
+  }
   private async deliver(
     token: string,
     id: string,
@@ -542,7 +776,7 @@ export class ClientService {
     let dispose = () => {};
     try {
       const e = this.store.event(p.eventId),
-        handle = await this.browser.adapter(e.payload);
+        handle = await this.browser.adapter(e.payload,this.store);
       dispose = handle.dispose;
       await this.browser.refreshIdentity(e.payload.channel);
       const outcome = await new SendCoordinator(
@@ -558,6 +792,7 @@ export class ClientService {
       );
       const receipt=this.store.receiptForEvent(e.id) as {proof_ref:string}|undefined;
       this.authority.finish(id, outcome, outcome==='UNCERTAIN'?receipt?.proof_ref??null:null);
+      if(outcome==='UNCERTAIN')this.verification?.enqueue(e.id);
       if (outcome === "CONFIRMED")
         this.authority.completeTrial(
           p.eventId,
@@ -589,12 +824,17 @@ export class ClientService {
   }
   async close(): Promise<void> {
     this.closing = true;
+    this.keyGeneration++;
     this.stopSync();
     this.key = "";
     this.modelAuthorized = false;
     this.modelAbort.abort();
-    this.store.db.prepare("UPDATE client_state SET paused=1 WHERE id=1").run();
+    clearInterval(this.leaseTimer);this.dialogs.clear();
+    clearInterval(this.autoTimer);
     this.authority.expireOperators();
+    await this.collector?.close();
+    await this.verification?.close();
+    if(!this.automation)this.store.db.prepare("UPDATE client_state SET paused=1 WHERE id=1").run();
     await this.drain();
     await this.browser.close();
   }

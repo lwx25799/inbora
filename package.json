@@ -1,6 +1,6 @@
 {
   "name": "inbora",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Single-account, approval-gated Douyin web PoC",
@@ -18,7 +18,7 @@
     "test": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
     "test:e2e": "vitest run tests/e2e",
-    "test:built": "pnpm build && node scripts/browser-smoke.mjs && node scripts/observed-smoke.mjs && node scripts/dm-reply-smoke.mjs && node scripts/comment-reply-smoke.mjs && node scripts/submission-smoke.mjs && node scripts/inbox-sync-smoke.mjs",
+    "test:built": "pnpm build && node scripts/browser-smoke.mjs && node scripts/observed-smoke.mjs && node scripts/dm-reply-smoke.mjs && node scripts/comment-reply-smoke.mjs && node scripts/submission-smoke.mjs && node scripts/inbox-sync-smoke.mjs && node scripts/automation-smoke.mjs",
     "test:real": "tsx src/cli.ts real-test",
     "build": "tsc -p tsconfig.build.json",
     "check:privacy": "node scripts/check-privacy.mjs",

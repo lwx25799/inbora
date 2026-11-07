@@ -10,13 +10,14 @@ import type {
   StoredEvent,
   InboundEvent,
 } from "../../src/core/contracts.js";
+import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../src/app/automation-contracts.js';
 
 export type { SendParams, AiSettings };
 export interface Status {
   runtime: string;
   account: { id: string; identity: string } | null;
   operator: { id: string; permissions: string[]; expiresAt: number };
-  mode: "OBSERVE" | "DRAFT_ONLY" | "MANUAL" | "AI_ASSISTED";
+  mode: "OBSERVE" | "DRAFT_ONLY" | "MANUAL" | "AI_ASSISTED" | "LIMITED_AUTO";
   configuredMode: Status["mode"];
   paused: boolean;
   browser: {
@@ -40,6 +41,9 @@ export interface Status {
   };
   settings: AiSettings;
   keyPresent: boolean;
+  keyStored?:boolean;keyStorageError?:string|null;
+  automation?:{startedAt:number;emergencyStopped:boolean;collection:CollectionSettings|null;modelGrant:Grant<ModelGrant>|null;replyPolicy:Grant<ReplyPolicy>|null;
+    inboxRevision:number;autoStopReason?:string|null;collector:{running:boolean;source:string|null;fatal:string|null;channels:{source:string;next_at:number;last_success:number|null;last_error:string|null;failures:number;elapsed_ms:number|null}[]};pendingWorks:{count:number}}|null;
   modelAuthorized: boolean;
   modelBusy: boolean;
   sync:InboxSync;
@@ -86,6 +90,8 @@ export interface Thread {
     draft_version: number;
     context_version: string;
   }[];
+  verification?:{state:string;attempts:number;last_error:string|null;verified:number|null;checked_at:number|null}|null;
+  automationJob?:{state:string;reason:string|null;grant_version:number}|null;
 }
 export interface Review {
   commandId: string;
@@ -114,6 +120,15 @@ export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
 export const reasons: Record<string, string> = {
+  PREPARING:'正在后台准备与核验',
+  AUTO_POLICY_REQUIRED:'请先设置并启用准确的自动回复策略',
+  POLICY_NO_LONGER_AUTHORIZED:'自动回复策略已撤销、暂停或范围变化',
+  MODEL_GRANT_EXHAUSTED:'持续模型授权额度已用尽',
+  SEND_GRANT_EXHAUSTED:'持续发送授权额度已用尽',
+  MODEL_OUTSIDE_GRANT:'当前通道或模型超出已启用授权',
+  OWN_WORKS_METADATA_NOT_READY:'本人作品列表尚未取得可核验字段，已保留进度',
+  OBSERVATION_EXISTING_HUMAN_INPUT:'网页保留了未发送输入，后台已保留草稿并停止本次切换',
+  DPAPI_RESTORE_FAILED:'当前 Windows 用户无法解密已保存的 Key，请重新配置',
   INBOX_SYNC_IN_PROGRESS: "收件箱正在同步，请等待当前读取完成。",
   OBSERVATION_DOM_NOT_READY: "页面尚未就绪，请稍后再次同步。",
   OBSERVATION_PAGE_BLOCKED: "请在专属浏览器检查登录或验证提示。",
@@ -158,6 +173,7 @@ export function explain(error: unknown): string {
   return reasons[text] ?? text;
 }
 export const statusNames: Record<string, string> = {
+  PREPARING:'正在后台准备与核验',
   AWAITING_DRAFT: "待处理",
   AWAITING_APPROVAL: "待确认",
   APPROVED: "已批准",

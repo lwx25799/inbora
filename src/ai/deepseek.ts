@@ -42,6 +42,7 @@ export class DeepSeekProvider {
     key: string,
     authorized: boolean,
     signal?: AbortSignal,
+    reserve?: () => void,
   ): Promise<{ text: string; model: string }> {
     requireSafe(
       authorized && key.length > 0,
@@ -62,6 +63,7 @@ export class DeepSeekProvider {
     const id = randomUUID();
     store.db
       .transaction(() => {
+        reserve?.();
         store.consumeBudget("MODEL");
         store.db
           .prepare("INSERT INTO model_calls VALUES(?,?,?,NULL,NULL,NULL,NULL)")

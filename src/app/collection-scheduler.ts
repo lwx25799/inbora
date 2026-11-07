@@ -6,6 +6,8 @@ export const collectionStops = new Set([
   "OBSERVATION_PAGE_BLOCKED", "OBSERVATION_ACCOUNT_CHANGED", "ACCOUNT_CHANGED", "BROWSER_CLOSED",
   "PLATFORM_STOP", "CHALLENGE_REQUIRED", "LOGIN_REQUIRED", "ACCOUNT_NOT_VERIFIED", "UNEXPECTED_ORIGIN",
   "OWNER_LOCKED_OR_PORT_UNAVAILABLE",
+  "OWN_WORKS_ACCOUNT_CHANGED", "NATIVE_REPLY_ACCOUNT_CHANGED", "COMMENT_REPLY_ACCOUNT_CHANGED",
+  "NATIVE_REPLY_PAGE_BLOCKED", "COMMENT_REPLY_PAGE_BLOCKED",
 ]);
 
 /** One bounded browser turn at a time. No AI, sending, WebView visibility or operator-session dependency. */
@@ -15,19 +17,27 @@ export class CollectionScheduler {
   private abort: AbortController | undefined;
   private closed = false;
   private last: CollectionSource = "dm";
+  private fatal: string | null = null;
   constructor(readonly persistence: AutomationStore,
     private readonly collect: (source: CollectionSource, signal: AbortSignal) => Promise<void>,
     private readonly updated: () => void = () => {},
   ) {}
   start(): void {
     if (this.timer || this.closed) return;
-    this.timer = setInterval(() => void this.tick(), 1000);
+    this.timer = setInterval(() => void this.pulse(), 1000);
     this.timer.unref();
-    void this.tick();
+    void this.pulse();
+  }
+  private async pulse():Promise<void> {
+    try {await this.tick();}catch {
+      this.fatal='COLLECTION_STATE_UNAVAILABLE';
+      this.closed=true;clearInterval(this.timer);this.timer=undefined;
+      this.updated();
+    }
   }
   cancel(): void { this.abort?.abort(); }
   status() {
-    return {running: !!this.running, source: this.running ? this.last : null,
+    return {running: !!this.running, source: this.running ? this.last : null, fatal:this.fatal,
       channels: this.persistence.store.db.prepare("SELECT * FROM collection_progress ORDER BY source").all()};
   }
   async tick(): Promise<void> {

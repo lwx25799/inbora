@@ -51,7 +51,7 @@ export function captureCommentReply(input:Input):Frame{
       return Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root);
     },
     root():{root:Element;context:unknown[];proofs:SendProof[];ids:string[]}{
-      const work=o.works.find(w=>w.id===e.videoId),peer=o.peers.find(p=>p.uid===e.actorId);
+      const work=o.works.find(w=>w.id===e.videoId),peer=[...o.peers,...o.commentAuthors??[]].find(p=>p.uid===e.actorId);
       dom.check(work&&peer&&e.channel==='COMMENT_NOTIFICATION'&&e.kind==='COMMENT'&&e.direction==='INCOMING','COMMENT_REPLY_SCOPE_REQUIRED');
       dom.check(location.origin===o.origin&&location.href.split('?')[0]===work!.url.split('?')[0]&&
         !/验证码|安全验证|访问受限/.test(document.title)&&!Array.from(document.querySelectorAll(m.blockers)).some(dom.visible),'COMMENT_REPLY_PAGE_BLOCKED');

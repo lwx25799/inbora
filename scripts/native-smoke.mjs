@@ -78,7 +78,7 @@ async function launch(index) {
     env: {
       ...process.env,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-debugging-address=127.0.0.1`,
-      WEBVIEW2_USER_DATA_FOLDER: join(root, `webview-${index}`),
+      WEBVIEW2_USER_DATA_FOLDER: join(root, 'webview'),
     },
     stdio: "ignore",
   });
@@ -144,17 +144,15 @@ try {
   console.log("Installed native app and actual Tauri WebView attached");
   await connect(run.page);
   await run.page.getByRole("button", { name: /合成原生私信/ }).click();
-  await run.page.getByRole("button", { name: "人工接管", exact: true }).click();
+  await run.page.getByRole("button", { name: "打开人工回复", exact: true }).click();
+  const dialog=run.page.getByRole('dialog',{name:'人工回复对话框'});
   await run.page
     .getByRole("textbox", { name: "人工回复草稿" })
     .fill("原生客户端人工持久化验证。");
-  await run.page.getByRole("button", { name: "保存草稿", exact: true }).click();
-  await run.page
-    .getByText("草稿已保存，旧审批已失效", { exact: true })
-    .waitFor();
+  await dialog.getByText('编辑期间自动接管、续期与保存 · 修改已保存',{exact:true}).waitFor();
   assert(
     await run.page
-      .getByRole("button", { name: "核对并发送", exact: true })
+      .getByRole("button", { name: "发送", exact: true })
       .isDisabled(),
   );
   for (const viewport of [
@@ -175,6 +173,7 @@ try {
     });
     result.viewports.push(viewport);
   }
+  await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
   await run.page
     .getByRole("button", { name: "AI 与设置", exact: true })
     .click();
@@ -202,8 +201,10 @@ try {
   await run.browser.close().catch(() => {});
   run = undefined;
   run = await launch(2);
-  await connect(run.page);
+  await run.page.getByRole('heading',{name:'收件箱',exact:true}).waitFor({timeout:10_000});
+  result.autoReconnect=true;
   await run.page.getByRole("button", { name: /合成原生私信/ }).click();
+  await run.page.getByRole('button',{name:'打开人工回复',exact:true}).click();
   await run.page.waitForFunction(
     () =>
       document.querySelector('textarea[aria-label="人工回复草稿"]')?.value ===
@@ -213,6 +214,7 @@ try {
     await run.page.getByRole("textbox", { name: "人工回复草稿" }).inputValue(),
     "原生客户端人工持久化验证。",
   );
+  await run.page.getByRole('dialog',{name:'人工回复对话框'}).getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
   await run.page
     .getByRole("button", { name: "AI 与设置", exact: true })
     .click();

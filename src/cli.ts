@@ -25,7 +25,8 @@ import { BrowserService } from './app/browser-service.js';
 import { randomUUID } from 'node:crypto';
 import { WorkbenchAuthority } from './app/authority.js';
 
-const help = `inbora 0.2.9 — 单账号双通道受控 PoC / 最小客户端
+const manifest=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8')) as {version:string};
+const help = `inbora ${manifest.version} · 单账号双通道内核 / 自动化客户端
 
 pnpm inbora <command> [id] [options]
   init                         初始化私有运行目录（只执行一次）

@@ -52,6 +52,7 @@ export const observationMappingSchema = z.object({
   self: z.object({ uid: nativeId, secUid: secureId }),
   peers: z.array(z.object({ uid: nativeId, secUid: secureId, conversationId: z.string().min(1).max(512), title: z.string().min(1) })).min(1).max(2),
   works: z.array(z.object({ id: nativeId, url: z.url() })).min(1).max(2),
+  commentAuthors: z.array(z.object({uid:nativeId,secUid:secureId,title:z.string()})).max(1000).optional(),
   selectors: z.object({
     selfAvatar: selector, selfFiberDepth: z.number().int().min(0).max(8),
     dmEntry: selector, dmPanel: selector, conversationRows: selector, conversationTitle: selector,

@@ -8,10 +8,19 @@ const sql = `
 CREATE TABLE automation_state (id INTEGER PRIMARY KEY CHECK(id=1), started_at INTEGER NOT NULL,
   emergency_stopped INTEGER NOT NULL DEFAULT 0, collection_json TEXT NOT NULL);
 CREATE TABLE collection_progress (source TEXT PRIMARY KEY, next_at INTEGER NOT NULL DEFAULT 0,
-  last_success INTEGER, last_error TEXT, failures INTEGER NOT NULL DEFAULT 0, elapsed_ms INTEGER);
+  last_success INTEGER, last_error TEXT, failures INTEGER NOT NULL DEFAULT 0, elapsed_ms INTEGER, cursor_json TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE discovered_works (id TEXT PRIMARY KEY, own_id TEXT NOT NULL, url TEXT NOT NULL,
   published_at INTEGER, precision_ms INTEGER NOT NULL, state TEXT NOT NULL,
   first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);
+CREATE TABLE discovered_conversations (id TEXT PRIMARY KEY, own_id TEXT NOT NULL, uid TEXT, sec_uid TEXT NOT NULL,
+  title TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, last_read INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE work_collection_progress (work_id TEXT PRIMARY KEY, scroll_top INTEGER NOT NULL, last_height INTEGER NOT NULL,
+  end_observations INTEGER NOT NULL, last_read INTEGER NOT NULL, last_error TEXT, next_at INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE collection_targets (target_key TEXT PRIMARY KEY, own_id TEXT NOT NULL, uid TEXT NOT NULL,
+  sec_uid TEXT NOT NULL, title TEXT NOT NULL, conversation_id TEXT, observed_at INTEGER NOT NULL);
+CREATE TABLE manual_send_inputs (command_id TEXT PRIMARY KEY REFERENCES manual_send_commands(command_id), input_digest TEXT NOT NULL);
+CREATE TABLE policy_commands (command_id TEXT PRIMARY KEY REFERENCES manual_send_commands(command_id),
+  grant_version INTEGER NOT NULL REFERENCES automation_grants(version), ownership_generation INTEGER NOT NULL);
 CREATE TABLE automation_grants (version INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
   scope_json TEXT NOT NULL, scope_digest TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER);
 CREATE TABLE automation_human_pauses (target_key TEXT PRIMARY KEY, paused INTEGER NOT NULL);

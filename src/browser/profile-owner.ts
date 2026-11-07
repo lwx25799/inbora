@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { chromium, type BrowserContext, type Page } from 'playwright';
 import { AccountActor } from './account-actor.js';
 import { OwnerLock } from './owner-lock.js';
+import { requireSafe } from '../core/contracts.js';
 
 export class BrowserProfileOwner {
   readonly actor = new AccountActor();
@@ -27,9 +28,11 @@ export class BrowserProfileOwner {
       await lock.close(); throw error;
     }
   }
-  async open(origin: string): Promise<void> {
+  async open(origin: string, signal?: AbortSignal): Promise<void> {
     await this.actor.run(async () => {
+      requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
       await this.notification.goto(origin, { waitUntil: 'domcontentloaded' });
+      requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
       await this.dm.goto(origin, { waitUntil: 'domcontentloaded' });
     });
   }

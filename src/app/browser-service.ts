@@ -20,6 +20,9 @@ import {
 import type { EventStore } from "../storage/store.js";
 import { recordEvidence } from "../observability/evidence.js";
 import type { CapabilityIdentity } from "./authority.js";
+import { InboxCollector } from "./inbox-collector.js";
+import type { AutomationStore } from "../storage/automation-store.js";
+import type { CollectionSource } from "./collection-scheduler.js";
 
 export interface AdapterHandle {
   adapter: ReplyAdapter;
@@ -33,6 +36,8 @@ export class BrowserService {
   private opening: Promise<void> | undefined;
   private closing: Promise<void> | undefined;
   private epoch = 0;
+  private collector: InboxCollector | undefined;
+  private collectorMapping = "";
   get ownerEpoch() { return this.epoch; }
   constructor(
     readonly root: string,
@@ -60,11 +65,13 @@ export class BrowserService {
       version: this.owner?.version() ?? null,
     };
   }
-  async workUrl(event: InboundEvent): Promise<string | null> {
+  async workUrl(event: InboundEvent, store?:EventStore): Promise<string | null> {
     if (event.channel !== "COMMENT_NOTIFICATION") return null;
     const observation = await loadObservationMapping(this.root);
     return (
-      observation?.works.find((work) => work.id === event.videoId)?.url ?? null
+      observation?.works.find((work) => work.id === event.videoId)?.url ??
+      (store?.db.prepare("SELECT name FROM sqlite_master WHERE name='discovered_works'").get()?
+        (store.db.prepare("SELECT url FROM discovered_works WHERE id=? AND own_id=? AND state='INCLUDED'").get(event.videoId,observation?.self.uid) as {url:string}|undefined)?.url:null)??null
     );
   }
   identity(channel: Channel): CapabilityIdentity | null {
@@ -75,13 +82,15 @@ export class BrowserService {
     owner.context.once("close", () => {
       if (this.owner !== owner) return;
       this.owner = undefined;
+      this.collector?.dispose();this.collector=undefined;
       this.epoch++;
       this.state = "CLOSED";
       this.currentIdentity.clear();
       this.closing = owner.close().finally(() => { this.closing = undefined; });
     });
   }
-  async open(mode: "headed" | "headless" = this.mode): Promise<void> {
+  async open(mode: "headed" | "headless" = this.mode, signal?:AbortSignal): Promise<void> {
+    requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
     if (this.closing) await this.closing;
     if (this.opening) {
       await this.opening;
@@ -93,7 +102,7 @@ export class BrowserService {
       "CLOSE_BROWSER_BEFORE_MODE_CHANGE",
     );
     if (this.owner) return;
-    const opening = this.launchOwner(mode);
+    const opening = this.launchOwner(mode,signal);
     this.opening = opening;
     try {
       await opening;
@@ -101,7 +110,7 @@ export class BrowserService {
       if (this.opening === opening) this.opening = undefined;
     }
   }
-  private async launchOwner(mode: "headed" | "headless"): Promise<void> {
+  private async launchOwner(mode: "headed" | "headless", signal?:AbortSignal): Promise<void> {
     this.state = "STARTING";
     this.mode = mode;
     let created: BrowserProfileOwner | undefined;
@@ -121,8 +130,9 @@ export class BrowserService {
         mode === "headless",
       );
       created = owner;
+      requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
       this.attachOwner(owner);
-      await owner.open(origin);
+      await owner.open(origin,signal);
       requireSafe(this.owner === owner, "BROWSER_CLOSED");
       for (const channel of ["COMMENT_NOTIFICATION", "DIRECT_MESSAGE"] as const)
         await this.refreshIdentity(channel);
@@ -139,6 +149,7 @@ export class BrowserService {
     }
   }
   async close(): Promise<void> {
+    this.collector?.dispose();this.collector=undefined;
     if (this.opening) await this.opening.catch(() => {});
     if (this.closing) return this.closing;
     const owner = this.owner;
@@ -155,14 +166,32 @@ export class BrowserService {
       }
     }
   }
-  async adapter(e: InboundEvent): Promise<AdapterHandle> {
-    await this.open();
+  async adapter(e: InboundEvent, store?:EventStore, signal?:AbortSignal): Promise<AdapterHandle> {
+    await this.open(this.mode,signal);
     const owner = this.owner!;
     const native =
       e.channel === "DIRECT_MESSAGE"
         ? await loadDmReplyMapping(this.root)
         : await loadCommentReplyMapping(this.root);
     if (native) {
+      const expanded=structuredClone(native);
+      if(store?.db.prepare("SELECT name FROM sqlite_master WHERE name='collection_targets'").get()) {
+        const target=store.db.prepare("SELECT own_id,uid,sec_uid,title,conversation_id FROM collection_targets WHERE target_key=?").get(
+          e.channel==='DIRECT_MESSAGE'?`dm:${e.conversationId}`:`comment:${e.videoId}:${e.commentId}`) as {
+            own_id:string;uid:string;sec_uid:string;title:string;conversation_id:string|null;
+          }|undefined;
+        if(target) {
+          requireSafe(target.own_id===native.observation.self.uid&&target.uid===e.actorId&&target.conversation_id===e.conversationId,'OBSERVATION_TARGET_IDENTITY_CONFLICT');
+          if(e.channel==='DIRECT_MESSAGE')expanded.observation.peers=[{uid:target.uid,secUid:target.sec_uid,title:target.title,conversationId:e.conversationId!}];
+          else {
+            expanded.observation.commentAuthors=[{uid:target.uid,secUid:target.sec_uid,title:target.title}];
+            if(!expanded.observation.works.some(w=>w.id===e.videoId)) {
+              const work=store.db.prepare("SELECT url FROM discovered_works WHERE id=? AND own_id=? AND state='INCLUDED'").get(e.videoId,target.own_id) as {url:string}|undefined;
+              requireSafe(work,'COMMENT_REPLY_SCOPE_REQUIRED');expanded.observation.works=[{id:e.videoId!,url:work.url}];
+            }
+          }
+        }
+      }
       this.currentIdentity.set(e.channel, {
         identityDigest: digest(native.observation.self.uid),
         mappingDigest: digest(native),
@@ -173,13 +202,13 @@ export class BrowserService {
         e.channel === "DIRECT_MESSAGE"
           ? new ObservedDmReply(
               owner.dm,
-              native as NonNullable<
+              expanded as NonNullable<
                 Awaited<ReturnType<typeof loadDmReplyMapping>>
               >,
             )
           : new ObservedCommentReply(
               owner.notification,
-              native as NonNullable<
+              expanded as NonNullable<
                 Awaited<ReturnType<typeof loadCommentReplyMapping>>
               >,
             );
@@ -322,10 +351,25 @@ export class BrowserService {
       throw error;
     });
   }
+  async collect(data:AutomationStore,source:CollectionSource,signal:AbortSignal):Promise<void> {
+    requireSafe(!signal.aborted&&!data.state().emergencyStopped,'COLLECTION_CANCELLED');
+    await this.open(this.mode,signal);
+    requireSafe(!signal.aborted&&!data.state().emergencyStopped,'COLLECTION_CANCELLED');
+    const owner=this.owner!,mapping=await loadObservationMapping(this.root);
+    requireSafe(mapping,'OBSERVATION_MAPPING_REQUIRED');
+    const key=digest(mapping);
+    if(!this.collector||this.collectorMapping!==key) {
+      this.collector?.dispose();this.collector=new InboxCollector(owner,mapping,data,this.root,this.mode);this.collectorMapping=key;
+    }
+    await this.collector.collect(source,signal);
+    requireSafe(this.owner===owner,'BROWSER_CLOSED');
+  }
   async verifyExisting(
     store: EventStore,
     eventId: string,
+    options:{signal?:AbortSignal;background?:boolean}={},
   ): Promise<{ verified: boolean; evidenceId: string }> {
+    requireSafe(!options.signal?.aborted,'COLLECTION_CANCELLED');
     const event = store.event(eventId),
       draft = store.db
         .prepare("SELECT id FROM reply_drafts WHERE event_id=?")
@@ -334,11 +378,12 @@ export class BrowserService {
       .prepare("SELECT id FROM send_intents WHERE event_id=?")
       .get(eventId) as { id: string } | undefined;
     requireSafe(draft && intent, "INTENT_REQUIRED");
-    await this.open();
+    await this.open(this.mode,options.signal);
     const owner = this.owner!;
-    const handle = await this.adapter(event.payload);
+    const handle = await this.adapter(event.payload,store);
     try {
       const proof = await owner.actor.run(async () => {
+        requireSafe(!options.signal?.aborted,'COLLECTION_CANCELLED');
         if (handle.adapter instanceof ObservedCommentReply)
           return handle.adapter.verifyExisting(
             event.payload,
@@ -360,7 +405,8 @@ export class BrowserService {
           [],
           store.intentBoundary(intent.id),
         );
-      });
+      },options.background?'background':'interactive');
+      requireSafe(!options.signal?.aborted,'VERIFICATION_CANCELLED');
       const evidenceId = await recordEvidence(join(this.root, "evidence"), {
         caseId: event.payload.channel === "DIRECT_MESSAGE" ? "D05" : "C05",
         browserVersion: owner.version(),

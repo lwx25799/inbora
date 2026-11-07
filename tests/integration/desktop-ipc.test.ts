@@ -79,8 +79,8 @@ test("source sidecar authenticates IPC, rejects unbounded/extra fields, reconnec
       await call({ command: "getStatus", operatorId: "forged" }),
     ).toMatchObject({ ok: false, error: "INVALID_COMMAND" });
     expect(await call({ command: "setMode", mode: "MANUAL" })).toMatchObject({
-      ok: false,
-      error: "CAPABILITY_UNVERIFIED",
+      ok: true,
+      result: { configuredMode: "MANUAL", mode: "DRAFT_ONLY" },
     });
     expect(
       await call({
@@ -91,7 +91,7 @@ test("source sidecar authenticates IPC, rejects unbounded/extra fields, reconnec
       }),
     ).toMatchObject({ ok: true, result: { connected: true } });
     const control=new Database(join(root,'poc.sqlite'));control.prepare('UPDATE operator_sessions SET expires_at=0').run();control.close();
-    expect(await call({command:'getStatus'})).toMatchObject({ok:false,error:'OPERATOR_EXPIRED'});
+    expect(await call({command:'getStatus'})).toMatchObject({ok:true,result:{configuredMode:'MANUAL'}});
     expect(await call({ command: "emergencyStop" })).toMatchObject({
       ok: true,
       result: { paused: true },

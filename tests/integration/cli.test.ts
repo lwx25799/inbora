@@ -4,13 +4,14 @@ import { expect, test } from 'vitest';
 import { privateTemp } from '../helpers.js';
 import { OwnerLock } from '../../src/browser/owner-lock.js';
 import { EventStore } from '../../src/storage/store.js';
+import { readFileSync } from 'node:fs';
 import { approved, snapshot, candidate } from '../helpers.js';
 
 const cli = resolve('src/cli.ts');
 function run(args: string[]) { return execFileSync(process.execPath, ['--import','tsx',cli,...args], { encoding: 'utf8' }); }
 test('CLI init/status/restart/help work without touching a real site, real entry requires explicit access', () => {
   const root = join(privateTemp(), 'runtime');
-  expect(run(['--help'])).toContain('inbora');
+  expect(run(['--help'])).toContain('inbora '+(JSON.parse(readFileSync('package.json','utf8')) as {version:string}).version);
   expect(JSON.parse(run(['init','--runtime',root]))).toEqual({ initialized: true });
   const status = JSON.parse(run(['status','--runtime',root]));
   expect(status.events).toEqual([]); expect(status.uncertain).toBe(0);
