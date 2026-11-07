@@ -364,6 +364,8 @@ export class ObservedReader {
     if(allCommentAuthors&&offset>0) {
       const input:CaptureInput={mapping:this.mapping,channel:'commentScroll',index,evidenceId:randomUUID(),commentOffset:offset};
       await this.page.evaluate(captureObserved,input);
+      // Native scroll handlers can remount the virtual rows on later rendering frames.
+      await new Promise(resolve=>setTimeout(resolve,150));
     }
     const batch=await this.ready('comments',index,{allCommentAuthors});
     if(allCommentAuthors) {

@@ -1,5 +1,11 @@
 # 来源与许可
 
+## 2026-11-07：单会话失败让步与评论续读渲染
+
+修复前复读MIT LockyBee/dsh-douyin-agent固定提交`7989640e340f0fd79e2de9874880d5197546e755`的`autonomous-watch.mjs:125-154`持久运行/停止、`chat-browser.mjs:303-337`身份绑定及`:854-896`有界列表读取。上游没有可直接移植到本项目SQLite会话调度的失败退避合同，因此独立复用已有`collection_progress.cursor_json`保存单会话120秒退避，不新增表/框架或模型重试；`last_read`仅成功后更新，账号/平台阻断继续透传全局门禁。许可已在本机候选副本复核，不复制上游宿主或放宽原生身份。
+
+原评论虚拟列表续读回归暴露异步渲染间隙：隔离阶段探针显示原生scroll已到达、滚动位置已前进，但新行尚未重挂，下一次同步capture仍读旧行。对照同固定提交`chat-browser.mjs:864-869`的滚动后150毫秒让步，并核对[HTML标准的渲染更新顺序](https://html.spec.whatwg.org/multipage/webappapis.html#update-the-rendering)中scroll steps与动画帧阶段，本项目在恢复评论offset之后让步150毫秒，再进入原有准确可见快照门禁。夹具用两次原生rAF独立延迟挂载，红绿均实际运行。此等待覆盖已复现的帧间隙，不承诺任意负载下页面稳定，也不拿它解释实机正文冲突。未新增依赖或复制源函数。
+
 ## 2026-11-07：首个自动化切片，持久合同及收取调度
 
 修改前复读已固定候选的具体源码：MIT LockyBee/dsh-douyin-agent `7989640e340f0fd79e2de9874880d5197546e755` 的 `autonomous-watch.mjs:125-154`、`receipt-baseline.mjs:62-83`，以及 MIT miqian-nomad/dsh-douyin-watch `177810c1f1858b529e78531f837ac9677fb9f9a9` 的 `tools/work-comments.mjs:67-85,110-119`；许可全文在本机上游副本复核。采用持久范围、单个后台操作、不可覆盖基线、有界作品发现和独立水位的组织原则；不采用要求Key才开始采集、只看最近10作品、直连接口/UA覆盖、并行发布或任何上游外发权限。独立扩展既有SQLite/AccountActor，不引入上游宿主或新依赖。

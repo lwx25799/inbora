@@ -14,6 +14,7 @@ import { Blocked } from "../core/contracts.js";
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
   pending: z.array(z.object({aweme_id:z.string(),create_time:z.number().nullable().optional(),author:z.object({uid:z.string(),sec_uid:z.string()})})).default([])});
+const dmCursorSchema=z.object({deferred:z.array(z.object({id:z.string().min(1),until:z.number().int().nonnegative(),code:z.string()})).default([])});
 
 /** Only this backend extends observed targets from the explicitly enabled own-account collection scope. */
 export class InboxCollector {
@@ -57,9 +58,15 @@ export class InboxCollector {
         this.mapping.self.uid,evidence,new Date(this.data.now()).toISOString(),this.data.state().startedAt);
     }).immediate();
   }
+  private async dmStage<T>(stage:'LIST'|'THREAD'|'ADVANCE',read:()=>Promise<T>):Promise<T> {
+    try{return await read();}catch(error){
+      if(error instanceof Blocked)throw error;
+      throw new Blocked(`DM_${stage}_READ_FAILED`);
+    }
+  }
   private async dm(signal:AbortSignal):Promise<void> {
     const reader=new ObservedReader(this.owner.dm,this.mapping);
-    const batch=await reader.conversations();
+    const batch=await this.dmStage('LIST',()=>reader.conversations());
     this.check('dm',signal);
     for(const peer of batch.peers??[]) {
       const old=this.data.store.db.prepare('SELECT own_id,sec_uid FROM discovered_conversations WHERE id=?').get(peer.conversationId) as {own_id:string;sec_uid:string}|undefined;
@@ -69,12 +76,30 @@ export class InboxCollector {
     }
     const visible=(batch.peers??[]).map(p=>p.conversationId);
     if(!visible.length)return;
-    const next=this.data.store.db.prepare(`SELECT * FROM discovered_conversations WHERE own_id=? AND id IN (${visible.map(()=>'?').join(',')}) ORDER BY last_read,first_seen,id LIMIT 1`).get(this.mapping.self.uid,...visible) as {
+    const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
+    const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
+    cursor.deferred=cursor.deferred.filter(item=>item.until>this.data.now());
+    const candidates=this.data.store.db.prepare(`SELECT * FROM discovered_conversations WHERE own_id=? AND id IN (${visible.map(()=>'?').join(',')}) ORDER BY last_read,first_seen,id`).all(this.mapping.self.uid,...visible) as {
       id:string;uid:string|null;sec_uid:string;title:string;
-    }|undefined;
-    if(!next)return;
+    }[];
+    const deferred=new Set(cursor.deferred.map(item=>item.id));
+    const next=candidates.find(candidate=>!deferred.has(candidate.id));
+    if(!next){await this.dmStage('ADVANCE',()=>reader.conversations('next'));return;}
     const peer:DiscoveredPeer={uid:next.uid,secUid:next.sec_uid,conversationId:next.id,title:next.title};
-    const messages=await reader.dm(0,peer);
+    let messages:ObservationBatch;
+    try{messages=await this.dmStage('THREAD',()=>reader.dm(0,peer));}
+    catch(error){
+      const code=error instanceof Blocked?error.code:'DM_THREAD_READ_FAILED';
+      if(!collectionStops.has(code)&&!signal.aborted){
+        this.check('dm',signal);
+        cursor.deferred.push({id:next.id,until:this.data.now()+120_000,code});
+        this.data.store.db.transaction(()=>{
+          this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
+          this.data.store.audit('DM_READ_DEFERRED',digest(next.id),{threadReadFailed:true});
+        }).immediate();
+      }
+      throw error;
+    }
     await this.persist('dm',next.id,messages,signal);
     const native=messages.bindings?.[0];
     if(native) {
@@ -82,8 +107,9 @@ export class InboxCollector {
       this.data.store.db.prepare('UPDATE discovered_conversations SET uid=? WHERE id=?').run(native.uid,next.id);
     }
     this.data.store.db.prepare('UPDATE discovered_conversations SET last_read=? WHERE id=?').run(this.data.now(),next.id);
+    this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
     this.check('dm',signal);
-    await reader.conversations('next');
+    await this.dmStage('ADVANCE',()=>reader.conversations('next'));
   }
   private async works(signal:AbortSignal):Promise<void> {
     const row=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='works'").get() as {cursor_json:string};
