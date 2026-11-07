@@ -1,5 +1,13 @@
 # 来源与许可
 
+## 2026-11-07：首个自动化切片，持久合同及收取调度
+
+修改前复读已固定候选的具体源码：MIT LockyBee/dsh-douyin-agent `7989640e340f0fd79e2de9874880d5197546e755` 的 `autonomous-watch.mjs:125-154`、`receipt-baseline.mjs:62-83`，以及 MIT miqian-nomad/dsh-douyin-watch `177810c1f1858b529e78531f837ac9677fb9f9a9` 的 `tools/work-comments.mjs:67-85,110-119`；许可全文在本机上游副本复核。采用持久范围、单个后台操作、不可覆盖基线、有界作品发现和独立水位的组织原则；不采用要求Key才开始采集、只看最近10作品、直连接口/UA覆盖、并行发布或任何上游外发权限。独立扩展既有SQLite/AccountActor，不引入上游宿主或新依赖。
+
+SQLite使用已锁定better-sqlite3 v13.0.3；远程tag解引用提交为 `dbc2ea1165fef1f599b9be12faea33fa5e9d7ffb`。复读安装包 `lib/methods/backup.js:1-70`，并经Context7核对该版本官方 `docs/api.md` 的backup/transaction.immediate：异步备份不放进同步事务，升级前校验一致备份、私有试升级和恢复，额度及意图事务保持同步。沿用其MIT依赖许可，不复制实现源码。
+
+本切片仅落地持久合同、调度器和公平队列，尚未接入产品后台；测试及真实库私有副本迁移结果见 `docs/AUTOMATION-ACCEPTANCE.md`，不把上游能力或合成通过当作新作品/会话实机通过。
+
 ## 2026-11-07：一个入口同步双通道及后台进度
 
 修改前重新核对两仓当前 SHA，读取固定源码，不以旧印象代替比较。MIT DSH [7989640e340f0fd79e2de9874880d5197546e755](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/autonomous-watch.mjs#L125-L154) 的 `autonomous-watch.mjs:125-154` 使用 running/completion 防止重复启动、异步执行并立即返回 state；`:92-93` 暴露 phase，`:422-430` 处理停止。采用“单个后台操作、立即回状态、可查询阶段及完成”的组织方式，独立复用本项目现有 pending/drain 和账号 actor；不引入其自动观看、文件任务系统、AI 调用或发送路线。

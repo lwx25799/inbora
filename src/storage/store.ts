@@ -82,7 +82,7 @@ export class EventStore {
     this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)')
       .run(randomUUID(), new Date().toISOString(), code, id, JSON.stringify(detail));
   }
-  observe(channel: Channel, scope: string, candidates: InboundEvent[], ownId: string, evidenceRef: string, observedAt = this.now()): string[] {
+  observe(channel: Channel, scope: string, candidates: InboundEvent[], ownId: string, evidenceRef: string, observedAt = this.now(), firstBoundary?: number): string[] {
     return this.db.transaction(() => {
       this.bindAccount(ownId);
       const events = candidates.map(e => eventSchema.parse(e));
@@ -94,9 +94,10 @@ export class EventStore {
         return parsed.success ? Date.parse(parsed.data) : null;
       };
       const baselineTime = absoluteTime(observedAt); requireSafe(baselineTime !== null,'OBSERVATION_TIME_INVALID');
+      requireSafe(firstBoundary === undefined || (Number.isSafeInteger(firstBoundary) && firstBoundary > 0 && firstBoundary <= baselineTime), 'OBSERVATION_BOUNDARY_INVALID');
       const times = events.map(e => absoluteTime(e.occurredAt)).filter((n): n is number => n !== null);
       const highWater = Math.max(priorWatermark?.highWater ?? baselineTime,...times);
-      const initialBoundary = priorWatermark?.baselineTime ?? highWater;
+      const initialBoundary = priorWatermark?.baselineTime ?? firstBoundary ?? highWater;
       const newIds: string[] = [];
       const weakOccurrences = new Map<string, { eventId: string; count: number }>();
       this.db.prepare('INSERT INTO observations VALUES (?,?,?,?,?,?)')
@@ -130,8 +131,9 @@ export class EventStore {
         }
         const id = randomUUID();
         const time = absoluteTime(e.occurredAt);
-        const status = !isStrong(e) || time === null ? 'MANUAL_REVIEW' : !priorWatermark ? 'BASELINE' :
-          time > priorWatermark.highWater ? 'AWAITING_DRAFT' : time < initialBoundary ? 'BASELINE' : 'MANUAL_REVIEW';
+        const overlapsBoundary = time !== null && time <= initialBoundary && time + (e.occurredAtPrecisionMs ?? 1) > initialBoundary;
+        const status = !isStrong(e) || time === null ? 'MANUAL_REVIEW' : !priorWatermark && firstBoundary === undefined ? 'BASELINE' :
+          time > (priorWatermark?.highWater ?? initialBoundary) ? 'AWAITING_DRAFT' : time < initialBoundary && !overlapsBoundary ? 'BASELINE' : 'MANUAL_REVIEW';
         this.db.prepare('INSERT INTO inbound_events VALUES (?,?,?,?,?,?,?,?,?)')
           .run(id, e.accountId, channel, key, scope, targetKey(e), binding, JSON.stringify(e), status);
         if (!isStrong(e)) weakOccurrences.set(key, { eventId: id, count: 1 });

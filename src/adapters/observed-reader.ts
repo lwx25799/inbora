@@ -181,7 +181,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       const text = dom.ownedOne(row,s.commentText).textContent ?? '';
       dom.check(text.length > 0 && text === dom.data(comment,'text'),'OBSERVATION_COMMENT_TEXT_CONFLICT');
       events.push({ accountId:'account_001',channel:'COMMENT_NOTIFICATION',platformEventId:id,actorId:peer.uid,
-        actorName:peer.title,text,occurredAt:dom.time(dom.data(comment,'createTime'),true),videoId:work!.id,commentId:id,
+        actorName:peer.title,text,occurredAt:dom.time(dom.data(comment,'createTime'),true),occurredAtPrecisionMs:1000,videoId:work!.id,commentId:id,
         conversationId:null,direction:'INCOMING',kind:'COMMENT',evidenceId,discovery:'ALLOWED_WORK' });
     }
   }

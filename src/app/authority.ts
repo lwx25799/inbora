@@ -175,6 +175,8 @@ export class WorkbenchAuthority {
           "OTHER_OPERATOR_OWNS",
         );
         this.writeOwner(e, op.id, old.generation + 1, this.now() + 120_000);
+        if (this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='automation_human_pauses'").get())
+          this.store.db.prepare("INSERT INTO automation_human_pauses VALUES(?,1) ON CONFLICT(target_key) DO UPDATE SET paused=1").run(targetKey(e.payload));
         this.invalidate(e);
         this.store.audit(
           "HUMAN_CLAIMED",
@@ -237,6 +239,18 @@ export class WorkbenchAuthority {
       )
       .all(e.id);
     return digest([e.binding, this.store.history(e.payload), collisions]);
+  }
+  resumeAutomation(token: string, eventId: string): void {
+    this.operator(token, "CONTROL");
+    const e = this.store.event(eventId);
+    this.store.db.transaction(() => {
+      requireSafe(!this.store.db.prepare("SELECT id FROM send_intents WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')").get(targetKey(e.payload)), "TARGET_FROZEN");
+      const owner = this.ownership(e);
+      this.writeOwner(e, null, owner.generation + 1, 0);
+      this.invalidate(e);
+      this.store.db.prepare("INSERT INTO automation_human_pauses VALUES(?,0) ON CONFLICT(target_key) DO UPDATE SET paused=0").run(targetKey(e.payload));
+      this.store.audit("TARGET_AUTOMATION_RESUMED", digest(targetKey(e.payload)));
+    }).immediate();
   }
   draftFor(eventId: string) {
     const row = this.store.db
