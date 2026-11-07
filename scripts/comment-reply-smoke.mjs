@@ -54,7 +54,11 @@ try{
   networkAdapter.dispose();adapter.dispose();
   await mountCommentReply(owner,server.origin);
   await reloadableCommentReply(owner.notification,server.origin);
-  await owner.notification.addInitScript(()=>document.addEventListener('DOMContentLoaded',()=>{void fetch('/aweme/v1/web/comment/list/?aweme_id=10');}));
+  await owner.notification.addInitScript(()=>document.addEventListener('DOMContentLoaded',()=>{
+    const list=document.querySelector('#comment-list'),prior=list.cloneNode(true);prior.style.display='none';list.before(prior);
+    const hidden=document.createElement('div');hidden.className='comment';hidden.style.display='none';list.prepend(hidden);
+    void fetch('/aweme/v1/web/comment/list/?aweme_id=10');
+  }));
   await owner.notification.route('**/aweme/v1/web/comment/list/**',route=>{
     const now=Math.floor(Date.now()/1000)*1000-1000;
     return route.fulfill({headers:{date:new Date(now).toUTCString()},json:{status_code:0,extra:{now}}});

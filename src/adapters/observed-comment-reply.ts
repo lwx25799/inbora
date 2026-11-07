@@ -383,11 +383,23 @@ export class ObservedCommentReply implements ReplyAdapter{
     return null;
   }
   private async refreshComments(event:InboundEvent):Promise<void>{
-    await new ObservedReader(this.page,this.mapping.observation).guard();
-    const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
-    const s=this.mapping.observation.selectors;
-    if(!await this.page.locator(s.commentList).isVisible())await this.page.locator(s.commentEntry).click();
-    await this.page.locator(s.commentRows).first().waitFor({state:'visible'});await this.frame(event,'expand');
+    try{
+      await new ObservedReader(this.page,this.mapping.observation).guard();
+      const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
+      const s=this.mapping.observation.selectors,list=this.page.locator(s.commentList).filter({visible:true});
+      if(!await list.count())await this.page.locator(s.commentEntry).click();
+      const deadline=Date.now()+5000;
+      for(;;){
+        const count=await list.count();requireSafe(count<=1,'COMMENT_REPLY_LIST_NOT_UNIQUE');
+        if(count===1&&await list.locator(s.commentRows).filter({visible:true}).count())break;
+        requireSafe(Date.now()<deadline,'COMMENT_REPLY_REFRESH_NOT_READY');
+        await new Promise(resolve=>setTimeout(resolve,50));
+      }
+      await this.frame(event,'expand');
+    }catch(error){
+      if(error instanceof Error&&error.name==='TimeoutError')requireSafe(false,'COMMENT_REPLY_REFRESH_NOT_READY');
+      throw error;
+    }
   }
   private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string):Promise<SendProof|null>{
     const deadline=Date.now()+this.timeoutMs;let previous:string|null=null;

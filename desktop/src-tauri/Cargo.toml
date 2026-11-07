@@ -1,6 +1,6 @@
 [package]
 name = "inbora"
-version = "0.2.5"
+version = "0.2.6"
 description = "Single-account, approval-gated local inbox"
 edition = "2021"
 rust-version = "1.77.2"

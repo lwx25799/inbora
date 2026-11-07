@@ -136,7 +136,7 @@ export class DomAdapter implements ReplyAdapter {
     const href = await jump.getAttribute('href');
     if (href) requireSafe(new URL(href, this.page.url()).origin === this.mapping.origin, 'UNSAFE_COMMENT_LINK');
     await jump.click();
-    await this.page.locator(t.roots).first().waitFor({ state: 'visible' });
+    await this.page.locator(t.roots).filter({visible:true}).first().waitFor({ state: 'visible' });
     await this.guard();
   }
   private async matchingRoot(e: InboundEvent, required = true): Promise<Locator | null> {

@@ -134,6 +134,8 @@ export const reasons: Record<string, string> = {
   DATABASE_MISSING_USE_INIT:
     "目录中没有数据库，请选择已有目录或明确初始化新目录",
   CONFIRMATION_EXPIRED: "确认已超过 60 秒，请重新检查目标和全文",
+  COMMENT_REPLY_REFRESH_NOT_READY: "原评论刷新后尚未就绪，草稿已保留",
+  COMMENT_REPLY_LIST_NOT_UNIQUE: "出现多个可见评论列表，无法确定回复位置，未继续发送",
 };
 export function explain(error: unknown): string {
   const text = typeof error === "string" ? error : String(error);

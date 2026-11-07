@@ -113,7 +113,7 @@ test.each(['valid','missing','wrong-date','wrong-work','future','stale'])('nativ
   }finally{restoreClock();await f.close();}
 });
 
-test.each(['valid','missing','wrong-date','human-draft','sibling-draft','human-during-wait','context-change'])('fresh comment sender on an already open work acquires its own clock before filling: %s',async kind=>{
+test.each(['valid','hidden-first-row','hidden-first-list','duplicate-visible-list','empty-visible-list','missing','wrong-date','human-draft','sibling-draft','human-during-wait','context-change'])('fresh comment sender on an already open work acquires its own clock before filling: %s',async kind=>{
   const f=await setup();let navigations=0;try{
     f.mapping.observation.environment='douyin';f.adapter.dispose();
     await reloadableCommentReply(f.owner.notification,f.server.origin);
@@ -139,20 +139,34 @@ test.each(['valid','missing','wrong-date','human-draft','sibling-draft','human-d
       const root=document.querySelector('#root-comment')!,props=Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture')!.value.return.memoizedProps;
       props.commentInfo.replyTotal=1;
     }));
+    if(['hidden-first-row','hidden-first-list','duplicate-visible-list'].includes(kind))await f.owner.notification.addInitScript(kind=>document.addEventListener('DOMContentLoaded',()=>{
+      const list=document.querySelector('#comment-list')!;
+      if(kind==='hidden-first-row'){
+        const row=document.createElement('div');row.className='comment';row.style.display='none';list.prepend(row);
+      }else{
+        const prior=list.cloneNode(true) as HTMLElement;
+        if(kind==='hidden-first-list')prior.style.display='none';
+        list.before(prior);
+      }
+    }),kind);
+    if(kind==='empty-visible-list')await f.owner.notification.addInitScript(()=>document.addEventListener('DOMContentLoaded',()=>{
+      document.querySelector('#root-comment')!.remove();
+    }));
     f.owner.notification.on('framenavigated',()=>navigations++);
-    if(kind==='valid'){
+    if(['valid','hidden-first-row','hidden-first-list'].includes(kind)){
       expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('CONFIRMED');
       expect(navigations).toBe(1);
       expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(1);
     }else{
       const humanDraft=['human-draft','sibling-draft','human-during-wait'].includes(kind);
       await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow(
-        humanDraft?'EXISTING_DRAFT':kind==='context-change'?'CONTEXT_CHANGED':'CLOCK_UNVERIFIED');
+        humanDraft?'EXISTING_DRAFT':kind==='context-change'?'CONTEXT_CHANGED':kind==='duplicate-visible-list'?'LIST_NOT_UNIQUE':kind==='empty-visible-list'?'REFRESH_NOT_READY':'CLOCK_UNVERIFIED');
       expect(navigations).toBe(humanDraft?0:1);
       expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
       expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(0);
       if(kind==='human-draft'||kind==='human-during-wait')expect(await f.owner.notification.locator('#comment-editor').textContent()).toBe('human draft must remain');
       else if(kind==='sibling-draft')expect(await f.owner.notification.locator('body > #reply-controls #comment-editor').textContent()).toBe('other human draft must remain');
+      else if(['duplicate-visible-list','empty-visible-list'].includes(kind))expect(await f.owner.notification.locator('#comment-editor').count()).toBe(0);
       else expect(await f.owner.notification.locator('#comment-editor').textContent()).toBe('');
     }
   }finally{await f.close();}

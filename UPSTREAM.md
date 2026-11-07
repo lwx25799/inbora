@@ -1,5 +1,13 @@
 # 来源与许可
 
+## 2026-11-07：刷新后只等待可见评论
+
+修改前核对 Playwright 1.64.1/Apache-2.0 固定 SHA `cfe490d941f992655948eee8fd4fd94e1c4234bf` 的 `packages/playwright-core/src/client/locator.ts`：`first()` 仅追加 nth=0，不会跳过隐藏节点；`filter({visible:true})` 每次定位时重新过滤。官方对应版本文档同步核对。采用现有可见性过滤，先要求唯一可见评论列表，再在其内部等待可见评论；不引入依赖、放宽准确父评论校验或物理点击。MIT DSH 固定 SHA `7989640e340f0fd79e2de9874880d5197546e755` 的 `chat-browser.mjs:1613-1625` 继续仅参考限定原目标的一次正常重挂，不复用宽松收据。
+
+0.2.5 安装版只读阶段探针在 prepare 刷新后实际超时，错误指向全局 commentRows.first 等待隐藏节点；当前页面两个列表仅一个可见。探针在填字前截断，原业务表逐行不变。三个正式回归在旧代码均失败，分别覆盖隐藏首行、隐藏旧列表和两个可见列表；后者仍须以固定代码阻断。与上一轮时钟缺样本是相邻两个阶段的不同问题，不能把合成单列表通过等同实机重挂通过。
+
+同形扫描还定位到 DomAdapter.locateComment 的全局 first 等待，合成旧节点场景已实际红测；同样先过滤可见根节点，后续 matchingRoot 仍逐字段绑定准确事件，不借可见性替代身份核验。原生评论 helper 的两个调用点（填写前补采及请求关联后的回读）共用本次修复，源码和构建 Node 冒烟都保留隐藏旧列表与首行。
+
 ## 2026-11-07：配置模式与评论时钟观察器生命周期
 
 修改前核对 MIT React 19.3.1 固定 SHA `61aa00df822d0eb76d0362eb8b6fdd3527693efe` 的 `packages/react-dom-bindings/src/client/ReactDOMSelect.js`，`updateSelect` 和 `restoreControlledSelectState` 都按传入 value 恢复选项；官方 select 文档同步核对。采用持久配置与有效运行状态分别返回的方式，让设置控件绑定配置，发送门禁继续读取有效状态；不引入新状态库或放宽能力门禁。真实库已保存 MANUAL 而身份为空时有效状态为 DRAFT_ONLY，正式集成和双尺寸界面回归先在旧代码失败。

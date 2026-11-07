@@ -10,6 +10,21 @@ let server: Awaited<ReturnType<typeof fixtureServer>>;
 beforeAll(async () => { server = await fixtureServer(); });
 afterAll(async () => { await server.close(); });
 
+test('comment target loading skips an older hidden root before the visible original',async()=>{
+  const owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await owner.open(server.origin);
+    await owner.notification.evaluate(e=>(window as unknown as {addNotification:(e:unknown)=>void}).addNotification(e),rowData('comment'));
+    const adapter=new DomAdapter(owner.notification,'COMMENT_NOTIFICATION',mapping(server.origin));
+    const batch=await adapter.observeNotifications();
+    await owner.notification.evaluate(()=>{
+      const hidden=document.createElement('div');hidden.className='comment';hidden.hidden=true;document.body.prepend(hidden);
+    });
+    expect(await adapter.inspect(batch.events[0]!)).toMatchObject({targetKey:'comment:video-1:comment-1',ownId:'own-1'});
+    expect(await owner.notification.evaluate(()=>(window as unknown as {clicks:number}).clicks)).toBe(0);
+  }finally{await owner.close();}
+});
+
 test.each([true, false])('both channels use real persistent Edge pages, complete approved receipt chain; headless=%s', async headless => {
   const owner = await BrowserProfileOwner.launch(join(privateTemp(), 'profile'), headless); const s = database();
   try {

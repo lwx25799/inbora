@@ -34,6 +34,16 @@ test('unclassified post-intent errors never persist arbitrary private diagnostic
   }finally{s.close();}
 });
 
+test.each(['COMMENT_REPLY_REFRESH_NOT_READY','COMMENT_REPLY_LIST_NOT_UNIQUE'])('comment refresh error keeps its fixed receipt code: %s',async code=>{
+  const s=database();let clicks=0;try{
+    const id=approved(s),a=adapter({clickOnce:async()=>{clicks++;},readback:async()=>{throw new Blocked(code);}});
+    expect(await new SendCoordinator(s,new AccountActor()).send(id,a,true)).toBe('UNCERTAIN');
+    expect((s.receiptForEvent(s.draft(id).eventId) as {proof_ref:string}).proof_ref).toBe(`POST_INTENT_FAILURE:READBACK:${code}`);
+    await expect(new SendCoordinator(s,new AccountActor()).send(id,a,true)).rejects.toThrow();
+    expect(clicks).toBe(1);
+  }finally{s.close();}
+});
+
 test.each([true,false])('clock-tolerant proof is bound to the original approved context: %s',async matches=>{
   const s=database();try{
     const id=approved(s),baseline='a'.repeat(64),initial=snapshot(candidate());initial.contextDigest=baseline;
