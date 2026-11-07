@@ -1,5 +1,11 @@
 # 来源与许可
 
+## 2026-11-07：重复急停后的接管详情刷新
+
+动手前复查React v19.3.1固定`61aa00df822d0eb76d0362eb8b6fdd3527693efe`的`packages/react-reconciler/src/ReactFiberHooks.js`：`areHookInputsEqual`逐项比较依赖，`updateEffectImpl`在全部相同时不标记Effect执行；MIT许可与已安装React LICENSE核对。官方useEffect文档经Context7复核。另复读MIT DSH固定`7989640e340f0fd79e2de9874880d5197546e755`的`native-model-settings.mjs`（私有只读源码归档tree目录），其配置/服务身份重核没有可直接复用的React急停刷新实现；不引入宿主、缓存框架或新依赖。
+
+本机后端已清空接管并递增代际，但账号原本paused=true，再次急停仍true，前端不能靠该标志触发详情Effect。采用现有准确目标`refreshThread`在急停确认后主动读取，统一详情读取的请求序号、选择标识和事件检查，只由首次有效读取初始化编辑器；非当前目标在递增序号前即拒绝，避免旧保存回调取消新目标读取。保留人稿，不改发送或暂停门禁。正式双尺寸React/应用服务测试实际先红后绿，覆盖已暂停时急停、较早详情晚到回退接管、跨目标旧保存回调取消新详情、界面只读和人稿保留；初始详情迟到跨显式重连也核验。原生分发包的用户截图复验另列，不以浏览器夹具替代。
+
 ## 2026-11-06：最小客户端 M1—M3 实施核对
 
 原生首次测试暴露pnpm11布局差异后，先核对`pnpm/pnpm.io`固定`f9f6057f2cd214c4a0d743d1ba09d898197b55e0`的`docs/settings.md`、`docs/migration.md`和安装命令文档：仅认证/registry/TLS等仍读`.npmrc`，`nodeLinker`应在`pnpm-workspace.yaml`。据此修正暂存构建为hoisted真实目录；验证扩为导入完整ClientService/Playwright及SQLite，随后原生Tauri IPC实际连接、保存及重启通过。未复制pnpm源码或引入宿主。

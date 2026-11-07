@@ -76,6 +76,8 @@ export function App() {
   const selection = useRef(crypto.randomUUID()),
     selectedRef = useRef<string | null>(null),
     buffers = useRef(new Map<string, BufferDraft>());
+  const detailRequest = useRef(0),
+    editorLoaded = useRef(false);
   const detailElement = useRef<HTMLElement | null>(null);
   const sending = useRef(false),
     connected = !!status;
@@ -141,43 +143,28 @@ export function App() {
     if (!connected || !selected) return;
     let ignore = false;
     setThread(null);
+    editorLoaded.current = false;
     setReview(null);
     setSend(null);
     setText("");
     const selectionId = crypto.randomUUID();
     selection.current = selectionId;
     void request({ command: "selectTarget", eventId: selected, selectionId })
-      .then(() => request<Thread>({ command: "getThread", eventId: selected }))
-      .then((t) => {
-        if (ignore) return;
-        setThread(t);
-        const saved = buffers.current.get(selected);
-        setText(saved?.text ?? t.draft?.text ?? "");
-        setSuggestionId(saved?.suggestionId ?? null);
-        if (saved && saved.version !== (t.draft?.version ?? 0))
-          setError(
-            "本地未保存内容保留，但服务器草稿已变化。请核对后重新保存。",
-          );
+      .then(() => {
+        if (!ignore) return refreshThread(selected);
       })
       .catch((e) => {
         if (!ignore) setError(explain(e));
       });
     return () => {
       ignore = true;
+      detailRequest.current++;
     };
   }, [connected, selected]);
   useEffect(() => {
     if (!connected || !selected) return;
-    let ignore = false;
     const eventId = selected;
-    void request<Thread>({ command: "getThread", eventId })
-      .then((t) => {
-        if (!ignore && selectedRef.current === eventId) setThread(t);
-      })
-      .catch(() => {});
-    return () => {
-      ignore = true;
-    };
+    void refreshThread(eventId).catch(() => {});
   }, [
     connected,
     selected,
@@ -234,11 +221,7 @@ export function App() {
               !["QUEUED", "PREFLIGHT", "SENDING"].includes(result.status) &&
               selectedRef.current
             ) {
-              const t = await request<Thread>({
-                command: "getThread",
-                eventId: selectedRef.current,
-              });
-              if (!ignore) setThread(t);
+              await refreshThread(selectedRef.current);
             }
           })
           .catch((e) => {
@@ -280,10 +263,26 @@ export function App() {
     }
   }
   async function refreshThread(eventId = selectedRef.current) {
-    if (eventId) {
+    if (eventId && eventId === selectedRef.current) {
+      const requestId = ++detailRequest.current,
+        selectionId = selection.current;
       const t = await request<Thread>({ command: "getThread", eventId });
-      if (selectedRef.current === eventId) {
+      if (
+        selectedRef.current === eventId &&
+        selection.current === selectionId &&
+        detailRequest.current === requestId
+      ) {
         setThread(t);
+        if (!editorLoaded.current) {
+          editorLoaded.current = true;
+          const saved = buffers.current.get(eventId);
+          setText(saved?.text ?? t.draft?.text ?? "");
+          setSuggestionId(saved?.suggestionId ?? null);
+          if (saved && saved.version !== (t.draft?.version ?? 0))
+            setError(
+              "本地未保存内容保留，但服务器草稿已变化。请核对后重新保存。",
+            );
+        }
         return t;
       }
     }
@@ -298,6 +297,7 @@ export function App() {
         suggestionId,
       });
     setReview(null);
+    detailRequest.current++;
     selectedRef.current = id;
     setSelected(id);
     setError("");
@@ -546,10 +546,11 @@ export function App() {
             className="danger"
             onClick={() =>
               void request<{paused:boolean}>({ command: "emergencyStop" })
-                .then(() => {
+                .then(async () => {
                   setStatus(s=>s?{...s,paused:true}:s);
                   setReview(null);
                   setNotice("急停已生效；已存意图仍需回读或冻结");
+                  await refreshThread();
                 })
                 .catch((e) => setError(explain(e)))
             }

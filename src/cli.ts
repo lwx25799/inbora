@@ -25,7 +25,7 @@ import { BrowserService } from './app/browser-service.js';
 import { randomUUID } from 'node:crypto';
 import { WorkbenchAuthority } from './app/authority.js';
 
-const help = `inbora 0.2.0 — 单账号双通道受控 PoC / 最小客户端
+const help = `inbora 0.2.1 — 单账号双通道受控 PoC / 最小客户端
 
 pnpm inbora <command> [id] [options]
   init                         初始化私有运行目录（只执行一次）
