@@ -483,7 +483,8 @@ export class ClientService {
           this.browser.identity(e.payload.channel),
         ),
       );
-      this.authority.finish(id, outcome);
+      const receipt=this.store.receiptForEvent(e.id) as {proof_ref:string}|undefined;
+      this.authority.finish(id, outcome, outcome==='UNCERTAIN'?receipt?.proof_ref??null:null);
       if (outcome === "CONFIRMED")
         this.authority.completeTrial(
           p.eventId,

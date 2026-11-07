@@ -4,7 +4,7 @@ import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import {
-  digest, eventBinding, eventSchema, isEligible, isStrong, requireSafe, targetKey, validText,
+  digest, dmClockToleranceMs, eventBinding, eventSchema, isEligible, isStrong, requireSafe, targetKey, validText,
   type Channel, type Draft, type InboundEvent, type StoredEvent, type TargetSnapshot,type SendProof,
 } from '../core/contracts.js';
 
@@ -261,6 +261,9 @@ export class EventStore {
     }).immediate();
   }
   private submissionProof(id:string,proof:SendProof|undefined):void{
+    if(proof?.clockSkew)this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)').run(randomUUID(),new Date().toISOString(),'CLOCK_SKEW_PROOF',id,
+      JSON.stringify({...proof.clockSkew,refreshedId:undefined,allowedSkewMs:dmClockToleranceMs,
+        observedSkewMs:Date.parse(proof.clockSkew.boundary)-Date.parse(proof.sentAt),nativeIdDigest:digest(proof.id),proofDigest:digest(proof)}));
     if(!proof?.submission)return;
     this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)').run(randomUUID(),new Date().toISOString(),'SUBMISSION_PROOF',id,
       JSON.stringify({...proof.submission,nativeIdDigest:digest(proof.id),proofDigest:digest(proof)}));

@@ -18,6 +18,48 @@ async function setup(){
   return{server,owner,store,mapping,adapter,event,draft,close:async()=>{store.close();await owner.close();await server.close();}};
 }
 
+test.each(['fresh','old'] as const)('read-only verification after restart uses strict refreshed evidence without an armed request: %s',async kind=>{
+  const f=await setup();try{
+    const at=kind==='fresh'?new Date(Date.now()-1000):new Date('2020-01-01T00:00:00Z');
+    const boundary=new Date(Date.now()-2000).toISOString();
+    await f.owner.dm.evaluate(({text,at})=>sessionStorage.setItem('native-receipt',JSON.stringify({id:'888',text,createdAt:at,clicks:0})),
+      {text:f.draft.text,at:at.toISOString()});
+    await f.owner.dm.reload({waitUntil:'domcontentloaded'});
+    f.mapping.submissionReceipts=true;f.adapter.dispose();f.adapter=new ObservedDmReply(f.owner.dm,f.mapping,250);
+    const verifier=f.adapter as unknown as {verifyExisting:(event:typeof f.event.payload,text:string,boundary:string)=>Promise<unknown>};
+    const proof=await verifier.verifyExisting(f.event.payload,f.draft.text,boundary);
+    if(kind==='fresh')expect(proof).toMatchObject({id:'888',text:f.draft.text});
+    else expect(proof).toBeNull();
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(0);
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM delivery_receipts').get()).toEqual({n:0});
+  }finally{f.adapter.dispose();await f.close();}
+});
+
+test.each(['within','too-old','changed-context','not-latest'] as const)('small native clock skew requires the exact prior context and refreshed latest record: %s',async kind=>{
+  const f=await setup();try{
+    const snapshot=await f.adapter.inspect(f.event.payload),now=Date.now(),boundary=new Date(now).toISOString();
+    const at=new Date(now-(kind==='too-old'?2001:763)).toISOString();
+    await f.owner.dm.evaluate(({text,at})=>sessionStorage.setItem('native-receipt',JSON.stringify({id:'888',text,createdAt:at,clicks:0})),{text:f.draft.text,at});
+    await f.owner.dm.reload({waitUntil:'domcontentloaded'});
+    if(kind==='changed-context')await f.owner.dm.locator('.message').nth(1).evaluate(row=>{
+      const native=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
+      native.createdAt=new Date('2026-11-04T00:00:00Z');
+    });
+    if(kind==='not-latest')await f.owner.dm.evaluate(()=>{
+      document.querySelector('[data-index="0"]')!.setAttribute('data-index','8');
+      document.querySelector('[data-index="1"]')!.setAttribute('data-index','0');
+    });
+    f.mapping.submissionReceipts=true;f.adapter.dispose();f.adapter=new ObservedDmReply(f.owner.dm,f.mapping,250);
+    const verify=f.adapter.verifyExisting.bind(f.adapter) as (...args:unknown[])=>Promise<unknown>;
+    const proof=await verify(f.event.payload,f.draft.text,boundary,snapshot.contextDigest);
+    if(kind==='within')expect(proof).toMatchObject({id:'888',clockSkew:{baselineContextDigest:snapshot.contextDigest}});
+    else expect(proof).toBeNull();
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(0);
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM delivery_receipts').get()).toEqual({n:0});
+  }finally{f.adapter.dispose();await f.close();}
+});
+
 test('native SMS verification blocks both direct-message reading and reply inspection',async()=>{
   const f=await setup();try{
     await f.owner.dm.evaluate(()=>{const n=document.createElement('div');n.className='uc-ui-verify-new_header-title';n.textContent='接收短信验证码';document.body.append(n);});

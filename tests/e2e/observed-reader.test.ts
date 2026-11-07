@@ -7,6 +7,23 @@ import { observedMapping as config, mountObserved as mount, mountVirtualizedConv
 import { fixtureServer } from '../fixtures/site.js';
 import { database, privateTemp } from '../helpers.js';
 
+test('native-bound conversation title may settle after metadata without selecting another row',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);
+    await owner.dm.evaluate(()=>{
+      (document.querySelector('#chat') as HTMLElement).hidden=true;
+      const title=document.querySelector('.conversation .title')!,row=document.querySelector('.conversation')!;
+      title.textContent='Loading rendered display name';
+      (window as unknown as {opened:number}).opened=0;
+      row.addEventListener('click',()=>{(window as unknown as {opened:number}).opened++;(document.querySelector('#chat') as HTMLElement).hidden=false;});
+      setTimeout(()=>title.textContent='Fixture peer',200);
+    });
+    expect((await new ObservedReader(owner.dm,config(server.origin)).dm(0)).events).toHaveLength(4);
+    expect(await owner.dm.evaluate(()=>(window as unknown as {opened:number}).opened)).toBe(1);
+  }finally{await owner.close();await server.close();}
+});
+
 test.each([false,true])('a virtualized permitted conversation is found beyond the first viewport (same title: %s)',async sameTitle=>{
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
   try{

@@ -66,10 +66,10 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     },
     rowIdentity(row: Element, peer: ObservationMapping['peers'][number]): void {
       dom.check(row.isConnected && dom.visible(row),'OBSERVATION_ROW_UNAVAILABLE');
-      dom.check(dom.one(row,s.conversationTitle).textContent?.trim()===peer.title,'OBSERVATION_ROW_CHANGED');
       const conversation=dom.data(dom.fiberProps(row,s.conversationFiberDepth),'conversation');
       dom.check(dom.conversationId(conversation)===peer.conversationId &&
         dom.data(conversation,'_toParticipantSecUserId')===peer.secUid,'OBSERVATION_ROW_IDENTITY_CONFLICT');
+      dom.check(dom.one(row,s.conversationTitle).textContent?.trim()===peer.title,'OBSERVATION_METADATA_NOT_READY');
     },
     time(value: unknown, seconds: boolean): string | null {
       let time = NaN;
@@ -243,7 +243,7 @@ export class ObservedReader {
       const batch=await this.ready('locate',index,{scroll:step===0?'start':'next'}),found=batch.conversation!;
       if(found.rowIndex!==null) {
         // Virtualized rows may change between tasks; the selection task rechecks native identity.
-        await this.capture('row',index,{rowIndex:found.rowIndex,select:true});
+        await this.ready('row',index,{rowIndex:found.rowIndex,select:true});
         await chat.waitFor({state:'visible'});return this.ready('dm',index);
       }
       if(!found.hasList)break;

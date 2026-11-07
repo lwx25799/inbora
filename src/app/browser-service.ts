@@ -330,6 +330,13 @@ export class BrowserService {
             store.draft(draft.id).text,
             store.intentBoundary(intent.id),
           );
+        if (handle.adapter instanceof ObservedDmReply)
+          return handle.adapter.verifyExisting(
+            event.payload,
+            store.draft(draft.id).text,
+            store.intentBoundary(intent.id),
+            store.draft(draft.id).approval?.snapshot.contextDigest,
+          );
         // DM readback is read-only: refresh only the already bound empty editor, never prepare/click.
         await handle.adapter.inspect(event.payload);
         return handle.adapter.readback(

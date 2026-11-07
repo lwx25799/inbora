@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import { AccountActor } from '../../src/browser/account-actor.js';
 import { SendCoordinator } from '../../src/core/send-coordinator.js';
-import { type ReplyAdapter } from '../../src/core/contracts.js';
+import { Blocked, type ReplyAdapter } from '../../src/core/contracts.js';
 import { approved, candidate, database, snapshot } from '../helpers.js';
 
 function adapter(overrides: Partial<ReplyAdapter> = {}): ReplyAdapter {
@@ -12,6 +12,44 @@ function adapter(overrides: Partial<ReplyAdapter> = {}): ReplyAdapter {
     ...overrides,
   };
 }
+
+test.each(['dispatch','readback'] as const)('post-intent %s failure retains a bounded phase and code without retry',async phase=>{
+  const s=database();let clicks=0;try{
+    const id=approved(s),a=adapter({clickOnce:async()=>{clicks++;if(phase==='dispatch')throw new Blocked('NATIVE_REPLY_CLICK_BLOCKED');},
+      readback:async()=>{throw new Blocked('OBSERVATION_ROW_CHANGED');}});
+    expect(await new SendCoordinator(s,new AccountActor()).send(id,a,true)).toBe('UNCERTAIN');
+    const receipt=s.receiptForEvent(s.draft(id).eventId) as {proof_ref:string};
+    expect(receipt?.proof_ref).toBe(phase==='dispatch'?'POST_INTENT_FAILURE:DISPATCH:NATIVE_REPLY_CLICK_BLOCKED':'POST_INTENT_FAILURE:READBACK:OBSERVATION_ROW_CHANGED');
+    await expect(new SendCoordinator(s,new AccountActor()).send(id,a,true)).rejects.toThrow();
+    expect(clicks).toBe(1);
+  }finally{s.close();}
+});
+
+test('unclassified post-intent errors never persist arbitrary private diagnostics',async()=>{
+  const s=database();try{
+    const id=approved(s);
+    expect(await new SendCoordinator(s,new AccountActor()).send(id,adapter({readback:async()=>{throw new Blocked('NATIVE_REPLY_PRIVATE_BODY_ABC');}}),true)).toBe('UNCERTAIN');
+    expect((s.receiptForEvent(s.draft(id).eventId) as {proof_ref:string}).proof_ref).toBe('POST_INTENT_FAILURE:READBACK:UNCLASSIFIED');
+    expect(JSON.stringify(s.db.prepare('SELECT * FROM audit_events').all())).not.toContain('PRIVATE_BODY');
+  }finally{s.close();}
+});
+
+test.each([true,false])('clock-tolerant proof is bound to the original approved context: %s',async matches=>{
+  const s=database();try{
+    const id=approved(s),baseline='a'.repeat(64),initial=snapshot(candidate());initial.contextDigest=baseline;
+    s.invalidateApproval(id);
+    s.approve(id,initial,s.draft(id).version,s.draft(id).text);
+    const a=adapter({inspect:async()=>initial,verifyPrepared:async()=>initial,
+      readback:async(e,text,_before,boundary)=>({id:'new',ownId:'own-1',targetKey:snapshot(e).targetKey,text,pending:false,
+        sentAt:new Date(Date.parse(boundary)-763).toISOString(),clockSkew:{boundary,baselineContextDigest:matches?baseline:'b'.repeat(64),
+          remainingContextDigest:matches?baseline:'b'.repeat(64),refreshedId:'new'}})});
+    expect(await new SendCoordinator(s,new AccountActor()).send(id,a,true)).toBe(matches?'CONFIRMED':'UNCERTAIN');
+    if(matches){
+      const row=s.db.prepare("SELECT detail_redacted FROM audit_events WHERE event_type='CLOCK_SKEW_PROOF'").get() as {detail_redacted:string};
+      expect(JSON.parse(row.detail_redacted)).toMatchObject({allowedSkewMs:2000,observedSkewMs:763,baselineContextDigest:baseline});
+    }
+  }finally{s.close();}
+});
 test('duplicate send commands result in exactly one click and one receipt', async () => {
   const s = database(); let clicks = 0;
   try {

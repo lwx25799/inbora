@@ -65,11 +65,19 @@ export interface Draft {
 export interface SendProof {
   id: string; ownId: string; targetKey: string; text: string; pending: boolean; sentAt: string;
   submission?:{boundary:string;requestAt:string;responseAt:string;requestDigest:string;responseDigest:string};
+  clockSkew?:{boundary:string;baselineContextDigest:string;remainingContextDigest:string;refreshedId:string};
 }
+export const dmClockToleranceMs=2000;
 export function proofTimeValid(proof:SendProof,boundary:string):boolean{
   const at=Date.parse(proof.sentAt),start=Date.parse(boundary),now=Date.now();
   if(!Number.isFinite(at)||at<Date.UTC(2000,0,1)||!Number.isFinite(start)||at>now)return false;
-  if(!proof.submission)return at>start;
+  if(!proof.submission){
+    if(!proof.clockSkew)return at>start;
+    const skew=proof.clockSkew;
+    return proof.targetKey.startsWith('dm:')&&at>=start-dmClockToleranceMs&&skew.boundary===boundary&&
+      skew.refreshedId===proof.id&&/^[a-f0-9]{64}$/.test(skew.baselineContextDigest)&&
+      skew.baselineContextDigest===skew.remainingContextDigest;
+  }
   const ack=proof.submission,request=Date.parse(ack.requestAt),response=Date.parse(ack.responseAt);
   return ack.boundary===boundary&&Number.isFinite(request)&&Number.isFinite(response)&&start<=request&&request<=response&&response<=now&&
     /^[a-f0-9]{64}$/.test(ack.requestDigest)&&/^[a-f0-9]{64}$/.test(ack.responseDigest);

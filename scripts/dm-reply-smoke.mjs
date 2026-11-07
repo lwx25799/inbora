@@ -25,8 +25,19 @@ try{
   store.approve(draft.id,await owner.actor.run(()=>adapter.inspect(event.payload)),draft.version,draft.text);
   const click=adapter.clickOnce.bind(adapter);
   adapter.clickOnce=async()=>{assert.equal(store.db.prepare('SELECT status FROM send_intents').get().status,'INTENT_RECORDED');await click();};
+  await owner.dm.evaluate(()=>window.nativeRehydratedTime=new Date(Date.now()-763).toISOString());
   assert.equal(await new SendCoordinator(store,owner.actor).send(draft.id,adapter,false),'CONFIRMED');
+  assert.equal(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='CLOCK_SKEW_PROOF'").get().n,1);
   assert.equal(await owner.dm.evaluate(()=>window.nativeClicks),1);
+  mapping.submissionReceipts=true;
+  const verifier=new ObservedDmReply(owner.dm,mapping);
+  try{
+    const intent=store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(event.id);
+    const priorContext=store.draft(draft.id).approval.snapshot.contextDigest;
+    assert.ok(await owner.actor.run(()=>verifier.verifyExisting(event.payload,draft.text,store.intentBoundary(intent.id),priorContext)));
+    assert.equal(await owner.dm.evaluate(()=>window.nativeClicks),1);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM delivery_receipts').get().n,1);
+  }finally{verifier.dispose();}
   assert.ok(store.db.prepare('SELECT used FROM budgets').all().every(row=>row.used===0));
   console.log(JSON.stringify({nativeDmReplySmoke:'PASS',runtime:source?'tsx-source':'compiled-node',fixtureClicks:1,realSends:0,modelCalls:0}));
 }finally{store.close();await owner.close();await server.close();}

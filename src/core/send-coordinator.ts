@@ -1,6 +1,16 @@
 import { AccountActor } from '../browser/account-actor.js';
 import { EventStore } from '../storage/store.js';
-import { digest, requireSafe, proofTimeValid, type ReplyAdapter } from './contracts.js';
+import { Blocked, digest, requireSafe, proofTimeValid, type ReplyAdapter } from './contracts.js';
+
+// Only fixed internal codes may enter a receipt; arbitrary browser errors can contain private text.
+const postIntentCodes=new Set(['NATIVE_REPLY_CLICK_BLOCKED','NATIVE_REPLY_NOT_PREPARED','NATIVE_REPLY_ACK_REVOKED',
+  'NATIVE_REPLY_EXISTING_DRAFT','NATIVE_REPLY_RECEIPT_AMBIGUOUS','NATIVE_REPLY_DOM_CHANGED','NATIVE_REPLY_ORIGINAL_CHANGED',
+  'NATIVE_REPLY_CONVERSATION_CHANGED','NATIVE_REPLY_ACCOUNT_CHANGED','NATIVE_REPLY_PAGE_BLOCKED',
+  'OBSERVATION_ROW_CHANGED','OBSERVATION_ROW_IDENTITY_CONFLICT','OBSERVATION_ROW_SELECTION_BLOCKED',
+  'OBSERVATION_ACCOUNT_CHANGED','OBSERVATION_PAGE_BLOCKED','OBSERVATION_CONVERSATION_NOT_FOUND',
+  'OBSERVATION_CONVERSATION_NOT_UNIQUE','OBSERVATION_DOM_NOT_READY','OBSERVATION_METADATA_NOT_READY',
+  'RENDERED_BINDING_UNAVAILABLE','COMMENT_REPLY_CLICK_BLOCKED','COMMENT_REPLY_ACK_REVOKED',
+  'COMMENT_REPLY_CLOCK_UNVERIFIED','COMMENT_REPLY_EXISTING_DRAFT']);
 
 export class SendCoordinator {
   constructor(private readonly store: EventStore, private readonly actor: AccountActor) {}
@@ -27,13 +37,16 @@ export class SendCoordinator {
         requireSafe(digest(final) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
       } catch (error) { this.store.invalidateApproval(draftId); throw error; }
       const intentId = this.store.recordIntent(draftId, final, real, authority);
+      let phase='DISPATCH';
       try {
         const notBefore = this.store.intentBoundary(intentId);
         // Any error after intent commit is unknown, even if click() reports an error.
         await adapter.clickOnce(notBefore);
+        phase='READBACK';
         const proof = await adapter.readback(event.payload, draft.text, baseline, notBefore);
         const valid = proof && proof.id && !baseline.includes(proof.id) && !proof.pending &&
           proof.ownId === final.ownId && proof.targetKey === final.targetKey && proof.text === draft.text &&
+          (!proof.clockSkew||proof.clockSkew.baselineContextDigest===final.contextDigest)&&
           proofTimeValid(proof,notBefore);
         if (!valid) {
           this.store.receipt(intentId, 'UNCERTAIN', 'NO_UNIQUE_BOUND_PROOF');
@@ -41,9 +54,11 @@ export class SendCoordinator {
         }
         this.store.receipt(intentId, 'CONFIRMED', digest(proof),proof);
         return 'CONFIRMED';
-      } catch {
+      } catch (error) {
         // A receipt write failure leaves the committed intent for restart recovery.
-        this.store.receipt(intentId, 'UNCERTAIN', 'POST_INTENT_FAILURE');
+        const code=error instanceof Blocked&&postIntentCodes.has(error.code)?error.code:
+          error instanceof Error&&error.name==='TimeoutError'?'BROWSER_TIMEOUT':'UNCLASSIFIED';
+        this.store.receipt(intentId, 'UNCERTAIN', `POST_INTENT_FAILURE:${phase}:${code}`);
         return 'UNCERTAIN';
       }
     });

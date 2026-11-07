@@ -32,6 +32,20 @@ test.each(['valid','boundary','request-before','response-before','future','diges
   delete p.submission;expect(proofTimeValid(p,boundary)).toBe(false);
 });
 
+test.each(['within','edge','too-old','future','boundary','digest','id','comment'] as const)('bounded clock proof validates every preserved binding: %s',kind=>{
+  const now=Date.now(),boundary=new Date(now-100).toISOString(),baseline='a'.repeat(64);
+  const p:SendProof={id:'888',ownId:'100',targetKey:'dm:conv-a',text:'test',pending:false,
+    sentAt:new Date(Date.parse(boundary)-(kind==='edge'?2000:kind==='too-old'?2001:763)).toISOString(),
+    clockSkew:{boundary,baselineContextDigest:baseline,remainingContextDigest:baseline,refreshedId:'888'}};
+  if(kind==='future')p.sentAt=new Date(now+10000).toISOString();
+  if(kind==='boundary')p.clockSkew!.boundary=new Date(now-101).toISOString();
+  if(kind==='digest')p.clockSkew!.remainingContextDigest='b'.repeat(64);
+  if(kind==='id')p.clockSkew!.refreshedId='999';
+  if(kind==='comment')p.targetKey='comment:10:11';
+  expect(proofTimeValid(p,boundary)).toBe(kind==='within'||kind==='edge');
+  delete p.clockSkew;expect(proofTimeValid(p,boundary)).toBe(false);
+});
+
 test.each(['valid','service-worker','navigation','wrong-body','missing-body','old-request','duplicate-key','redirect','bad-status'])('passive response evidence never survives an invalid source or scope: %s',async kind=>{
   const page=new EventEmitter() as EventEmitter&{mainFrame:()=>unknown;url:()=>string},frame={};
   page.mainFrame=()=>frame;page.url=()=> 'https://www.douyin.com/video/10';

@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { Page } from 'playwright';
 import type { DmReplyMapping } from '../config/site-mapping.js';
-import { digest, eventBinding, isStrong, requireSafe, targetKey, validText,
+import { digest, dmClockToleranceMs, eventBinding, isStrong, requireSafe, targetKey, validText,
   type InboundEvent, type ReplyAdapter, type SendProof, type TargetSnapshot } from '../core/contracts.js';
 import { ObservedReader } from './observed-reader.js';
-import {SubmissionResponse} from './submission-response.js';
+import {SubmissionResponse,type SubmissionAck} from './submission-response.js';
 
 interface ReplyCaptureInput {
   mapping: DmReplyMapping; event: InboundEvent;
@@ -12,7 +12,7 @@ interface ReplyCaptureInput {
   before: {context:unknown[];editorText:string}|null;
   editorShape:string|null;
 }
-interface ReplyFrame { context: unknown[]; proofs: SendProof[]; outgoingIds: string[]; editorText: string;editorShape:string }
+interface ReplyFrame { context: unknown[]; proofs: SendProof[]; outgoingIds: string[]; editorText: string;editorShape:string;latestId:string|null }
 
 /** Serialized without module helpers: fixed rendered paths, never calls website functions. */
 export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
@@ -118,7 +118,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       const rows=Array.from(chat.querySelectorAll(s.messages)).filter(dom.visible);
       dom.check(rows.length>0&&rows.length<=100,'NATIVE_REPLY_WINDOW_UNVERIFIED');
       dom.check(rows.filter(row=>row.closest(m.latestIndexAncestor)?.getAttribute('data-index')==='0').length===1,'NATIVE_REPLY_LATEST_END_MISSING');
-      const context:unknown[]=[],proofs:SendProof[]=[],outgoingIds:string[]=[],seen=new Set<string>();let originals=0;
+      const context:unknown[]=[],proofs:SendProof[]=[],outgoingIds:string[]=[],seen=new Set<string>();let originals=0,latestId:string|null=null;
       for(const row of rows) {
         const message=dom.data(dom.childProps(row),'message'),sender=dom.data(message,'sender'),id=dom.data(message,'serverId');
         dom.check(dom.data(message,'conversationId')===peer!.conversationId&&(sender===peer!.uid||sender===o.self.uid),'NATIVE_REPLY_MESSAGE_CONFLICT');
@@ -127,6 +127,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
         for(let node:Element|null=row;node&&box!.contains(node);node=node.parentElement)if(node.classList.contains(s.fromMeClass))outgoing=true;
         dom.check(outgoing===(sender===o.self.uid),'NATIVE_REPLY_DIRECTION_CONFLICT');
         const nativeId=typeof id==='string'&&/^[1-9]\d{0,63}$/.test(id)?id:null;
+        if(row.closest(m.latestIndexAncestor)?.getAttribute('data-index')==='0')latestId=nativeId;
         if(nativeId){dom.check(!seen.has(nativeId),'NATIVE_REPLY_MESSAGE_ID_COLLISION');seen.add(nativeId);}
         const sentAt=dom.time(dom.data(message,'createdAt')),parsed=dom.data(message,'_parsedContent'),parsedText=dom.data(parsed,'text');
         const texts=row.querySelectorAll(s.messageText);
@@ -158,7 +159,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       dom.check(editor instanceof HTMLElement&&editor.isContentEditable,'NATIVE_REPLY_EDITOR_UNSUPPORTED');
       dom.check(m.submission==='html-click'?button instanceof HTMLElement:button instanceof SVGElement,'NATIVE_REPLY_CONTROL_CHANGED');
       const editorText=dom.editorText(editor);
-      return{context,proofs,outgoingIds,editorText,editorShape:editor.innerHTML,editor,button};
+      return{context,proofs,outgoingIds,editorText,editorShape:editor.innerHTML,editor,button,latestId};
     },
   };
   const state=dom.capture();
@@ -182,7 +183,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     const after=dom.capture();
     dom.check(after.editor===editor&&JSON.stringify(after.context)===context,'NATIVE_REPLY_CONTEXT_CHANGED');
     dom.check(after.editorText===text,'NATIVE_REPLY_APPROVED_TEXT_CHANGED');
-    return{context:after.context,proofs:after.proofs,outgoingIds:after.outgoingIds,editorText:after.editorText,editorShape:after.editorShape};
+    return{context:after.context,proofs:after.proofs,outgoingIds:after.outgoingIds,editorText:after.editorText,editorShape:after.editorShape,latestId:after.latestId};
   }
   if(input.action==='refresh'){
     dom.check(state.editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
@@ -222,13 +223,13 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     gate.validate();
     window.addEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);host.__inboraDmReplyGate=gate;
   }
-  return{context:state.context,proofs:state.proofs,outgoingIds:state.outgoingIds,editorText:state.editorText,editorShape:state.editorShape};
+  return{context:state.context,proofs:state.proofs,outgoingIds:state.outgoingIds,editorText:state.editorText,editorShape:state.editorShape,latestId:state.latestId};
 }
 
 /** Uses only the independently installed, calibrated DM reply mapping. */
 export class ObservedDmReply implements ReplyAdapter {
   private gateToken:string|null=null;
-  private prepared:{binding:string;text:string;editorShape:string}|null=null;
+  private prepared:{binding:string;text:string;editorShape:string;contextDigest:string}|null=null;
   private pendingEvent:InboundEvent|null=null;
   private readonly submission:SubmissionResponse|null;
   constructor(readonly page:Page,readonly mapping:DmReplyMapping,private readonly receiptTimeoutMs=5000){
@@ -260,7 +261,7 @@ export class ObservedDmReply implements ReplyAdapter {
     const after=await this.frame(event,'fill',text,null,{context:frame.context,editorText:frame.editorText});
     requireSafe(after.editorText===text,'NATIVE_REPLY_APPROVED_TEXT_CHANGED');
     requireSafe(digest(frame.context)===digest(after.context),'NATIVE_REPLY_CONTEXT_CHANGED');
-    this.prepared={binding:eventBinding(event),text,editorShape:after.editorShape};
+    this.prepared={binding:eventBinding(event),text,editorShape:after.editorShape,contextDigest:digest(frame.context)};
     this.pendingEvent=event;
   }
   async verifyPrepared(event:InboundEvent,text:string):Promise<TargetSnapshot>{
@@ -286,7 +287,17 @@ export class ObservedDmReply implements ReplyAdapter {
       while(!(ack=this.submission.current())&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));
       if(!ack)return null;
     }
-    const initial=await this.poll(event,text,before,notBefore,ack?.id);
+    return this.refreshedProof(event,text,before,notBefore,ack??undefined,this.prepared?.contextDigest);
+  }
+  async verifyExisting(event:InboundEvent,text:string,notBefore:string,baselineContextDigest?:string):Promise<SendProof|null>{
+    requireSafe(Number.isFinite(Date.parse(notBefore)),'NATIVE_REPLY_INTENT_REQUIRED');
+    await this.inspect(event);
+    // A new read-only adapter cannot reconstruct the prior attempt's ephemeral acknowledgement.
+    // Small clock differences require the persisted pre-send context, never an invented acknowledgement.
+    return this.refreshedProof(event,text,[],notBefore,undefined,baselineContextDigest);
+  }
+  private async refreshedProof(event:InboundEvent,text:string,before:string[],notBefore:string,ack?:SubmissionAck,baselineContextDigest?:string):Promise<SendProof|null>{
+    const initial=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest);
     if(!initial)return null;
     // A serverId can coexist with a temporary local createdAt. Require a fresh page model.
     requireSafe((await this.frame(event,'proofs')).editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
@@ -295,19 +306,25 @@ export class ObservedDmReply implements ReplyAdapter {
     const index=this.mapping.observation.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
     requireSafe(index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
     await new ObservedReader(this.page,this.mapping.observation).dm(index);
-    const refreshed=await this.poll(event,text,before,notBefore,ack?.id);
+    const refreshed=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest);
     if(ack&&this.submission!.current()!==ack)return null;
-    const result=refreshed?.id===initial.id?{...refreshed,...(ack?{submission:ack.submission}:{})}:null;
+    const result=refreshed?.id===initial.id?{...refreshed,...(ack?{submission:ack.submission}:{}),
+      ...(refreshed.clockSkew?{clockSkew:{...refreshed.clockSkew,refreshedId:refreshed.id}}:{})}:null;
     this.submission?.dispose();return result;
   }
-  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string):Promise<SendProof|null>{
+  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string,baselineContextDigest?:string):Promise<SendProof|null>{
     const deadline=Date.now()+this.receiptTimeoutMs;let previous:string|null=null;
     do {
       const frame=await this.frame(event,'proofs');
+      const start=Date.parse(notBefore);
       const matches=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&
-        (ackId?p.id===ackId:Date.parse(p.sentAt)>Date.parse(notBefore))&&Date.parse(p.sentAt)<=Date.now());
+        (ackId?p.id===ackId:Date.parse(p.sentAt)>start||Boolean(baselineContextDigest&&
+          Date.parse(p.sentAt)>=start-dmClockToleranceMs&&frame.latestId===p.id&&
+          digest(frame.context.filter(row=>(row as unknown[])[0]!==p.id))===baselineContextDigest))&&Date.parse(p.sentAt)<=Date.now());
       requireSafe(matches.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
-      const proof=matches[0];
+      const candidate=matches[0],proof=candidate&&!ackId&&Date.parse(candidate.sentAt)<=start?{...candidate,
+        clockSkew:{boundary:notBefore,baselineContextDigest:baselineContextDigest!,
+          remainingContextDigest:digest(frame.context.filter(row=>(row as unknown[])[0]!==candidate.id)),refreshedId:''}}:candidate;
       if(proof&&digest(proof)===previous)return frame.editorText===''?proof:null;
       previous=proof?digest(proof):null;
       await new Promise(resolve=>setTimeout(resolve,75));
