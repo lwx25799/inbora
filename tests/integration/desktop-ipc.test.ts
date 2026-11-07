@@ -5,6 +5,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { privateTemp } from "../helpers.js";
 import Database from 'better-sqlite3';
+import {existsSync} from 'node:fs';
+import {writeFile} from 'node:fs/promises';
 
 test("source sidecar authenticates IPC, rejects unbounded/extra fields, reconnects and exits without replay", async () => {
   const secret = randomBytes(32).toString("hex"),
@@ -55,6 +57,13 @@ test("source sidecar authenticates IPC, rejects unbounded/extra fields, reconnec
       ok: false,
       error: "IPC_AUTHENTICATION_FAILED",
     });
+    const absent=join(root,'uninitialized-nested');
+    expect({reply:await call({command:'connect',runtime:absent,initialize:false,consent:true}),created:existsSync(absent)})
+      .toMatchObject({reply:{ok:false,error:'RUNTIME_NOT_FOUND'},created:false});
+    expect(await call({command:'connect',runtime:root,initialize:false,consent:true})).toMatchObject({ok:false,error:'RUNTIME_NOT_FOUND'});
+    expect(existsSync(join(root,'poc.sqlite'))).toBe(false);
+    const file=join(root,'not-a-directory');await writeFile(file,'synthetic file must remain');
+    expect(await call({command:'connect',runtime:file,initialize:false,consent:true})).toMatchObject({ok:false,error:'RUNTIME_NOT_FOUND'});
     expect(
       await call({
         command: "connect",

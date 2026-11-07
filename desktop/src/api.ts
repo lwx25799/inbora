@@ -112,6 +112,7 @@ export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
 export const reasons: Record<string, string> = {
+  RUNTIME_NOT_FOUND: "没有找到现有运行资料，请核对目录路径；首次使用请明确初始化新目录。",
   CAPABILITY_UNVERIFIED: "请先打开专属浏览器并同步此通道",
   CAPABILITY_EXPIRED_OR_CHANGED: "通道证据已过期或环境已变化",
   CAPABILITY_READ_ONLY: "读取已核验，发送尚未核验",

@@ -65,7 +65,7 @@ async function connect(raw: unknown): Promise<unknown> {
   connecting = true;
   try {
     const root = runtimeRoot(c.runtime);
-    lock = await OwnerLock.acquire(root);
+    lock = await OwnerLock.acquire(root, c.initialize);
     if (c.initialize) await initRuntime(root);
     await loadRuntime(root);
     store = new EventStore(join(root, "poc.sqlite"), c.initialize);
@@ -88,6 +88,8 @@ async function connect(raw: unknown): Promise<unknown> {
     store = undefined;
     await lock?.close();
     lock = undefined;
+    const code=(error as NodeJS.ErrnoException)?.code;
+    if(!c.initialize&&(code==='ENOENT'||code==='ENOTDIR'))requireSafe(false,'RUNTIME_NOT_FOUND');
     throw error;
   } finally {
     connecting = false;

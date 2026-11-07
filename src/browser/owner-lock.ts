@@ -5,8 +5,8 @@ import { digest, Blocked } from '../core/contracts.js';
 /** OS-owned socket releases on process death; never guesses stale file-lock ownership. */
 export class OwnerLock {
   private constructor(private readonly server: Server) {}
-  static async acquire(directory: string): Promise<OwnerLock> {
-    await mkdir(directory, { recursive: true });
+  static async acquire(directory: string, createDirectory = true): Promise<OwnerLock> {
+    if(createDirectory)await mkdir(directory, { recursive: true });
     let canonical = await realpath(directory);
     if (process.platform === 'win32') canonical = canonical.toLowerCase();
     const port = 20_000 + (Number.parseInt(digest(canonical).slice(0, 8), 16) % 40_000);
