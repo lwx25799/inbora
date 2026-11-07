@@ -139,6 +139,7 @@ export class ClientService {
         expiresAt: op.expires_at,
       },
       mode: effectiveMode,
+      configuredMode,
       paused: this.authority.paused(),
       browser: this.browser.status(),
       lastSync: this.store.db

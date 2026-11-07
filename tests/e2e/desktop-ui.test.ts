@@ -53,19 +53,19 @@ test.each([
     );
     const legacyDraft = store.saveDraft(comment, "此前保存的合成 Mock 草稿。", "mock-deterministic");
     await migrateClient(store, join(root, "backup.sqlite"));
-    let clicks = 0;
+    let clicks = 0,identityAvailable=true;
     class UiBrowser extends BrowserService {
       private uiActor = new AccountActor();
       override get actor() {
         return this.uiActor;
       }
       override identity() {
-        return {
+        return identityAvailable ? {
           identityDigest: digest("own-1"),
           mappingDigest: "ui-fixture",
           browserMode: "headed" as const,
           browserVersion: "ui-fixture",
-        };
+        } : null;
       }
       override async refreshIdentity() {
         return this.identity();
@@ -296,6 +296,19 @@ test.each([
           page.getByRole("heading", { name: "DeepSeek 辅助回复" }).isVisible(),
         )
         .toBe(true);
+      identityAvailable=false;
+      await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+      await expect.poll(()=>page.getByRole('combobox',{name:'工作模式',exact:true}).inputValue()).toBe('MANUAL');
+      await page.getByText('已选择纯人工回复；当前仅保存草稿。请打开专属浏览器，并查看下方通道状态。',{exact:true}).waitFor();
+      expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth||document.documentElement.scrollHeight>innerHeight)).toBe(false);
+      await page.screenshot({path:join(output,`mode-${viewport.width}x${viewport.height}.png`)});
+      await page.getByRole('combobox',{name:'工作模式',exact:true}).selectOption('OBSERVE');
+      await expect.poll(()=>service.authority.mode()).toBe('OBSERVE');
+      await page.getByRole('combobox',{name:'工作模式',exact:true}).selectOption('MANUAL');
+      await expect.poll(()=>page.getByRole('combobox',{name:'工作模式',exact:true}).inputValue()).toBe('MANUAL');
+      expect(await service.dispatch(token,{command:'getStatus'})).toMatchObject({mode:'DRAFT_ONLY',configuredMode:'MANUAL'});
+      identityAvailable=true;
+      await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
       await page
         .getByRole("textbox", { name: "本次 API Key" })
         .fill("synthetic-ui-memory-key");

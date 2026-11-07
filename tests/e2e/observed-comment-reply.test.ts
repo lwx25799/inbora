@@ -7,7 +7,7 @@ import {ObservedCommentReply} from '../../src/adapters/observed-comment-reply.js
 import {SendCoordinator} from '../../src/core/send-coordinator.js';
 import {ManualCommentRetry} from '../../src/core/manual-comment-retry.js';
 import {fixtureServer} from '../fixtures/site.js';
-import {mountCommentReply,commentReplyMapping,mountFreshCommentPage} from '../fixtures/observed-site.js';
+import {mountCommentReply,commentReplyMapping,mountFreshCommentPage,reloadableCommentReply} from '../fixtures/observed-site.js';
 import {database,privateTemp} from '../helpers.js';
 
 async function setup(){
@@ -88,6 +88,10 @@ test('seconds-rounded native receipt is strictly after the durable boundary with
 
 test.each(['valid','missing','wrong-date','wrong-work','future','stale'])('native clock calibration must be fresh, scoped and corroborated: %s',async kind=>{
   const f=await setup();let restoreClock=()=>{};try{
+    await reloadableCommentReply(f.owner.notification,f.server.origin);
+    await f.owner.notification.addInitScript(kind=>document.addEventListener('DOMContentLoaded',()=>{
+      if(kind!=='missing')void fetch('/aweme/v1/web/comment/list/?aweme_id='+(kind==='wrong-work'?'12':'10'));
+    }),kind);
     f.mapping.observation.environment='douyin';
     const snap=await f.adapter.inspect(f.event.payload);f.store.approve(f.draft.id,snap,f.draft.version,f.draft.text);
     if(kind!=='missing'){
@@ -107,6 +111,51 @@ test.each(['valid','missing','wrong-date','wrong-work','future','stale'])('nativ
       expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(0);
     }
   }finally{restoreClock();await f.close();}
+});
+
+test.each(['valid','missing','wrong-date','human-draft','sibling-draft','human-during-wait','context-change'])('fresh comment sender on an already open work acquires its own clock before filling: %s',async kind=>{
+  const f=await setup();let navigations=0;try{
+    f.mapping.observation.environment='douyin';f.adapter.dispose();
+    await reloadableCommentReply(f.owner.notification,f.server.origin);
+    await f.owner.notification.addInitScript(()=>document.addEventListener('DOMContentLoaded',()=>{
+      void fetch('/aweme/v1/web/comment/list/?aweme_id=10');
+    }));
+    await f.owner.notification.route('**/aweme/v1/web/comment/list/**',route=>{
+      const now=Math.floor(Date.now()/1000)*1000-1000;
+      return route.fulfill({headers:{date:new Date(now+(kind==='wrong-date'?2000:0)).toUTCString()},
+        json:kind==='missing'?{status_code:0}:{status_code:0,extra:{now}}});
+    });
+    f.adapter=new ObservedCommentReply(f.owner.notification,f.mapping,250);
+    const inspected=await f.adapter.inspect(f.event.payload);
+    f.store.approve(f.draft.id,inspected,f.draft.version,f.draft.text);
+    if(kind==='human-draft')await f.owner.notification.locator('#comment-editor .public-DraftStyleDefault-block').evaluate(node=>{node.textContent='human draft must remain';});
+    if(kind==='sibling-draft')await f.owner.notification.locator('#reply-controls').evaluate(node=>{
+      const sibling=node.cloneNode(true) as Element;sibling.querySelector('.public-DraftStyleDefault-block')!.textContent='other human draft must remain';document.body.append(sibling);
+    });
+    if(kind==='human-during-wait')await f.owner.notification.evaluate(()=>setTimeout(()=>{
+      document.querySelector('#comment-editor .public-DraftStyleDefault-block')!.textContent='human draft must remain';
+    },100));
+    if(kind==='context-change')await f.owner.notification.addInitScript(()=>document.addEventListener('DOMContentLoaded',()=>{
+      const root=document.querySelector('#root-comment')!,props=Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture')!.value.return.memoizedProps;
+      props.commentInfo.replyTotal=1;
+    }));
+    f.owner.notification.on('framenavigated',()=>navigations++);
+    if(kind==='valid'){
+      expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('CONFIRMED');
+      expect(navigations).toBe(1);
+      expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(1);
+    }else{
+      const humanDraft=['human-draft','sibling-draft','human-during-wait'].includes(kind);
+      await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow(
+        humanDraft?'EXISTING_DRAFT':kind==='context-change'?'CONTEXT_CHANGED':'CLOCK_UNVERIFIED');
+      expect(navigations).toBe(humanDraft?0:1);
+      expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
+      expect(await f.owner.notification.evaluate(()=>(window as unknown as {commentClicks:number}).commentClicks)).toBe(0);
+      if(kind==='human-draft'||kind==='human-during-wait')expect(await f.owner.notification.locator('#comment-editor').textContent()).toBe('human draft must remain');
+      else if(kind==='sibling-draft')expect(await f.owner.notification.locator('body > #reply-controls #comment-editor').textContent()).toBe('other human draft must remain');
+      else expect(await f.owner.notification.locator('#comment-editor').textContent()).toBe('');
+    }
+  }finally{await f.close();}
 });
 
 test.each(['valid','wrong-parent','wrong-text','wrong-owner','duplicate','missing','wrong-id'])('comment submission response must bind the request and refreshed child: %s',async failure=>{

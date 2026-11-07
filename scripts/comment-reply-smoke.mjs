@@ -3,7 +3,7 @@ import {mkdir,mkdtemp} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
-import {mountCommentReply,commentReplyMapping} from '../tests/fixtures/observed-site.ts';
+import {mountCommentReply,commentReplyMapping,reloadableCommentReply} from '../tests/fixtures/observed-site.ts';
 const source=process.argv[2]==='source',root=source?'src':'dist';
 const url=name=>pathToFileURL(resolve(root,name.replace(/\.js$/,source?'.ts':'.js'))).href;
 const {BrowserProfileOwner}=await import(url('browser/profile-owner.js'));
@@ -52,5 +52,25 @@ try{
   },{at,text:draft.text});
   assert.equal((await networkAdapter.readback(event.payload,draft.text,[],new Date(Date.now()-5000).toISOString()))?.id,'901');
   networkAdapter.dispose();adapter.dispose();
-  console.log(JSON.stringify({nativeCommentReplySmoke:'PASS',runtime:source?'tsx-source':'compiled-node',fixtureClicks:1,realSends:0,modelCalls:0}));
+  await mountCommentReply(owner,server.origin);
+  await reloadableCommentReply(owner.notification,server.origin);
+  await owner.notification.addInitScript(()=>document.addEventListener('DOMContentLoaded',()=>{void fetch('/aweme/v1/web/comment/list/?aweme_id=10');}));
+  await owner.notification.route('**/aweme/v1/web/comment/list/**',route=>{
+    const now=Math.floor(Date.now()/1000)*1000-1000;
+    return route.fulfill({headers:{date:new Date(now).toUTCString()},json:{status_code:0,extra:{now}}});
+  });
+  const freshStore=new EventStore(join(dir,'fresh-clock.sqlite'),true,()=> '2026-11-03T00:00:00Z');
+  const freshMapping=commentReplyMapping(server.origin);freshMapping.observation.environment='douyin';
+  const freshAdapter=new ObservedCommentReply(owner.notification,freshMapping);
+  try{
+    freshStore.observe('COMMENT_NOTIFICATION','work:10',[],'100','fixture');freshStore.observe('COMMENT_NOTIFICATION','work:10',batch.events,'100','fixture');
+    const freshEvent=freshStore.events()[0],freshDraft=freshStore.saveDraft(freshEvent.id,'fresh sender clock fixture','mock');
+    freshStore.approve(freshDraft.id,await freshAdapter.inspect(freshEvent.payload),freshDraft.version,freshDraft.text);
+    let refreshes=0;const onNavigation=()=>refreshes++;owner.notification.on('framenavigated',onNavigation);
+    try{
+      assert.equal(await new SendCoordinator(freshStore,owner.actor).send(freshDraft.id,freshAdapter,false),'CONFIRMED');
+      assert.equal(refreshes,1);assert.equal(await owner.notification.evaluate(()=>window.commentClicks),1);
+    }finally{owner.notification.off('framenavigated',onNavigation);}
+  }finally{freshAdapter.dispose();freshStore.close();}
+  console.log(JSON.stringify({nativeCommentReplySmoke:'PASS',runtime:source?'tsx-source':'compiled-node',fixtureClicks:2,freshSenderRefreshes:1,realSends:0,modelCalls:0}));
 }finally{store.close();await owner.close();await server.close();}

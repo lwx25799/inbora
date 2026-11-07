@@ -16,6 +16,7 @@ export interface Status {
   account: { id: string; identity: string } | null;
   operator: { id: string; permissions: string[]; expiresAt: number };
   mode: "OBSERVE" | "DRAFT_ONLY" | "MANUAL" | "AI_ASSISTED";
+  configuredMode: Status["mode"];
   paused: boolean;
   browser: {
     state: string;

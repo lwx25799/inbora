@@ -1166,7 +1166,7 @@ function Settings({
         <label>
           工作模式
           <select
-            value={status.mode}
+            value={status.configuredMode}
             onChange={(e) =>
               void act("更新模式", async () =>
                 update(
@@ -1188,6 +1188,11 @@ function Settings({
         <p className="hint">
           切换模式不会开启未经核验的发送能力；新账号默认仅保存草稿。
         </p>
+        {status.mode !== status.configuredMode && (
+          <p className="hint" role="status">
+            已选择{modes[status.configuredMode]}；当前{modes[status.mode]}。请打开专属浏览器，并查看下方通道状态。
+          </p>
+        )}
         <label>
           浏览器模式
           <select

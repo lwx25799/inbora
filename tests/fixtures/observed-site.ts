@@ -150,10 +150,8 @@ export function commentReplyMapping(origin:string):CommentReplyMapping{
     composerFiberDepth:2,composer:'#comment-editor',send:'#comment-send',pending:'.pending',failed:'.failed',rootLevel:1,confirmedStatus:1,submissionReceipts:false};
 }
 /** Synthetic direct parent reply contract, separate from observed platform evidence. */
-export async function mountCommentReply(owner:BrowserProfileOwner,origin:string):Promise<void>{
-  await owner.notification.goto(origin+'/video/10');
-  await owner.notification.setContent('<a id="self">Self</a><section id="comment-list"><div class="comment" id="root-comment"><a class="author" href="/user/peer-sec">Peer</a><div class="body">root fixture input</div><div class="tooltip" id="tooltip_11">Actions</div><button class="reply-action">回复</button></div></section>');
-  await owner.notification.evaluate(()=>{
+const commentReplyHtml='<a id="self">Self</a><section id="comment-list"><div class="comment" id="root-comment"><a class="author" href="/user/peer-sec">Peer</a><div class="body">root fixture input</div><div class="tooltip" id="tooltip_11">Actions</div><button class="reply-action">回复</button></div></section>';
+export function initializeCommentReplyFixture():void{
     const root=document.querySelector('#root-comment')!;
     Object.defineProperty(document.querySelector('#self')!,'__reactFiber$fixture',{value:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}});
     const comment={cid:'11',text:'root fixture input',user:{uid:'200',secUid:'peer-sec'},createTime:1793836800,replyId:'0',replyTotal:0,
@@ -189,5 +187,13 @@ export async function mountCommentReply(owner:BrowserProfileOwner,origin:string)
         node.append(author,body,tip);root.append(node);controls.remove();
       });
     });
-  });
+}
+export async function mountCommentReply(owner:BrowserProfileOwner,origin:string):Promise<void>{
+  await owner.notification.goto(origin+'/video/10');
+  await owner.notification.setContent(commentReplyHtml);
+  await owner.notification.evaluate(initializeCommentReplyFixture);
+}
+export async function reloadableCommentReply(page:Page,origin:string):Promise<void>{
+  await page.route(origin+'/video/10',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:commentReplyHtml}));
+  await page.addInitScript({content:`document.addEventListener('DOMContentLoaded',(${initializeCommentReplyFixture.toString()}));`});
 }

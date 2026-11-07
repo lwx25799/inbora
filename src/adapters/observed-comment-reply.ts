@@ -291,8 +291,21 @@ export class ObservedCommentReply implements ReplyAdapter{
     return this.snapshot(event,frame);
   }
   async prepare(event:InboundEvent,text:string):Promise<void>{
-    validText(text);requireSafe(!/[\r\n]/.test(text),'COMMENT_REPLY_SINGLE_LINE_ONLY');const before=await this.frame(event);
+    validText(text);requireSafe(!/[\r\n]/.test(text),'COMMENT_REPLY_SINGLE_LINE_ONLY');let before=await this.frame(event);
     requireSafe(before.editorText===''||this.prepared?.binding===eventBinding(event)&&this.prepared.text===before.editorText,'COMMENT_REPLY_EXISTING_DRAFT');
+    if(!this.submission&&this.mapping.observation.environment!=='fixture'&&!await this.waitForClock()){
+      // A fresh sender cannot inherit the preview adapter's passive response. Refresh before any fill.
+      requireSafe(before.editorText==='','COMMENT_REPLY_CLOCK_UNVERIFIED');
+      const context=digest(before.context);
+      await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15_000}),this.frame(event,'refresh')]);
+      await this.refreshComments(event);
+      const refreshed=await this.inspect(event);
+      requireSafe(refreshed.contextDigest===context,'COMMENT_REPLY_CONTEXT_CHANGED');
+      requireSafe(await this.waitForClock(),'COMMENT_REPLY_CLOCK_UNVERIFIED');
+      before=await this.frame(event);
+      requireSafe(before.editorText==='','COMMENT_REPLY_EXISTING_DRAFT');
+      requireSafe(digest(before.context)===context,'COMMENT_REPLY_CONTEXT_CHANGED');
+    }
     const token=randomUUID(),prior={context:before.context,editorText:before.editorText};
     await this.frame(event,'fill',text,token,prior);
     try{
@@ -308,12 +321,15 @@ export class ObservedCommentReply implements ReplyAdapter{
         if(gate?.token===token)gate.remove();},token).catch(()=>{});
     }
   }
+  private async waitForClock():Promise<boolean>{
+    const deadline=Date.now()+1000;
+    while(this.responses.clockLag()===null&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));
+    return this.responses.clockLag()!==null;
+  }
   async verifyPrepared(event:InboundEvent,text:string):Promise<TargetSnapshot>{
     requireSafe(this.prepared?.binding===eventBinding(event)&&this.prepared.text===text,'COMMENT_REPLY_NOT_PREPARED');
     if(!this.submission&&this.mapping.observation.environment!=='fixture'){
-      const deadline=Date.now()+1000;
-      while(this.responses.clockLag()===null&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));
-      requireSafe(this.responses.clockLag()!==null,'COMMENT_REPLY_CLOCK_UNVERIFIED');
+      requireSafe(await this.waitForClock(),'COMMENT_REPLY_CLOCK_UNVERIFIED');
     }
     const token=randomUUID(),deadline=Date.now()+5000;let state:Frame;
     for(;;)try{state=await this.frame(event,'arm',text,token,null,this.prepared.shape);break;}catch(error){

@@ -602,6 +602,17 @@ describe("workbench authority and application contracts, synthetic only", () => 
       c.service.dispatch(token, { command: "getStatus", operatorId: "forged" }),
     ).rejects.toThrow();
   });
+  test("configured manual mode remains distinct from the effective draft-only mode while browser identity is absent",async()=>{
+    const c=await setup();
+    const cold=new ClientService(c.store,new BrowserService(c.browser.root));
+    const token=cold.authority.issueSession();
+    await cold.dispatch(token,{command:'setMode',mode:'MANUAL'});
+    expect(await cold.dispatch(token,{command:'getStatus'})).toMatchObject({
+      configuredMode:'MANUAL',mode:'DRAFT_ONLY',browser:{state:'CLOSED'},
+    });
+    expect(cold.authority.mode()).toBe('MANUAL');
+    expect(c.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
+  });
   test("T31 cold browser failure and confirmation timeout retain human draft and never create intent", async () => {
     const c = await setup(),
       p = saveAndSelect(c),
