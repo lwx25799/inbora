@@ -3,9 +3,54 @@ import { join } from 'node:path';
 import { BrowserProfileOwner } from '../../src/browser/profile-owner.js';
 import { ObservedReader, captureObserved } from '../../src/adapters/observed-reader.js';
 import { validateObservationMapping } from '../../src/config/site-mapping.js';
-import { observedMapping as config, mountObserved as mount } from '../fixtures/observed-site.js';
+import { observedMapping as config, mountObserved as mount, mountVirtualizedConversations } from '../fixtures/observed-site.js';
 import { fixtureServer } from '../fixtures/site.js';
 import { database, privateTemp } from '../helpers.js';
+
+test.each([false,true])('a virtualized permitted conversation is found beyond the first viewport (same title: %s)',async sameTitle=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await mountVirtualizedConversations(owner.dm,sameTitle);
+    const mapping=config(server.origin);
+    Object.assign(mapping.selectors,{conversationList:'#conversation-list'});
+    const batch=await owner.actor.run(()=>new ObservedReader(owner.dm,mapping).dm(0));
+    expect(batch.events.map(e=>e.platformEventId)).toEqual(['1','2','3','4']);
+    expect(await owner.dm.evaluate(()=>(window as unknown as {opened:number}).opened)).toBe(1);
+    expect(await owner.dm.evaluate(()=>(window as unknown as {outsideOpened:number}).outsideOpened)).toBe(0);
+    expect(await owner.dm.evaluate(()=>(window as unknown as {listScrolls:number}).listScrolls)).toBeGreaterThan(0);
+  }finally{await owner.close();await server.close();}
+});
+
+test('duplicate native conversations remain unselected after scrolling',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await mountVirtualizedConversations(owner.dm);
+    await owner.dm.evaluate(()=>document.querySelector('#conversation-list')!.addEventListener('scroll',()=>{
+      const target=document.querySelector('.conversation')!;
+      const native=Object.getOwnPropertyDescriptor(target,'__reactFiber$fixture')!.value;
+      if(native.return.memoizedProps.conversation.id!=='conv-a')return;
+      const copy=target.cloneNode(true);
+      Object.defineProperty(copy,'__reactFiber$fixture',{value:native});target.parentElement!.append(copy);
+    }));
+    const mapping=config(server.origin);Object.assign(mapping.selectors,{conversationList:'#conversation-list'});
+    await expect(new ObservedReader(owner.dm,mapping).dm(0)).rejects.toThrow('OBSERVATION_CONVERSATION_NOT_UNIQUE');
+    expect(await owner.dm.evaluate(()=>(window as unknown as {opened:number}).opened)).toBe(0);
+  }finally{await owner.close();await server.close();}
+});
+
+test('account change during a list scroll cannot select a conversation',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await mountVirtualizedConversations(owner.dm);
+    await owner.dm.evaluate(()=>document.querySelector('#conversation-list')!.addEventListener('scroll',()=>{
+      Object.getOwnPropertyDescriptor(document.querySelector('#self')!,'__reactFiber$fixture')!.value.return.memoizedProps.uid='outside';
+    }));
+    const mapping=config(server.origin);mapping.selectors.conversationList='#conversation-list';
+    await expect(new ObservedReader(owner.dm,mapping).dm(0)).rejects.toThrow('OBSERVATION_ACCOUNT_CHANGED');
+    expect(await owner.dm.evaluate(()=>(window as unknown as {opened:number}).opened)).toBe(0);
+    expect(await owner.dm.evaluate(()=>(window as unknown as {outsideOpened:number}).outsideOpened)).toBe(0);
+  }finally{await owner.close();await server.close();}
+});
 
 test('calibrated rendered reader preserves three server identities, excludes outgoing tasks and blocks partial data', async () => {
   const server = await fixtureServer(), owner = await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);

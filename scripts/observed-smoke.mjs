@@ -3,7 +3,7 @@ import { mkdir, mkdtemp } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fixtureServer } from '../tests/fixtures/site.ts';
-import { observedMapping, mountObserved } from '../tests/fixtures/observed-site.ts';
+import { observedMapping, mountObserved, mountVirtualizedConversations } from '../tests/fixtures/observed-site.ts';
 
 const source = process.argv[2] === 'source', root = source ? 'src' : 'dist';
 const moduleUrl = name => pathToFileURL(resolve(root,name.replace(/\.js$/,source?'.ts':'.js'))).href;
@@ -39,5 +39,13 @@ try {
   for(let n=0;n<5;n++)store.observe('DIRECT_MESSAGE','conv-a',batch.events,'100','fixture');
   assert.equal(store.events().length,3);assert.ok(store.events().every(e=>e.status==='AWAITING_DRAFT'));
   assert.equal(store.db.prepare('SELECT count(*) AS n FROM send_intents').get().n,0);
+  await mountObserved(owner,server.origin);
+  await mountVirtualizedConversations(owner.dm,true);
+  config.selectors.conversationList='#conversation-list';
+  const scrolled=await owner.actor.run(()=>new ObservedReader(owner.dm,config).dm(0));
+  assert.deepEqual(scrolled.events.map(e=>e.platformEventId),['1','2','3','4']);
+  assert.equal(await owner.dm.evaluate(()=>window.opened),1);
+  assert.equal(await owner.dm.evaluate(()=>window.outsideOpened),0);
+  assert.ok(await owner.dm.evaluate(()=>window.listScrolls>0));
   console.log(JSON.stringify({observedReaderSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:3,sends:0}));
 } finally {store.close();await owner.close();await server.close();}

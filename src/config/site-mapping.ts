@@ -55,6 +55,7 @@ export const observationMappingSchema = z.object({
   selectors: z.object({
     selfAvatar: selector, selfFiberDepth: z.number().int().min(0).max(8),
     dmEntry: selector, dmPanel: selector, conversationRows: selector, conversationTitle: selector,
+    conversationList: selector.nullable().default(null),
     conversationFiberDepth: z.number().int().min(0).max(3),
     conversationSelectEvent: z.enum(['click','mousedown']),
     chat: selector, chatHeader: selector, chatTitle: selector, chatBack: selector,

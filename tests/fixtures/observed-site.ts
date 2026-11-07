@@ -8,7 +8,7 @@ export function observedMapping(origin: string): ObservationMapping {
     securityBlockers:'[data-fixture-challenge],.uc-ui-verify-new_header-title',
     observedAt:'2026-11-05T00:00:00Z',evidenceRef:'synthetic-rendered-only',self:{uid:'100',secUid:'self-sec'},
     peers:[{uid:'200',secUid:'peer-sec',conversationId:'conv-a',title:'Fixture peer'}],works:[{id:'10',url:origin+'/video/10'}],
-    selectors:{selfAvatar:'#self',selfFiberDepth:1,dmEntry:'#dm-open',dmPanel:'#dm-panel',conversationRows:'.conversation',
+    selectors:{selfAvatar:'#self',selfFiberDepth:1,dmEntry:'#dm-open',dmPanel:'#dm-panel',conversationRows:'.conversation',conversationList:null,
       conversationTitle:'.title',conversationFiberDepth:1,conversationSelectEvent:'click',chat:'#chat',chatHeader:'#header',chatTitle:'#chat-title',chatBack:'#back',
       messages:'.message',messageBox:'.box',fromMeClass:'from-me',messageText:'.text',commentList:'#comment-list',
       commentEntry:'#comment-open',commentRows:'.comment',commentText:'.body',commentAuthor:'.author',
@@ -25,6 +25,31 @@ export async function mountObserved(owner: BrowserProfileOwner, origin: string):
     <div class="box"><div class="direction from-me"><div class="message"><span class="text">owner text</span></div></div></div>
     <div class="box"><div class="message"><img alt="fixture emoji"></div></div></div></section>`);
   await owner.dm.evaluate(installObservedMetadata);
+}
+
+/** Only the current viewport is mounted; the permitted row appears after normal list scrolling. */
+export async function mountVirtualizedConversations(page:Page,sameTitle=false):Promise<void>{
+  await page.evaluate(({sameTitle})=>{
+    (document.querySelector('#chat') as HTMLElement).hidden=true;
+    const target=document.querySelector('.conversation')!,panel=document.querySelector('#dm-panel')!;
+    target.remove();
+    const list=document.createElement('div');list.id='conversation-list';
+    list.style.cssText='height:80px;width:300px;overflow-y:auto';
+    const space=document.createElement('div');space.style.height='1000px';
+    const viewport=document.createElement('div');viewport.style.cssText='position:sticky;top:0';
+    const other=document.createElement('div');other.className='conversation';
+    other.innerHTML='<span class="title"></span>';other.firstElementChild!.textContent=sameTitle?'Fixture peer':'Other fixture';
+    Object.defineProperty(other,'__reactFiber$fixture',{value:{return:{memoizedProps:{conversation:{id:'outside',_toParticipantSecUserId:'outside-sec'}}}}});
+    viewport.append(other);space.append(viewport);list.append(space);panel.prepend(list);
+    const state=window as unknown as {opened:number;outsideOpened:number;listScrolls:number};
+    state.opened=0;state.outsideOpened=0;state.listScrolls=0;
+    other.addEventListener('click',()=>state.outsideOpened++);
+    target.addEventListener('click',()=>{state.opened++;(document.querySelector('#chat') as HTMLElement).hidden=false;});
+    list.addEventListener('scroll',()=>{
+      state.listScrolls++;
+      viewport.replaceChildren(list.scrollTop>100?target:other);
+    });
+  },{sameTitle});
 }
 function installObservedMetadata():void {
     const self = document.querySelector('#self')!;

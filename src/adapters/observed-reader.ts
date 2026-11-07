@@ -3,9 +3,11 @@ import type { Page } from 'playwright';
 import type { ObservationMapping } from '../config/site-mapping.js';
 import { eventSchema, requireSafe, type InboundEvent } from '../core/contracts.js';
 
-interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row'; index: number;
-  evidenceId: string; rowIndex?: number; select?: boolean }
-export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; unsupported: number; loaded: number }
+interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate'; index: number;
+  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next' }
+type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'>;
+export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; unsupported: number; loaded: number;
+  conversation?: { rowIndex: number | null; hasList: boolean } }
 
 /** Fixed paths in the currently rendered, authorized components; never calls website functions or getters. */
 export function captureObserved(input: CaptureInput): ObservationBatch {
@@ -82,7 +84,27 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
   const events: InboundEvent[] = []; let unsupported = 0, loaded = 0;
   if (channel === 'identity') return { events,evidenceId,unsupported,loaded };
-  if(channel==='row') {
+  if(channel==='locate') {
+    const peer=m.peers[index];dom.check(peer,'OBSERVATION_PEER_REQUIRED');
+    const panel=dom.one(document,s.dmPanel),list=s.conversationList?dom.one(panel,s.conversationList):null;
+    const rows=document.querySelectorAll(s.conversationRows),matches:number[]=[];
+    for(let n=0;n<rows.length;n++) {
+      const row=rows[n]!;
+      if(!panel.contains(row)||!dom.visible(row)||(list&&!list.contains(row)))continue;
+      loaded++;dom.check(loaded<=100,'OBSERVATION_WINDOW_TOO_LARGE');
+      const native=dom.data(dom.fiberProps(row,s.conversationFiberDepth),'conversation');
+      if(dom.conversationId(native)===peer!.conversationId && dom.data(native,'_toParticipantSecUserId')===peer!.secUid)matches.push(n);
+    }
+    dom.check(loaded>0,'OBSERVATION_DOM_NOT_READY');
+    dom.check(matches.length<=1,'OBSERVATION_CONVERSATION_NOT_UNIQUE');
+    if(matches.length)dom.rowIdentity(rows[matches[0]!]!,peer!);
+    else if(list && input.scroll) {
+      // Only the calibrated list is moved; no contact bodies or private application state are traversed.
+      list.scrollTop=input.scroll==='start'?0:Math.min(list.scrollHeight-list.clientHeight,
+        list.scrollTop+Math.max(1,Math.floor(list.clientHeight*0.8)));
+    }
+    return {events,evidenceId,unsupported,loaded,conversation:{rowIndex:matches[0]??null,hasList:Boolean(list)}};
+  } else if(channel==='row') {
     const peer=m.peers[index], rows=document.querySelectorAll(s.conversationRows);
     dom.check(peer && Number.isInteger(input.rowIndex) && input.rowIndex!>=0 && input.rowIndex!<rows.length,'OBSERVATION_ROW_REQUIRED');
     const row=rows[input.rowIndex!]!;dom.rowIdentity(row,peer!);
@@ -171,7 +193,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
 /** AccountActor owns the entire call, including opening and switching the permitted chat. */
 export class ObservedReader {
   constructor(readonly page: Page, readonly mapping: ObservationMapping) {}
-  private async capture(channel: CaptureInput['channel'], index: number, selection: {rowIndex?:number;select?:boolean} = {}): Promise<ObservationBatch> {
+  private async capture(channel: CaptureInput['channel'], index: number, selection: CaptureOptions = {}): Promise<ObservationBatch> {
     try {
       const result = await this.page.evaluate(captureObserved,{mapping:this.mapping,channel,index,evidenceId:randomUUID(),...selection});
       return {...result,events:result.events.map(e=>eventSchema.parse(e))};
@@ -180,9 +202,9 @@ export class ObservedReader {
       if(code) requireSafe(false,code);throw error;
     }
   }
-  private async ready(channel: CaptureInput['channel'],index: number): Promise<ObservationBatch> {
+  private async ready(channel: CaptureInput['channel'],index: number,options:CaptureOptions={}): Promise<ObservationBatch> {
     const deadline=Date.now()+5000;
-    for(;;)try{return await this.capture(channel,index);}catch(error){
+    for(;;)try{return await this.capture(channel,index,options);}catch(error){
       if(!(error instanceof Error)||!/(?:OBSERVATION_(?:DOM|METADATA)_NOT_READY|RENDERED_BINDING_UNAVAILABLE)/.test(error.message)||Date.now()>=deadline)throw error;
       await new Promise(resolve=>setTimeout(resolve,50));
     }
@@ -216,20 +238,18 @@ export class ObservedReader {
         await this.page.locator(s.chatBack).click(); await chat.waitFor({state:'hidden'});
       }
     }
-    await this.page.waitForFunction(selector=>Array.from(document.querySelectorAll(selector))
-      .some(row=>{const r=row.getBoundingClientRect(),style=getComputedStyle(row);
-        return r.width>0&&r.height>0&&style.display!=='none'&&style.visibility!=='hidden';}),s.conversationRows);
-    const matches: number[] = [];let rowIndex=0;
-    for (const row of await this.page.locator(s.conversationRows).all()) {
-      if (await row.isVisible() && await row.locator(s.conversationTitle).count() === 1 &&
-        (await row.locator(s.conversationTitle).textContent())?.trim() === peer.title) {
-        await this.capture('row',index,{rowIndex});matches.push(rowIndex);
+    const deadline=Date.now()+12000;
+    for(let step=0;step<80 && Date.now()<deadline;step++) {
+      const batch=await this.ready('locate',index,{scroll:step===0?'start':'next'}),found=batch.conversation!;
+      if(found.rowIndex!==null) {
+        // Virtualized rows may change between tasks; the selection task rechecks native identity.
+        await this.capture('row',index,{rowIndex:found.rowIndex,select:true});
+        await chat.waitFor({state:'visible'});return this.ready('dm',index);
       }
-      rowIndex++;
+      if(!found.hasList)break;
+      await new Promise(resolve=>setTimeout(resolve,150));
     }
-    requireSafe(matches.length === 1,'OBSERVATION_CONVERSATION_NOT_UNIQUE');
-    await this.capture('row',index,{rowIndex:matches[0]!,select:true});
-    await chat.waitFor({state:'visible'}); return this.ready('dm',index);
+    requireSafe(false,'OBSERVATION_CONVERSATION_NOT_FOUND');
   }
   async comments(index: number): Promise<ObservationBatch> {
     const work = this.mapping.works[index]; requireSafe(work,'OBSERVATION_WORK_REQUIRED');
