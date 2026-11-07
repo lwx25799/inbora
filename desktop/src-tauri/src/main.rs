@@ -128,6 +128,7 @@ async fn client_request(
         "getAudit",
         "browser",
         "observe",
+        "syncInbox",
         "reconcileUncertain",
         "configureAi",
         "authorizeAi",

@@ -1,5 +1,17 @@
 # 来源与许可
 
+## 2026-11-07：一个入口同步双通道及后台进度
+
+修改前重新核对两仓当前 SHA，读取固定源码，不以旧印象代替比较。MIT DSH [7989640e340f0fd79e2de9874880d5197546e755](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/autonomous-watch.mjs#L125-L154) 的 `autonomous-watch.mjs:125-154` 使用 running/completion 防止重复启动、异步执行并立即返回 state；`:92-93` 暴露 phase，`:422-430` 处理停止。采用“单个后台操作、立即回状态、可查询阶段及完成”的组织方式，独立复用本项目现有 pending/drain 和账号 actor；不引入其自动观看、文件任务系统、AI 调用或发送路线。
+
+Chatwoot 非 enterprise 的 MIT Expat 源码固定 [625d5964e3cb3f1d917b43c3b8332219e525a4b8](https://github.com/chatwoot/chatwoot/blob/625d5964e3cb3f1d917b43c3b8332219e525a4b8/app/javascript/dashboard/store/modules/conversations/actions.js#L235-L279)，`syncActiveConversationMessages` 按会话保留已有记录、补齐消息并在末尾更新同步游标。采用“同步不清空已有收件箱”的交互，不采用其吞掉错误的 catch、客户端直接操作服务端接口或多人/已读流程。两个仓库 SHA 与本次核对一致，许可全文已读，原始源码存 `.local/upstream-review/2026-11-07-sync`，不复制源函数或新增依赖。
+
+本机用户反馈两个按钮互相禁用；源码证明二者共用 busy，act 等 observe 完成后才清理；只读库显示两条通道都留下新观察，不能把用户反馈推断成第二项永久失败。此次将作品补充评论与私信合并为后端一次串行读取，立即返回运行状态、分别保存内存进度及安全错误代码；WebView 重连取状态，不重放任务。普通读取失败按通道/当前浏览器模式隔离，平台停止、账号或安全验证错误停止后续读取；通知独立来源入口保持单列。已有任务与未保存人稿保留，不恢复账号、不启用发送、不调用模型。
+
+审查修复前另读同一 MIT DSH 提交的 `browser-host.mjs:48-68,102`：关闭先失效 active/页面跟踪，迟到异步结果不能恢复 ready 状态。采用持有者生命周期失效原则，正常关闭递增本地代际，后续通道拒绝旧代际；观察结束和异步身份读取只更新仍为当前的 owner。数据库原生 ACCOUNT_CHANGED 同样属于账号级停止，不能因页面与映射一致就继续另一通道。复用现有对象/队列，不引入新的调度层。
+
+验证先在未修复代码运行单入口 UI 及后台立即响应/串行/重复请求/单通道失败/安全停止/急停/重连回归，再运行修复后合成链与双尺寸界面；原生包和真实点击分别记录，不能由 Mock 读取代替实机同步通过。
+
 ## 2026-11-07：连接目录错误与只打开现有资料
 
 修改前核对 Node.js v26.13.0 的 tag 对象 `daaa22aeddb87085542376ea1f4854dcea080baf`，解引用固定提交 [18b32a3b1552e199a01f1a8d9fd64aa756d3b75b](https://github.com/nodejs/node/tree/18b32a3b1552e199a01f1a8d9fd64aa756d3b75b)。阅读 MIT 核心源码 `lib/internal/fs/promises.js:1703` 的 mkdir 和 `:2105` 的 realpath，以及 `doc/api/errors.md:599-605` 的 ENOENT/ENOTDIR；官方当前错误/文件系统文档同步核对。采用公开 realpath 的不创建语义，现有 OwnerLock 增加是否允许创建目录参数，桌面入口仅显式初始化传 true，CLI/Profile 默认行为保持；不复制 Node 源码或新增依赖。连接边界仅把目录/配置缺失映射为固定安全代码，不回传原始路径和堆栈，不通过预先 access 判断来替代实际打开。

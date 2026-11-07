@@ -26,6 +26,8 @@ const modes = {
   MANUAL: "纯人工回复",
   AI_ASSISTED: "AI 辅助回复",
 };
+const syncNames={works:'评论',dm:'私信'};
+const syncStates={PENDING:'等待同步',RUNNING:'同步中',SUCCEEDED:'同步完成',FAILED:'同步失败',SKIPPED:'未继续同步',CANCELLED:'同步已停止'};
 const draftOrigins = new Map([
   ["HUMAN_TYPED", "人工输入"],
   ["AI_ASSISTED_APPROVED", "已引用 AI 建议"],
@@ -144,7 +146,8 @@ export function App() {
     return () => {
       ignore = true;
     };
-  }, [connected, channel, filter, pageNumber, notice, send?.status]);
+  }, [connected, channel, filter, pageNumber, notice, send?.status,status?.sync.runId,status?.sync.running,
+    status?.sync.results.map(result=>result.state).join('|')]);
   useEffect(() => {
     if (!connected || !selected) return;
     let ignore = false;
@@ -583,36 +586,23 @@ export function App() {
           </div>
           <div className="toolbar">
             <button
-              disabled={!!busy}
+              disabled={!!busy||status.sync.running}
               onClick={() =>
-                void act("同步私信", async () => {
+                void act("启动同步", async () => {
                   setStatus(
-                    await request<Status>({ command: "observe", source: "dm" }),
+                    await request<Status>({ command: "syncInbox" }),
                   );
-                  setNotice("私信同步完成");
                 })
               }
             >
-              同步私信
-            </button>
-            <button
-              disabled={!!busy}
-              onClick={() =>
-                void act("同步评论", async () => {
-                  setStatus(
-                    await request<Status>({
-                      command: "observe",
-                      source: "works",
-                    }),
-                  );
-                  setNotice("授权作品同步完成");
-                })
-              }
-            >
-              同步作品评论
+              {status.sync.running?(status.sync.cancelled?'正在结束同步…':status.sync.source?`正在同步${syncNames[status.sync.source]}…`:'正在启动同步…'):'同步收件箱'}
             </button>
           </div>
         </header>
+        {status.sync.runId&&<div className={"message"+(status.sync.results.some(result=>result.state==='FAILED')?' error':'')}
+          role={status.sync.results.some(result=>result.state==='FAILED')?'alert':'status'} data-testid="inbox-sync-progress">
+          {status.sync.results.map(result=>`${syncNames[result.source]}${syncStates[result.state]}${result.error?'：'+(reasons[result.error]??result.error):''}`).join('；')}
+        </div>}
         {(error || notice || busy) && (
           <div
             className={"message " + (error ? "error" : "")}

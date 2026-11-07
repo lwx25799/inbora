@@ -3,6 +3,7 @@ import type {
   ClientCommand,
   SendParams,
   AiSettings,
+  InboxSync,
 } from "../../src/app/contracts.js";
 import type {
   Draft,
@@ -41,6 +42,7 @@ export interface Status {
   keyPresent: boolean;
   modelAuthorized: boolean;
   modelBusy: boolean;
+  sync:InboxSync;
   go: string;
   schema: number;
 }
@@ -112,6 +114,16 @@ export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
 export const reasons: Record<string, string> = {
+  INBOX_SYNC_IN_PROGRESS: "收件箱正在同步，请等待当前读取完成。",
+  OBSERVATION_DOM_NOT_READY: "页面尚未就绪，请稍后再次同步。",
+  OBSERVATION_PAGE_BLOCKED: "请在专属浏览器检查登录或验证提示。",
+  OBSERVATION_ACCOUNT_CHANGED: "浏览器账号与绑定账号不一致，已停止同步。",
+  PLATFORM_STOP: "平台要求停止，已结束本次同步。",
+  CHALLENGE_REQUIRED: "请在专属浏览器完成平台验证后再同步。",
+  LOGIN_REQUIRED: "请先在专属浏览器登录。",
+  ACCOUNT_NOT_VERIFIED: "当前账号身份未通过核验，已停止同步。",
+  ACCOUNT_CHANGED: "当前账号与收件箱绑定账号不一致，已停止同步。",
+  BROWSER_CLOSED: "专属浏览器已关闭，本次同步已停止。",
   RUNTIME_NOT_FOUND: "没有找到现有运行资料，请核对目录路径；首次使用请明确初始化新目录。",
   CAPABILITY_UNVERIFIED: "请先打开专属浏览器并同步此通道",
   CAPABILITY_EXPIRED_OR_CHANGED: "通道证据已过期或环境已变化",

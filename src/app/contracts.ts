@@ -121,6 +121,7 @@ export const commandSchema = z.discriminatedUnion("command", [
       source: z.enum(["notifications", "works", "dm"]),
     })
     .strict(),
+  z.object({command:z.literal('syncInbox')}).strict(),
   z
     .object({
       command: z.literal("reconcileUncertain"),
@@ -140,6 +141,17 @@ export const commandSchema = z.discriminatedUnion("command", [
     .strict(),
 ]);
 export type ClientCommand = z.infer<typeof commandSchema>;
+export interface InboxSync {
+  runId: string | null;
+  running: boolean;
+  cancelled: boolean;
+  source: "works" | "dm" | null;
+  results: {
+    source: "works" | "dm";
+    state: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "SKIPPED" | "CANCELLED";
+    error: string | null;
+  }[];
+}
 export const envelopeSchema = z
   .object({
     protocol: z.literal(protocolVersion),

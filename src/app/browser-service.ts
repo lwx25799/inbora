@@ -32,6 +32,8 @@ export class BrowserService {
   private state = "CLOSED";
   private opening: Promise<void> | undefined;
   private closing: Promise<void> | undefined;
+  private epoch = 0;
+  get ownerEpoch() { return this.epoch; }
   constructor(
     readonly root: string,
     private readonly launch = BrowserProfileOwner.launch,
@@ -42,7 +44,7 @@ export class BrowserService {
     mode: "headed" | "headless",
   ): BrowserService {
     const service = new BrowserService(root);
-    service.owner = owner;
+    service.attachOwner(owner);
     service.mode = mode;
     service.state = "OPEN_IDENTITY_UNVERIFIED";
     return service;
@@ -67,6 +69,17 @@ export class BrowserService {
   }
   identity(channel: Channel): CapabilityIdentity | null {
     return this.currentIdentity.get(channel) ?? null;
+  }
+  private attachOwner(owner: BrowserProfileOwner): void {
+    this.owner = owner;
+    owner.context.once("close", () => {
+      if (this.owner !== owner) return;
+      this.owner = undefined;
+      this.epoch++;
+      this.state = "CLOSED";
+      this.currentIdentity.clear();
+      this.closing = owner.close().finally(() => { this.closing = undefined; });
+    });
   }
   async open(mode: "headed" | "headless" = this.mode): Promise<void> {
     if (this.closing) await this.closing;
@@ -108,26 +121,20 @@ export class BrowserService {
         mode === "headless",
       );
       created = owner;
-      this.owner = owner;
-      owner.context.once("close", () => {
-        if (this.owner === owner) {
-          this.owner = undefined;
-          this.state = "CLOSED";
-          this.currentIdentity.clear();
-          this.closing = owner.close().finally(() => {
-            this.closing = undefined;
-          });
-        }
-      });
+      this.attachOwner(owner);
       await owner.open(origin);
+      requireSafe(this.owner === owner, "BROWSER_CLOSED");
       for (const channel of ["COMMENT_NOTIFICATION", "DIRECT_MESSAGE"] as const)
         await this.refreshIdentity(channel);
+      requireSafe(this.owner === owner, "BROWSER_CLOSED");
       this.state = "OPEN_IDENTITY_UNVERIFIED";
     } catch (error) {
-      if (this.owner === created) this.owner = undefined;
-      this.state = "BROWSER_START_FAILED";
+      const closed = !!created && this.owner !== created;
+      if (created && this.owner === created) { this.owner = undefined; this.epoch++; }
+      this.state = closed ? "CLOSED" : "BROWSER_START_FAILED";
       this.currentIdentity.clear();
       await created?.close();
+      requireSafe(!closed, "BROWSER_CLOSED");
       throw error;
     }
   }
@@ -136,6 +143,7 @@ export class BrowserService {
     if (this.closing) return this.closing;
     const owner = this.owner;
     this.owner = undefined;
+    if (owner) this.epoch++;
     this.currentIdentity.clear();
     this.state = "CLOSED";
     if (owner) {
@@ -194,7 +202,8 @@ export class BrowserService {
     };
   }
   async refreshIdentity(channel: Channel): Promise<CapabilityIdentity | null> {
-    if (!this.owner) return null;
+    const owner = this.owner;
+    if (!owner) return null;
     const native =
       channel === "DIRECT_MESSAGE"
         ? await loadDmReplyMapping(this.root)
@@ -207,7 +216,7 @@ export class BrowserService {
         mapping = await loadMapping(this.root);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          this.currentIdentity.delete(channel);
+          if (this.owner === owner) this.currentIdentity.delete(channel);
           return null;
         }
         throw error;
@@ -216,10 +225,11 @@ export class BrowserService {
     const own = native
       ? native.observation.self.uid
       : (mapping as Awaited<ReturnType<typeof loadMapping>>).ownId;
+    if (this.owner !== owner) return null;
     const identity = {
       identityDigest: digest(own),
       mappingDigest: digest(mapping),
-      browserVersion: this.owner.version(),
+      browserVersion: owner.version(),
       browserMode: this.mode,
     };
     this.currentIdentity.set(channel, identity);
@@ -302,9 +312,14 @@ export class BrowserService {
             );
           }
       }
-      this.state = "OPEN_LAST_READ_VERIFIED";
+      requireSafe(this.owner === owner, "BROWSER_CLOSED");
       for (const channel of ["COMMENT_NOTIFICATION", "DIRECT_MESSAGE"] as const)
         await this.refreshIdentity(channel);
+      requireSafe(this.owner === owner, "BROWSER_CLOSED");
+      this.state = "OPEN_LAST_READ_VERIFIED";
+    }).catch(error => {
+      requireSafe(this.owner === owner, "BROWSER_CLOSED");
+      throw error;
     });
   }
   async verifyExisting(

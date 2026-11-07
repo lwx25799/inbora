@@ -17,6 +17,7 @@ import {
   settingsSchema,
   type AiSettings,
   type SendParams,
+  type InboxSync,
 } from "./contracts.js";
 import { WorkbenchAuthority } from "./authority.js";
 import { BrowserService } from "./browser-service.js";
@@ -39,6 +40,11 @@ export class ClientService {
   private modelPending = new Set<string>();
   private pending = new Set<Promise<unknown>>();
   private closing = false;
+  private syncTask: Promise<void> | null = null;
+  private observing = false;
+  private sync: InboxSync = {
+    runId: null, running: false, cancelled: false, source: null, results: [],
+  };
   constructor(
     readonly store: EventStore,
     readonly browser: BrowserService,
@@ -68,6 +74,71 @@ export class ClientService {
   private track(task: Promise<unknown>): void {
     this.pending.add(task);
     void task.finally(() => this.pending.delete(task)).catch(() => {});
+  }
+  private stopSync(): void {
+    if (!this.syncTask) return;
+    this.sync.cancelled = true;
+    for (const result of this.sync.results)
+      if (result.state === "PENDING" || result.state === "RUNNING") result.state = "CANCELLED";
+    this.emit("inbox_sync_updated");
+  }
+  private syncMustStop(code: string): boolean {
+    return ["OBSERVATION_PAGE_BLOCKED", "OBSERVATION_ACCOUNT_CHANGED", "ACCOUNT_CHANGED", "BROWSER_CLOSED", "PLATFORM_STOP", "CHALLENGE_REQUIRED",
+      "LOGIN_REQUIRED", "ACCOUNT_NOT_VERIFIED", "UNEXPECTED_ORIGIN", "OWNER_LOCKED_OR_PORT_UNAVAILABLE",
+      "OPERATOR_EXPIRED", "OPERATOR_PERMISSION_DENIED"].includes(code);
+  }
+  private async observeSource(source: "works" | "dm" | "notifications"): Promise<void> {
+    try {
+      await this.browser.observe(this.store, source);
+    } catch (error) {
+      const code = clientError(error), mode = this.browser.status().mode;
+      if (code === "BROWSER_CLOSED") { this.emit("status_updated"); throw error; }
+      if (this.syncMustStop(code)) this.store.db.prepare("UPDATE channel_capabilities SET state='BLOCKED'").run();
+      else this.store.db.prepare("UPDATE channel_capabilities SET state='BLOCKED' WHERE channel=? AND browser_mode=?")
+        .run(source === "dm" ? "DIRECT_MESSAGE" : "COMMENT_NOTIFICATION", mode);
+      this.emit("status_updated");
+      throw error;
+    }
+  }
+  private startInboxSync(token: string): void {
+    if (this.syncTask) return;
+    requireSafe(!this.observing, "INBOX_SYNC_IN_PROGRESS");
+    this.sync = {
+      runId: randomUUID(), running: true, cancelled: false, source: "works",
+      results: [{source: "works", state: "RUNNING", error: null}, {source: "dm", state: "PENDING", error: null}],
+    };
+    const ownerEpoch = this.browser.ownerEpoch;
+    const task = Promise.resolve().then(async () => {
+      for (const result of this.sync.results) {
+        if (this.closing || this.sync.cancelled) break;
+        this.sync.source = result.source;
+        result.state = "RUNNING";
+        this.emit("inbox_sync_updated");
+        try {
+          this.authority.operator(token, "CONTROL");
+          requireSafe(this.browser.ownerEpoch === ownerEpoch, "BROWSER_CLOSED");
+          await this.observeSource(result.source);
+          if (!this.sync.cancelled) result.state = "SUCCEEDED";
+        } catch (error) {
+          if (this.sync.cancelled) break;
+          const code = clientError(error);
+          result.state = "FAILED";
+          result.error = code;
+          if (this.syncMustStop(code)) {
+            for (const next of this.sync.results) if (next.state === "PENDING") next.state = "SKIPPED";
+            break;
+          }
+        }
+        this.emit("inbox_updated");
+      }
+    }).finally(() => {
+      this.sync.running = false;
+      this.sync.source = null;
+      this.syncTask = null;
+      this.emit("inbox_updated");
+    });
+    this.syncTask = task;
+    this.track(task);
   }
   private thread(token: string, eventId: string) {
     const op = this.authority.operator(token),
@@ -165,6 +236,7 @@ export class ClientService {
       keyPresent: !!this.key,
       modelAuthorized: this.modelAuthorized,
       modelBusy: this.modelPending.size > 0,
+      sync:structuredClone(this.sync),
       go: "UNVERIFIED",
       schema: 3,
     };
@@ -279,6 +351,7 @@ export class ClientService {
           c.command !== "resume",
         );
         if (c.command === "emergencyStop") {
+          this.stopSync();
           this.modelAbort.abort();
           this.modelAbort = new AbortController();
         }
@@ -289,23 +362,22 @@ export class ClientService {
       case "browser": {
         this.authority.operator(token, "CONTROL");
         if (c.open) await this.browser.open(c.mode);
-        else await this.browser.close();
+        else {this.stopSync();await this.browser.close();}
         this.emit("status_updated");
         return this.status(token);
       }
       case "observe": {
         this.authority.operator(token, "CONTROL");
-        try {
-          await this.browser.observe(this.store, c.source);
-        } catch (error) {
-          this.store.db
-            .prepare("UPDATE channel_capabilities SET state='BLOCKED'")
-            .run();
-          throw error;
-        }
+        requireSafe(!this.syncTask&&!this.observing,'INBOX_SYNC_IN_PROGRESS');
+        this.observing=true;
+        try {await this.observeSource(c.source);}finally{this.observing=false;}
         this.emit("inbox_updated");
         return this.status(token);
       }
+      case 'syncInbox':
+        this.authority.operator(token,'CONTROL');
+        this.startInboxSync(token);
+        return this.status(token);
       case "getAudit":
         return {
           items: this.store.db
@@ -517,6 +589,7 @@ export class ClientService {
   }
   async close(): Promise<void> {
     this.closing = true;
+    this.stopSync();
     this.key = "";
     this.modelAuthorized = false;
     this.modelAbort.abort();

@@ -54,6 +54,7 @@ test.each([
     const legacyDraft = store.saveDraft(comment, "此前保存的合成 Mock 草稿。", "mock-deterministic");
     await migrateClient(store, join(root, "backup.sqlite"));
     let clicks = 0,identityAvailable=true;
+    const syncCalls:string[]=[];let releaseSyncRead:(()=>void)|undefined,holdSyncRead=true;
     class UiBrowser extends BrowserService {
       private uiActor = new AccountActor();
       override get actor() {
@@ -71,6 +72,12 @@ test.each([
         return this.identity();
       }
       override async close() {}
+      override async observe(_store:typeof store,source:'works'|'dm'|'notifications'){
+        syncCalls.push(source);if(holdSyncRead)await new Promise<void>(resolve=>{releaseSyncRead=resolve;});
+        if(source==='works')pending(store,candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',conversationId:null,
+          platformEventId:'ui-synced-comment',videoId:'ui-sync-work',commentId:'ui-sync-parent',actorName:'同步新增评论',text:'评论读取完成后可立即查看的合成任务',occurredAt:'2026-11-04T01:00:10Z'}));
+        if(source==='dm')pending(store,candidate({platformEventId:'ui-synced-event',actorName:'同步新增任务',text:'同步后应自动出现的合成任务',occurredAt:'2026-11-04T01:00:10Z'}));
+      }
       override async adapter(e: InboundEvent) {
         let text = "";
         const adapter: ReplyAdapter = {
@@ -192,6 +199,28 @@ test.each([
       await page.goto(`http://127.0.0.1:${address.port}`);
       await page.getByRole("checkbox").nth(1).check();
       await page.getByRole("button", { name: "连接收件箱" }).click();
+      await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
+      expect(await page.getByRole('button',{name:'同步私信',exact:true}).count()).toBe(0);
+      expect(await page.getByRole('button',{name:'同步作品评论',exact:true}).count()).toBe(0);
+      await page.getByRole('button',{name:'同步收件箱',exact:true}).click();
+      await expect.poll(()=>syncCalls).toEqual(['works']);
+      await expect.poll(()=>page.locator('.toolbar').innerText(),{timeout:5000}).toBe('正在同步评论…');
+      expect(await page.getByRole('button',{name:'正在同步评论…',exact:true}).isDisabled()).toBe(true);
+      await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+      await page.getByRole('heading',{name:'DeepSeek 辅助回复'}).waitFor();
+      expect(await page.getByRole('button',{name:'全局急停',exact:true}).isEnabled()).toBe(true);
+      releaseSyncRead?.();await expect.poll(()=>syncCalls).toEqual(['works','dm']);
+      await page.getByRole('button',{name:'收件箱',exact:true}).click();
+      await page.getByRole('button',{name:/同步新增评论/}).waitFor();
+      await page.reload();
+      await expect.poll(()=>page.locator('.toolbar').innerText(),{timeout:5000}).toBe('正在同步私信…');
+      expect(await page.getByRole('button',{name:'正在同步私信…',exact:true}).isDisabled()).toBe(true);
+      expect(syncCalls).toEqual(['works','dm']); // Reconnecting the renderer must not start another read.
+      releaseSyncRead?.();
+      await expect.poll(()=>page.getByRole('button',{name:'同步收件箱',exact:true}).isEnabled(),{timeout:5000}).toBe(true);
+      await page.getByText('评论同步完成；私信同步完成',{exact:true}).waitFor();
+      await page.getByRole('button',{name:/同步新增任务/}).waitFor();
+      expect(syncCalls).toEqual(['works','dm']);expect(clicks).toBe(0);
       await page.getByRole("button", { name: /合成私信作者/ }).click();
       await expect
         .poll(() =>
@@ -376,6 +405,7 @@ test.each([
         }),
       );
     } finally {
+      holdSyncRead=false;releaseSyncRead?.();
       await mkdir(resolve(".local/desktop-ui"), { recursive: true });
       await writeFile(resolve(`.local/desktop-ui/control-trace-${viewport.width}.json`), JSON.stringify(controlTrace));
       await browser.close();
