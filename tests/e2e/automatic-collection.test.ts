@@ -133,7 +133,8 @@ test('one unreadable conversation yields to another native peer across collector
     expect(store.db.prepare("SELECT detail_redacted FROM audit_events WHERE event_type='DM_READ_DEFERRED'").get())
       .toEqual({detail_redacted:'{"threadReadFailed":true}'});
     const saved=store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
-    expect(JSON.parse(saved.cursor_json)).toEqual({deferred:[{id:'a-unavailable',until:now+120_000,code:'OBSERVATION_DM_CHAT_NOT_READY'}]});
+    expect(JSON.parse(saved.cursor_json)).toEqual({deferred:[{id:'a-unavailable',until:now+120_000,code:'OBSERVATION_DM_CHAT_NOT_READY'}],
+      parked:[],recent:['conv-a','a-unavailable'],burst:2});
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='a-unavailable'").get()).toEqual({last_read:0});
     collector.dispose();collector=new InboxCollector(owner,mapping,new AutomationStore(store,()=>now),root,'headless');
     await collector.collect('dm',signal);

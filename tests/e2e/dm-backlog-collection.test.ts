@@ -92,8 +92,13 @@ test.each([[false,false],[true,false],[false,true],[true,true]])('DM backlog sur
     }, { startedAt, restoredOld });
     const mapping = observedMapping(server.origin), signal = new AbortController().signal;
     collector = new InboxCollector(owner, mapping, data, root, 'headless');
-    const progress = () => JSON.parse((store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as { cursor_json: string }).cursor_json) as {
-      sweep?: { top: number; height: number; phase: string };
+    const progress = () => {
+      const cursor=JSON.parse((store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as { cursor_json: string }).cursor_json) as {
+        sweep?: {top:number;height:number;phase:string;anchor?:{top:number;height:number;ids:string[]}};
+        parked?:{top:number;height:number;phase:string;anchor?:{top:number;height:number;ids:string[]};peer:{conversationId:string}}[];
+      };
+      // A yielded peer retains the same pending proof in its parked checkpoint.
+      return {...cursor,sweep:cursor.sweep??cursor.parked?.find(item=>item.peer.conversationId==='conv-a')};
     };
     const lastRead = () => (store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='conv-a'").get() as { last_read: number }).last_read;
     let completed = false;
@@ -118,9 +123,12 @@ test.each([[false,false],[true,false],[false,true],[true,true]])('DM backlog sur
       if (turn === 2 && heightChanges) {
         const current = await owner.dm.evaluate(() => {
           const list = document.querySelector('#backlog-messages')!;
-          return { height: list.scrollHeight, nextTop: list.scrollHeight - list.clientHeight - Math.floor(list.clientHeight * 0.8) };
+          return {height:list.scrollHeight,step:Math.floor(list.clientHeight*0.8)};
         });
-        expect(progress().sweep).toMatchObject({ phase: restoredOld ? 'PROBE_MIN' : 'MIN', height: current.height, top: restoredOld ? 0 : current.nextTop });
+        const checkpoint=progress().sweep!;
+        expect(checkpoint).toMatchObject({phase:restoredOld?'PROBE_MIN':'MIN',height:current.height,anchor:{height:current.height}});
+        expect(checkpoint.anchor!.ids.length).toBeGreaterThan(0);
+        expect(checkpoint.top).toBe(restoredOld?0:Math.max(0,checkpoint.anchor!.top-current.step));
         expect(lastRead()).toBe(0);
       }
       if (lastRead() > 0) {

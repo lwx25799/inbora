@@ -18,9 +18,11 @@ const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).def
   pending: z.array(z.object({aweme_id:z.string(),create_time:z.number().nullable().optional(),author:z.object({uid:z.string(),sec_uid:z.string()})})).default([])});
 const dmSweepSchema=z.object({peer:z.object({uid:z.string().nullable(),secUid:z.string(),conversationId:z.string(),title:z.string()}),
   phase:z.enum(['MIN','MAX','PROBE_MIN','PROBE_MAX']),top:z.number().finite(),height:z.number().nonnegative(),signature:z.string(),
-  edge:z.number().int().nonnegative(),legHasNew:z.boolean(),minimumOld:z.boolean().default(false)});
+  edge:z.number().int().nonnegative(),legHasNew:z.boolean(),minimumOld:z.boolean().default(false),
+  anchor:z.object({top:z.number().finite(),height:z.number().nonnegative(),ids:z.array(z.string().min(1)).min(1).max(100)}).optional()});
 const dmCursorSchema=z.object({deferred:z.array(z.object({id:z.string().min(1),until:z.number().int().nonnegative(),code:z.string()})).default([]),
-  sweep:dmSweepSchema.optional()});
+  sweep:dmSweepSchema.optional(),parked:z.array(dmSweepSchema).default([]),recent:z.array(z.string().min(1)).default([]),
+  burst:z.number().int().nonnegative().default(0)});
 type DmCursor=z.infer<typeof dmCursorSchema>;
 type DmSweep=z.infer<typeof dmSweepSchema>;
 const objectRetryMs=120_000;
@@ -113,7 +115,13 @@ export class InboxCollector {
     }[];
     // Retain failed attempts after cooldown: an old unreadable row must not regain priority over never-attempted peers.
     const attempts=new Map(cursor.deferred.map(item=>[item.id,item.until-objectRetryMs]));
-    candidates.sort((a,b)=>Math.max(a.last_read,attempts.get(a.id)??0)-Math.max(b.last_read,attempts.get(b.id)??0));
+    const known=new Set(cursor.recent);
+    const discovered=candidates.filter(candidate=>!known.has(candidate.id)).sort((a,b)=>
+      Math.max(a.last_read,attempts.get(a.id)??0)-Math.max(b.last_read,attempts.get(b.id)??0));
+    // Newly discovered peers join the persistent rotation rather than overtaking every unfinished peer forever.
+    cursor.recent.push(...discovered.map(candidate=>candidate.id));
+    const order=new Map(cursor.recent.map((id,index)=>[id,index]));
+    candidates.sort((a,b)=>order.get(a.id)!-order.get(b.id)!);
     const deferred=new Set(cursor.deferred.filter(item=>item.until>this.data.now()).map(item=>item.id));
     const next=candidates.find(candidate=>!deferred.has(candidate.id));
     if(!next){await this.advanceDm(reader,signal);return;}
@@ -128,9 +136,11 @@ export class InboxCollector {
     });
     const hasNew=batch.events.some(event=>{const at=Date.parse(event.occurredAt??'');return Number.isFinite(at)&&at>=boundary;});
     const signature=digest(batch.events.map(event=>[event.platformEventId,event.occurredAt]).sort());
+    const ids=batch.events.map(event=>event.platformEventId).filter((id):id is string=>id!==null);
+    const anchor=ids.length?{top:viewport.top,height:viewport.height,ids}:undefined;
     // An accurate native chat may reopen at a saved historical position, so an old first window proves neither end.
     if(!prior&&allOld)return {peer,phase:'PROBE_MIN',top:viewport.minimum,height:viewport.height,signature,
-      edge:0,legHasNew:false,minimumOld:false};
+      edge:0,legHasNew:false,minimumOld:false,anchor};
     let phase=prior?.phase??'MIN',legHasNew=(prior?.legHasNew??false)||hasNew,minimumOld=prior?.minimumOld??false;
     const atEdge=Math.abs(viewport.top-(phase==='MIN'||phase==='PROBE_MIN'?viewport.minimum:viewport.maximum))<=1;
     let edge=atEdge?(prior?.height===viewport.height&&prior.signature===signature?prior.edge+1:1):0;
@@ -149,28 +159,72 @@ export class InboxCollector {
     const step=Math.max(1,Math.floor(viewport.viewport*0.8));
     const top=phase==='PROBE_MIN'?viewport.minimum:phase==='PROBE_MAX'?viewport.maximum:
       Math.max(viewport.minimum,Math.min(viewport.maximum,viewport.top+(phase==='MIN'?-step:step)));
-    return {peer,phase,top,height:viewport.height,signature,edge,legHasNew,minimumOld};
+    return {peer,phase,top,height:viewport.height,signature,edge,legHasNew,minimumOld,anchor};
+  }
+  private async resumeDm(reader:ObservedReader,peer:DiscoveredPeer,active:DmSweep,messages:ObservationBatch,signal:AbortSignal):Promise<ObservationBatch> {
+    const anchor=active.anchor!;
+    const matches=(batch:ObservationBatch)=>batch.events.some(event=>event.platformEventId!==null&&anchor.ids.includes(event.platformEventId));
+    // Preserve new arrivals before leaving a chat that reopened at its latest window.
+    await this.persist('dm',peer.conversationId,messages,signal);
+    let aligned=messages;
+    const initial=messages.dmViewport;requireSafe(initial,'OBSERVATION_DM_SCROLL_UNAVAILABLE');
+    const delta=initial.height-anchor.height,direction=initial.minimum<0?-1:1;
+    const candidates=[...new Set([anchor.top,anchor.top+direction*delta].map(top=>
+      Math.max(initial.minimum,Math.min(initial.maximum,top))))];
+    let best:ObservationBatch|undefined,bestScore=0;
+    for(const top of candidates) {
+      this.check('dm',signal);
+      // Sticky or nonvirtual lists can expose the same IDs at many offsets: restore geometry before accepting the ID proof.
+      if(!aligned.dmViewport||Math.abs(aligned.dmViewport.top-top)>1) {
+        aligned=await reader.dmWindow(peer,top);
+        await this.persist('dm',peer.conversationId,aligned,signal);
+      }
+      const score=aligned.events.filter(event=>event.platformEventId!==null&&anchor.ids.includes(event.platformEventId)).length;
+      if(score>bestScore){best=aligned;bestScore=score;}
+      if(score===anchor.ids.length)break;
+    }
+    requireSafe(best&&matches(best),'OBSERVATION_DM_ANCHOR_NOT_FOUND');
+    aligned=best;
+    const viewport=aligned.dmViewport;requireSafe(viewport,'OBSERVATION_DM_SCROLL_UNAVAILABLE');
+    const step=Math.max(1,Math.floor(viewport.viewport*0.8));
+    const top=active.phase==='PROBE_MIN'?viewport.minimum:active.phase==='PROBE_MAX'?viewport.maximum:
+      Math.max(viewport.minimum,Math.min(viewport.maximum,viewport.top+(active.phase==='MIN'?-step:step)));
+    this.check('dm',signal);
+    return reader.dmWindow(peer,top);
   }
   private async dm(signal:AbortSignal):Promise<void> {
     const reader=new ObservedReader(this.owner.dm,this.mapping);
     const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
-    const active=cursor.sweep&&!cursor.deferred.some(item=>item.id===cursor.sweep!.peer.conversationId&&item.until>this.data.now())?cursor.sweep:undefined;
+    const park=(sweep:DmSweep)=>{cursor.parked=cursor.parked.filter(item=>item.peer.conversationId!==sweep.peer.conversationId);cursor.parked.push(sweep);};
+    let active=cursor.sweep&&cursor.burst<2&&!cursor.deferred.some(item=>item.id===cursor.sweep!.peer.conversationId&&item.until>this.data.now())?cursor.sweep:undefined;
     let peer:DiscoveredPeer|undefined;
+    if(!active) {
+      if(cursor.sweep)park(cursor.sweep);
+      delete cursor.sweep;cursor.burst=0;
+      peer=await this.dmPeer(reader,cursor,signal);
+      if(!peer)return;
+      active=cursor.parked.find(item=>item.peer.conversationId===peer!.conversationId);
+      cursor.parked=cursor.parked.filter(item=>item.peer.conversationId!==peer!.conversationId);
+    }
     if(active) {
       const current=this.data.store.db.prepare('SELECT uid,sec_uid,title FROM discovered_conversations WHERE own_id=? AND id=?')
         .get(this.mapping.self.uid,active.peer.conversationId) as {uid:string|null;sec_uid:string;title:string}|undefined;
       requireSafe(current&&current.sec_uid===active.peer.secUid&&(active.peer.uid===null||current.uid===active.peer.uid),'OBSERVATION_CONVERSATION_CHANGED');
       peer={...active.peer,uid:current.uid,title:current.title};
-    } else peer=await this.dmPeer(reader,cursor,signal);
+    }
     if(!peer)return;
+    const visited=()=>{cursor.recent=cursor.recent.filter(id=>id!==peer!.conversationId);cursor.recent.push(peer!.conversationId);};
     let nextSweep:DmSweep|undefined;
     try{
       let messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer));
       this.check('dm',signal);
       // A changed virtual height invalidates a raw offset. Rescan both ends from the current window instead.
       let prior=active&&messages.dmViewport?.height===active.height?active:undefined;
-      if(prior&&Math.abs(messages.dmViewport!.top-prior.top)>1) {
+      if(active?.anchor) {
+        messages=await this.dmStage('THREAD',()=>this.resumeDm(reader,peer,active!,messages,signal));
+        prior=messages.dmViewport?.height===active.height?active:{...active,edge:0,signature:'',minimumOld:false};
+      } else if(prior&&Math.abs(messages.dmViewport!.top-prior.top)>1) {
         const top=prior.top;
         messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer,top));
         if(messages.dmViewport?.height!==prior.height)prior=undefined;
@@ -192,6 +246,8 @@ export class InboxCollector {
         this.check('dm',signal);
         cursor.deferred=cursor.deferred.filter(item=>item.id!==peer.conversationId);
         cursor.deferred.push({id:peer.conversationId,until:this.data.now()+objectRetryMs,code});
+        if(active)cursor.sweep=active;
+        cursor.burst=2;visited();
         this.data.store.db.transaction(()=>{
           this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
           this.data.store.audit('DM_READ_DEFERRED',digest(peer.conversationId),{threadReadFailed:true});
@@ -202,14 +258,16 @@ export class InboxCollector {
       throw error;
     }
     cursor.deferred=cursor.deferred.filter(item=>item.id!==peer.conversationId);
-    // A cooled-down failure may yield its single continuation slot to another readable conversation.
-    if(nextSweep)cursor.sweep=nextSweep;
-    else if(cursor.sweep?.peer.conversationId===peer.conversationId)delete cursor.sweep;
+    visited();
+    // Height/phase resets cannot reset the persisted two-window quantum or erase another peer's checkpoint.
+    const yieldPeer=!!nextSweep&&++cursor.burst>=2;
+    if(nextSweep&&!yieldPeer)cursor.sweep=nextSweep;
+    else {if(nextSweep)park(nextSweep);delete cursor.sweep;cursor.burst=0;}
     this.data.store.db.transaction(()=>{
       if(!nextSweep)this.data.store.db.prepare('UPDATE discovered_conversations SET last_read=? WHERE id=?').run(this.data.now(),peer.conversationId);
       this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
     }).immediate();
-    if(nextSweep)return;
+    if(nextSweep&&!yieldPeer)return;
     this.check('dm',signal);
     await this.advanceDm(reader,signal);
   }
