@@ -55,6 +55,9 @@ try {
   });
   const emoji=await owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-emoji'});
   assert.equal(emoji.events[0].text,'root fixture input[赞]');assert.equal(emoji.events[0].observationIssue,undefined);
+  const diagnostic=await new ObservedReader(owner.notification,config).diagnostic('comments');
+  assert.equal(diagnostic.source,'comments');assert.ok(diagnostic.samples.length>0);
+  assert.ok(!JSON.stringify(diagnostic).includes('root fixture input'));
   await owner.notification.locator('.body img').evaluate(node=>node.removeAttribute('alt'));
   const unverified=await owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-review'});
   assert.equal(unverified.events[0].observationIssue,'COMMENT_TEXT_UNVERIFIED');

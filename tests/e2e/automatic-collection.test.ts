@@ -9,6 +9,7 @@ import { migrateAutomation } from "../../src/storage/automation-migration.js";
 import { CollectionScheduler } from "../../src/app/collection-scheduler.js";
 import { InboxCollector } from "../../src/app/inbox-collector.js";
 import { Blocked } from "../../src/core/contracts.js";
+import { readdir,readFile } from 'node:fs/promises';
 import { database, privateTemp } from "../helpers.js";
 import { fixtureServer } from "../fixtures/site.js";
 import { mountObserved, mountDmReply, observedMapping } from "../fixtures/observed-site.js";
@@ -85,6 +86,11 @@ test('one unreadable conversation yields to another native peer across collector
     const mapping=observedMapping(server.origin),signal=new AbortController().signal;
     collector=new InboxCollector(owner,mapping,data,root,'headless');
     await expect(collector.collect('dm',signal)).rejects.toThrow('OBSERVATION_DM_CHAT_NOT_READY');
+    const diagnostics=(await readdir(join(root,'evidence'))).filter(name=>name.startsWith('collection-read-'));
+    expect(diagnostics).toHaveLength(1);
+    const diagnostic=JSON.parse(await readFile(join(root,'evidence',diagnostics[0]!),'utf8'));
+    expect(diagnostic).toMatchObject({code:'OBSERVATION_DM_CHAT_NOT_READY',report:{source:'dm',visibleContainers:1,chatVisible:false}});
+    expect(JSON.stringify(diagnostic)).not.toContain('a-unavailable');
     expect(store.db.prepare("SELECT detail_redacted FROM audit_events WHERE event_type='DM_READ_DEFERRED'").get())
       .toEqual({detail_redacted:'{"threadReadFailed":true}'});
     const saved=store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};

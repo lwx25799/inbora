@@ -4,13 +4,19 @@ import type { ObservationMapping } from '../config/site-mapping.js';
 import { eventSchema, requireSafe, type InboundEvent } from '../core/contracts.js';
 
 export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string }
-interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll'; index: number;
-  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number }
-type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'>;
+interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'diagnostic'; index: number;
+  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; diagnosticSource?:'dm'|'comments' }
+type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'>;
+export interface CollectionReadDiagnostic {
+  source:'dm'|'comments';containers:number;visibleContainers:number;rows:number;visibleRows:number;roots:number;windowRoots:number;
+  viewportHeight:number;containerTop:number;containerBottom:number;scrollTop:number;chatVisible:boolean;
+  samples:{visible:boolean;inWindow:boolean;hasBox:boolean;displayContents:boolean;top:number;bottom:number;width:number;height:number;bodies:number;visibleBodies:number}[];
+}
 export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; unsupported: number; loaded: number;
   conversation?: { rowIndex: number | null; hasList: boolean };
   peers?: DiscoveredPeer[];
   scroll?:{top:number;height:number;viewport:number;atEnd:boolean};
+  diagnostic?:CollectionReadDiagnostic;
   bindings?: {targetKey: string; uid: string; secUid: string; title: string; conversationId: string | null}[] }
 
 /** Fixed paths in the currently rendered, authorized components; never calls website functions or getters. */
@@ -133,6 +139,29 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   const events: InboundEvent[] = []; let unsupported = 0, loaded = 0;
   const bindings: NonNullable<ObservationBatch['bindings']> = [];
   if (channel === 'identity') return { events,evidenceId,unsupported,loaded };
+  if(channel==='diagnostic') {
+    const comments=input.diagnosticSource==='comments';
+    if(comments){const work=m.works[index];dom.check(work&&location.href.split('?')[0]===work.url.split('?')[0],'OBSERVATION_WORK_CHANGED');}
+    const containers=Array.from(document.querySelectorAll(comments?s.commentList:s.dmPanel)),visible=containers.filter(dom.visible);
+    const container=visible.length===1?visible[0]:undefined,box=container?.getBoundingClientRect();
+    const rows=container?Array.from(container.querySelectorAll(comments?s.commentRows:s.conversationRows)):[];
+    const roots=rows.slice(0,250).filter(row=>!row.parentElement?.closest(comments?s.commentRows:s.conversationRows));
+    const probe={
+      inWindow(row:Element):boolean {const r=row.getBoundingClientRect();return r.bottom>Math.max(0,box?.top??0)&&r.top<Math.min(innerHeight,box?.bottom??innerHeight);},
+      number(value:number):number{return Math.max(-10_000_000,Math.min(10_000_000,Math.round(value)));},
+      sample(row:Element):CollectionReadDiagnostic['samples'][number]{
+        const r=row.getBoundingClientRect(),bodies=comments?Array.from(row.querySelectorAll(s.commentText)).filter(n=>n.closest(s.commentRows)===row):[];
+        return {visible:dom.visible(row),inWindow:probe.inWindow(row),hasBox:row.getClientRects().length>0,
+          displayContents:getComputedStyle(row).display==='contents',top:probe.number(r.top),bottom:probe.number(r.bottom),width:probe.number(r.width),height:probe.number(r.height),
+          bodies:bodies.length,visibleBodies:bodies.filter(dom.visible).length};
+      },
+    };
+    const diagnostic:CollectionReadDiagnostic={source:comments?'comments':'dm',containers:containers.length,visibleContainers:visible.length,
+      rows:rows.length,visibleRows:rows.slice(0,250).filter(dom.visible).length,roots:roots.length,windowRoots:roots.filter(probe.inWindow).length,
+      viewportHeight:innerHeight,containerTop:probe.number(box?.top??0),containerBottom:probe.number(box?.bottom??0),scrollTop:container?.scrollTop??0,
+      chatVisible:!comments&&Array.from(document.querySelectorAll(s.chat)).some(dom.visible),samples:roots.slice(0,6).map(probe.sample)};
+    return {events,evidenceId,unsupported,loaded,diagnostic};
+  }
   if(channel==='navigate') {
     const url=new URL(input.navigationUrl!);
     dom.check(url.origin===m.origin&&!url.username&&!url.password&&!url.hash&&
@@ -320,6 +349,16 @@ export class ObservedReader {
       await new Promise(resolve=>setTimeout(resolve,50));
     }
   }
+  private async transition(code:string,action:()=>Promise<void>):Promise<void> {
+    try{await action();}catch(error){
+      if(error instanceof Error&&error.name==='TimeoutError')requireSafe(false,code);
+      throw error;
+    }
+  }
+  async diagnostic(source:'dm'|'comments',index=0):Promise<CollectionReadDiagnostic> {
+    const batch=await this.capture('diagnostic',index,{diagnosticSource:source});
+    requireSafe(batch.diagnostic,'OBSERVATION_DIAGNOSTIC_UNAVAILABLE');return batch.diagnostic;
+  }
   async guard(): Promise<void> {
     await this.page.waitForFunction(({selector,depth})=>{
       const nodes=document.querySelectorAll(selector); if(nodes.length!==1)return false;
@@ -340,8 +379,8 @@ export class ObservedReader {
     const s = this.mapping.selectors, peer = discoveredPeer??this.mapping.peers[index]; requireSafe(peer,'OBSERVATION_PEER_REQUIRED');
     const options:CaptureOptions=discoveredPeer?{peer:discoveredPeer}:{};
     await this.guard();
-    if (!await this.page.locator(s.dmPanel).isVisible()) await this.page.locator(s.dmEntry).click();
-    await this.page.locator(s.dmPanel).waitFor({state:'visible'});
+    if (!await this.page.locator(s.dmPanel).isVisible()) await this.transition('OBSERVATION_DM_ENTRY_DOM_NOT_READY',()=>this.page.locator(s.dmEntry).click());
+    await this.transition('OBSERVATION_DM_PANEL_DOM_NOT_READY',()=>this.page.locator(s.dmPanel).waitFor({state:'visible'}));
     const chat = this.page.locator(s.chat);
     if (await chat.isVisible()) {
       try { return await this.ready('dm',index,options); } catch (error) {
@@ -349,7 +388,7 @@ export class ObservedReader {
         // A different visible chat must close normally before selecting another permitted row.
         if(discoveredPeer)await this.capture('back',index);
         else await this.page.locator(s.chatBack).click();
-        await chat.waitFor({state:'hidden'});
+        await this.transition('OBSERVATION_DM_BACK_DOM_NOT_READY',()=>chat.waitFor({state:'hidden'}));
       }
     }
     const deadline=Date.now()+12000;
@@ -372,8 +411,13 @@ export class ObservedReader {
   async conversations(scroll?: 'start'|'next'):Promise<ObservationBatch> {
     await this.guard();
     const s=this.mapping.selectors;
-    if(!await this.page.locator(s.dmPanel).isVisible())await this.page.locator(s.dmEntry).click();
-    if(await this.page.locator(s.chat).isVisible())await this.capture('back',0);
+    if(!await this.page.locator(s.dmPanel).isVisible())await this.transition('OBSERVATION_DM_ENTRY_DOM_NOT_READY',()=>this.page.locator(s.dmEntry).click());
+    await this.transition('OBSERVATION_DM_PANEL_DOM_NOT_READY',()=>this.page.locator(s.dmPanel).waitFor({state:'visible'}));
+    const chat=this.page.locator(s.chat);
+    if(await chat.isVisible()){
+      await this.capture('back',0);
+      await this.transition('OBSERVATION_DM_BACK_DOM_NOT_READY',()=>chat.waitFor({state:'hidden'}));
+    }
     return this.ready('conversations',0,scroll?{scroll}:{});
   }
   async navigate(url:string):Promise<void> {

@@ -13,13 +13,16 @@ import type { ReplyPolicy } from "../../src/app/automation-contracts.js";
 
 class AutoFixtureBrowser extends BrowserService {
   private queue=new AccountActor();clicks=0;
+  beforePrepare:()=>Promise<void>=async()=>{};
+  afterClick:()=>Promise<void>=async()=>{};
+  afterIdentity:()=>void=()=>{};
   wrongIdentity=false;
   override get actor(){return this.queue;}
   override identity(){return{identityDigest:digest(this.wrongIdentity?'wrong-account':'own-1'),mappingDigest:'synthetic',browserVersion:'1.0.0.0',browserMode:'headed' as const};}
-  override async refreshIdentity(){return this.identity();}
+  override async refreshIdentity(){this.afterIdentity();return this.identity();}
   override async close(){}
-  override async adapter(e:InboundEvent){let text='';return{dispose:()=>{},adapter:{inspect:async()=>snapshot(e),prepare:async(_e:InboundEvent,t:string)=>{text=t;},
-    verifyPrepared:async()=>snapshot(e),baseline:async()=>[],clickOnce:async()=>{this.clicks++;await new Promise(r=>setTimeout(r,5));},
+  override async adapter(e:InboundEvent){let text='';return{dispose:()=>{},adapter:{inspect:async()=>snapshot(e),prepare:async(_e:InboundEvent,t:string)=>{await this.beforePrepare();text=t;},
+    verifyPrepared:async()=>snapshot(e),baseline:async()=>[],clickOnce:async()=>{this.clicks++;await this.afterClick();await new Promise(r=>setTimeout(r,5));},
     readback:async()=>({id:randomUUID(),ownId:'own-1',targetKey:targetKey(e),text,pending:false,sentAt:new Date().toISOString()}),
   }};}
 }
@@ -45,6 +48,109 @@ test('both channels automatically generate, backend approve, single submit and c
     expect(f.store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='AUTO_POLICY_APPROVED'").get()).toEqual({n:2});
     expect(f.store.db.prepare("SELECT count(*) AS n FROM grant_reservations WHERE kind='SEND'").get()).toEqual({n:2});
     expect(f.store.db.prepare("SELECT origin FROM draft_revisions").all()).toEqual([{origin:'AUTO_POLICY'},{origin:'AUTO_POLICY'}]);
+  }finally{await f.close();}
+});
+
+test('one explicit policy activation resumes ordinary send pause and authorizes both channels without a separate model grant',async()=>{
+  const f=await setup();try{
+    await f.service.dispatch(f.token,{command:'pause',eventId:null});
+    f.store.db.prepare("UPDATE budgets SET used=CASE kind WHEN 'MODEL' THEN 1 ELSE 9 END").run();
+    const result=await f.service.dispatch(f.token,{command:'enableReplyPolicy',policy,confirmed:true});
+    expect(result).toMatchObject({paused:false,configuredMode:'LIMITED_AUTO',automation:{modelGrant:null,replyPolicy:{scope:policy}}});
+    await f.service.runAutomaticReply();await f.service.runAutomaticReply();await f.service.runAutomaticReply();
+    expect(f.models()).toBe(2);expect(f.browser.clicks).toBe(2);
+    expect(f.store.db.prepare('SELECT kind,used FROM budgets ORDER BY kind').all()).toEqual([{kind:'MODEL',used:3},{kind:'SEND',used:11}]);
+    expect(f.store.events().map(e=>e.status)).toEqual(['CONFIRMED','CONFIRMED']);
+  }finally{await f.close();}
+});
+
+test('automatic reply switch preserves the policy and remaining budget across off, restart and on',async()=>{
+  const f=await setup();let restarted:ClientService|undefined;
+  try{
+    const before=(await f.service.dispatch(f.token,{command:'getStatus'}) as {automation:{replyPolicy:{version:number}}}).automation.replyPolicy.version;
+    await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:false});await f.service.runAutomaticReply();
+    expect(f.models()).toBe(0);expect(f.browser.clicks).toBe(0);expect(f.service.authority.paused()).toBe(false);
+    await f.service.close();restarted=new ClientService(f.store,f.browser);await restarted.loadSettings();const token=restarted.authority.issueSession();
+    expect(await restarted.dispatch(token,{command:'getStatus'})).toMatchObject({configuredMode:'MANUAL',paused:false,automation:{replyPolicy:{version:before}}});
+    expect(await restarted.dispatch(token,{command:'setAutomaticReply',enabled:true})).toMatchObject({configuredMode:'LIMITED_AUTO',automation:{replyPolicy:{version:before}}});
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM automation_grants').get()).toEqual({n:1});
+    expect(f.store.db.prepare('SELECT kind,used FROM budgets ORDER BY kind').all()).toEqual([{kind:'MODEL',used:0},{kind:'SEND',used:0}]);
+  }finally{await restarted?.close();await f.close();}
+});
+
+test('automatic reply switch cancels a late model even when the same policy is immediately switched on again',async()=>{
+  let release!:()=>void;const gate=new Promise<void>(r=>{release=r;}),f=await setup(()=>gate);
+  let task:Promise<void>|undefined;
+  try{
+    task=f.service.runAutomaticReply();await expect.poll(f.models).toBe(1);
+    await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:false});
+    await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:true});release();await task;
+    expect(f.browser.clicks).toBe(0);expect(f.service.authority.draftFor(f.dm)).toBeNull();
+    expect(f.store.db.prepare("SELECT used FROM budgets WHERE kind='MODEL'").get()).toEqual({used:1});
+  }finally{release();await task?.catch(()=>{});await f.close();}
+});
+
+test('off and on at the qualification return boundary cannot reserve or call a cancelled model task',async()=>{
+  const f=await setup();let samples=0;const toggles:Promise<unknown>[]=[];
+  try{
+    f.browser.afterIdentity=()=>{
+      if(++samples===2)queueMicrotask(()=>queueMicrotask(()=>{
+        toggles.push(f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:false}));
+        toggles.push(f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:true}));
+      }));
+    };
+    await f.service.runAutomaticReply();await Promise.all(toggles);
+    expect(f.models()).toBe(0);expect(f.browser.clicks).toBe(0);
+    expect(f.store.db.prepare("SELECT used FROM budgets WHERE kind='MODEL'").get()).toEqual({used:0});
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM automation_jobs').get()).toEqual({n:0});
+    f.browser.afterIdentity=()=>{};await f.service.runAutomaticReply();
+    expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(1);
+  }finally{await Promise.allSettled(toggles);await f.close();}
+});
+
+test.each([false,true])('automatic reply switch stops an unsubmitted command but preserves a submitted readback (submitted: %s)',async submitted=>{
+  const f=await setup();let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});let entered=false;
+  let task:Promise<void>|undefined;
+  try{
+    const stop=async()=>{entered=true;await gate;};
+    if(submitted)f.browser.afterClick=stop;else f.browser.beforePrepare=stop;
+    task=f.service.runAutomaticReply();await expect.poll(()=>entered).toBe(true);
+    await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:false});
+    if(!submitted)await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:true});
+    release();await task;
+    expect(f.browser.clicks).toBe(submitted?1:0);
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:submitted?1:0});
+    if(submitted)expect(f.store.event(f.dm).status).toBe('CONFIRMED');
+  }finally{release?.();await task?.catch(()=>{});await f.close();}
+});
+
+test('policy activation preserves global emergency stop and target human pauses',async()=>{
+  const f=await setup();try{
+    const thread=await f.service.dispatch(f.token,{command:'openHumanDialog',eventId:f.dm,selectionId:randomUUID()}) as {ownership:{generation:number}};
+    await f.service.dispatch(f.token,{command:'closeHumanDialog',eventId:f.dm,generation:thread.ownership.generation});
+    await f.service.dispatch(f.token,{command:'enableReplyPolicy',policy,confirmed:true});
+    await f.service.runAutomaticReply();
+    expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(1);expect(f.store.event(f.dm).status).toBe('AWAITING_DRAFT');
+    await f.service.dispatch(f.token,{command:'emergencyStop'});
+    const before=f.store.db.prepare('SELECT * FROM automation_grants').all();
+    await expect(f.service.dispatch(f.token,{command:'enableReplyPolicy',policy,confirmed:true})).rejects.toThrow('EMERGENCY_STOPPED');
+    expect(f.store.db.prepare('SELECT * FROM automation_grants').all()).toEqual(before);
+    expect(f.service.authority.paused()).toBe(true);
+  }finally{await f.close();}
+});
+
+test('policy activation rolls back the grant and mode if account resume fails',async()=>{
+  const f=await setup();try{
+    await f.service.dispatch(f.token,{command:'pause',eventId:null});
+    await f.service.dispatch(f.token,{command:'setMode',mode:'DRAFT_ONLY'});
+    const before=f.store.db.prepare('SELECT * FROM automation_grants').all();
+    const resume=f.service.authority.pause.bind(f.service.authority);
+    f.service.authority.pause=()=>{throw new Error('fixture resume failed');};
+    try{await expect(f.service.dispatch(f.token,{command:'enableReplyPolicy',policy,confirmed:true})).rejects.toThrow('fixture resume failed');}
+    finally{f.service.authority.pause=resume;}
+    expect(f.store.db.prepare('SELECT * FROM automation_grants').all()).toEqual(before);
+    expect(f.service.authority.paused()).toBe(true);
+    expect(f.service.authority.mode()).toBe('DRAFT_ONLY');
   }finally{await f.close();}
 });
 test('late model output cannot replace a human takeover draft or submit after grant revocation',async()=>{

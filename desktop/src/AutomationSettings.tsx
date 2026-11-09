@@ -35,8 +35,11 @@ export function AutomationSettings({status,busy,act,update}:{status:Status;busy:
       <label>本次持续授权的发送次数<input type="number" min="1" max="20" value={sendLimit} onChange={e=>setSendLimit(Number(e.target.value))}/></label></div>
     <p className="hint">累计额度：{status.budgets.map(b=>`${b.kind} ${b.used}/${b.maximum}`).join(' · ')}。授权不重置累计额度。有效至撤销、额度用尽或范围实质变更；正常重启保留。</p>
     <label className="check"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/>我确认当前本人账号、所选通道、模型 {status.settings.model} 和上述额度。模型可能产生费用；启用自动回复还允许下列规则范围内外发。</label>
-    <div className="row"><button disabled={!consent||!ownId||!channels.length||!!busy} onClick={()=>void act('启用持续模型授权',async()=>{update(await request<Status>({command:'setModelGrant',scope:{ownId,channels,model:status.settings.model,modelLimit,expiresAt:null},confirmed:true}));setConsent(false);})}>仅启用模型授权</button>
-      <button disabled={!state.modelGrant||!!busy} onClick={()=>void act('撤销模型授权',async()=>update(await request<Status>({command:'setModelGrant',scope:null,confirmed:true})))}>撤销模型授权</button></div>
+    <details><summary>仅生成 AI 建议（可选）</summary>
+      <p className="hint">用于人工编辑时生成建议。下方规则自动回复已包含模型调用许可，无需先启用此项。</p>
+      <div className="row"><button disabled={!consent||!ownId||!channels.length||!!busy} onClick={()=>void act('启用持续模型授权',async()=>{update(await request<Status>({command:'setModelGrant',scope:{ownId,channels,model:status.settings.model,modelLimit,expiresAt:null},confirmed:true}));setConsent(false);})}>仅启用模型授权</button>
+        <button disabled={!state.modelGrant||!!busy} onClick={()=>void act('撤销模型授权',async()=>update(await request<Status>({command:'setModelGrant',scope:null,confirmed:true})))}>撤销模型授权</button></div>
+    </details>
     <label>允许回复的作品原生 ID（逗号或换行分隔）<textarea value={workIds} onChange={e=>setWorkIds(e.target.value)}/></label>
     <label className="check"><input type="checkbox" checked={future} onChange={e=>setFuture(e.target.checked)}/>回复策略覆盖本号运行起点后所有新视频</label>
     <label>允许回复的私信原生会话 ID<textarea value={conversations} onChange={e=>setConversations(e.target.value)}/></label>
@@ -46,13 +49,13 @@ export function AutomationSettings({status,busy,act,update}:{status:Status;busy:
     <label>自动回复规则<textarea value={instructions} onChange={e=>setInstructions(e.target.value)}/></label>
     <div className="policy-fields"><label>每日开始小时（北京时间）<input type="number" min="0" max="23" value={startHour} onChange={e=>setStartHour(Number(e.target.value))}/></label>
       <label>每日结束小时<input type="number" min="1" max="24" value={endHour} onChange={e=>setEndHour(Number(e.target.value))}/></label></div>
-    <p className="hint">人工接管、历史基线、我方消息、未知冻结和范围外任务均不自动外发。失败的模型调用不自动重试。</p>
+    <p className="hint">一次启用即允许范围内模型调用与发送，并恢复普通发送暂停。人工接管、历史基线、我方消息、未知冻结和范围外任务均不自动外发；全局急停须先显式恢复。失败的模型调用不自动重试。</p>
     <div className="row"><button className="primary" disabled={!consent||!ownId||!channels.length||!instructions.trim()||!!busy} onClick={()=>void act('启用规则自动回复',async()=>{
       const policy:ReplyPolicy={ownId,channels,model:status.settings.model,modelLimit,sendLimit,expiresAt:null,workIds:list(workIds),futureOwnWorks:future,conversationIds:list(conversations),entireInbox,containsAny:list(contains),excludesAny:list(excludes),instructions,startHour,endHour};
-      update(await request<Status>({command:'setReplyPolicy',policy,confirmed:true}));update(await request<Status>({command:'setMode',mode:'LIMITED_AUTO'}));setConsent(false);
+      update(await request<Status>({command:'enableReplyPolicy',policy,confirmed:true}));setConsent(false);
     })}>按此范围启用规则自动回复</button>
       <button disabled={!state.replyPolicy||!!busy} onClick={()=>void act('撤销自动回复策略',async()=>update(await request<Status>({command:'setReplyPolicy',policy:null,confirmed:true})))}>撤销自动回复策略</button></div>
-    <p>模型授权：{state.modelGrant?'版本 '+state.modelGrant.version:'关闭'} · 自动回复：{state.replyPolicy?'策略版本 '+state.replyPolicy.version:'关闭'}</p>
+    <p>自动回复（含模型调用）：{state.replyPolicy?'策略版本 '+state.replyPolicy.version:'关闭'} · 人工 AI 建议：{state.modelGrant?'授权版本 '+state.modelGrant.version:'关闭'}</p>
     {state.autoStopReason&&<p className="hint">自动回复等待：{reasons[state.autoStopReason]??state.autoStopReason}</p>}
   </div>;
 }

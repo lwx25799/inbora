@@ -1,6 +1,6 @@
 {
   "$schema":"https://schema.tauri.app/config/2",
-  "productName":"inbora", "version":"0.3.2", "identifier":"app.inbora.desktop",
+  "productName":"inbora", "version":"0.3.3", "identifier":"app.inbora.desktop",
   "build":{"beforeDevCommand":"pnpm --dir .. desktop:dev:web","devUrl":"http://127.0.0.1:1420",
     "beforeBuildCommand":"pnpm --dir .. desktop:prepare","frontendDist":"../../.local/desktop-web"},
   "app":{"windows":[{"label":"main","title":"inbora · 人工收件箱","width":1240,"height":800,"minWidth":900,"minHeight":640}],

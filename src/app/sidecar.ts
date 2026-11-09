@@ -80,6 +80,7 @@ async function connect(raw: unknown): Promise<unknown> {
     await service.loadSettings();
     token = service.authority.issueSession();
     service.events.on("update", (event) => output({ protocol: 1, event }));
+    service.startOnline();
     return {
       connected: true,
       runtime: root,

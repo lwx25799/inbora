@@ -1,38 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import { AutomationSettings } from './AutomationSettings';
+import { Settings } from './Settings';
+import { ReplyDetail } from './ReplyDetail';
+import { modes, time } from './presentation';
 import {
   request,
   desktopInfo,
-  closeDesktop,
   explain,
   reasons,
-  statusNames,
-  capabilityNames,
-  sourceNames,
   type Status,
   type Inbox,
   type Thread,
 } from "./api";
 
-function time(value: string | number | null | undefined) {
-  return value
-    ? new Date(value).toLocaleString("zh-CN", { hour12: false })
-    : "尚无成功记录";
-}
-const modes = {
-  OBSERVE: "只读观察",
-  DRAFT_ONLY: "仅保存草稿",
-  MANUAL: "纯人工回复",
-  AI_ASSISTED: "AI 辅助回复",
-  LIMITED_AUTO: "规则自动回复",
-};
 const syncNames={works:'评论',dm:'私信'};
 const syncStates={PENDING:'等待同步',RUNNING:'同步中',SUCCEEDED:'同步完成',FAILED:'同步失败',SKIPPED:'未继续同步',CANCELLED:'同步已停止'};
-const draftOrigins = new Map([
-  ["HUMAN_TYPED", "人工输入"],
-  ["AI_ASSISTED_APPROVED", "已引用 AI 建议"],
-  ["LEGACY", "历史草稿"],
-]);
 interface BufferDraft {
   text: string;
   version: number;
@@ -50,7 +31,7 @@ export function App() {
     "ALL" | "COMMENT_NOTIFICATION" | "DIRECT_MESSAGE"
   >("ALL");
   const [filter, setFilter] = useState<
-      "ALL" | "PENDING" | "REVIEW" | "UNCERTAIN" | "CONFIRMED"
+      "PENDING" | "CONFIRMED"
     >("PENDING"),
     [pageNumber, setPageNumber] = useState(0);
   const [inbox, setInbox] = useState<Inbox>({
@@ -192,6 +173,7 @@ export function App() {
     selected,
     status?.browser.state,
     status?.paused,
+    status?.automation?.emergencyStopped,
     status?.browser.version,
     status?.capabilities.map((c) => c.state + ":" + c.reason).join("|"),
     status?.automation?.inboxRevision,
@@ -373,14 +355,14 @@ export function App() {
   function sendDisabled() {
     if (!thread || !status) return "请选择一条任务";
     if (thread.intent)
-      return thread.intent.status === "CONFIRMED"
-        ? "此事件已有确认收据"
-        : "此事件已有发送意图，禁止重复提交";
+      return thread.replyStatus === 'REPLIED'
+        ? "这条消息已回复"
+        : "这条回复已提交，正在后台检查送达情况，请勿重复发送";
     if (thread.frozen) return reasons.TARGET_FROZEN;
-    if (status.paused) return reasons.ACCOUNT_PAUSED;
+    if (status.automation?.emergencyStopped||status.paused) return "已急停，恢复运行后可继续回复";
     if (thread.paused) return reasons.TARGET_PAUSED;
     if (!thread.strong || thread.event.status === "MANUAL_REVIEW")
-      return "目标需核对，请保留草稿";
+      return "这条消息暂时无法发送，草稿已保留，后台正在处理";
     const capability =
       status.capabilities.find(
         (c) => c.channel === thread.event.payload.channel,
@@ -393,7 +375,7 @@ export function App() {
       !thread.ownership.isMine ||
       thread.ownership.lease_expires_at <= Date.now()
     )
-      return "请先接管此目标";
+      return "正在自动准备编辑，输入内容会保留";
     if (!status.operator.permissions.includes("SEND"))
       return "当前操作员没有发送权限";
     if (!text.trim()) return "请输入回复";
@@ -417,7 +399,7 @@ export function App() {
     setDialogOpen(false);await refreshThread();
   }
   async function emergencyStop(){
-    await request({command:'emergencyStop'});setStatus(s=>s?{...s,paused:true}:s);setReview(null);
+    await request({command:'emergencyStop'});setStatus(s=>s?{...s,paused:true,automation:s.automation?{...s.automation,emergencyStopped:true}:s.automation}:s);setReview(null);
     setNotice('急停已生效；已存意图仍需回读或冻结');await refreshThread();
   }
   async function sendCurrentText(){
@@ -542,18 +524,18 @@ export function App() {
         </nav>
         <div className="runtime-status">
           <p>
-            <span className={"dot " + (status.paused ? "warn" : "")} />
-            {status.paused ? "账号已暂停" : "内核已连接"}
+            <span className={"dot " + (status.automation?.emergencyStopped ? "warn" : "")} />
+            {status.automation?.emergencyStopped ? "已急停" : status.browser.state.startsWith('OPEN') ? "账号保持连接" : "正在连接账号"}
           </p>
           <small>
             浏览器：
             {status.browser.state === "CLOSED"
-              ? "已关闭"
+              ? "正在自动连接"
               : status.browser.state === "OPEN_LAST_READ_VERIFIED"
-                ? "最近读取已核验"
+                ? "已连接"
                 : status.browser.state === "STARTING"
                   ? "正在启动"
-                  : "已打开，身份待核验"}
+                  : "等待登录或自动连接"}
           </small>
           <small>
             {status.browser.mode === "headed" ? "有头 Edge" : "无头 Edge"}{" "}
@@ -570,16 +552,6 @@ export function App() {
         </div>
         <div className="sidebar-bottom">
           <button disabled={!!busy} onClick={()=>void act('重新连接内核',reconnect)}>重新连接内核</button>
-          <button
-            className="danger"
-            onClick={() =>
-              void emergencyStop()
-                .catch((e) => setError(explain(e)))
-            }
-          >
-            全局急停
-          </button>
-          <small>已开始的提交无法撤回</small>
           <small>{version} · 受控试用</small>
         </div>
       </aside>
@@ -594,10 +566,14 @@ export function App() {
                   : "操作审计"}
             </h1>
             <span className="muted">
-              {modes[status.mode]} · {status.paused ? "已暂停" : "手动操作"}
+              {modes[status.configuredMode]} · {status.automation?.emergencyStopped ? "已急停" : "单账号持续连接"}
             </span>
           </div>
           <div className="toolbar">
+            <label className="check"><input type="checkbox" role="switch" aria-label="自动回复" checked={status.configuredMode==='LIMITED_AUTO'&&!!status.automation?.replyPolicy}
+              disabled={!!busy||!status.automation?.replyPolicy} onChange={e=>{const enabled=e.target.checked;void act('更新自动回复',async()=>setStatus(await request<Status>({command:'setAutomaticReply',enabled})));}}/>
+              自动回复：{status.configuredMode==='LIMITED_AUTO'&&status.automation?.replyPolicy?'开':'关'}</label>
+            {!status.automation?.replyPolicy&&<button onClick={()=>setPage('settings')}>设置自动回复</button>}
             <button
               disabled={!!busy||status.sync.running}
               onClick={() =>
@@ -631,6 +607,7 @@ export function App() {
             busy={busy}
             act={act}
             update={setStatus}
+            stop={()=>void emergencyStop().catch(e=>setError(explain(e)))}
           />
         ) : page === "audit" ? (
           <section className="audit scroll">
@@ -704,11 +681,8 @@ export function App() {
                     setPageNumber(0);
                   }}
                 >
-                  <option value="ALL">所有任务</option>
-                  <option value="PENDING">待处理 / 待确认</option>
-                  <option value="REVIEW">目标需核对</option>
-                  <option value="UNCERTAIN">结果待核实</option>
-                  <option value="CONFIRMED">已确认</option>
+                  <option value="PENDING">等待回复</option>
+                  <option value="CONFIRMED">已回复</option>
                 </select>
                 <small>{inbox.total} 条任务</small>
               </div>
@@ -721,7 +695,7 @@ export function App() {
                     onClick={() => choose(i.id)}
                   >
                     <div>
-                      <strong>{i.author || "身份待核对"}</strong>
+                      <strong>{i.author || "当前联系人"}</strong>
                       <span
                         className={
                           "badge " +
@@ -730,14 +704,12 @@ export function App() {
                             : "")
                         }
                       >
-                        {statusNames[i.status] ?? i.status}
+                        {i.replyStatus==='REPLIED'?'已回复':'等待回复'}
                       </span>
                     </div>
                     <p>{i.preview}</p>
                     <small>
                       {i.channel === "DIRECT_MESSAGE" ? "私信" : "评论"} ·{" "}
-                      {sourceNames[i.source]}
-                      <br />
                       {time(i.time)}
                     </small>
                   </button>
@@ -765,564 +737,36 @@ export function App() {
                 </button>
               </div>
             </section>
-            <section
-              ref={detailElement}
-              className="detail scroll"
-              aria-label="消息详情"
-            >
-              {!thread ? (
-                <div className="empty detail-empty">
-                  <span className="detail-mark">i</span>
-                  <h2>
-                    {selected ? "正在读取准确目标" : "从左侧选择一条消息"}
-                  </h2>
-                  <p>查看原文与准确目标，打开人工回复后输入并发送。</p>
-                </div>
-              ) : (
-                <>
-                  <div className="detail-heading">
-                    <div>
-                      <p className="eyebrow">
-                        {thread.event.payload.channel === "DIRECT_MESSAGE"
-                          ? "私信会话"
-                          : "作品评论"}{" "}
-                        ·{" "}
-                        {
-                          sourceNames[
-                            thread.event.payload.discovery ??
-                              (thread.event.payload.channel === "DIRECT_MESSAGE"
-                                ? "DIRECT_MESSAGE"
-                                : "NOTIFICATION")
-                          ]
-                        }
-                      </p>
-                      <h2>{thread.event.payload.actorName || "身份待核对"}</h2>
-                    </div>
-                    <span className="badge">
-                      {statusNames[thread.event.status]}
-                    </span>
-                  </div>
-                  <details className="identity" open>
-                    <summary>
-                      准确目标与身份 ·{" "}
-                      {thread.strong
-                        ? "本地字段完整，发送前仍核验网页"
-                        : "需人工核对"}
-                    </summary>
-                    <dl>
-                      <dt>本人账号</dt>
-                      <dd>{status.account?.identity ?? "未绑定"}</dd>
-                      <dt>对方账号</dt>
-                      <dd>
-                        {thread.event.payload.actorId ?? "未取得稳定标识"}
-                      </dd>
-                      {thread.event.payload.channel === "DIRECT_MESSAGE" ? (
-                        <>
-                          <dt>会话</dt>
-                          <dd>
-                            {thread.event.payload.conversationId ?? "未取得"}
-                          </dd>
-                        </>
-                      ) : (
-                        <>
-                          <dt>作品</dt>
-                          <dd>{thread.event.payload.videoId ?? "未取得"}</dd>
-                          {thread.workUrl && (
-                            <>
-                              <dt>作品链接</dt>
-                              <dd>{thread.workUrl}</dd>
-                            </>
-                          )}
-                          <dt>原父评论</dt>
-                          <dd>{thread.event.payload.commentId ?? "未取得"}</dd>
-                          <dt>回复关系</dt>
-                          <dd>只回复此父评论，不在作品下另发顶层评论</dd>
-                        </>
-                      )}
-                      <dt>原事件</dt>
-                      <dd>
-                        {thread.event.payload.platformEventId ?? "未取得"}
-                      </dd>
-                    </dl>
-                  </details>
-                  <button
-                    disabled={!!busy}
-                    onClick={() =>
-                      void act("打开准确原对象", async () => {
-                        await request({
-                          command: "openTarget",
-                          eventId: thread.event.id,
-                        });
-                        setNotice("已在专属浏览器中定位，未填写或发送");
-                      })
-                    }
-                  >
-                    在专属浏览器查看原对象
-                  </button>
-                  <section className="original">
-                    <h3>
-                      {thread.event.payload.channel === "DIRECT_MESSAGE"
-                        ? "触发此任务的私信"
-                        : "原父评论"}
-                    </h3>
-                    <p>{thread.event.payload.text}</p>
-                    <small>{time(thread.event.payload.occurredAt)}</small>
-                  </section>
-                  <details className="history">
-                    <summary>有限上下文 · {thread.history.length} 条</summary>
-                    {thread.history.map((h, i) => (
-                      <article
-                        key={i}
-                        className={h.direction === "OUTGOING" ? "outgoing" : ""}
-                      >
-                        <small>
-                          {h.direction === "OUTGOING"
-                            ? "我方已确认回复"
-                            : "入站观察"}{" "}
-                          · {time(h.occurredAt)}
-                        </small>
-                        <p>{h.text}</p>
-                      </article>
-                    ))}
-                  </details>
-                  <button className="primary" onClick={()=>void act('打开人工回复',openDialog)}>打开人工回复</button>
-                  <dialog ref={dialogElement} className="human-dialog" aria-label="人工回复对话框" onCancel={e=>{e.preventDefault();void act('保存并关闭',closeDialog);}}>
-                    <div className="dialog-heading"><h2>回复 {thread.event.payload.actorName || '当前目标'}</h2>
-                      <button className="danger" onClick={()=>void emergencyStop().catch(e=>setError(explain(e)))}>全局急停</button>
-                      <button onClick={()=>void act('保存并关闭',closeDialog)}>关闭并保留草稿</button></div>
-                    {!thread.ownership.isMine&&!thread.intent&&<button onClick={()=>void act('恢复编辑',openDialog)}>恢复编辑</button>}
-                    <p className="identity">本人：{status.account?.identity} · 对方：{thread.event.payload.actorId}<br/>
-                      {thread.event.payload.channel==='DIRECT_MESSAGE'?'会话：'+thread.event.payload.conversationId:'作品：'+thread.event.payload.videoId+' · 父评论：'+thread.event.payload.commentId}</p>
-                    <blockquote>{thread.event.payload.text}</blockquote>
-                    <details><summary>上下文 · {thread.history.length} 条</summary>{thread.history.map((h,i)=><p key={i}>{h.direction==='OUTGOING'?'我方：':'对方：'}{h.text}</p>)}</details>
-                    <p className="hint">{thread.ownership.isMine?'编辑期间自动接管、续期与保存':'此目标当前只读'}{saving?' · 正在保存':dirty?' · 等待自动保存':' · 修改已保存'}</p>
-                    {(error||notice||busy)&&<p role={error?'alert':'status'} className={error?'error':'hint'}>{error||busy||notice}</p>}
-                  <section className="editor">
-                    <div className="editor-title">
-                      <h3>回复草稿</h3>
-                      <small>
-                        版本 {thread.draft?.version ?? 0} ·{" "}
-                        {thread.draft
-                          ? draftOrigins.get(thread.draft.origin) ?? "来源待核对"
-                          : "尚未保存"}{" "}
-                        · {[...text].length}/500 字
-                      </small>
-                    </div>
-                    <textarea
-                      aria-label="人工回复草稿"
-                      value={text}
-                      readOnly={readOnly}
-                      placeholder={
-                        readOnly
-                          ? "先接管目标，开始人工编辑"
-                          : "直接输入回复，无需 Key"
-                      }
-                      onChange={(e) => {
-                        setText(e.target.value);
-                        setReview(null);
-                      }}
-                    />
-                    <div className="editor-actions">
-                      <div>
-                        <button
-                          disabled={readOnly || !!busy || !text}
-                          onClick={() => {
-                            setText("");
-                            setSuggestionId(null);
-                            setReview(null);
-                          }}
-                        >
-                          清空
-                        </button>
-                      </div>
-                      <button
-                        disabled={
-                          !!busy ||
-                          status.modelBusy ||
-                          !status.modelAuthorized ||
-                          !!thread.intent ||
-                          status.mode === "OBSERVE"
-                        }
-                        onClick={() =>
-                          void act("生成 AI 建议", async () => {
-                            await request({
-                              command: "generateSuggestion",
-                              eventId: thread.event.id,
-                              draftVersion: thread.draft?.version ?? 0,
-                            });
-                            await refreshThread();
-                            setNotice("AI 建议已到达，当前人稿保留");
-                          })
-                        }
-                      >
-                        生成 AI 建议
-                      </button>
-                    </div>
-                    {!status.keyPresent && (
-                      <p className="hint">
-                        未配置 Key，人工输入、保存与确认发送均不调用模型。
-                      </p>
-                    )}
-                  </section>
-                  {thread.suggestions.map((s) => (
-                    <section className="suggestion" key={s.id}>
-                      <h3>
-                        AI 建议{" "}
-                        <small>
-                          {s.model}
-                          {s.draft_version !== (thread.draft?.version ?? 0)
-                            ? " · 基于旧草稿版本"
-                            : ""}
-                        </small>
-                      </h3>
-                      <p>{s.text}</p>
-                      <button
-                        disabled={readOnly}
-                        onClick={() => {
-                          setText(s.text);
-                          setSuggestionId(s.id);
-                          setReview(null);
-                        }}
-                      >
-                        引用到编辑器
-                      </button>
-                      <button
-                        onClick={() =>
-                          void act("拒绝建议", async () => {
-                            await request({
-                              command: "dismissSuggestion",
-                              suggestionId: s.id,
-                            });
-                            await refreshThread();
-                          })
-                        }
-                      >
-                        拒绝建议
-                      </button>
-                    </section>
-                  ))}
-                  {thread.receipt && (
-                    <section className="receipt">
-                      <strong>{statusNames[thread.receipt.result]}</strong>
-                      <p>回读记录：{time(thread.receipt.verified_at)}</p>
-                      <small>原收据保留；异常或未知不会因刷新被解冻。</small>
-                    </section>
-                  )}
-                  {thread.verification&&<p className="receipt">{thread.verification.verified?'后续核验已确认送达，原异常与冻结保留':thread.verification.state==='REVIEW'?'后台补证结束，需要核对结果':'后台正在有界补证，无需重复发送'} · 已核验 {thread.verification.attempts} 次</p>}
-                  {thread.automationJob&&<p className="hint">自动处理：{statusNames[thread.automationJob.state]??thread.automationJob.state}{thread.automationJob.reason?' · '+(reasons[thread.automationJob.reason]??thread.automationJob.reason):''}</p>}
-                  {send && (
-                    <p role="status" className="send-state">
-                      {statusNames[send.status] ?? send.status}
-                      {send.reason
-                        ? " · " + (reasons[send.reason] ?? send.reason)
-                        : ""}
-                    </p>
-                  )}
-                    <div className="send-footer">
-                      <p className="hint">
-                        {block ||
-                          "点击发送即确认当前目标与完整回复，后台自动核验并提交一次。"}
-                      </p>
-                      <div>
-                        <small>Ctrl+Enter 也可发送当前全文</small>
-                        <button
-                          className="primary"
-                          disabled={!!block || !!busy}
-                          onClick={() => void act("发送中", sendCurrentText)}
-                        >
-                          发送
-                        </button>
-                        <button
-                          onClick={() =>
-                            void act("更新暂停", async () => {
-                              setStatus(
-                                await request<Status>({
-                                  command: thread.paused ? "resume" : "pause",
-                                  eventId: thread.event.id,
-                                }),
-                              );
-                              await refreshThread();
-                              setReview(null);
-                            })
-                          }
-                        >
-                          {thread.paused ? "恢复此目标" : "暂停此目标"}
-                        </button>
-                        {thread.intent && (
-                          <button
-                            disabled={!!busy}
-                            onClick={() =>
-                              void act("只读核验", async () => {
-                                const result = await request<{
-                                  verified: boolean;
-                                }>({
-                                  command: "reconcileUncertain",
-                                  eventId: thread.event.id,
-                                  decision: "READ_ONLY_VERIFY",
-                                });
-                                setNotice(
-                                  result.verified
-                                    ? "本次只读核验取得证明，原收据与冻结保留"
-                                    : "本次未取得完整证明，原收据与冻结保留",
-                                );
-                              })
-                            }
-                          >
-                            只读核验
-                          </button>
-                        )}
-                        {!thread.intent&&status.automation&&<button onClick={()=>void act('恢复自动处理',async()=>{const eventId=thread.event.id;await closeDialog();await request({command:'resumeAutomation',eventId});await refreshThread();})}>恢复此目标自动处理</button>}
-                      </div>
-                    </div>
-                  </dialog>
-                </>
-              )}
-            </section>
+            <ReplyDetail
+              detailElement={detailElement}
+              dialogElement={dialogElement}
+              thread={thread}
+              status={status}
+              setStatus={setStatus}
+              selected={selected}
+              busy={busy}
+              act={act}
+              setNotice={setNotice}
+              openDialog={openDialog}
+              closeDialog={closeDialog}
+              readOnly={readOnly}
+              saving={saving}
+              dirty={dirty}
+              error={error}
+              notice={notice}
+              text={text}
+              setText={setText}
+              setSuggestionId={setSuggestionId}
+              setReview={setReview}
+              refreshThread={()=>refreshThread()}
+              block={block}
+              send={send}
+              sendCurrentText={sendCurrentText}
+            />
+
           </div>
         )}
       </main>
     </div>
-  );
-}
-
-function Settings({
-  status,
-  runtime,
-  busy,
-  act,
-  update,
-}: {
-  status: Status;
-  runtime: string;
-  busy: string;
-  act: (s: string, f: () => Promise<void>) => Promise<void>;
-  update: (s: Status) => void;
-}) {
-  const [settings, setSettings] = useState(status.settings),
-    [key, setKey] = useState("");
-  const [browserMode, setBrowserMode] = useState(status.browser.mode);
-  return (
-    <section className="settings scroll">
-      {status.automation&&<AutomationSettings status={status} busy={busy} act={act} update={update}/>}
-      <div className="settings-section">
-        <h2>回复模式与运行</h2>
-        <label>
-          工作模式
-          <select
-            value={status.configuredMode}
-            onChange={(e) =>
-              void act("更新模式", async () =>
-                update(
-                  await request<Status>({
-                    command: "setMode",
-                    mode: e.target.value as Status["mode"],
-                  }),
-                ),
-              )
-            }
-          >
-            {Object.entries(modes).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <p className="hint">
-          切换模式不会开启未经核验的发送能力；新账号默认仅保存草稿。
-        </p>
-        {status.mode !== status.configuredMode && (
-          <p className="hint" role="status">
-            已选择{modes[status.configuredMode]}；当前{modes[status.mode]}。请打开专属浏览器，并查看下方通道状态。
-          </p>
-        )}
-        <label>
-          浏览器模式
-          <select
-            value={browserMode}
-            onChange={(e) =>
-              setBrowserMode(e.target.value as typeof browserMode)
-            }
-          >
-            <option value="headed">有头 Edge（扫码 / 人工验证）</option>
-            <option value="headless">无头 Edge（证据单列）</option>
-          </select>
-        </label>
-        <div className="row">
-          <button
-            disabled={!!busy}
-            onClick={() =>
-              void act("启动浏览器", async () =>
-                update(
-                  await request<Status>({
-                    command: "browser",
-                    open: true,
-                    mode: browserMode,
-                  }),
-                ),
-              )
-            }
-          >
-            打开专属浏览器
-          </button>
-          <button
-            disabled={!!busy}
-            onClick={() =>
-              void act("关闭浏览器", async () =>
-                update(
-                  await request<Status>({
-                    command: "browser",
-                    open: false,
-                    mode: browserMode,
-                  }),
-                ),
-              )
-            }
-          >
-            关闭浏览器
-          </button>
-          <button
-            onClick={() =>
-              void act("更新账号暂停", async () =>
-                update(
-                  await request<Status>({
-                    command: status.paused||status.automation?.emergencyStopped ? "resume" : "pause",
-                    eventId: null,
-                  }),
-                ),
-              )
-            }
-          >
-            {status.paused||status.automation?.emergencyStopped ? "恢复发送" : "暂停发送"}
-          </button>
-        </div>
-        <p>
-          数据目录：<code>{runtime}</code>
-        </p>
-        <button onClick={() => void closeDesktop().catch(() => {})}>
-          退出工作台并保留数据
-        </button>
-        <p className="hint">
-          网络为本机直连。登录和验证码在正常可见浏览器中由本人处理，所有网页自启动即静音。
-        </p>
-        <dl>
-          {status.capabilities.map((c) => (
-            <div key={c.channel}>
-              <dt>
-                {c.channel === "DIRECT_MESSAGE" ? "私信能力" : "评论能力"}
-              </dt>
-              <dd>
-                {capabilityNames[c.state] ?? c.state}
-                {c.reason && <> · {reasons[c.reason] ?? c.reason}</>}
-              </dd>
-            </div>
-          ))}
-        </dl>
-        <p className="hint">通道状态与 AI Key 分别生效；未配置 Key 仍可人工编辑和保存。</p>
-        <button
-          disabled={!!busy}
-          onClick={() =>
-            void act("同步通知", async () => {
-              update(
-                await request<Status>({
-                  command: "observe",
-                  source: "notifications",
-                }),
-              );
-            })
-          }
-        >
-          同步顶部通知（独立来源）
-        </button>
-      </div>
-      <div className="settings-section">
-        <h2>DeepSeek 辅助回复</h2>
-        <p>
-          手工建议与规则自动回复分别受已启用授权约束。Key 默认只留后端内存，普通配置保存保留现有 Key 与持续授权。
-        </p>
-        <label>
-          模型
-          <input
-            value={settings.model}
-            onChange={(e) =>
-              setSettings({ ...settings, model: e.target.value })
-            }
-          />
-        </label>
-        <small>官方接口：https://api.deepseek.com/chat/completions</small>
-        {(["persona", "business", "rules"] as const).map((field, i) => (
-          <label key={field}>
-            {["账号人设", "业务说明", "回复规则"][i]}
-            <textarea
-              value={settings[field]}
-              onChange={(e) =>
-                setSettings({ ...settings, [field]: e.target.value })
-              }
-            />
-          </label>
-        ))}
-        <label>
-          本次 API Key
-          <input
-            type="password"
-            value={key}
-            autoComplete="off"
-            onChange={(e) => setKey(e.target.value)}
-            placeholder={
-              status.keyPresent
-                ? "已持有 Key，留空保存可保留"
-                : "不填写也可人工回复"
-            }
-          />
-        </label>
-        <button
-          disabled={!!busy}
-          onClick={() =>
-            void act("保存 AI 配置", async () => {
-              const submitted = key;
-              setKey("");
-              update(
-                await request<Status>({
-                  command: "configureAi",
-                  settings,
-                  key: submitted,
-                }),
-              );
-            })
-          }
-        >
-          保存配置并清空 Key 输入
-        </button>
-        <p>
-          模型：{status.modelAuthorized ? "持续授权有效" : "未授权"} · Key：
-          {status.keyPresent ? status.keyStored?'当前用户 DPAPI 安全保存':'仅后端内存持有' : "未配置"}
-        </p>
-        <label className="check"><input type="checkbox" checked={!!status.keyStored} disabled={!status.keyPresent||!!busy}
-          onChange={e=>void act('更新安全保存',async()=>update(await request<Status>({command:'setKeyStorage',storage:e.target.checked?'DPAPI':'MEMORY'})))}/>
-          在本机安全保存 Key（Windows 当前用户 DPAPI，默认关闭）</label>
-        {status.keyStorageError&&<p className="error">{reasons[status.keyStorageError]??status.keyStorageError}</p>}
-        <button disabled={!status.keyPresent&&!status.keyStored&&!status.keyStorageError} onClick={()=>void act('删除 Key',async()=>update(await request<Status>({command:'setKeyStorage',storage:'DELETE'})))}>删除已保存 Key 并清除内存</button>
-        <div className="budget">
-          {status.budgets.map((b) => (
-            <p key={b.kind}>
-              {b.kind === "MODEL" ? "累计模型预占" : "累计发送意图"}{" "}
-              <strong>
-                {b.used} / {b.maximum}
-              </strong>
-            </p>
-          ))}
-          <p>
-            已记录 Token{" "}
-            <strong>
-              {status.usage.inputTokens} 输入 / {status.usage.outputTokens} 输出
-            </strong>
-          </p>
-        </div>
-        <p className="hint">
-          预算上限不代替授权。超时或失败不自动重试，未返回 usage 时不推算
-          Token。
-        </p>
-      </div>
-    </section>
   );
 }

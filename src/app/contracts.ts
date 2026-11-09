@@ -50,6 +50,8 @@ export const commandSchema = z.discriminatedUnion("command", [
   z.object({command:z.literal("configureCollection"),settings:collectionSchema}).strict(),
   z.object({command:z.literal("setModelGrant"),scope:modelGrantSchema.nullable(),confirmed:z.literal(true)}).strict(),
   z.object({command:z.literal("setReplyPolicy"),policy:replyPolicySchema.nullable(),confirmed:z.literal(true)}).strict(),
+  z.object({command:z.literal('enableReplyPolicy'),policy:replyPolicySchema,confirmed:z.literal(true)}).strict(),
+  z.object({command:z.literal('setAutomaticReply'),enabled:z.boolean()}).strict(),
   z.object({command:z.literal("resumeAutomation"),...event}).strict(),
   z.object({command:z.literal("clearModelKey")}).strict(),
   z.object({command:z.literal('setKeyStorage'),storage:z.enum(['MEMORY','DPAPI','DELETE'])}).strict(),

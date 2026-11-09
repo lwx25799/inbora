@@ -135,6 +135,8 @@ async fn client_request(
         "configureCollection",
         "setModelGrant",
         "setReplyPolicy",
+        "enableReplyPolicy",
+        "setAutomaticReply",
         "resumeAutomation",
         "clearModelKey",
         "openHumanDialog",

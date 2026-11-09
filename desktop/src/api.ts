@@ -57,6 +57,7 @@ export interface Inbox {
   items: {
     id: string;
     status: string;
+    replyStatus: 'WAITING'|'REPLIED';
     channel: string;
     author: string | null;
     preview: string;
@@ -65,6 +66,7 @@ export interface Inbox {
   }[];
 }
 export interface Thread {
+  replyStatus: 'WAITING'|'REPLIED';
   controlledTrial: boolean;
   workUrl: string | null;
   event: StoredEvent;
@@ -186,23 +188,6 @@ export function explain(error: unknown): string {
   const text = typeof error === "string" ? error : String(error);
   return reasons[text] ?? text;
 }
-export const statusNames: Record<string, string> = {
-  PREPARING:'正在后台准备与核验',
-  AWAITING_DRAFT: "待处理",
-  AWAITING_APPROVAL: "待确认",
-  APPROVED: "已批准",
-  MANUAL_REVIEW: "目标需核对",
-  INTENT_RECORDED: "发送中",
-  CONFIRMED: "已确认",
-  UNCERTAIN: "结果待核实",
-  REJECTED: "已拒绝",
-  BASELINE: "历史基线",
-  QUEUED: "排队中",
-  PREFLIGHT: "发送前核验",
-  SENDING: "发送中",
-  FAILED_BEFORE_CLICK: "发送前失败",
-  PREVIEW: "待确认",
-};
 export const capabilityNames: Record<string, string> = {
   READ_OK: "已验证读取",
   SEND_REVIEW_ONLY: "发送待验证",

@@ -5,7 +5,7 @@ export type CollectionSource = "works" | "dm";
 /** An object-specific failure was persisted; the channel can serve a different object next turn. */
 export class DeferredObjectRead extends Blocked {}
 export const collectionStops = new Set([
-  "OBSERVATION_PAGE_BLOCKED", "OBSERVATION_ACCOUNT_CHANGED", "ACCOUNT_CHANGED", "BROWSER_CLOSED",
+  "OBSERVATION_PAGE_BLOCKED", "OBSERVATION_ACCOUNT_CHANGED", "ACCOUNT_CHANGED",
   "PLATFORM_STOP", "CHALLENGE_REQUIRED", "LOGIN_REQUIRED", "ACCOUNT_NOT_VERIFIED", "UNEXPECTED_ORIGIN",
   "OWNER_LOCKED_OR_PORT_UNAVAILABLE",
   "OWN_WORKS_ACCOUNT_CHANGED", "NATIVE_REPLY_ACCOUNT_CHANGED", "COMMENT_REPLY_ACCOUNT_CHANGED",

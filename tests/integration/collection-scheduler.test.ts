@@ -55,6 +55,14 @@ test("ordinary source failure backs off only that channel; global stop survives 
   f.data.stop(false); await f.scheduler.tick(); expect(calls).toHaveLength(3);
 });
 
+test('ordinary browser closure retains collection error and retries instead of globally stopping',async()=>{
+  let calls=0;const f=await setup(async()=>{if(++calls===1)throw new Blocked('BROWSER_CLOSED');});
+  await f.scheduler.tick();
+  expect(f.data.state().emergencyStopped).toBe(false);
+  expect(f.scheduler.status().channels).toEqual(expect.arrayContaining([expect.objectContaining({source:'works',last_error:'BROWSER_CLOSED',last_success:null})]));
+  f.advance(60_000);await f.scheduler.tick();expect(calls).toBe(2);
+});
+
 test.each([false,true])('only a persisted per-object deferral avoids whole-channel backoff (deferred: %s)',async deferred=>{
   const f=await setup(async()=>{throw deferred?new DeferredObjectRead('OBSERVATION_DOM_NOT_READY'):new Blocked('OBSERVATION_DOM_NOT_READY');});
   const before=f.data.now();await f.scheduler.tick();

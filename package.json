@@ -1,6 +1,6 @@
 {
   "name": "inbora",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "type": "module",
   "description": "Single-account, approval-gated Douyin web PoC",
@@ -26,7 +26,8 @@
     "desktop:build:web": "vite build --config desktop/vite.config.ts",
     "desktop:prepare": "pnpm build && pnpm desktop:build:web && node scripts/stage-sidecar.mjs && node scripts/rust-notices.mjs",
     "desktop:dev": "node scripts/desktop-build.mjs --dev",
-    "desktop:build": "node scripts/desktop-build.mjs"
+    "desktop:build": "node scripts/desktop-build.mjs",
+    "check:source-size": "node scripts/check-source-size.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.4",

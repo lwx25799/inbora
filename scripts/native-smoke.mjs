@@ -9,6 +9,9 @@ import { chromium } from "playwright";
 import { EventStore } from "../dist/storage/store.js";
 import { initRuntime } from "../dist/config/runtime.js";
 import { OwnerLock } from "../dist/browser/owner-lock.js";
+import { migrateClient } from '../dist/storage/client-migration.js';
+import { migrateAutomation } from '../dist/storage/automation-migration.js';
+import { AutomationStore } from '../dist/storage/automation-store.js';
 
 const executable = resolve(
   process.argv[2] ?? ".local/native-installed/inbora.exe",
@@ -51,6 +54,9 @@ initial.observe(
   "synthetic-native-only",
   "2026-11-06T00:00:02.000Z",
 );
+await migrateClient(initial,join(root,'schema3-backup.sqlite'));
+await migrateAutomation(initial,join(root,'automation-backup.sqlite'));
+const automation=new AutomationStore(initial);automation.initialize(Date.now());automation.stop(true);
 initial.close();
 
 async function launch(index) {
@@ -149,7 +155,22 @@ try {
   await run.page
     .getByRole("textbox", { name: "人工回复草稿" })
     .fill("原生客户端人工持久化验证。");
-  await dialog.getByText('编辑期间自动接管、续期与保存 · 修改已保存',{exact:true}).waitFor();
+  await dialog.getByText('修改已保存',{exact:true}).waitFor();
+  assert.deepEqual(await run.page.getByRole('combobox',{name:'任务状态'}).locator('option').allTextContents(),['等待回复','已回复']);
+  assert.equal(await run.page.getByRole('button',{name:'全局急停',exact:true}).count(),0);
+  assert.equal(await run.page.getByRole('button',{name:'只读核验',exact:true}).count(),0);
+  const nativeCommands=await run.page.evaluate(async()=>{
+    const invoke=body=>window.__TAURI_INTERNALS__.invoke('client_request',{body});
+    const errors={};
+    const policy={ownId:'native-fixture-own',channels:['DIRECT_MESSAGE'],model:'deepseek-flash',modelLimit:1,sendLimit:1,expiresAt:null,
+      workIds:[],futureOwnWorks:false,conversationIds:['native-fixture-conversation'],entireInbox:false,containsAny:['synthetic-marker'],excludesAny:[],instructions:'Synthetic contract only.',startHour:0,endHour:24};
+    try{await invoke({command:'enableReplyPolicy',policy,confirmed:true});}catch(error){errors.enable=String(error);}
+    const stopped=await invoke({command:'setAutomaticReply',enabled:false});
+    return {errors,mode:stopped.configuredMode,emergencyStopped:stopped.automation.emergencyStopped};
+  });
+  assert.equal(nativeCommands.errors.enable,'EMERGENCY_STOPPED');
+  assert.equal(nativeCommands.mode,'MANUAL');assert.equal(nativeCommands.emergencyStopped,true);
+  result.nativePolicyCommands=true;result.twoReplyBuckets=true;
   assert(
     await run.page
       .getByRole("button", { name: "发送", exact: true })
@@ -221,6 +242,7 @@ try {
   await run.page
     .getByText("模型：未授权 · Key：未配置", { exact: true })
     .waitFor();
+  await run.page.getByText('故障处理',{exact:true}).click();
   await run.page.getByRole("button", { name: "全局急停", exact: true }).click();
   await run.page
     .getByText("急停已生效；已存意图仍需回读或冻结", { exact: true })

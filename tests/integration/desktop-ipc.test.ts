@@ -6,7 +6,16 @@ import { join, resolve } from "node:path";
 import { privateTemp } from "../helpers.js";
 import Database from 'better-sqlite3';
 import {existsSync} from 'node:fs';
-import {writeFile} from 'node:fs/promises';
+import {readFile,writeFile} from 'node:fs/promises';
+
+test('native request allowlist matches the complete application command contract',async()=>{
+  const [contracts,native]=await Promise.all([readFile('src/app/contracts.ts','utf8'),readFile('desktop/src-tauri/src/main.rs','utf8')]);
+  const commands=[...contracts.matchAll(/command:\s*z\.literal\(["']([A-Za-z][A-Za-z0-9]+)["']\)/gu)].map(m=>m[1]!);
+  const allowed=native.match(/const ALLOWED:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/u)?.[1];
+  expect(commands.length).toBeGreaterThan(30);expect(commands).toContain('enableReplyPolicy');expect(allowed).toBeDefined();
+  const names=[...allowed!.matchAll(/"([A-Za-z][A-Za-z0-9]+)"/gu)].map(m=>m[1]!);
+  expect(new Set(names)).toEqual(new Set(['connect','disconnect',...commands]));
+});
 
 test("source sidecar authenticates IPC, rejects unbounded/extra fields, reconnects and exits without replay", async () => {
   const secret = randomBytes(32).toString("hex"),
