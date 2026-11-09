@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Page } from 'playwright';
 import type { DmReplyMapping } from '../config/site-mapping.js';
-import { digest, dmClockToleranceMs, eventBinding, isStrong, requireSafe, targetKey, validText,
+import { digest, dmClockToleranceMs, eventBinding, isStrong, isManualMediaCandidate, requireSafe, targetKey, validText,
   type InboundEvent, type ReplyAdapter, type SendProof, type TargetSnapshot } from '../core/contracts.js';
 import { ObservedReader } from './observed-reader.js';
 import {SubmissionResponse,type SubmissionAck} from './submission-response.js';
@@ -11,13 +11,17 @@ interface ReplyCaptureInput {
   action: 'snapshot' | 'fill' | 'arm' | 'proofs' | 'refresh'; text: string | null; token: string | null;
   before: {context:unknown[];editorText:string}|null;
   editorShape:string|null;
+  manualMedia?:boolean;
 }
-interface ReplyFrame { context: unknown[]; proofs: SendProof[]; outgoingIds: string[]; editorText: string;editorShape:string;latestId:string|null }
+interface MediaObservation {contentType:NonNullable<InboundEvent['contentType']>;nativeKind:number;witness:unknown[]}
+interface ReplyFrame { context: unknown[]; proofs: SendProof[]; outgoingIds: string[]; editorText: string;editorShape:string;latestId:string|null;media?:MediaObservation }
 
 /** Serialized without module helpers: fixed rendered paths, never calls website functions. */
 export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
   const {mapping:m,event:expected,text,token}=input, o=m.observation, s=o.selectors;
   const peer=o.peers.find(p=>p.uid===expected.actorId&&p.conversationId===expected.conversationId);
+  const manualMedia=input.manualMedia===true&&expected.observationIssue==='DM_CONTENT_UNVERIFIED'&&!!expected.contentType;
+  let sourceBudget=1_048_576;
   type Gate={token:string;submit:()=>boolean;remove:()=>void};
   const host=window as unknown as {__inboraDmReplyGate?:Gate};
   const dom={
@@ -103,7 +107,60 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       // An otherwise empty Slate editor contains a zero-width sentinel, not a user draft.
       return /^[\u200B\uFEFF]*$/.test(raw)?'':value;
     },
+    media(row:Element,parsed:unknown,exactOriginal:boolean):{contentType:MediaObservation['contentType'];witness:unknown[]} {
+      const nodes=dom.ownedMedia(row,'img,video,audio'),cards=dom.ownedMedia(row,'[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]');
+      dom.check(nodes.length<=8&&cards.length<=1&&(nodes.length>0||cards.length===1),'NATIVE_REPLY_MEDIA_NOT_READY');
+      const witness:unknown[]=[],types=new Set<string>();
+      if(cards.length){
+        const itemId=dom.data(parsed,'itemId'),kind=dom.data(parsed,'awemeType'),slides=dom.data(parsed,'is_slides');
+        dom.check(typeof itemId==='string'&&/^[1-9]\d{0,63}$/u.test(itemId),'NATIVE_REPLY_MEDIA_UNVERIFIED');
+        dom.check(kind===undefined||Number.isSafeInteger(kind),'NATIVE_REPLY_MEDIA_UNVERIFIED');
+        dom.check(slides===undefined||typeof slides==='boolean','NATIVE_REPLY_MEDIA_UNVERIFIED');
+        witness.push(['SHARED_WORK',itemId,kind??null,slides??null]);types.add('IMG');
+      }
+      for(const node of nodes){
+        if(cards[0]?.contains(node))continue;
+        dom.check(!node.closest('[role="menu"],[aria-hidden="true"],header'),'NATIVE_REPLY_MEDIA_UNVERIFIED');
+        const prototype=node instanceof HTMLImageElement?HTMLImageElement.prototype:HTMLMediaElement.prototype;
+        const current=Object.getOwnPropertyDescriptor(prototype,'currentSrc')?.get?.call(node) as string|undefined;
+        const source=current||Element.prototype.getAttribute.call(node,'src')||'';
+        sourceBudget-=source.length;dom.check(sourceBudget>=0,'NATIVE_REPLY_MEDIA_WINDOW_TOO_LARGE');
+        let safe=false;try{const url=new URL(source,location.href);safe=source.length>0&&source.length<=262144&&!url.username&&!url.password&&
+          (url.protocol==='https:'||o.environment==='fixture'&&url.protocol==='http:'&&url.origin===o.origin||
+            url.protocol==='blob:'&&url.origin===o.origin||/^data:(?:image\/(?:png|jpeg|gif|webp)|audio\/[a-z0-9.+-]+|video\/[a-z0-9.+-]+);base64,[A-Za-z0-9+/=\r\n]+$/u.test(source));}
+        catch{/* Source verification never makes a request. */}
+        dom.check(safe,'NATIVE_REPLY_MEDIA_UNVERIFIED');
+        if(exactOriginal){
+          if(node instanceof HTMLImageElement)dom.check(node.complete&&node.naturalWidth>0&&node.naturalHeight>0,'NATIVE_REPLY_MEDIA_NOT_READY');
+          else dom.check(node instanceof HTMLMediaElement&&node.readyState>=1,'NATIVE_REPLY_MEDIA_NOT_READY');
+        }
+        witness.push([node.tagName,source]);types.add(node.tagName);
+      }
+      const texts=dom.ownedMedia(row,s.messageText).filter(node=>(node.textContent??'').length>0);
+      if(texts.length){
+        dom.check(texts.length===1,'NATIVE_REPLY_MESSAGE_TEXT_CONFLICT');let remaining=2000;
+        const readable={
+          walk(node:Node):string{
+            dom.check(--remaining>=0,'NATIVE_REPLY_MEDIA_UNVERIFIED');if(node.nodeType===Node.TEXT_NODE)return node.nodeValue??'';
+            dom.check(node instanceof HTMLElement,'NATIVE_REPLY_MEDIA_UNVERIFIED');const element=node as HTMLElement;
+            if(!dom.visible(element))return'';
+            dom.check(element.closest(s.messages)===row,'NATIVE_REPLY_MESSAGE_CONFLICT');
+            if(element.tagName==='IMG'){const alt=Element.prototype.getAttribute.call(element,'alt');
+              dom.check(alt&&alt.length<=128&&!/[\u0000-\u001f\u007f]/u.test(alt),'NATIVE_REPLY_MESSAGE_TEXT_CONFLICT');return alt!;}
+            dom.check(['DIV','SPAN','P','BR','B','I','EM','STRONG'].includes(element.tagName),'NATIVE_REPLY_MEDIA_UNVERIFIED');
+            return element.tagName==='BR'?'\n':Array.from(element.childNodes).map(child=>readable.walk(child)).join('');
+          },
+        };
+        const body=readable.walk(texts[0]!);dom.check(body===dom.data(parsed,'text'),'NATIVE_REPLY_MESSAGE_TEXT_CONFLICT');witness.push(['TEXT',body]);
+      }
+      const contentType:MediaObservation['contentType']=texts.length||types.size>1?'MIXED':types.has('VIDEO')?'VIDEO':types.has('AUDIO')?'AUDIO':'IMAGE';
+      return {contentType,witness};
+    },
+    ownedMedia(row:Element,selector:string):Element[]{
+      return Array.from(row.querySelectorAll(selector)).filter(node=>node.closest(s.messages)===row&&dom.visible(node));
+    },
     capture(): ReplyFrame & {editor: Element;button: Element} {
+      sourceBudget=1_048_576;
       dom.check(peer&&expected.channel==='DIRECT_MESSAGE'&&expected.direction==='INCOMING'&&expected.kind==='DM','NATIVE_REPLY_SCOPE_REQUIRED');
       dom.check(location.origin===o.origin&&!/验证码|安全验证|访问受限/.test(document.title),'NATIVE_REPLY_PAGE_BLOCKED');
       dom.check(!Array.from(document.querySelectorAll(m.blockers)).some(dom.visible),'NATIVE_REPLY_PAGE_BLOCKED');
@@ -118,7 +175,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       const rows=Array.from(chat.querySelectorAll(s.messages)).filter(dom.visible);
       dom.check(rows.length>0&&rows.length<=100,'NATIVE_REPLY_WINDOW_UNVERIFIED');
       dom.check(rows.filter(row=>row.closest(m.latestIndexAncestor)?.getAttribute('data-index')==='0').length===1,'NATIVE_REPLY_LATEST_END_MISSING');
-      const context:unknown[]=[],proofs:SendProof[]=[],outgoingIds:string[]=[],seen=new Set<string>();let originals=0,latestId:string|null=null;
+      const context:unknown[]=[],proofs:SendProof[]=[],outgoingIds:string[]=[],seen=new Set<string>();let originals=0,latestId:string|null=null,originalMedia:MediaObservation|undefined;
       for(const row of rows) {
         const message=dom.data(dom.childProps(row),'message'),sender=dom.data(message,'sender'),id=dom.data(message,'serverId');
         dom.check(dom.data(message,'conversationId')===peer!.conversationId&&(sender===peer!.uid||sender===o.self.uid),'NATIVE_REPLY_MESSAGE_CONFLICT');
@@ -137,10 +194,17 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
         const status=dom.data(message,'serverStatus'),type=dom.data(message,'type');
         dom.check(typeof status==='number'&&Number.isFinite(status)&&typeof type==='number'&&Number.isFinite(type),'NATIVE_REPLY_MESSAGE_STATE_MISSING');
         if(input.action!=='proofs')dom.check(nativeId&&sentAt,'NATIVE_REPLY_WINDOW_UNVERIFIED');
-        context.push([nativeId,sender,body,sentAt,type,status,pending,failed]);
+        const visibleMedia=manualMedia&&Array.from(row.querySelectorAll('img,video,audio,[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]'))
+          .some(node=>node.closest(s.messages)===row&&dom.visible(node));
+        const media=visibleMedia?dom.media(row,parsed,nativeId===expected.platformEventId):null;
+        context.push([nativeId,sender,media?['DM_MEDIA',media.contentType,media.witness]:body,sentAt,type,status,pending,failed]);
         if(body!==null&&nativeId&&sentAt&&!outgoing&&type===m.textMessageType&&!pending&&!failed&&status===m.confirmedServerStatus) {
           const current={...expected,platformEventId:nativeId,actorId:sender as string,text:body,occurredAt:sentAt};
           if(JSON.stringify(dom.binding(current))===JSON.stringify(dom.binding(expected)))originals++;
+        }
+        if(media&&nativeId===expected.platformEventId&&sender===expected.actorId&&sentAt===expected.occurredAt&&!outgoing&&!pending&&!failed&&status===m.confirmedServerStatus){
+          dom.check(typeof type==='number'&&Number.isSafeInteger(type)&&type>=0&&type<=65535&&media.contentType===expected.contentType,'NATIVE_REPLY_MEDIA_CHANGED');
+          originals++;originalMedia={...media,nativeKind:type as number};
         }
         if(outgoing&&nativeId) {
           outgoingIds.push(nativeId);
@@ -159,7 +223,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       dom.check(editor instanceof HTMLElement&&editor.isContentEditable,'NATIVE_REPLY_EDITOR_UNSUPPORTED');
       dom.check(m.submission==='html-click'?button instanceof HTMLElement:button instanceof SVGElement,'NATIVE_REPLY_CONTROL_CHANGED');
       const editorText=dom.editorText(editor);
-      return{context,proofs,outgoingIds,editorText,editorShape:editor.innerHTML,editor,button,latestId};
+      return{context,proofs,outgoingIds,editorText,editorShape:editor.innerHTML,editor,button,latestId,...(originalMedia?{media:originalMedia}:{})};
     },
   };
   const state=dom.capture();
@@ -183,7 +247,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     const after=dom.capture();
     dom.check(after.editor===editor&&JSON.stringify(after.context)===context,'NATIVE_REPLY_CONTEXT_CHANGED');
     dom.check(after.editorText===text,'NATIVE_REPLY_APPROVED_TEXT_CHANGED');
-    return{context:after.context,proofs:after.proofs,outgoingIds:after.outgoingIds,editorText:after.editorText,editorShape:after.editorShape,latestId:after.latestId};
+    return{context:after.context,proofs:after.proofs,outgoingIds:after.outgoingIds,editorText:after.editorText,editorShape:after.editorShape,latestId:after.latestId,...(after.media?{media:after.media}:{})};
   }
   if(input.action==='refresh'){
     dom.check(state.editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
@@ -223,7 +287,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     gate.validate();
     window.addEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);host.__inboraDmReplyGate=gate;
   }
-  return{context:state.context,proofs:state.proofs,outgoingIds:state.outgoingIds,editorText:state.editorText,editorShape:state.editorShape,latestId:state.latestId};
+  return{context:state.context,proofs:state.proofs,outgoingIds:state.outgoingIds,editorText:state.editorText,editorShape:state.editorShape,latestId:state.latestId,...(state.media?{media:state.media}:{})};
 }
 
 /** Uses only the independently installed, calibrated DM reply mapping. */
@@ -232,24 +296,27 @@ export class ObservedDmReply implements ReplyAdapter {
   private prepared:{binding:string;text:string;editorShape:string;contextDigest:string}|null=null;
   private pendingEvent:InboundEvent|null=null;
   private readonly submission:SubmissionResponse|null;
-  constructor(readonly page:Page,readonly mapping:DmReplyMapping,private readonly receiptTimeoutMs=5000){
+  constructor(readonly page:Page,readonly mapping:DmReplyMapping,private readonly receiptTimeoutMs=5000,private readonly options:{manualMedia?:boolean}={}){
     this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;
   }
   dispose():void{this.submission?.dispose();}
   private async frame(event:InboundEvent,action:ReplyCaptureInput['action']='snapshot',text:string|null=null,token:string|null=null,
     before:ReplyCaptureInput['before']=null,editorShape:string|null=null):Promise<ReplyFrame>{
-    try{return await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape});}
+    try{return await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape,manualMedia:this.options.manualMedia===true});}
     catch(error){const code=error instanceof Error?error.message.match(/NATIVE_REPLY_[A-Z_]+/)?.[0]:null;
       if(code)requireSafe(false,code);throw error;}
   }
   private snapshot(event:InboundEvent,frame:ReplyFrame):TargetSnapshot {
+    const contextDigest=digest(frame.context);
     return{accountId:event.accountId,ownId:this.mapping.observation.self.uid,targetKey:targetKey(event),eventBinding:eventBinding(event),
-      composerKey:targetKey(event),contextDigest:digest(frame.context),mappingDigest:digest(this.mapping)};
+      composerKey:targetKey(event),contextDigest,mappingDigest:digest(this.mapping),...(frame.media?{manualObservation:{kind:'DM_MEDIA' as const,
+        channel:'DIRECT_MESSAGE' as const,eventBinding:eventBinding(event),contextDigest,contentType:frame.media.contentType,
+        nativeKind:frame.media.nativeKind,mediaDigest:digest(frame.media.witness),freshExact:true as const}}:{})};
   }
   async inspect(event:InboundEvent):Promise<TargetSnapshot>{
     this.gateToken=null;
     const o=this.mapping.observation,index=o.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
-    requireSafe(event.channel==='DIRECT_MESSAGE'&&isStrong(event)&&index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
+    requireSafe(event.channel==='DIRECT_MESSAGE'&&(isStrong(event)||this.options.manualMedia===true&&isManualMediaCandidate(event))&&index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
     await new ObservedReader(this.page,o).dm(index);
     const frame=await this.frame(event);
     requireSafe(frame.editorText===''||this.prepared?.binding===eventBinding(event)&&this.prepared.text===frame.editorText,'NATIVE_REPLY_EXISTING_DRAFT');

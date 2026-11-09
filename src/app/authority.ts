@@ -5,6 +5,7 @@ import {
   digest,
   requireSafe,
   isStrong,
+  validManualMediaProof,
   targetKey,
   validText,
   type StoredEvent,
@@ -14,6 +15,7 @@ import type { EventStore } from "../storage/store.js";
 import type { SendParams, Mode } from "./contracts.js";
 import { AutomationStore } from "../storage/automation-store.js";
 import type { Grant, ReplyPolicy } from "./automation-contracts.js";
+import {humanReplyEligibility} from './manual-reply-eligibility.js';
 
 export type Permission = "READ" | "EDIT" | "APPROVE" | "SEND" | "CONTROL";
 interface Operator {
@@ -468,11 +470,14 @@ export class WorkbenchAuthority {
           )),
       capability.reason,
     );
+    const manualMedia=!isStrong(e.payload)&&!policy&&!!commandId&&humanReplyEligibility(this.store,e).eligible&&
+      !!this.store.db.prepare('SELECT command_id FROM manual_send_inputs WHERE command_id=?').get(commandId)&&
+      this.command(commandId).operator_id===this.operator(token).id&&this.command(commandId).params_digest===digest(p);
     requireSafe(
-      isStrong(e.payload) &&
+      (isStrong(e.payload)||manualMedia) &&
         ["AWAITING_APPROVAL", ...(allowApproved ? ["APPROVED"] : [])].includes(
           e.status,
-        ),
+        )||manualMedia&&e.status==='MANUAL_REVIEW',
       "TARGET_NEEDS_REVIEW",
     );
     requireSafe(
@@ -568,10 +573,23 @@ export class WorkbenchAuthority {
       this.assertCanSend(token,params,identity,false,id);
       requireSafe(snapshot.eventBinding===this.store.event(params.eventId).binding&&snapshot.targetKey===targetKey(this.store.event(params.eventId).payload),'TARGET_CHANGED');
       this.store.db.prepare('INSERT INTO client_approvals VALUES(?,?,?,?)').run(id,params.draftId,JSON.stringify(snapshot),this.now()+60_000);
-      this.store.approve(params.draftId,snapshot,params.draftVersion,params.text);
+      this.store.approve(params.draftId,snapshot,params.draftVersion,params.text,()=>this.assertManualMediaApproval(token,id,snapshot,identity));
       this.store.db.prepare("UPDATE manual_send_commands SET status='QUEUED' WHERE command_id=?").run(id);
       this.store.audit(this.store.db.prepare('SELECT command_id FROM policy_commands WHERE command_id=?').get(id)?'AUTO_POLICY_APPROVED':'MANUAL_SEND_APPROVED',id);
     }).immediate();
+  }
+  private assertManualMediaApproval(token:string,id:string,snapshot:TargetSnapshot,identity:CapabilityIdentity|null):void {
+    const row=this.command(id),params=JSON.parse(row.params) as SendParams,event=this.store.event(params.eventId),approval=this.approval(id);
+    requireSafe(!this.store.db.prepare('SELECT command_id FROM policy_commands WHERE command_id=?').get(id)&&
+      !!this.store.db.prepare('SELECT command_id FROM manual_send_inputs WHERE command_id=?').get(id)&&row.intent_id===null&&
+      ['PREPARING','QUEUED','PREFLIGHT'].includes(row.status)&&row.operator_id===this.operator(token).id&&row.params_digest===digest(params),
+      'HUMAN_MEDIA_APPROVAL_REQUIRED');
+    this.requireOwner(token,event,params.generation);this.requireSelection(token,event.id,params.selectionId);
+    requireSafe(humanReplyEligibility(this.store,event).eligible&&this.draftFor(event.id)?.origin==='HUMAN_TYPED'&&
+      this.contextVersion(event)===params.contextVersion&&approval.expires_at>this.now()&&digest(JSON.parse(approval.snapshot))===digest(snapshot)&&
+      validManualMediaProof(event.payload,snapshot)&&identity?.identityDigest===digest(snapshot.ownId)&&
+      this.capability(event.payload.channel,identity).evidence===`readonly-contract:${digest([snapshot,identity])}`,
+      'HUMAN_MEDIA_APPROVAL_REQUIRED');
   }
   queue(
     token: string,
@@ -625,6 +643,7 @@ export class WorkbenchAuthority {
     identity: () => CapabilityIdentity | null,
   ) {
     return {
+      manualMedia:()=>this.assertManualMediaApproval(token,id,JSON.parse(this.approval(id).snapshot) as TargetSnapshot,identity()),
       check: () => {
         const row = this.command(id);
         requireSafe(
@@ -642,6 +661,8 @@ export class WorkbenchAuthority {
           true,
           id,
         );
+        const snapshot=JSON.parse(this.approval(id).snapshot) as TargetSnapshot;
+        if(snapshot.manualObservation)this.assertManualMediaApproval(token,id,snapshot,identity());
         this.store.db
           .prepare(
             "UPDATE manual_send_commands SET status='PREFLIGHT' WHERE command_id=?",

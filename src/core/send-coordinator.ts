@@ -15,7 +15,7 @@ const postIntentCodes=new Set(['NATIVE_REPLY_CLICK_BLOCKED','NATIVE_REPLY_NOT_PR
 export class SendCoordinator {
   constructor(private readonly store: EventStore, private readonly actor: AccountActor) {}
   send(draftId: string, adapter: ReplyAdapter, real: boolean,
-    authority?: { check(): void; committed(intentId: string): void }): Promise<'CONFIRMED' | 'UNCERTAIN'> {
+    authority?: { check(): void; committed(intentId: string): void;manualMedia?():void }): Promise<'CONFIRMED' | 'UNCERTAIN'> {
     return this.actor.run(async () => {
       authority?.check();
       const draft = this.store.draft(draftId);

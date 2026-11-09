@@ -70,7 +70,7 @@ test('nontext native IDs deduplicate after restart, while old history remains ba
   } finally { store.close(); }
 });
 
-test('without a Key, a media task can be opened and drafted but cannot queue a human send or reach a provider', async () => {
+test('without a Key, a media task can save the explicit human request but cannot send without fresh native proof or reach a provider', async () => {
   const store = database(), root = privateTemp('dm-media-human-');
   let calls = 0;
   const provider = new DeepSeekProvider(async () => { calls++; return new Response(JSON.stringify(response)); });
@@ -79,7 +79,8 @@ test('without a Key, a media task can be opened and drafted but cannot queue a h
     pending(store, media());
     const eventId = store.events()[0]!.id;
     await migrateClient(store, join(root, 'client.sqlite'));
-    service = new ClientService(store, new BrowserService(root), provider);
+    class NoNativeProof extends BrowserService {override async adapter():Promise<never>{throw Error('NATIVE_MEDIA_PROOF_NOT_AVAILABLE');}}
+    service = new ClientService(store, new NoNativeProof(root), provider);
     await service.loadSettings();
     const token = service.authority.issueSession(), selectionId = randomUUID();
     await service.dispatch(token, { command: 'setMode', mode: 'MANUAL' });
@@ -88,13 +89,15 @@ test('without a Key, a media task can be opened and drafted but cannot queue a h
     };
     await service.dispatch(token, { command: 'saveDraft', eventId, generation: detail.ownership.generation,
       expectedVersion: 0, text: 'Saved synthetic human draft', suggestionId: null });
-    await expect(service.dispatch(token, { command: 'sendHumanReply', commandId: randomUUID(), input: {
+    const commandId=randomUUID();
+    expect(await service.dispatch(token, { command: 'sendHumanReply', commandId, input: {
       eventId, generation: detail.ownership.generation, expectedVersion: 1, text: 'Synthetic human text',
       contextVersion: detail.contextVersion, selectionId, suggestionId: null,
-    } })).rejects.toThrow('TARGET_NEEDS_REVIEW');
-    expect(service.authority.draftFor(eventId)).toMatchObject({ text: 'Saved synthetic human draft', version: 1 });
+    } })).toMatchObject({status:'PREPARING'});
+    await service.drain();expect(await service.dispatch(token,{command:'getSendResult',commandId})).toMatchObject({status:'FAILED_BEFORE_CLICK'});
+    expect(service.authority.draftFor(eventId)).toMatchObject({ text: 'Synthetic human text', origin:'HUMAN_TYPED',version: 2 });
     expect(calls).toBe(0);
-    expect(store.db.prepare('SELECT count(*) AS n FROM manual_send_commands').get()).toEqual({ n: 0 });
+    expect(store.db.prepare('SELECT count(*) AS n FROM manual_send_commands').get()).toEqual({ n: 1 });
     expect(store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({ n: 0 });
     expect(store.db.prepare('SELECT kind,used FROM budgets ORDER BY kind').all())
       .toEqual([{ kind: 'MODEL', used: 0 }, { kind: 'SEND', used: 0 }]);

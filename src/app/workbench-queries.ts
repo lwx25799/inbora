@@ -6,6 +6,7 @@ import type { BrowserService } from './browser-service.js';
 import type { AiSettings, InboxSync, ClientCommand } from './contracts.js';
 import type { CollectionScheduler } from './collection-scheduler.js';
 import {InboxQueries,inboxGroupKey} from './inbox-queries.js';
+import {humanReplyEligibility} from './manual-reply-eligibility.js';
 
 interface ViewState {
   settings: AiSettings;
@@ -75,6 +76,7 @@ export class WorkbenchQueries {
           identity,
         ),
       strong: isStrong(e.payload),
+      humanReplyEligibility:humanReplyEligibility(this.store,e),
       replyStatus:this.replyStatus(e.id,e.status),
       paused,
       frozen,

@@ -60,6 +60,8 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
         !!busy ||
         status.modelBusy ||
         !status.modelAuthorized ||
+        !thread.strong ||
+        thread.event.status==='MANUAL_REVIEW' ||
         !!thread.intent ||
         status.mode === "OBSERVE"
       }

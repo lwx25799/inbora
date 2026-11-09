@@ -17,8 +17,8 @@ import {
   type AiSettings,
   type SendParams,
   type InboxSync,
-  humanReplySchema,
 } from "./contracts.js";
+import {HumanReplyWorkflow} from './human-reply-workflow.js';
 import { WorkbenchQueries } from "./workbench-queries.js";
 import {MessagePreviewStore} from '../storage/message-previews.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
@@ -28,7 +28,6 @@ import { DeepSeekProvider } from "../ai/deepseek.js";
 import { AutomationStore } from "../storage/automation-store.js";
 import { migrateAutomation } from "../storage/automation-migration.js";
 import { CollectionScheduler, collectionStops } from "./collection-scheduler.js";
-import type { z } from "zod";
 import { VerificationScheduler } from "./verification-scheduler.js";
 import type { Grant, ReplyPolicy } from "./automation-contracts.js";
 import { CredentialStore } from "./credentials.js";
@@ -44,6 +43,7 @@ export class ClientService {
   private readonly queries: WorkbenchQueries;
   readonly events = new EventEmitter();
   readonly authority: WorkbenchAuthority;
+  private readonly humanReplies:HumanReplyWorkflow;
   private settings: AiSettings = { ...defaultSettings };
   private key = "";
   private modelAuthorized = false;
@@ -83,6 +83,7 @@ export class ClientService {
     this.startedAt = startedAt;
     this.authority = new WorkbenchAuthority(store, now);
     this.authority.recover();
+    this.humanReplies=new HumanReplyWorkflow(store,this.authority,browser,()=>this.closing,(token,id,params)=>this.deliver(token,id,params),event=>this.emit(event),clientError);
     this.queries = new WorkbenchQueries(store,this.authority,browser);
   }
   async loadSettings(): Promise<void> {
@@ -252,8 +253,8 @@ export class ClientService {
       case 'sendHumanReply': {
         requireSafe(this.automation,'AUTOMATION_NOT_READY');
         const input={...c.input,text:c.input.text.replace(/\r\n?/gu,'\n')};
-        const fresh=this.queueHumanInput(token,c.commandId,input);
-        if(fresh)this.track(this.prepareHumanSend(token,c.commandId));
+        const fresh=this.humanReplies.queue(token,c.commandId,input);
+        if(fresh)this.track(this.humanReplies.prepare(token,c.commandId));
         return this.result(token,c.commandId);
       }
       case 'configureCollection':
@@ -635,7 +636,7 @@ export class ClientService {
           this.store.db.prepare('INSERT INTO policy_commands VALUES(?,?,?)').run(commandId,grant.version,generation);
           this.store.db.prepare("UPDATE automation_jobs SET state='PREPARING',draft_version=1,command_id=?,updated_at=? WHERE event_id=?").run(commandId,this.authority.now(),event.id);
         }).immediate();
-        await this.prepareHumanSend(token,commandId);
+        await this.humanReplies.prepare(token,commandId);
         const command=this.authority.command(commandId);
         this.store.db.prepare('UPDATE automation_jobs SET state=?,reason=?,updated_at=? WHERE event_id=?').run(command.status,command.reason,this.authority.now(),event.id);
       }finally{this.authority.revoke(token);}
@@ -648,61 +649,6 @@ export class ClientService {
       this.store.audit('AUTO_REPLY_STOPPED',event.id);
     }finally{this.modelPending.delete(event.id);this.inboxRevision++;this.emit('inbox_updated');}
   }
-  private queueHumanInput(token:string,id:string,input:z.infer<typeof humanReplySchema>):boolean {
-    this.authority.operator(token,'SEND');
-    return this.store.db.transaction(()=>{
-      const previous=this.store.db.prepare('SELECT input_digest FROM manual_send_inputs WHERE command_id=?').get(id) as {input_digest:string}|undefined;
-      if(previous){requireSafe(previous.input_digest===digest(input),'COMMAND_PARAMETERS_CONFLICT');return false;}
-      this.authority.requireSelection(token,input.eventId,input.selectionId);
-      const event=this.store.event(input.eventId);
-      this.authority.requireOwner(token,event,input.generation);
-      requireSafe(this.authority.contextVersion(event)===input.contextVersion,'CONTEXT_VERSION_CONFLICT');
-      const old=this.authority.draftFor(input.eventId);
-      requireSafe((old?.version??0)===input.expectedVersion,'DRAFT_VERSION_CONFLICT');
-      const draft=old&&old.text===input.text&&!input.suggestionId?old:this.authority.save(token,input.eventId,input.generation,input.expectedVersion,input.text,input.suggestionId);
-      const params:SendParams={eventId:input.eventId,generation:input.generation,draftId:draft.id,draftVersion:draft.version,
-        text:draft.text,contextVersion:input.contextVersion,selectionId:input.selectionId};
-      this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
-      this.store.db.prepare('INSERT INTO manual_send_commands VALUES(?,?,?,?,?,?,?,?,?)').run(id,event.id,this.authority.operator(token).id,
-        digest(params),JSON.stringify(params),'PREPARING',null,null,this.authority.now());
-      this.store.db.prepare('INSERT INTO manual_send_inputs VALUES(?,?)').run(id,digest(input));
-      this.store.audit('HUMAN_SEND_REQUESTED',id);
-      return true;
-    }).immediate();
-  }
-  private async prepareHumanSend(token:string,id:string):Promise<void> {
-    const row=this.authority.command(id),params=JSON.parse(row.params) as SendParams,event=this.store.event(params.eventId);
-    let dispose=()=>{};
-    try {
-      const handle=await this.browser.adapter(event.payload,this.store);dispose=handle.dispose;
-      await this.browser.refreshIdentity(event.payload.channel);
-      await this.browser.actor.run(async()=>{
-        requireSafe(!this.closing,'CLIENT_CLOSING');
-        requireSafe(this.authority.command(id).status==='PREPARING','COMMAND_NOT_QUEUED');
-        this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
-        const priorIdentity=digest(this.browser.identity(event.payload.channel));
-        const before=digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel));
-        const snapshot=await handle.adapter.inspect(event.payload);
-        requireSafe(!this.closing,'CLIENT_CLOSING');
-        requireSafe(this.authority.command(id).status==='PREPARING','COMMAND_NOT_QUEUED');
-        this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
-        const identity=await this.browser.refreshIdentity(event.payload.channel);
-        requireSafe(digest(identity)===priorIdentity,'CAPABILITY_CHANGED_DURING_CHECK');
-        const account=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string};
-        requireSafe(identity&&snapshot.ownId===account.own_id&&identity.identityDigest===digest(account.own_id)&&snapshot.accountId===event.payload.accountId&&
-          snapshot.eventBinding===event.binding&&snapshot.targetKey===targetKey(event.payload)&&snapshot.composerKey===snapshot.targetKey,'TARGET_CHANGED');
-        requireSafe(before===digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel)),'CAPABILITY_CHANGED_DURING_CHECK');
-        this.authority.attest(event.payload.channel,'SEND_AVAILABLE',identity,`readonly-contract:${digest(snapshot)}`);
-        this.store.audit('READ_ONLY_SEND_CONTRACT_VERIFIED',id);
-        this.authority.approvePreparedCommand(token,id,snapshot,identity);
-      });
-      dispose();dispose=()=>{};
-      await this.deliver(token,id,params);
-    }catch(error){
-      if(this.authority.command(id).intent_id===null)this.authority.finish(id,'FAILED_BEFORE_CLICK',clientError(error));
-      this.emit('send_status_updated');
-    }finally{dispose();}
-  }
   private async deliver(
     token: string,
     id: string,
@@ -711,7 +657,7 @@ export class ClientService {
     let dispose = () => {};
     try {
       const e = this.store.event(p.eventId),
-        handle = await this.browser.adapter(e.payload,this.store);
+        handle = await this.browser.adapter(e.payload,this.store,undefined,{manualMedia:!!this.store.draft(p.draftId).approval?.snapshot.manualObservation});
       dispose = handle.dispose;
       await this.browser.refreshIdentity(e.payload.channel);
       const outcome = await new SendCoordinator(

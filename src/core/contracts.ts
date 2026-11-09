@@ -66,6 +66,23 @@ export interface TargetSnapshot {
   contextDigest: string;
   composerKey: string;
   mappingDigest: string;
+  manualObservation?:ManualMediaProof;
+}
+export interface ManualMediaProof {
+  kind:'DM_MEDIA';channel:'DIRECT_MESSAGE';eventBinding:string;contextDigest:string;
+  contentType:'IMAGE'|'VIDEO'|'AUDIO'|'MIXED';nativeKind:number;mediaDigest:string;freshExact:true;
+}
+export function isManualMediaCandidate(event:InboundEvent):boolean {
+  return event.channel==='DIRECT_MESSAGE'&&event.direction==='INCOMING'&&event.kind==='DM'&&event.observationIssue==='DM_CONTENT_UNVERIFIED'&&
+    !!event.contentType&&!!event.platformEventId&&!!event.actorId&&!!event.conversationId&&!!event.occurredAt&&Number.isFinite(Date.parse(event.occurredAt));
+}
+export function validManualMediaProof(event:InboundEvent,snapshot:TargetSnapshot):boolean {
+  const proof=snapshot.manualObservation;
+  return !!proof&&isManualMediaCandidate(event)&&proof.kind==='DM_MEDIA'&&proof.channel==='DIRECT_MESSAGE'&&proof.freshExact===true&&
+    proof.eventBinding===eventBinding(event)&&snapshot.eventBinding===proof.eventBinding&&proof.contextDigest===snapshot.contextDigest&&
+    proof.contentType===event.contentType&&Number.isSafeInteger(proof.nativeKind)&&proof.nativeKind>=0&&proof.nativeKind<=65535&&
+    /^[a-f0-9]{64}$/u.test(proof.mediaDigest)&&/^[a-f0-9]{64}$/u.test(proof.contextDigest)&&
+    snapshot.accountId===event.accountId&&snapshot.targetKey===targetKey(event)&&snapshot.composerKey===snapshot.targetKey&&event.actorId!==snapshot.ownId;
 }
 export interface Draft {
   id: string; eventId: string; text: string; model: string; version: number;

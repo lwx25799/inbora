@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import { z } from 'zod';
 import {
   digest, dmClockToleranceMs, eventBinding, eventSchema, isEligible, isStrong, requireSafe, targetKey, validText,
+  validManualMediaProof,
   type Channel, type Draft, type InboundEvent, type StoredEvent, type TargetSnapshot,type SendProof,
 } from '../core/contracts.js';
 
@@ -196,13 +197,15 @@ export class EventStore {
       return this.draft(id);
     }).immediate();
   }
-  approve(id: string, snapshot: TargetSnapshot, expectedVersion: number, expectedText: string): void {
+  approve(id: string, snapshot: TargetSnapshot, expectedVersion: number, expectedText: string,manualGate?:()=>void): void {
     this.db.transaction(() => {
       const d = this.draft(id); const e = this.event(d.eventId);
-      requireSafe(d.status === 'DRAFT' && e.status === 'AWAITING_APPROVAL', 'NOT_AWAITING_APPROVAL');
+      const media=!isStrong(e.payload)&&!!manualGate&&validManualMediaProof(e.payload,snapshot);
+      if(media)manualGate!();
+      requireSafe(d.status === 'DRAFT' && (e.status === 'AWAITING_APPROVAL'||media&&e.status==='MANUAL_REVIEW'), 'NOT_AWAITING_APPROVAL');
       requireSafe(d.version === expectedVersion && d.text === expectedText, 'DRAFT_CHANGED');
       requireSafe(snapshot.accountId === e.payload.accountId && snapshot.targetKey === targetKey(e.payload) &&
-        snapshot.eventBinding === e.binding && isStrong(e.payload), 'TARGET_CHANGED');
+        snapshot.eventBinding === e.binding && (isStrong(e.payload)||media), 'TARGET_CHANGED');
       const account = this.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(e.payload.accountId) as { own_id: string };
       requireSafe(snapshot.ownId === account.own_id, 'ACCOUNT_CHANGED');
       const approval = { snapshot, textDigest: digest(d.text), version: d.version };
@@ -263,11 +266,15 @@ export class EventStore {
     requireSafe(result.changes === 1, 'BUDGET_EXHAUSTED');
   }
   recordIntent(draftId: string, snapshot: TargetSnapshot, real: boolean,
-    authority?: { check(): void; committed(intentId: string): void }): string {
+    authority?: { check(): void; committed(intentId: string): void;manualMedia?():void }): string {
     return this.db.transaction(() => {
       requireSafe(this.db.pragma('user_version', {simple:true}) !== 3 || authority, 'CLIENT_AUTHORITY_REQUIRED');
       authority?.check();
       const d = this.draft(draftId); this.assertSendable(d.eventId);
+      if(!isStrong(this.event(d.eventId).payload)){
+        requireSafe(authority?.manualMedia&&d.approval&&validManualMediaProof(this.event(d.eventId).payload,d.approval.snapshot),'HUMAN_MEDIA_APPROVAL_REQUIRED');
+        authority.manualMedia();
+      }
       requireSafe(d.status === 'APPROVED' && d.approval && d.approval.version === d.version &&
         d.approval.textDigest === digest(d.text) && digest(d.approval.snapshot) === digest(snapshot), 'APPROVAL_INVALID');
       if (real) this.consumeBudget('SEND');

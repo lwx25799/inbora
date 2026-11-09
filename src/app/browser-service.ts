@@ -168,7 +168,7 @@ export class BrowserService {
       }
     }
   }
-  async adapter(e: InboundEvent, store?:EventStore, signal?:AbortSignal): Promise<AdapterHandle> {
+  async adapter(e: InboundEvent, store?:EventStore, signal?:AbortSignal,options:{manualMedia?:boolean}={}): Promise<AdapterHandle> {
     await this.open(this.mode,signal);
     const owner = this.owner!;
     const native =
@@ -207,6 +207,7 @@ export class BrowserService {
               expanded as NonNullable<
                 Awaited<ReturnType<typeof loadDmReplyMapping>>
               >,
+              undefined,options,
             )
           : new ObservedCommentReply(
               owner.notification,
@@ -394,7 +395,12 @@ export class BrowserService {
     requireSafe(draft && intent, "INTENT_REQUIRED");
     await this.open(this.mode,options.signal);
     const owner = this.owner!;
-    const handle = await this.adapter(event.payload,store);
+    const savedApproval=store.draft(draft.id).approval;
+    const manualMedia=!!savedApproval?.snapshot.manualObservation&&
+      !!store.db.prepare(`SELECT c.command_id FROM manual_send_commands c JOIN manual_send_inputs h ON h.command_id=c.command_id
+        JOIN draft_revisions r ON r.draft_id=? AND r.version=? WHERE c.intent_id=? AND c.event_id=? AND r.origin='HUMAN_TYPED'
+        AND NOT EXISTS(SELECT 1 FROM policy_commands p WHERE p.command_id=c.command_id)`).get(draft.id,store.draft(draft.id).version,intent.id,eventId);
+    const handle = await this.adapter(event.payload,store,undefined,{manualMedia});
     try {
       const proof = await owner.actor.run(async () => {
         requireSafe(!options.signal?.aborted,'COLLECTION_CANCELLED');

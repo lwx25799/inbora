@@ -394,9 +394,11 @@ export function App() {
     if (thread.frozen) return reasons.TARGET_FROZEN;
     if (status.automation?.emergencyStopped||status.paused) return "已急停，恢复运行后可继续回复";
     if (thread.paused) return reasons.TARGET_PAUSED;
-    if (!thread.strong || thread.event.status === "MANUAL_REVIEW")
-      return thread.event.payload.observationIssue
-        ? reasons[thread.event.payload.observationIssue]??"这条消息需人工处理，草稿已保留"
+    const human=thread.humanReplyEligibility;
+    if (human?!human.eligible:!thread.strong||thread.event.status==='MANUAL_REVIEW')
+      return human?.reason
+        ? reasons[human.reason]??'这条消息暂时无法人工发送，草稿已保留'
+        : thread.event.payload.observationIssue?reasons[thread.event.payload.observationIssue]??"这条消息需人工处理，草稿已保留"
         : "这条消息暂时无法发送，草稿已保留，后台正在处理";
     const capability =
       status.capabilities.find(

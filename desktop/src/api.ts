@@ -92,6 +92,7 @@ export interface Thread {
   };
   capability: { state: string; reason: string; evidence: string | null };
   strong: boolean;
+  humanReplyEligibility?:{eligible:boolean;reason:string|null};
   paused: boolean;
   frozen: boolean;
   intent: { id: string; status: string } | null;
@@ -176,7 +177,10 @@ export const reasons: Record<string, string> = {
   OBSERVATION_COMMENT_TEXT_DOM_NOT_UNIQUE:'评论正文组件不唯一，已停止当前作品读取',
   OBSERVATION_COMMENT_TOOLTIP_DOM_NOT_UNIQUE:'评论原生编号组件不唯一，已停止当前作品读取',
   COMMENT_TEXT_UNVERIFIED:'评论正文尚未完整核验，已保留待核对；完成核验前不会调用模型或发送',
-  DM_CONTENT_UNVERIFIED:'这条私信包含图片、表情或其他未核验内容，需在专属浏览器中人工查看；不会进入模型或发送',
+  DM_CONTENT_UNVERIFIED:'内容仅供人工查看，AI不会自动处理',
+  HUMAN_MEDIA_TEXT_REQUIRED:'请直接输入人工回复，此消息不能使用已有的非人工草稿',
+  HUMAN_MEDIA_APPROVAL_REQUIRED:'本次人工回复的后台核验已失效，草稿已保留',
+  TARGET_NEEDS_REVIEW:'消息的准确目标或原生身份仍待核验，暂不能发送',
   OBSERVATION_DM_CONTENT_DOM_NOT_READY:'私信正文正在加载，后台已保留收取进度',
   DM_ADVANCE_READ_FAILED:'私信列表翻页未完成，已保留已收取记录和会话进度',
   OBSERVATION_EXISTING_HUMAN_INPUT:'网页保留了未发送输入，后台已保留草稿并停止本次切换',
