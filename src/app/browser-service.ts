@@ -280,7 +280,7 @@ export class BrowserService {
               expanded as NonNullable<
                 Awaited<ReturnType<typeof loadDmReplyMapping>>
               >,
-              undefined,options,
+              undefined,{...options,onContextChanged:({stage,...counts})=>store?.audit(`DM_CONTEXT_CHANGED_${stage}`,digest(['dm',e.conversationId,e.platformEventId]),counts)},
             )
           : new ObservedCommentReply(
               owner.notification,

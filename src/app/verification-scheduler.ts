@@ -26,6 +26,8 @@ export class VerificationScheduler {
   }
   start():void {
     if(this.timer||this.closed)return;
+    const legacy=this.data.store.db.prepare("SELECT event_id FROM send_intents WHERE status='UNCERTAIN' AND id NOT IN (SELECT intent_id FROM verification_jobs)").all() as {event_id:string}[];
+    for(const intent of legacy)this.enqueue(intent.event_id);
     this.data.store.db.prepare("UPDATE verification_jobs SET state=CASE WHEN attempts<2 THEN 'PENDING' ELSE 'REVIEW' END WHERE state='RUNNING'").run();
     this.data.store.db.prepare("UPDATE verification_jobs SET deadline=? WHERE state='PENDING' AND attempts<2 AND deadline<=?").run(this.data.now()+120_000,this.data.now());
     this.timer=setInterval(()=>void this.tick().catch(()=>{this.closed=true;clearInterval(this.timer);this.updated();}),1000);this.timer.unref();

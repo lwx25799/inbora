@@ -257,12 +257,28 @@ export class WorkbenchAuthority {
     this.operator(token, "CONTROL");
     const e = this.store.event(eventId);
     this.store.db.transaction(() => {
-      requireSafe(!this.store.db.prepare("SELECT id FROM send_intents WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')").get(targetKey(e.payload)), "TARGET_FROZEN");
+      requireSafe(!this.store.sendFrozen(e.id), "TARGET_FROZEN");
+      this.store.pause(targetKey(e.payload),false);
       const owner = this.ownership(e);
       this.writeOwner(e, null, owner.generation + 1, 0);
       this.invalidate(e);
       this.store.db.prepare("INSERT INTO automation_human_pauses VALUES(?,0) ON CONFLICT(target_key) DO UPDATE SET paused=0").run(targetKey(e.payload));
       this.store.audit("TARGET_AUTOMATION_RESUMED", digest(targetKey(e.payload)));
+    }).immediate();
+  }
+  resumeIdleAutomation():void {
+    this.store.db.transaction(()=>{
+      const seen=new Set<string>();
+      for(const event of this.store.events()){
+        const key=targetKey(event.payload);if(seen.has(key))continue;seen.add(key);
+        if(!this.store.events().some(next=>targetKey(next.payload)===key&&!this.store.sendFrozen(next.id)))continue;
+        this.store.pause(key,false);
+        const owner=this.ownership(event);
+        if(!owner.operator_id||owner.lease_expires_at<=this.now()){
+          this.writeOwner(event,null,owner.generation+1,0);this.invalidate(event);
+        }
+        this.store.db.prepare('DELETE FROM automation_human_pauses WHERE target_key=?').run(key);
+      }
     }).immediate();
   }
   draftFor(eventId: string) {
@@ -489,11 +505,7 @@ export class WorkbenchAuthority {
       "TARGET_PAUSED",
     );
     requireSafe(
-      !this.store.db
-        .prepare(
-          "SELECT id FROM send_intents WHERE target_key=? AND status IN ('UNCERTAIN','INTENT_RECORDED')",
-        )
-        .get(targetKey(e.payload)),
+      !this.store.sendFrozen(e.id),
       "TARGET_FROZEN",
     );
     requireSafe(

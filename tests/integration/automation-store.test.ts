@@ -30,6 +30,28 @@ const policy: ReplyPolicy = {
   instructions: "Answer the specified greeting briefly.", startHour: 0, endHour: 24,
 };
 
+test('a new policy cannot silently enable empty targets or revoke the existing valid scope',async()=>{
+  const {store,auto}=await setup(),valid=auto.grant('AUTO_REPLY',policy);
+  for(const scope of [{...policy,futureOwnWorks:false},{...policy,entireInbox:false}])
+    expect(()=>auto.grant('AUTO_REPLY',scope)).toThrow('POLICY_TARGETS_REQUIRED');
+  expect(auto.active('AUTO_REPLY')?.version).toBe(valid.version);
+  expect(store.db.prepare('SELECT count(*) n FROM grant_reservations').get()).toEqual({n:0});
+});
+
+test('saving an all-inbound policy removes trigger filtering and carries consumed allowance into the revised scope',async()=>{
+  const {store,auto}=await setup();store.db.prepare("UPDATE client_state SET mode='LIMITED_AUTO'").run();
+  const first=auto.grant('AUTO_REPLY',policy);auto.reserve(first.version,'MODEL','used-model');auto.reserve(first.version,'SEND','used-send');
+  store.consumeBudget('MODEL');store.consumeBudget('SEND');
+  const revised=auto.grant('AUTO_REPLY',{...policy,instructions:'Reply naturally to the specific incoming text.'});
+  expect(revised.scope.containsAny).toEqual([]);
+  expect(store.db.prepare('SELECT kind,count(*) n FROM grant_reservations WHERE grant_version=? GROUP BY kind').all(revised.version))
+    .toEqual([{kind:'MODEL',n:1},{kind:'SEND',n:1}]);
+  const e=candidate({text:'A normal question with no special trigger',occurredAt:new Date(start+10_000).toISOString()});
+  const [id]=store.observe(e.channel,e.conversationId!,[e],'own-1','synthetic',new Date(start+60_000).toISOString(),start);
+  expect(auto.policyMatches(revised,store.event(id!))).toBe(true);
+  expect(auto.policyMatches(revised,{...store.event(id!),payload:{...e,text:'Please refund'}})).toBe(false);
+});
+
 test("additive migration preserves the actual SQLite backup, budgets, old intents and restore inventory", async () => {
   const {store, backup} = await setup();
   const restored = new Database(backup, {readonly: true});
@@ -112,8 +134,9 @@ test("policy deterministically checks target, rules, future-work opt-in and huma
   expect(auto.policyMatches(grant, comment)).toBe(true);
   const authority = new WorkbenchAuthority(store), token = authority.issueSession();
   const claim = authority.claim(token, id!, 0);
-  authority.release(token, id!, claim.generation);
   expect(auto.policyMatches(grant, store.event(id!))).toBe(false);
+  authority.release(token, id!, claim.generation);
+  expect(auto.policyMatches(grant, store.event(id!))).toBe(true);
   authority.resumeAutomation(token, id!);
   expect(auto.policyMatches(grant, store.event(id!))).toBe(true);
   store.db.prepare("UPDATE client_state SET paused=1").run();

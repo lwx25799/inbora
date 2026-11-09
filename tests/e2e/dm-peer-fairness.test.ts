@@ -174,6 +174,22 @@ function noExternalCalls(f:Awaited<ReturnType<typeof twoPeers>>):void{
   expect(new Set(f.store.events().map(event=>event.payload.platformEventId)).size).toBe(f.store.events().length);
 }
 
+test('a changed latest native conversation is read before parked historical sweeps and retains their checkpoints',async()=>{
+  const f=await twoPeers(true);try{
+    await f.collector.collect('dm',f.signal);const before=f.cursor();
+    await f.owner.dm.evaluate(()=>{
+      const row=document.querySelector('.conversation')!;row.append(document.createTextNode('new incoming preview'));
+    });
+    f.advance(30_000);const calls=vi.spyOn(ObservedReader.prototype,'dmWindow');
+    try{
+      await f.collector.collect('dm',f.signal);
+      expect(calls.mock.calls.map(call=>call[0].conversationId)).toEqual(['conv-a']);
+      expect(f.cursor().sweep).toEqual(before.sweep);expect(f.cursor().parked).toEqual(before.parked);
+    }finally{calls.mockRestore();}
+    noExternalCalls(f);
+  }finally{await f.close();}
+});
+
 test.each([false,true])('a selected preview priority reads one window then preserves the original continuation and normal next slot (list window %s)',async listWindow=>{
   const f=await twoPeers(listWindow);try{
     await f.collector.collect('dm',f.signal);const before=f.cursor();
@@ -251,6 +267,18 @@ test('two-window quantum discovers a readable peer in the next native contact-li
     expect(checkpoint(f.cursor(),'conv-a')).toBeDefined();
     expect(await f.owner.dm.evaluate(()=>(window as unknown as {listScrolls:number}).listScrolls)).toBeGreaterThan(0);
     noExternalCalls(f);
+  }finally{await f.close();}
+});
+
+test('a deferred peer advances the native contact list so later readable conversations are not starved by expired cooldowns',async()=>{
+  const f=await twoPeers(true,false);
+  try{
+    const failure=vi.spyOn(ObservedReader.prototype,'dmWindow').mockRejectedValueOnce(new Blocked('OBSERVATION_DM_CONTENT_DOM_NOT_READY'));
+    try{await expect(f.collector.collect('dm',f.signal)).rejects.toThrow('OBSERVATION_DM_CONTENT_DOM_NOT_READY');}finally{failure.mockRestore();}
+    expect(f.cursor().deferred.some(item=>item.id==='conv-a')).toBe(true);
+    await f.owner.dm.waitForFunction(()=>document.querySelector('.conversation .title')?.textContent==='Peer B',undefined,{timeout:1000});
+    f.advance();await f.collector.collect('dm',f.signal);
+    expect(f.store.events().some(event=>event.payload.platformEventId==='4002')).toBe(true);noExternalCalls(f);
   }finally{await f.close();}
 });
 

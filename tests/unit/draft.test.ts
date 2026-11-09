@@ -13,4 +13,9 @@ test('prompt treats injection as business data and excludes other conversations'
   expect(p.system).not.toContain(attack.text);
   expect(JSON.stringify(p.businessData)).toContain(attack.text);
   expect(JSON.stringify(p.businessData)).not.toContain('private other conversation');
+  expect(p.system).toContain('根据当前评论或私信的具体原文');
+  expect(p.system).toContain('不默认套用');
+  const other=prompt(candidate({text:'这件商品有大一号的吗？'}),[candidate({text:'我平时穿XL',direction:'INCOMING'})]);
+  expect(JSON.stringify(other.businessData)).toContain('这件商品有大一号的吗？');
+  expect(JSON.stringify(other.businessData)).toContain('我平时穿XL');
 });

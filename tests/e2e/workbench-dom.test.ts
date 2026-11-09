@@ -15,17 +15,18 @@ import { fixtureServer, mapping, rowData } from "../fixtures/site.js";
 import { database, privateTemp } from "../helpers.js";
 
 test.each([false, true])(
-  "application service sends both synthetic DOM channels through the sole coordinator, headless=%s",
-  async (headless) => {
+  "application service sends both synthetic DOM channels through the sole coordinator, reopen headless owner=%s",
+  async (reopen) => {
     const server = await fixtureServer(),
       root = privateTemp("workbench-dom-"),
       store = database();
-    const owner = await BrowserProfileOwner.launch(
+    let owner = await BrowserProfileOwner.launch(
       join(root, "profile"),
-      headless,
+      true,
     );
     let service: ClientService | undefined;
     try {
+      if(reopen){await owner.close();owner=await BrowserProfileOwner.launch(join(root,'profile'),true);}
       await owner.open(server.origin);
       await migrateClient(store, join(root, "backup.sqlite"));
       const config = mapping(server.origin),
@@ -90,7 +91,7 @@ test.each([false, true])(
             identityDigest: digest(config.ownId),
             mappingDigest: digest(config),
             browserVersion: owner.version(),
-            browserMode: headless ? ("headless" as const) : ("headed" as const),
+            browserMode: "headless" as const,
           };
         }
         override async refreshIdentity() {

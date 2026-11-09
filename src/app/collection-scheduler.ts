@@ -48,7 +48,15 @@ export class CollectionScheduler {
     if (this.closed || this.running || this.suspended) return;
     const {collection, emergencyStopped} = this.persistence.state();
     if (!collection || emergencyStopped) return;
-    const progress = this.persistence.store.db.prepare("SELECT source,next_at FROM collection_progress").all() as {source: CollectionSource; next_at: number}[];
+    const progress = this.persistence.store.db.prepare("SELECT source,next_at,last_error FROM collection_progress").all() as {source: CollectionSource; next_at: number;last_error:string|null}[];
+    const now=this.persistence.now();
+    for(const row of progress){
+      const interval=row.source==='works'?collection.commentIntervalMs:collection.dmIntervalMs;
+      if(row.last_error==='COLLECTION_CANCELLED'&&row.next_at>now+interval){
+        row.next_at=now+interval;
+        this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=? WHERE source=? AND last_error='COLLECTION_CANCELLED'").run(row.next_at,row.source);
+      }
+    }
     const due = progress.filter(p => (p.source === "works" ? collection.comments : collection.inbox) && p.next_at <= this.persistence.now());
     const next = due.find(p => p.source !== this.last) ?? due[0];
     if (!next) return;
@@ -60,6 +68,7 @@ export class CollectionScheduler {
     const task = Promise.resolve().then(async () => {
       let error: string | null = null;
       let objectDeferred=false;
+      let cancelled=false;
       try {
         const current = this.persistence.state();
         requireSafe(!this.closed && !abort.signal.aborted && !current.emergencyStopped && current.collection &&
@@ -70,9 +79,14 @@ export class CollectionScheduler {
       } catch (cause) {
         error = cause instanceof Blocked ? cause.code : "COLLECTION_FAILED_PRIVATE_DIAGNOSTICS";
         objectDeferred=cause instanceof DeferredObjectRead;
+        cancelled=error==='COLLECTION_CANCELLED'||abort.signal.aborted&&(!(cause instanceof Blocked)||error==='BROWSER_CLOSED');
       }
       const now = this.persistence.now();
-      if (error) {
+      if(cancelled){
+        // A bounded interruption is neither a successful read nor a new source fault. Keep its prior error and checkpoint.
+        this.persistence.store.db.prepare('UPDATE collection_progress SET next_at=?,elapsed_ms=? WHERE source=?')
+          .run(now+interval,Math.max(0,now-started),next.source);
+      }else if (error) {
         const old = this.persistence.store.db.prepare("SELECT failures FROM collection_progress WHERE source=?").get(next.source) as {failures: number};
         const delay = objectDeferred?interval:Math.min(Math.max(interval, 600_000), interval * 2 ** Math.min(old.failures + 1, 10));
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_error=?,failures=failures+1,elapsed_ms=? WHERE source=?")

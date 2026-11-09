@@ -52,6 +52,16 @@ test('a stale autosave version is rejected without replacing the latest human dr
     expect(f.store.db.prepare('SELECT count(*) AS n FROM manual_send_commands').get()).toEqual({n:0});expect(f.browser.clicks).toBe(0);
   }finally{await f.close();}
 });
+
+test('overlapping focus and input reuse the current editing lease without invalidating autosave',async()=>{
+  const f=await setup();try{
+    const first=await f.service.dispatch(f.token,{command:'openHumanDialog',eventId:f.eventId,selectionId:f.input.selectionId}) as {ownership:{generation:number}};
+    const second=await f.service.dispatch(f.token,{command:'openHumanDialog',eventId:f.eventId,selectionId:f.input.selectionId}) as {ownership:{generation:number}};
+    expect(second.ownership.generation).toBe(first.ownership.generation);
+    await expect(f.service.dispatch(f.token,{command:'saveDraft',eventId:f.eventId,generation:first.ownership.generation,expectedVersion:0,text:'Fast input remains saved',suggestionId:null}))
+      .resolves.toMatchObject({text:'Fast input remains saved'});
+  }finally{await f.close();}
+});
 test('target switching during backend qualification invalidates the preparing command before any click',async()=>{
   const f=await setup();let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});let entered=false;
   f.browser.inspectGate=async()=>{entered=true;await gate;};

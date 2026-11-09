@@ -1,4 +1,4 @@
-import {request,reasons,type Status,type Thread} from './api';
+import {request,reasons,type Thread} from './api';
 import {time} from './presentation';
 import type {ReplyViewProps} from './reply-view-types';
 
@@ -9,10 +9,9 @@ const draftOrigins = new Map([
 ]);
 
 export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
-  const {thread,status,busy,act,setNotice,closeDialog,readOnly,saving,dirty,error,notice,text,setText,setSuggestionId,setReview,refreshThread,block,send,sendCurrentText,setStatus}=props;
+  const {thread,status,busy,act,setNotice,readOnly,saving,dirty,error,notice,text,setText,setSuggestionId,setReview,refreshThread,block,send,sendCurrentText}=props;
   return <div className="reply-composer">
     <p className="composer-status hint">{thread.ownership.isMine?saving?'正在保存':dirty?'正在自动保存':'修改已保存':'正在准备回复输入'}</p>
-    {!thread.ownership.isMine&&!thread.intent&&thread.event.payload.channel==='DIRECT_MESSAGE'&&<button onClick={()=>void act('继续写回复',props.openDialog)}>继续写回复</button>}
     {thread.event.payload.channel!=='DIRECT_MESSAGE'&&(error||notice||busy)&&<p role={error?'alert':'status'} className={error?'error':'hint'}>{error||busy||notice}</p>}
 <section className="editor">
   <div className="editor-title">
@@ -28,6 +27,7 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
   <textarea
     aria-label="人工回复草稿"
     value={text}
+    onFocus={()=>{if(!thread.intent&&!thread.ownership.isMine)void act('准备人工输入',props.openDialog);}}
     readOnly={readOnly}
     placeholder={
       readOnly
@@ -35,6 +35,7 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
         : "直接输入回复，无需 Key"
     }
     onChange={(e) => {
+      if(!thread.intent&&!thread.ownership.isMine)void act('准备人工输入',props.openDialog);
       setText(e.target.value);
       setReview(null);
     }}
@@ -154,23 +155,6 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
       >
         发送
       </button>
-      {thread.paused&&!thread.intent&&<button
-        onClick={() =>
-          void act("继续回复", async () => {
-            setStatus(
-              await request<Status>({
-                command: 'resume',
-                eventId: thread.event.id,
-              }),
-            );
-            await refreshThread();
-            setReview(null);
-          })
-        }
-      >
-        继续回复
-      </button>}
-      {!thread.intent&&status.automation&&<button onClick={()=>void act('交回自动回复',async()=>{const eventId=thread.event.id;await closeDialog();await request({command:'resumeAutomation',eventId});await refreshThread();})}>交回自动回复</button>}
     </div>
   </div>
 

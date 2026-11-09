@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { AutomationSettings } from './AutomationSettings';
+import { BrowserDraftRecovery } from './BrowserDraftRecovery';
 import { request, closeDesktop, reasons, capabilityNames, type Status } from './api';
 import { modes } from './presentation';
 
@@ -10,6 +11,7 @@ export function Settings({
   act,
   update,
   stop,
+  toggleAuto,
 }: {
   status: Status;
   runtime: string;
@@ -17,11 +19,18 @@ export function Settings({
   act: (s: string, f: () => Promise<void>) => Promise<void>;
   update: (s: Status) => void;
   stop:()=>void;
+  toggleAuto:(enabled:boolean)=>Promise<void>;
 }) {
   const [settings, setSettings] = useState(status.settings),
     [key, setKey] = useState("");
   return (
     <section className="settings scroll">
+      <div className="settings-section"><h2>自动回复</h2>
+        <label className="check"><input type="checkbox" role="switch" aria-label="设置中的自动回复" disabled={!!busy||!status.automation?.replyPolicy}
+          checked={status.configuredMode==='LIMITED_AUTO'&&!!status.automation?.replyPolicy} onChange={e=>void act('更新自动回复',()=>toggleAuto(e.target.checked))}/>
+          自动回复：{status.configuredMode==='LIMITED_AUTO'&&status.automation?.replyPolicy?'开':'关'}</label>
+        <p className="hint">统一控制已保存策略范围，无需逐个会话交接。查看消息不暂停自动回复；正在编辑和已保存的人稿保留。关闭后收取继续。</p>
+      </div>
       {status.automation&&<AutomationSettings status={status} busy={busy} act={act} update={update}/>}
       <div className="settings-section">
         <h2>回复模式与运行</h2>
@@ -78,6 +87,7 @@ export function Settings({
             await request<Status>({command:'browser',open:true,mode:'headless'})))}>返回无头运行</button>}
         </div>
         <details className="fault-controls"><summary>故障处理</summary>
+          <BrowserDraftRecovery busy={busy} act={act}/>
           <p className="hint">仅在需要停止全部后台操作时使用。急停会停止收取、模型和发送；已提交消息不会撤回或重复发送。</p>
           <button className="danger" onClick={stop}>全局急停</button>
           {status.automation?.emergencyStopped&&<button
@@ -207,7 +217,7 @@ export function Settings({
             <p key={b.kind}>
               {b.kind === "MODEL" ? "累计模型预占" : "累计发送意图"}{" "}
               <strong>
-                {b.used} / {b.maximum}
+                {b.used} / {b.maximum===null?'无上限':b.maximum}
               </strong>
             </p>
           ))}

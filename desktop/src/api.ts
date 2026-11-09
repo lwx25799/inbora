@@ -4,6 +4,7 @@ import type {
   SendParams,
   AiSettings,
   InboxSync,
+  BrowserDraftChoice,
 } from "../../src/app/contracts.js";
 import type {
   Draft,
@@ -14,7 +15,7 @@ import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../s
 import type { TimelineItem } from '../../src/app/inbox-queries.js';
 export type { TimelineItem };
 
-export type { SendParams, AiSettings };
+export type { SendParams, AiSettings, BrowserDraftChoice };
 export interface Status {
   runtime: string;
   account: { id: string; identity: string } | null;
@@ -35,7 +36,7 @@ export interface Status {
     reason: string;
     evidence: string | null;
   }[];
-  budgets: { kind: string; used: number; maximum: number }[];
+  budgets: { kind: string; used: number; maximum: number|null }[];
   usage: {
     requests: number;
     inputTokens: number;
@@ -46,6 +47,7 @@ export interface Status {
   keyPresent: boolean;
   keyStored?:boolean;keyStorageError?:string|null;
   automation?:{startedAt:number;emergencyStopped:boolean;collection:CollectionSettings|null;modelGrant:Grant<ModelGrant>|null;replyPolicy:Grant<ReplyPolicy>|null;
+    unresolvedSends?:{channel:string;count:number}[];
     inboxRevision:number;autoStopReason?:string|null;collector:{running:boolean;source:string|null;fatal:string|null;channels:{source:string;next_at:number;last_success:number|null;last_error:string|null;failures:number;elapsed_ms:number|null}[]};pendingWorks:{count:number}}|null;
   modelAuthorized: boolean;
   modelBusy: boolean;
@@ -158,6 +160,12 @@ export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
 export const reasons: Record<string, string> = {
+  BROWSER_DRAFT_NOT_RECOVERABLE:'当前没有可安全清理的已保存自动回复稿，网页输入已保留',
+  BROWSER_DRAFT_NOT_MATCHED:'网页输入与已保存的自动回复稿不一致，未清理',
+  BROWSER_DRAFT_CHANGED:'应用回复稿或会话已变化，未清理，请重新检查',
+  NATIVE_REPLY_SAVED_DRAFT_MISMATCH:'网页输入与已保存的自动回复稿不一致，未清理',
+  NATIVE_REPLY_SAVED_DRAFT_CHANGED:'网页输入或会话已变化，未清理，请重新检查',
+  NATIVE_REPLY_SAVED_DRAFT_NOT_CLEARED:'未能确认网页输入已清空，应用回复稿保留，未发送或重试',
   POLICY_TARGETS_REQUIRED:'请为每个已选通道选择作品或会话范围，已保存策略和额度保持不变',
   LOGIN_RECOVERY_IN_PROGRESS:'正在等待本人登录或处理验证码，完成后自动恢复无头运行',
   BROWSER_HAS_HUMAN_INPUT:'专属网页中还有未提交输入，已保留，请处理后再切换浏览器',
@@ -209,7 +217,7 @@ export const reasons: Record<string, string> = {
   MODE_DRAFT_ONLY: "当前模式仅允许保存草稿",
   ACCOUNT_PAUSED: "账号已暂停",
   TARGET_PAUSED: "此目标已暂停",
-  TARGET_FROZEN: "目标存在待核实发送，已冻结",
+  TARGET_FROZEN: "这条消息曾提交过，系统不会重复发送；独立新消息继续处理",
   LEASE_EXPIRED_OR_CHANGED: "接管已过期或代际已变化，请重新接管",
   DRAFT_VERSION_CONFLICT: "草稿版本已变化，请重新读取并核对",
   CONTEXT_VERSION_CONFLICT: "上下文已变化，请重新核对",

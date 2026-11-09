@@ -9,12 +9,21 @@ import { DeepSeekProvider } from '../../src/ai/deepseek.js';
 import { digest,type InboundEvent } from '../../src/core/contracts.js';
 import { defaultSettings } from '../../src/app/contracts.js';
 import { fixtureServer,mapping,rowData } from '../fixtures/site.js';
-import { database,privateTemp } from '../helpers.js';
+import { approved,candidate,database,privateTemp,snapshot } from '../helpers.js';
 
-test('one persistent GUI-style strategy completes both real synthetic DOM channels, with no manual draft or confirmation commands',async()=>{
+test.each([false,true])('one persistent GUI-style strategy completes both synthetic DOM channels without manual confirmation (legacy unknown: %s)',async legacyUnknown=>{
   const server=await fixtureServer(),root=privateTemp('automatic-policy-dom-'),owner=await BrowserProfileOwner.launch(join(root,'profile'),true),store=database();
   let service:ClientService|undefined;
   try{
+    let oldIntent:unknown,oldReceipt:unknown,oldEventId:string|undefined,legacyIntent:string|undefined;
+    if(legacyUnknown){
+      const old=candidate({platformEventId:'legacy-message',occurredAt:'2026-11-03T12:00:00Z'}),draft=approved(store,old);
+      oldEventId=store.draft(draft).eventId;legacyIntent=store.recordIntent(draft,snapshot(old),false,{check:()=>{},committed:()=>{}});
+      store.db.prepare('UPDATE send_intents SET attempt_started_at=? WHERE id=?').run('2026-11-03T12:00:05Z',legacyIntent);
+      store.receipt(legacyIntent,'UNCERTAIN','synthetic-legacy-original');
+      oldIntent=store.db.prepare('SELECT * FROM send_intents WHERE id=?').get(legacyIntent);
+      oldReceipt=store.db.prepare('SELECT * FROM delivery_receipts WHERE send_intent_id=?').all(legacyIntent);
+    }
     await owner.open(server.origin);const config=mapping(server.origin);
     const dm=new DomAdapter(owner.dm,'DIRECT_MESSAGE',config),comment=new DomAdapter(owner.notification,'COMMENT_NOTIFICATION',config);
     for(const [channel,scope,adapter]of [['DIRECT_MESSAGE','conversation-1',dm],['COMMENT_NOTIFICATION','notifications',comment]] as const){
@@ -33,6 +42,7 @@ test('one persistent GUI-style strategy completes both real synthetic DOM channe
       override identity(){return{identityDigest:digest(config.ownId),mappingDigest:digest(config),browserVersion:owner.version(),browserMode:'headless' as const};}
       override async refreshIdentity(){return this.identity();}
       override async close(){}
+      override async verifyExisting(){return{verified:false,evidenceId:'synthetic-legacy-followup-incomplete'};}
       override async adapter(e:InboundEvent){return{adapter:e.channel==='DIRECT_MESSAGE'?dm:comment,dispose:()=>{}};}
     }
     let calls=0;
@@ -44,7 +54,12 @@ test('one persistent GUI-style strategy completes both real synthetic DOM channe
       expiresAt:null,workIds:[video],futureOwnWorks:false,conversationIds:['conversation-1'],entireInbox:false,containsAny:[],excludesAny:[],instructions:'Reply briefly.',startHour:0,endHour:24}});
     await service.dispatch(token,{command:'setMode',mode:'LIMITED_AUTO'});
     await service.runAutomaticReply();await service.runAutomaticReply();await service.runAutomaticReply();
-    expect(store.events().map(e=>e.status)).toEqual(['CONFIRMED','CONFIRMED']);expect(calls).toBe(2);
+    const states=store.db.prepare('SELECT state,reason FROM automation_jobs').all();
+    expect(store.events().filter(e=>e.id!==oldEventId).map(e=>e.status),JSON.stringify(states)).toEqual(['CONFIRMED','CONFIRMED']);expect(calls).toBe(2);
+    if(legacyUnknown){
+      expect(store.db.prepare('SELECT * FROM send_intents WHERE id=?').get(legacyIntent)).toEqual(oldIntent);
+      expect(store.db.prepare('SELECT * FROM delivery_receipts WHERE send_intent_id=?').all(legacyIntent)).toEqual(oldReceipt);
+    }
     for(const page of [owner.dm,owner.notification])expect(await page.evaluate(()=>(window as unknown as {clicks:number}).clicks)).toBe(1);
     expect(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='AUTO_POLICY_APPROVED'").get()).toEqual({n:2});
     expect(store.db.prepare("SELECT used FROM budgets ORDER BY kind").all()).toEqual([{used:2},{used:2}]);

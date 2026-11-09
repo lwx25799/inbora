@@ -138,7 +138,7 @@ async function anchoredPeer(){
     close:async()=>{collector.dispose();store.close();await owner.close();await server.close();}};
 }
 
-test.each(['missing','wrong-peer'])('an unavailable anchor (%s) retains its original checkpoint and successful watermark until scoped recovery',async action=>{
+test.each(['missing','wrong-peer'])('an unavailable anchor (%s) preserves the watermark and only discards a proven stale position',async action=>{
   const f=await anchoredPeer();
   try{
     await f.collector.collect('dm',f.signal);const saved=aCheckpoint(f.cursor())!;
@@ -146,9 +146,14 @@ test.each(['missing','wrong-peer'])('an unavailable anchor (%s) retains its orig
     await f.reopen(action==='missing',action==='wrong-peer');
     const code=action==='missing'?'OBSERVATION_DM_ANCHOR_NOT_FOUND':'OBSERVATION_CONVERSATION_CHANGED';
     await expect(f.collector.collect('dm',f.signal)).rejects.toThrow(code);
-    expect(aCheckpoint(f.cursor())).toEqual(saved);expect(f.lastRead()).toBe(0);expect(f.cursor().deferred.map(item=>item.code)).toEqual([code]);
+    if(action==='missing')expect(aCheckpoint(f.cursor())).toBeUndefined();else expect(aCheckpoint(f.cursor())).toEqual(saved);
+    expect(f.lastRead()).toBe(0);expect(f.cursor().deferred.map(item=>item.code)).toEqual([code]);
     expect(f.store.events().every(event=>event.payload.conversationId==='conv-a')).toBe(true);
     f.recover();await f.reopen();await f.collector.collect('dm',f.signal);
+    if(action==='missing'){
+      expect(aCheckpoint(f.cursor())!.anchor.ids).toEqual(saved.anchor.ids);expect(aCheckpoint(f.cursor())!.top).toBe(saved.top);
+      expect(f.lastRead()).toBe(0);await f.collector.collect('dm',f.signal);
+    }
     expect(aCheckpoint(f.cursor())!.top).toBeLessThan(saved.top);expect(f.lastRead()).toBe(0);expect(f.cursor().deferred).toEqual([]);
     expect(f.store.events().some(event=>event.payload.platformEventId==='7019')).toBe(true);f.noExternal();
   }finally{await f.close();}

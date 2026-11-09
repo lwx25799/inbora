@@ -41,3 +41,23 @@ test('in-flight verification aborts at its deadline and retains the queue until 
     expect(store.db.prepare('SELECT count(*) AS n FROM verification_results').get()).toEqual({n:0});
   }finally{release?.();await worker?.close();store.close();}
 });
+
+test('startup registers legacy unknowns once without resetting follow-up attempts, original records or target freezes',async()=>{
+  const store=database(),root=privateTemp('legacy-unknown-followup-');let worker:VerificationScheduler|undefined;
+  try{
+    const id=approved(store);await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
+    const intent=store.recordIntent(id,snapshot(candidate()),false,{check:()=>{},committed:()=>{}});
+    store.receipt(intent,'UNCERTAIN','legacy-original-unknown');let now=Date.now();
+    const data=new AutomationStore(store,()=>now);data.initialize(now);
+    const before={intents:store.db.prepare('SELECT * FROM send_intents').all(),receipts:store.db.prepare('SELECT * FROM delivery_receipts').all(),
+      budgets:store.db.prepare('SELECT * FROM budgets').all(),pauses:store.db.prepare('SELECT * FROM pauses').all()};
+    let calls=0;const check=async()=>{calls++;return{verified:false,evidenceId:'synthetic-legacy-followup'};};
+    worker=new VerificationScheduler(data,check);worker.start();now+=2000;await worker.tick();await worker.close();
+    expect(calls).toBe(1);
+    worker=new VerificationScheduler(data,check);worker.start();now+=10_000;await worker.tick();await worker.close();
+    expect(calls).toBe(2);expect(store.db.prepare('SELECT state,attempts FROM verification_jobs').get()).toEqual({state:'REVIEW',attempts:2});
+    worker=new VerificationScheduler(data,check);worker.start();now+=120_000;await worker.tick();expect(calls).toBe(2);
+    expect({intents:store.db.prepare('SELECT * FROM send_intents').all(),receipts:store.db.prepare('SELECT * FROM delivery_receipts').all(),
+      budgets:store.db.prepare('SELECT * FROM budgets').all(),pauses:store.db.prepare('SELECT * FROM pauses').all()}).toEqual(before);
+  }finally{await worker?.close();store.close();}
+});

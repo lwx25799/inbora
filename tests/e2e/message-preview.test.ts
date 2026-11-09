@@ -146,19 +146,175 @@ test('oversized and unloaded body images retain unavailable reasons and source f
   }finally{await f.close();}
 });
 
-test('a narrow overlay between the sampled image points cannot leak foreign pixels into a message thumbnail',async()=>{
+test.each([false,true])('a narrow overlay between the sampled image points cannot leak foreign pixels into a message thumbnail (pointer-free image: %s)',async pointerFree=>{
   const f=await setup();
   try{
     await images(f,[{id:'9701',alt:'exact body'}]);
-    await f.owner.dm.evaluate(()=>{
+    await f.owner.dm.evaluate(pointerFree=>{
+      if(pointerFree)(document.querySelector('.message img') as HTMLElement).style.pointerEvents='none';
       const bounds=document.querySelector('.message img')!.getBoundingClientRect(),overlay=document.createElement('div');
       overlay.style.cssText='position:fixed;z-index:10000;pointer-events:none;background:red;font-size:1px;width:2px;height:2px;left:'+
         (bounds.left+6)+'px;top:'+(bounds.top+6)+'px';overlay.textContent='foreign';document.body.append(overlay);
-    });
+    },pointerFree);
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    await saveMessagePreviews(f.owner.dm,f.mapping,batch,f.root,f.signal);
+    expect(f.cache.list(batch.events[0]!,'100')[0]).toMatchObject({state:'UNAVAILABLE',reason:'MESSAGE_PREVIEW_OBSCURED'});
+    expect(JSON.parse(readFileSync(join(f.root,'evidence','message-preview-latest.json'),'utf8')).imageObstructions[0]).toMatchObject({stage:'OVERLAP'});
+    expect(readdirSync(join(f.root,'evidence','message-previews')).filter(name=>name.endsWith('.png'))).toEqual([]);f.noExternal();
+  }finally{await f.close();}
+});
+
+test.each(['POINTER_NONE','NEGATIVE_BACKGROUND'] as const)('an unobscured native image stays previewable with %s',async mode=>{
+  const f=await setup();
+  try{
+    await images(f,[{id:'9811',alt:'exact visible image'}]);
+    await f.owner.dm.evaluate(mode=>{
+      const image=document.querySelector('.message img') as HTMLElement;
+      if(mode==='POINTER_NONE')image.style.pointerEvents='none';
+      else{const background=document.createElement('div');background.style.cssText='position:fixed;inset:0;z-index:-1;background:#333';document.body.prepend(background);}
+    },mode);
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    const inspected=await f.owner.dm.evaluate(inspectMessageImage,{mapping:f.mapping,event:batch.events[0]!,imageIndex:0,peer:f.mapping.peers[0]!});
+    expect(inspected.reason).toBeNull();
+    await saveMessagePreviews(f.owner.dm,f.mapping,batch,f.root,f.signal);
+    expect(f.cache.list(batch.events[0]!,'100')[0]).toMatchObject({state:'READY',width:24,height:24});f.noExternal();
+  }finally{await f.close();}
+});
+
+test('an exact small native image with uniform pixel-rounded corners stays previewable',async()=>{
+  const f=await setup();try{
+    await images(f,[{id:'9813',alt:'round native image'}]);
+    await f.owner.dm.locator('.message img').evaluate(image=>(image as HTMLElement).style.borderRadius='10px');
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    const inspected=await f.owner.dm.evaluate(inspectMessageImage,{mapping:f.mapping,event:batch.events[0]!,imageIndex:0,peer:f.mapping.peers[0]!});
+    expect(inspected.reason).toBeNull();
+    await saveMessagePreviews(f.owner.dm,f.mapping,batch,f.root,f.signal);
+    expect(f.cache.list(batch.events[0]!,'100')[0]).toMatchObject({state:'READY',width:24,height:24});f.noExternal();
+  }finally{await f.close();}
+});
+
+test.each(['ELEMENT','GENERATED','CLIP','NONUNIFORM'] as const)('rounded geometry cannot hide %s content or unproven clipping',async kind=>{
+  const f=await setup();try{
+    await images(f,[{id:'9814',alt:'protected rounded image'}]);
+    await f.owner.dm.evaluate(kind=>{
+      const image=document.querySelector('.message img') as HTMLElement,row=image.closest('.message') as HTMLElement;
+      image.style.borderRadius='10px';row.style.position='relative';
+      if(kind==='CLIP')image.style.clipPath='inset(2px)';
+      else if(kind==='NONUNIFORM')image.style.borderTopRightRadius='0px';
+      else if(kind==='GENERATED'){
+        const style=document.createElement('style');style.textContent='.message::after{content:"";position:absolute;left:0;top:0;width:2px;height:2px;pointer-events:none;z-index:10;background:red}';document.head.append(style);
+      }else{
+        const r=image.getBoundingClientRect(),overlay=document.createElement('div');overlay.style.cssText=`position:fixed;z-index:10000;background:red;left:${r.left}px;top:${r.top}px;width:24px;height:24px`;document.body.append(overlay);
+      }
+    },kind);
     const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
     await saveMessagePreviews(f.owner.dm,f.mapping,batch,f.root,f.signal);
     expect(f.cache.list(batch.events[0]!,'100')[0]).toMatchObject({state:'UNAVAILABLE',reason:'MESSAGE_PREVIEW_OBSCURED'});
     expect(readdirSync(join(f.root,'evidence','message-previews')).filter(name=>name.endsWith('.png'))).toEqual([]);f.noExternal();
+  }finally{await f.close();}
+});
+
+test.each(['ELEMENT','GENERATED'] as const)('a pointer-free image still rejects an opaque %s overlay',async kind=>{
+  const f=await setup();
+  try{
+    await images(f,[{id:'9812',alt:'covered image'}]);
+    await f.owner.dm.evaluate(kind=>{
+      const image=document.querySelector('.message img') as HTMLElement,row=image.closest('.message') as HTMLElement;
+      image.style.pointerEvents='none';row.style.position='relative';
+      if(kind==='GENERATED'){
+        const style=document.createElement('style');style.textContent='.message::after{content:"";position:absolute;left:0;top:0;width:24px;height:24px;pointer-events:none;z-index:10;background:red}';document.head.append(style);
+      }else{const overlay=document.createElement('span');overlay.style.cssText='position:absolute;left:0;top:0;width:24px;height:24px;z-index:10;background:red';row.append(overlay);}
+    },kind);
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    await saveMessagePreviews(f.owner.dm,f.mapping,batch,f.root,f.signal);
+    expect(f.cache.list(batch.events[0]!,'100')[0]).toMatchObject({state:'UNAVAILABLE',reason:'MESSAGE_PREVIEW_OBSCURED'});
+    expect(readdirSync(join(f.root,'evidence','message-previews')).filter(name=>name.endsWith('.png'))).toEqual([]);f.noExternal();
+  }finally{await f.close();}
+});
+
+test('hit diagnostics distinguish an image clipped by its exact scrolling ancestor without exposing geometry or identity',async()=>{
+  const f=await setup();try{
+    await images(f,[{id:'9818',alt:'bound image'}]);
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    await f.owner.dm.evaluate(()=>{
+      const row=document.querySelector('.message')!,viewport=document.createElement('div');viewport.id='PRIVATE_CLIPPING_IDENTIFIER';
+      viewport.style.cssText='position:relative;overflow:hidden;height:20px;width:320px';row.replaceWith(viewport);viewport.append(row);viewport.scrollTop=8;
+    });
+    const report=await f.owner.dm.evaluate(inspectMessageImage,{mapping:f.mapping,event:batch.events[0]!,imageIndex:0,peer:f.mapping.peers[0]!});
+    expect(report.reason).toBe('MESSAGE_PREVIEW_OBSCURED');
+    expect(report.obstruction).toMatchObject({stage:'HIT',clipping:{imageInMessageRect:true,imageInChatRect:true,
+      hitSameMessage:[true,false,false,true,true],hitInChat:[true,true,true,true,true],overflowAncestorCount:1,truncated:false,
+      ancestors:[{index:1,x:true,y:true,containsX:true,containsY:false,pointsOutside:[false,true,true,false,false],sameMessage:false,insideChat:true,transformed:false}]}});
+    expect(JSON.stringify(report.obstruction)).not.toMatch(/PRIVATE_|9818|conv-a|bound image|\.message/u);f.noExternal();
+  }finally{await f.close();}
+});
+
+test.each(['div','span'])('a transparent structural %s has no own paint and its children remain individually checked',async tag=>{
+  const f=await setup();try{
+    await images(f,[{id:'9816',alt:'exact transparent-wrapper image'}]);
+    await f.owner.dm.evaluate(tag=>{
+      const image=document.querySelector('.message img') as HTMLElement;image.style.position='relative';
+      const r=image.getBoundingClientRect(),wrapper=document.createElement(tag),child=document.createElement('div');
+      wrapper.style.cssText=`position:absolute;left:${r.left-10}px;top:${r.top-10}px;width:${r.width+20}px;height:${r.height+20}px`;
+      child.style.cssText='position:absolute;left:-5px;top:-5px;width:2px;height:2px;background:red';wrapper.append(child);document.body.prepend(wrapper);
+    },tag);
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    const inspected=await f.owner.dm.evaluate(inspectMessageImage,{mapping:f.mapping,event:batch.events[0]!,imageIndex:0,peer:f.mapping.peers[0]!});
+    expect(inspected.reason,JSON.stringify(inspected.obstruction)).toBeNull();
+    await saveMessagePreviews(f.owner.dm,f.mapping,batch,f.root,f.signal);
+    expect(f.cache.list(batch.events[0]!,'100')[0]).toMatchObject({state:'READY',width:24,height:24});f.noExternal();
+  }finally{await f.close();}
+});
+
+test.each(['SCROLLBAR','CSS_CONTENT','BORDER_IMAGE','CHILD_TEXT','CHILD_IMAGE','CHILD_SVG','CHILD_NARROW','PSEUDO','TOP_LAYER'] as const)
+  ('transparent structural containers cannot suppress %s paint',async kind=>{
+  const f=await setup();try{
+    await images(f,[{id:'9817',alt:'protected structural-wrapper image'}]);
+    await f.owner.dm.evaluate(({kind,png})=>{
+      const image=document.querySelector('.message img') as HTMLElement;image.style.position='relative';
+      const r=image.getBoundingClientRect(),wrapper=document.createElement('div');wrapper.id='structural-fixture';
+      wrapper.style.cssText=`position:absolute;pointer-events:none;left:${r.left-10}px;top:${r.top-10}px;width:${r.width+20}px;height:${r.height+20}px`;
+      if(kind==='SCROLLBAR')wrapper.style.overflow='scroll';
+      else if(kind==='TOP_LAYER'){
+        wrapper.setAttribute('popover','manual');wrapper.style.cssText+=';margin:0;border:0;padding:0;background:transparent';
+        const style=document.createElement('style');style.textContent='#structural-fixture::backdrop{background:red;pointer-events:none}';document.head.append(style);
+      }
+      else if(kind==='CSS_CONTENT')wrapper.style.content=`url(data:image/png;base64,${png})`;
+      else if(kind==='BORDER_IMAGE')wrapper.style.cssText+=';border-image:linear-gradient(red,red) 1 / 4px';
+      else if(kind==='PSEUDO'){
+        const style=document.createElement('style');style.textContent='#structural-fixture::after{content:"";position:absolute;left:16px;top:16px;width:2px;height:2px;background:red;z-index:10000}';document.head.append(style);
+      }else{
+        const child=kind==='CHILD_SVG'?document.createElementNS('http://www.w3.org/2000/svg','svg'):document.createElement(kind==='CHILD_IMAGE'?'img':'div');
+        child.setAttribute('style','position:absolute;left:16px;top:16px;width:2px;height:2px;font-size:2px;z-index:10000;pointer-events:none');
+        if(kind==='CHILD_TEXT')child.textContent='foreign';
+        if(kind==='CHILD_IMAGE')child.setAttribute('src',`data:image/png;base64,${png}`);
+        if(kind==='CHILD_NARROW')(child as HTMLElement).style.background='red';
+        if(kind==='CHILD_SVG')child.innerHTML='<rect width="2" height="2" fill="red"/>';
+        wrapper.append(child);
+      }
+      document.body.prepend(wrapper);if(kind==='TOP_LAYER')wrapper.showPopover();
+    },{kind,png:png.toString('base64')});
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    const inspected=await f.owner.dm.evaluate(inspectMessageImage,{mapping:f.mapping,event:batch.events[0]!,imageIndex:0,peer:f.mapping.peers[0]!});
+    expect(inspected.reason).toBe('MESSAGE_PREVIEW_OBSCURED');expect(inspected.clip).toBeNull();f.noExternal();
+  }finally{await f.close();}
+});
+
+test('overlap diagnostics expose bounded paint indicators without foreign text, source or attributes',async()=>{
+  const f=await setup();try{
+    await images(f,[{id:'9815',alt:'bound image'}]);
+    await f.owner.dm.evaluate(()=>{
+      const r=document.querySelector('.message img')!.getBoundingClientRect(),wrapper=document.createElement('section');
+      wrapper.id='PRIVATE_FOREIGN_IDENTIFIER';wrapper.style.cssText=`position:absolute;left:${r.left+6}px;top:${r.top+6}px;width:2px;height:2px;pointer-events:none`;
+      document.body.append(wrapper);
+    });
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    const report=await f.owner.dm.evaluate(inspectMessageImage,{mapping:f.mapping,event:batch.events[0]!,imageIndex:0,peer:f.mapping.peers[0]!});
+    expect(report.reason).toBe('MESSAGE_PREVIEW_OBSCURED');
+    expect(report.obstruction).toMatchObject({stage:'OVERLAP',paint:{backgroundTransparent:true,backgroundImage:false,borderWidths:false,borderStyles:false,
+      shadow:false,outline:false,filter:false,backdrop:false,mask:false,directText:false,pseudo:false,childCount:0,insideImage:true,coversImage:false,beforeImage:false,
+      scrollbar:false,replacementContent:false,borderImage:false,textShadow:false,textDecoration:false,appearance:false,reflection:false,topLayer:false,structuralDisplay:true}});
+    expect(JSON.stringify(report)).not.toContain('PRIVATE_');f.noExternal();
   }finally{await f.close();}
 });
 
@@ -178,17 +334,22 @@ test.each([false,true])('an exact image above an explicit background remains usa
   }finally{await f.close();}
 });
 
-test('a target change during capture discards pixels instead of binding them to the previous message',async()=>{
+test.each(['NATIVE_ID','SOURCE','CLIP'] as const)('a target %s change during capture discards pixels instead of binding them to the previous message',async change=>{
   const f=await setup();
   try{
     await images(f,[{id:'9401',alt:'bound image'}]);const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
     const original=f.owner.dm.screenshot.bind(f.owner.dm),screenshot=vi.spyOn(f.owner.dm,'screenshot').mockImplementation(async options=>{
-      const bytes=await original(options);await f.owner.dm.evaluate(()=>{
-        const native=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message;native.serverId='changed';
-      });return bytes;
+      const bytes=await original(options);await f.owner.dm.evaluate(async({change,png})=>{
+        const native=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message;
+        const image=document.querySelector('.message img') as HTMLImageElement;
+        if(change==='NATIVE_ID')native.serverId='changed';
+        if(change==='SOURCE'){image.src='data:image/png;base64,'+png;await image.decode();}
+        if(change==='CLIP')image.style.marginLeft='1px';
+      },{change,png:png.toString('base64')});return bytes;
     });
     await saveMessagePreviews(f.owner.dm,f.mapping,batch,f.root,f.signal);screenshot.mockRestore();
-    expect(f.cache.list(batch.events[0]!,'100')).toEqual([{previewId:null,kind:'IMAGE',label:'bound image',state:'UNAVAILABLE',reason:'MESSAGE_PREVIEW_CAPTURE_FAILED'}]);
+    expect(f.cache.list(batch.events[0]!,'100')).toEqual([{previewId:null,kind:'IMAGE',label:'bound image',state:'UNAVAILABLE',
+      reason:change==='NATIVE_ID'?'MESSAGE_PREVIEW_CAPTURE_FAILED':'MESSAGE_PREVIEW_TARGET_CHANGED'}]);
     expect(readdirSync(join(f.root,'evidence','message-previews')).filter(name=>name.endsWith('.png'))).toEqual([]);f.noExternal();
   }finally{await f.close();}
 });

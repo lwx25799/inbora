@@ -261,16 +261,47 @@ export class EventStore {
       this.audit(paused ? 'PAUSED' : 'RESUMED', digest(key));
     }).immediate();
   }
+  sendFrozen(eventId:string):boolean {
+    const event=this.event(eventId),next=event.payload;
+    const unresolved=this.db.prepare("SELECT event_id,status,attempt_started_at FROM send_intents WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')")
+      .all(targetKey(next)) as {event_id:string;status:string;attempt_started_at:string}[];
+    if(!unresolved.length)return false;
+    // A legacy DM outcome belongs to its original inbound. It must not stop distinct later messages forever.
+    if(next.channel!=='DIRECT_MESSAGE'||!isStrong(next)||next.direction!=='INCOMING'||next.kind!=='DM')return true;
+    const at=next.occurredAt?Date.parse(next.occurredAt):NaN;
+    if(!Number.isFinite(at)||at>Date.now())return true;
+    return unresolved.some(intent=>{
+      if(intent.event_id===eventId||intent.status==='INTENT_RECORDED')return true;
+      const prior=this.event(intent.event_id).payload,boundary=Date.parse(intent.attempt_started_at);
+      return !isStrong(prior)||prior.actorId!==next.actorId||prior.accountId!==next.accountId||prior.channel!==next.channel||
+        prior.platformEventId===next.platformEventId||!Number.isFinite(boundary)||at<=boundary+dmClockToleranceMs||
+        !prior.occurredAt||!Number.isFinite(Date.parse(prior.occurredAt))||at<=Date.parse(prior.occurredAt)||
+        !!this.db.prepare('SELECT event_id FROM source_collisions WHERE event_id IN (?,?) LIMIT 1').get(eventId,intent.event_id);
+    });
+  }
   assertSendable(eventId: string): void {
     const e = this.event(eventId); const key = targetKey(e.payload);
     requireSafe(!(this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as { paused: number } | undefined)?.paused, 'TARGET_PAUSED');
     requireSafe(e.status === 'APPROVED', 'EVENT_NOT_APPROVED');
-    requireSafe(!this.db.prepare("SELECT id FROM send_intents WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')").get(key), 'TARGET_FROZEN');
+    requireSafe(!this.sendFrozen(eventId), 'TARGET_FROZEN');
     requireSafe(!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(eventId), 'INTENT_EXISTS');
   }
   consumeBudget(kind: 'MODEL' | 'SEND'): void {
-    const result = this.db.prepare('UPDATE budgets SET used=used+1 WHERE kind=? AND used<maximum').run(kind);
+    const extended=!!this.db.prepare("SELECT name FROM sqlite_master WHERE name='budget_limits' AND type='table'").get();
+    const result = this.db.prepare(extended?`UPDATE budgets SET used=used+1 WHERE kind=? AND EXISTS
+      (SELECT 1 FROM budget_limits l WHERE l.kind=budgets.kind AND (l.maximum IS NULL OR budgets.used<l.maximum))`:
+      'UPDATE budgets SET used=used+1 WHERE kind=? AND used<maximum').run(kind);
     requireSafe(result.changes === 1, 'BUDGET_EXHAUSTED');
+  }
+  budgets():{kind:'MODEL'|'SEND';used:number;maximum:number|null}[]{
+    if(this.db.prepare("SELECT name FROM sqlite_master WHERE name='budget_limits' AND type='table'").get()){
+      const rows=this.db.prepare('SELECT b.kind,b.used,l.maximum FROM budgets b JOIN budget_limits l ON l.kind=b.kind ORDER BY b.kind').all();
+      requireSafe(rows.length===2,'BUDGET_POLICY_UNAVAILABLE');return rows as ReturnType<EventStore['budgets']>;
+    }
+    return this.db.prepare('SELECT * FROM budgets ORDER BY kind').all() as ReturnType<EventStore['budgets']>;
+  }
+  budget(kind:'MODEL'|'SEND'):{kind:'MODEL'|'SEND';used:number;maximum:number|null}{
+    const row=this.budgets().find(item=>item.kind===kind);requireSafe(row,'BUDGET_POLICY_UNAVAILABLE');return row;
   }
   recordIntent(draftId: string, snapshot: TargetSnapshot, real: boolean,
     authority?: { check(): void; committed(intentId: string): void;manualMedia?():void }): string {
@@ -428,7 +459,7 @@ export class EventStore {
   stats(): Record<string, unknown> {
     return {
       events: this.db.prepare('SELECT status,count(*) AS count FROM inbound_events GROUP BY status').all(),
-      budgets: this.db.prepare('SELECT * FROM budgets').all(),
+      budgets: this.budgets(),
       uncertain: this.uncertain().length,
       manualRetries:this.db.prepare(`SELECT i.id AS retryId,i.entity_id AS grantId,
         json_extract(i.detail_redacted,'$.eventId') AS eventId,

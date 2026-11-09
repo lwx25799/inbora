@@ -1,7 +1,7 @@
 import {afterAll,beforeAll,expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
-import {captureObserved} from '../../src/adapters/observed-reader.js';
+import {captureObserved,ObservedReader} from '../../src/adapters/observed-reader.js';
 import {InboxCollector} from '../../src/app/inbox-collector.js';
 import {AutomationStore} from '../../src/storage/automation-store.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
@@ -23,7 +23,7 @@ test.each(['locate','conversations'] as const)('a metadata-incomplete unrelated 
   const mapping=observedMapping(server.origin),input:Parameters<typeof captureObserved>[0]={mapping,channel,index:0,evidenceId:'synthetic-list-isolation',peer:mapping.peers[0]!};
   const batch=await owner.dm.evaluate(captureObserved,input);
   if(channel==='locate')expect(batch.conversation?.rowIndex).toBe(1);
-  else expect(batch.peers).toEqual([mapping.peers[0]]);
+  else expect(batch.peers?.map(({activity,...peer})=>{expect(typeof activity).toBe('string');return peer;})).toEqual([mapping.peers[0]]);
   expect(batch.unsupported).toBe(1);
 });
 
@@ -55,9 +55,8 @@ test('an unrecognized content row retains other exact window messages without ma
     expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);
     expect(store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
     for(const event of store.events())expect(()=>store.assertModelObservation(event.payload)).toThrow('DM_CONTENT_UNVERIFIED');
-    const mapping=observedMapping(server.origin),strict:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,
-      evidenceId:'synthetic-strict-read',peer:mapping.peers[0]!,dmWindow:true};
-    await expect(owner.dm.evaluate(captureObserved,strict)).rejects.toThrow('OBSERVATION_DM_CONTENT_DOM_NOT_READY');
+    const mapping=observedMapping(server.origin);
+    await expect(new ObservedReader(owner.dm,mapping).dm(0,mapping.peers[0]!)).rejects.toThrow('OBSERVATION_DM_CONTENT_DOM_NOT_READY');
     const oldIds=store.events().map(event=>event.id);
     await owner.dm.evaluate(()=>{
       const row=document.querySelectorAll('.message')[3]!,body=document.createElement('span');body.className='text';body.textContent='late exact text';row.append(body);

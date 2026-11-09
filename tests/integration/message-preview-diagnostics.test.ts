@@ -33,5 +33,6 @@ test.each(['READY','INSPECT_FAILURE','CAPTURE_FAILURE'] as const)('normal previe
   }
   await saveMessagePreviews(page,mapping,{...batch,events:[]},root,new AbortController().signal);
   expect(JSON.parse(readFileSync(file,'utf8'))).toMatchObject({batchDMcount:0,eligibleCount:0,inspected:0,ready:0,caught:{}});
-  expect(readdirSync(join(root,'evidence')).filter(name=>name!=='message-previews')).toEqual(['message-preview-latest.json']);
+  expect(JSON.parse(readFileSync(join(root,'evidence','message-preview-last-nonempty.json'),'utf8'))).toEqual(diagnostic);
+  expect(readdirSync(join(root,'evidence')).filter(name=>name!=='message-previews').sort()).toEqual(['message-preview-last-nonempty.json','message-preview-latest.json']);
 });

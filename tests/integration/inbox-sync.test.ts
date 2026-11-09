@@ -13,12 +13,13 @@ async function fixture(read:(source:Source)=>Promise<void>){
   const calls:Source[]=[];
   class SyncBrowser extends BrowserService{
     closes=0;
-    override identity(){return{identityDigest:digest('own-1'),mappingDigest:'sync-fixture',browserMode:'headed' as const,browserVersion:'fixture'};}
+    override identity(){return{identityDigest:digest('own-1'),mappingDigest:'sync-fixture',browserMode:'headless' as const,browserVersion:'fixture'};}
     override async refreshIdentity(){return this.identity();}
     override async observe(_store:EventStore,source:Source){calls.push(source);await read(source);}
     override async close(){this.closes++;}
   }
   const browser=new SyncBrowser(root),service=new ClientService(store,browser),token=service.authority.issueSession();
+  expect(browser.identity().browserMode).toBe(browser.status().mode);
   for(const channel of ['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as const)service.authority.attest(channel,'SEND_AVAILABLE',browser.identity(),'synthetic-sync-proof');
   const status=async()=>await service.dispatch(token,{command:'getStatus'}) as {sync:{runId:string|null;running:boolean;cancelled:boolean;source:Source|null;results:{source:Source;state:string;error:string|null}[]}};
   return{store,browser,service,token,calls,status,close:async()=>{await service.close();store.close();}};

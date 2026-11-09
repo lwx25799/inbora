@@ -16,6 +16,9 @@ import { saveMessagePreviews } from '../adapters/message-preview.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
 import {MessageShareStore} from '../storage/message-shares.js';
 import {MessagePreviewStore} from '../storage/message-previews.js';
+import {dmLatestSchema,dmWindowCoverage,latestDmWindow,overlapsCompletedDm} from './dm-incremental.js';
+import {dmActivitySchema,readDmActivity} from './dm-activity.js';
+import {previewRetryFields,preparePreviewRetry,finishPreviewNormalTurn} from './preview-retry.js';
 
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
@@ -23,10 +26,11 @@ const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).def
 const dmSweepSchema=z.object({peer:z.object({uid:z.string().nullable(),secUid:z.string(),conversationId:z.string(),title:z.string()}),
   phase:z.enum(['MIN','MAX','PROBE_MIN','PROBE_MAX']),top:z.number().finite(),height:z.number().nonnegative(),signature:z.string(),
   edge:z.number().int().nonnegative(),legHasNew:z.boolean(),minimumOld:z.boolean().default(false),
-  anchor:z.object({top:z.number().finite(),height:z.number().nonnegative(),ids:z.array(z.string().min(1)).min(1).max(100)}).optional()});
+  anchor:z.object({top:z.number().finite(),height:z.number().nonnegative(),ids:z.array(z.string().min(1)).min(1).max(100)}).optional(),latest:dmLatestSchema.optional()});
 const dmCursorSchema=z.object({deferred:z.array(z.object({id:z.string().min(1),until:z.number().int().nonnegative(),code:z.string()})).default([]),
   sweep:dmSweepSchema.optional(),parked:z.array(dmSweepSchema).default([]),recent:z.array(z.string().min(1)).default([]),
-  burst:z.number().int().nonnegative().default(0)});
+  burst:z.number().int().nonnegative().default(0),completed:z.array(z.object({id:z.string().min(1),latest:dmLatestSchema})).max(1000).default([]),activity:dmActivitySchema,
+  activityNeedsNormal:z.boolean().default(false),...previewRetryFields});
 type DmCursor=z.infer<typeof dmCursorSchema>;
 type DmSweep=z.infer<typeof dmSweepSchema>;
 const objectRetryMs=120_000;
@@ -56,8 +60,11 @@ export class InboxCollector {
     await this.owner.actor.run(async()=>{
       this.check(source,signal);
       if(source==='dm'){
+        if(preparePreviewRetry(this.data,this.root,!this.priority&&!this.priorityNeedsNormal,id=>this.prioritize(this.mapping.self.uid,id)))this.priorityNeedsNormal=true;
         if(this.priority&&!this.priorityNeedsNormal)await this.previewPriority(signal);
-        else{try{await this.dm(signal);}finally{this.priorityNeedsNormal=false;}}
+        else{try{await this.dm(signal);}finally{
+          if(!signal.aborted&&!this.disposed){this.priorityNeedsNormal=false;finishPreviewNormalTurn(this.data);}
+        }}
       }else await this.works(signal);
     },'background');
   }
@@ -81,7 +88,7 @@ export class InboxCollector {
     const current=this.data.store.db.prepare('SELECT uid,sec_uid,title FROM discovered_conversations WHERE own_id=? AND id=?')
       .get(this.mapping.self.uid,id) as {uid:string|null;sec_uid:string;title:string}|undefined;
     requireSafe(current,'OBSERVATION_CONVERSATION_CHANGED');
-    const reader=new ObservedReader(this.owner.dm,this.mapping),peer={uid:current.uid,secUid:current.sec_uid,title:current.title,conversationId:id};
+    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt),peer={uid:current.uid,secUid:current.sec_uid,title:current.title,conversationId:id};
     let top:number|undefined,canRestore=false,restoring=false;
     try{
       top=(await reader.conversations()).scroll?.top;canRestore=true;this.check('dm',signal);
@@ -128,7 +135,7 @@ export class InboxCollector {
       if(source==='dm')new ChatMessageStore(this.data.store).observe(batch.events,this.mapping.self.uid,this.data.state().startedAt,this.data.now());
       if(displayChanged)this.data.store.audit('MESSAGE_DISPLAY_CHANGED',digest(['account_001','dm:'+scope]));
     }).immediate();
-    requireSafe(!batch.incomplete,'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
+    requireSafe(!batch.incomplete||!!dmWindowCoverage(batch,this.data.state().startedAt),'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
   }
   private async dmStage<T>(stage:'LIST'|'THREAD'|'ADVANCE',read:()=>Promise<T>):Promise<T> {
     try{return await read();}catch(error){
@@ -200,13 +207,16 @@ export class InboxCollector {
     const viewport=batch.dmViewport;
     if(!viewport){requireSafe(!restarted,'OBSERVATION_DM_SCROLL_UNAVAILABLE');return;}
     const boundary=this.data.state().startedAt;
-    const allOld=batch.unsupported===0&&batch.events.length===batch.loaded&&batch.events.length>0&&batch.events.every(event=>{
-      const at=Date.parse(event.occurredAt??'');return Number.isFinite(at)&&at+(event.occurredAtPrecisionMs??1)<=boundary;
+    const coverage=dmWindowCoverage(batch,boundary);
+    const allOld=!!coverage&&coverage.every(row=>{
+      const at=Date.parse(row.occurredAt);return at+row.precisionMs<=boundary;
     });
-    const hasNew=batch.events.some(event=>{const at=Date.parse(event.occurredAt??'');return Number.isFinite(at)&&at>=boundary;});
-    const signature=digest(batch.events.map(event=>[event.platformEventId,event.occurredAt]).sort());
-    const ids=batch.events.map(event=>event.platformEventId).filter((id):id is string=>id!==null);
+    const rows=coverage??batch.events.map(event=>({id:event.platformEventId,occurredAt:event.occurredAt}));
+    const hasNew=rows.some(row=>{const at=Date.parse(row.occurredAt??'');return Number.isFinite(at)&&at>=boundary;});
+    const signature=digest(rows.map(row=>[row.id,row.occurredAt]).sort());
+    const ids=rows.map(row=>row.id).filter((id):id is string=>id!==null);
     const anchor=ids.length?{top:viewport.top,height:viewport.height,ids}:undefined;
+    if(allOld&&prior?.latest&&prior.latest.maximumTime>=boundary)return;
     // An accurate native chat may reopen at a saved historical position, so an old first window proves neither end.
     if(!prior&&allOld)return {peer,phase:'PROBE_MIN',top:viewport.minimum,height:viewport.height,signature,
       edge:0,legHasNew:false,minimumOld:false,anchor};
@@ -232,7 +242,8 @@ export class InboxCollector {
   }
   private async resumeDm(reader:ObservedReader,peer:DiscoveredPeer,active:DmSweep,messages:ObservationBatch,signal:AbortSignal):Promise<ObservationBatch> {
     const anchor=active.anchor!;
-    const matches=(batch:ObservationBatch)=>batch.events.some(event=>event.platformEventId!==null&&anchor.ids.includes(event.platformEventId));
+    const ids=(batch:ObservationBatch)=>dmWindowCoverage(batch,this.data.state().startedAt)?.map(row=>row.id)??[];
+    const matches=(batch:ObservationBatch)=>ids(batch).some(id=>anchor.ids.includes(id));
     // Preserve new arrivals before leaving a chat that reopened at its latest window.
     await this.persist('dm',peer.conversationId,messages,signal,peer);
     let aligned=messages;
@@ -248,7 +259,7 @@ export class InboxCollector {
         aligned=await reader.dmWindow(peer,top,true);
         await this.persist('dm',peer.conversationId,aligned,signal,peer);
       }
-      const score=aligned.events.filter(event=>event.platformEventId!==null&&anchor.ids.includes(event.platformEventId)).length;
+      const score=ids(aligned).filter(id=>anchor.ids.includes(id)).length;
       if(score>bestScore){best=aligned;bestScore=score;}
       if(score===anchor.ids.length)break;
     }
@@ -262,10 +273,19 @@ export class InboxCollector {
     return reader.dmWindow(peer,top,true);
   }
   private async dm(signal:AbortSignal):Promise<void> {
-    const reader=new ObservedReader(this.owner.dm,this.mapping);
+    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt);
     const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
     const park=(sweep:DmSweep)=>{cursor.parked=cursor.parked.filter(item=>item.peer.conversationId!==sweep.peer.conversationId);cursor.parked.push(sweep);};
+    const save=()=>{this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));};
+    if(cursor.activityNeedsNormal){cursor.activityNeedsNormal=false;save();}
+    else{
+      try{
+        if(await readDmActivity(reader,this.data,cursor.activity,signal,(peer,batch)=>this.persist('dm',peer.conversationId,batch,signal,peer),save)){
+          cursor.activityNeedsNormal=true;save();return;
+        }
+      }catch(error){cursor.activityNeedsNormal=true;save();throw error;}
+    }
     let active=cursor.sweep&&cursor.burst<2&&!cursor.deferred.some(item=>item.id===cursor.sweep!.peer.conversationId&&item.until>this.data.now())?cursor.sweep:undefined;
     let peer:DiscoveredPeer|undefined;
     if(!active) {
@@ -288,6 +308,12 @@ export class InboxCollector {
     try{
       let messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer,undefined,true));
       this.check('dm',signal);
+      const completed=!active?cursor.completed.find(item=>item.id===peer.conversationId)?.latest:undefined;
+      if(completed&&messages.dmViewport){
+        const top=completed.side==='MIN'?messages.dmViewport.minimum:messages.dmViewport.maximum;
+        if(Math.abs(messages.dmViewport.top-top)>1)messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer,top,true));
+      }
+      const incremental=!!completed&&overlapsCompletedDm(messages,completed,this.data.state().startedAt);
       // A changed virtual height invalidates a raw offset. Rescan both ends from the current window instead.
       let prior=active&&messages.dmViewport?.height===active.height?active:undefined;
       if(active?.anchor) {
@@ -305,7 +331,10 @@ export class InboxCollector {
         this.data.store.db.prepare('UPDATE discovered_conversations SET uid=? WHERE id=?').run(native.uid,peer.conversationId);
         peer.uid=native.uid;
       }
-      nextSweep=this.dmSweep(peer,messages,prior,!!active);
+      const latest=latestDmWindow(messages,active?.latest??completed,this.data.state().startedAt);
+      nextSweep=incremental?undefined:this.dmSweep(peer,messages,prior,!!active);
+      if(nextSweep)nextSweep.latest=latest;
+      else if(latest){cursor.completed=cursor.completed.filter(item=>item.id!==peer.conversationId);cursor.completed.push({id:peer.conversationId,latest});cursor.completed=cursor.completed.slice(-1000);}
       if(nextSweep)await this.dmStage('THREAD',()=>reader.scrollDm(peer,nextSweep!.top));
       this.check('dm',signal);
     }
@@ -315,13 +344,23 @@ export class InboxCollector {
         this.check('dm',signal);
         cursor.deferred=cursor.deferred.filter(item=>item.id!==peer.conversationId);
         cursor.deferred.push({id:peer.conversationId,until:this.data.now()+objectRetryMs,code});
-        if(active)cursor.sweep=active;
+        if(code==='OBSERVATION_DM_ANCHOR_NOT_FOUND'&&active?.anchor){
+          // The bounded candidates were freshly persisted, but no longer prove this peer's old position.
+          if(cursor.sweep?.peer.conversationId===peer.conversationId)delete cursor.sweep;
+          cursor.parked=cursor.parked.filter(item=>item.peer.conversationId!==peer.conversationId);
+          cursor.completed=cursor.completed.filter(item=>item.id!==peer.conversationId);
+        }else if(active)cursor.sweep=active;
         cursor.burst=2;visited();
         this.data.store.db.transaction(()=>{
           this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
           this.data.store.audit('DM_READ_DEFERRED',digest(peer.conversationId),{threadReadFailed:true});
         }).immediate();
         await this.diagnose(reader,'dm',code,signal,peer,'THREAD');
+        try{this.check('dm',signal);await this.advanceDm(reader,signal);}
+        catch(advanceError){
+          const advanceCode=advanceError instanceof Blocked?advanceError.code:'DM_ADVANCE_READ_FAILED';
+          if(collectionStops.has(advanceCode)||advanceCode==='BROWSER_CLOSED'||signal.aborted)throw advanceError;
+        }
         throw new DeferredObjectRead(code);
       }
       throw error;

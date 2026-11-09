@@ -23,20 +23,34 @@ export class SendCoordinator {
       this.store.assertSendable(event.id);
       requireSafe(draft.status === 'APPROVED' && draft.approval, 'APPROVAL_REQUIRED');
       const approved = draft.approval;
+      const unchanged=(snapshot:typeof approved.snapshot,stage:'INSPECT'|'PREPARED'|'FINAL'):boolean=>{
+        if(digest(snapshot)===digest(approved.snapshot))return true;
+        for(const [field,code] of [['accountId','ACCOUNT'],['ownId','SELF'],['targetKey','TARGET'],['eventBinding','EVENT'],
+          ['composerKey','COMPOSER'],['contextDigest','CONTEXT'],['mappingDigest','MAPPING'],['manualObservation','MEDIA']] as const)
+          if(digest(snapshot[field]??null)!==digest(approved.snapshot[field]??null))this.store.audit(`SEND_RECHECK_${stage}_${code}_CHANGED`,draftId);
+        return false;
+      };
       let baseline: string[];
       let final: typeof approved.snapshot;
+      let intentId:string;
       try {
         const before = await adapter.inspect(event.payload);
-        requireSafe(digest(before) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
+        requireSafe(unchanged(before,'INSPECT'), 'TARGET_CHANGED_REAPPROVE');
         await adapter.prepare(event.payload, draft.text);
         const prepared = await adapter.verifyPrepared(event.payload, draft.text);
-        requireSafe(digest(prepared) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
+        requireSafe(unchanged(prepared,'PREPARED'), 'TARGET_CHANGED_REAPPROVE');
         baseline = await adapter.baseline(event.payload);
         // Re-read after baseline and immediately before committing the irreversible intent.
         final = await adapter.verifyPrepared(event.payload, draft.text);
-        requireSafe(digest(final) === digest(approved.snapshot), 'TARGET_CHANGED_REAPPROVE');
-      } catch (error) { this.store.invalidateApproval(draftId); throw error; }
-      const intentId = this.store.recordIntent(draftId, final, real, authority);
+        requireSafe(unchanged(final,'FINAL'), 'TARGET_CHANGED_REAPPROVE');
+        intentId=this.store.recordIntent(draftId,final,real,authority);
+      } catch (error) {
+        if(!this.store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(event.id)){
+          try{await adapter.cancelPreparation?.(event.payload,draft.text);}catch{this.store.audit('PREPARATION_DISCARD_FAILED',draftId);}
+          this.store.invalidateApproval(draftId);
+        }
+        throw error;
+      }
       let phase='DISPATCH';
       try {
         const notBefore = this.store.intentBoundary(intentId);

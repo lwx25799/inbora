@@ -43,8 +43,18 @@ export const sendParamsSchema = z
 export type SendParams = z.infer<typeof sendParamsSchema>;
 export const humanReplySchema=z.object({...owned,expectedVersion:z.number().int().nonnegative(),text:z.string().min(1).max(2000),
   contextVersion:z.string().regex(/^[a-f0-9]{64}$/),selectionId:z.uuid(),suggestionId:z.uuid().nullable()}).strict();
-export const commandSchema = z.discriminatedUnion("command", [
-  z.object({command:z.literal('openHumanDialog'),...event,selectionId:z.uuid()}).strict(),
+export interface BrowserDraftChoice {
+  eventId:string;draftId:string;draftVersion:number;text:string;contextVersion:string;
+  author:string|null;conversationId:string;originalText:string;
+}
+const browserCommandSchema=z.union([
+  z.object({command:z.literal('browser'),open:z.boolean(),mode:z.enum(['headed','headless']),loginRecovery:z.boolean().optional()}).strict(),
+  z.object({command:z.literal('browser'),action:z.literal('inspectSavedDraftRecovery')}).strict(),
+  z.object({command:z.literal('browser'),action:z.literal('clearSavedDraftRecovery'),...event,draftId:z.uuid(),draftVersion:z.number().int().positive(),
+    expectedText:z.string().min(1).max(2000),contextVersion:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true)}).strict(),
+]);
+const ordinaryCommandSchema = z.discriminatedUnion("command", [
+  z.object({command:z.literal('openHumanDialog'),...event,selectionId:z.uuid(),editing:z.boolean().optional()}).strict(),
   z.object({command:z.literal('closeHumanDialog'),...owned}).strict(),
   z.object({command:z.literal('sendHumanReply'),commandId:z.uuid(),input:humanReplySchema}).strict(),
   z.object({command:z.literal("configureCollection"),settings:collectionSchema}).strict(),
@@ -126,14 +136,6 @@ export const commandSchema = z.discriminatedUnion("command", [
     .strict(),
   z
     .object({
-      command: z.literal("browser"),
-      open: z.boolean(),
-      mode: z.enum(["headed", "headless"]),
-      loginRecovery:z.boolean().optional(),
-    })
-    .strict(),
-  z
-    .object({
       command: z.literal("observe"),
       source: z.enum(["notifications", "works", "dm"]),
     })
@@ -157,6 +159,7 @@ export const commandSchema = z.discriminatedUnion("command", [
     .object({ command: z.literal("authorizeAi"), authorized: z.boolean() })
     .strict(),
 ]);
+export const commandSchema=z.union([ordinaryCommandSchema,browserCommandSchema]);
 export type ClientCommand = z.infer<typeof commandSchema>;
 export interface InboxSync {
   runId: string | null;

@@ -73,6 +73,9 @@ test.each([[false,false],[true,false],[false,true],[true,true]])('DM backlog sur
         mountWindow(restoredOld ? earlier : latest);
         list.scrollTop = restoredOld ? 0 : list.scrollHeight - list.clientHeight;
       };
+      (window as unknown as {appendLatest:()=>void}).appendLatest=()=>{
+        latest.push({id:'106',text:'new after completed history',at:Date.now()});mountWindow(latest);
+      };
       list.addEventListener('scroll', () => {
         state.backlogScrollEvents++;
         // Only ordinary physical scrolling mounts the other native window.
@@ -143,6 +146,8 @@ test.each([[false,false],[true,false],[false,true],[true,true]])('DM backlog sur
     // Later routine rounds observe the same native IDs without making duplicate tasks.
     await collector.collect('dm', signal);
     await collector.collect('dm', signal);
+    expect(progress().sweep).toBeUndefined();
+    expect(progress().parked?.some(item=>item.peer.conversationId==='conv-a')??false).toBe(false);
     const events = store.events();
     expect(data.state().startedAt).toBe(startedAt);
     expect(events.some(event => event.payload.platformEventId === '104')).toBe(true);
@@ -155,6 +160,11 @@ test.each([[false,false],[true,false],[false,true],[true,true]])('DM backlog sur
     expect(new Set(events.map(event => event.payload.platformEventId)).size).toBe(events.length);
     expect(events.find(event => event.payload.platformEventId === '101')?.status).toBe('BASELINE');
     if (restoredOld) for (const id of ['102','103']) expect(events.find(event => event.payload.platformEventId === id)?.status).toBe('BASELINE');
+    collector.dispose();collector=new InboxCollector(owner,mapping,data,root,'headless');
+    await owner.dm.evaluate(()=>(window as unknown as {appendLatest:()=>void}).appendLatest());
+    await collector.collect('dm',signal);
+    expect(store.events().find(event=>event.payload.platformEventId==='106')?.status).toBe('AWAITING_DRAFT');
+    expect(progress().sweep).toBeUndefined();
     expect(await owner.dm.evaluate(() => (window as unknown as { backlogOlderLoads: number }).backlogOlderLoads)).toBeGreaterThan(0);
   } finally {
     collector?.dispose(); store.close(); await owner.close(); await server.close();

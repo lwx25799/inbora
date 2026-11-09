@@ -8,7 +8,7 @@ import {BrowserService} from '../../src/app/browser-service.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
 import {migrateAutomation} from '../../src/storage/automation-migration.js';
 import {ChatMessageStore} from '../../src/storage/chat-messages.js';
-import {candidate,database,pending,privateTemp} from '../helpers.js';
+import {candidate,database,pending,privateTemp,snapshot} from '../helpers.js';
 import type {Thread} from '../../desktop/src/api.js';
 
 const editor=(page:Page)=>page.getByRole('textbox',{name:'人工回复草稿'});
@@ -112,6 +112,46 @@ test('same-conversation new messages and late details preserve the current draft
     await new Promise(resolve=>setTimeout(resolve,650));expect(await editor(f.page).inputValue()).toBe('只属于B的继续输入');
     const saved=f.calls.filter(call=>call.command==='saveDraft').at(-1);expect(saved).toMatchObject({eventId:f.b,text:'只属于B的继续输入'});
     expect(await f.page.locator('.task').count()).toBe(3);expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
+
+test('the settings switch controls all conversations while viewing stays passive and focusing the composer protects human input',async()=>{
+  const f=await setup();try{
+    await f.service.dispatch(f.token,{command:'setReplyPolicy',confirmed:true,policy:{ownId:'own-1',channels:['DIRECT_MESSAGE'],model:'deepseek-flash',
+      modelLimit:1,sendLimit:1,expiresAt:null,workIds:[],futureOwnWorks:false,conversationIds:[],entireInbox:true,
+      containsAny:['never-match'],excludesAny:[],instructions:'Synthetic test',startHour:0,endHour:24}});
+    await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:true});
+    await expect.poll(()=>f.page.getByRole('switch',{name:'自动回复',exact:true}).isChecked(),{timeout:3000}).toBe(true);
+    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();await editor(f.page).waitFor();
+    expect(f.calls.filter(call=>call.command==='openHumanDialog')).toHaveLength(0);
+    expect(f.service.authority.ownership(f.store.event(f.a)).operator_id).toBeNull();
+    expect(await f.page.getByRole('button',{name:'交回自动回复',exact:true}).count()).toBe(0);
+    await editor(f.page).fill('统一开关保持这份人稿');
+    await expect.poll(()=>f.calls.some(call=>call.command==='openHumanDialog')).toBe(true);
+    await expect.poll(()=>f.service.authority.draftFor(f.a)?.text).toBe('统一开关保持这份人稿');
+    await f.page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    const toggle=f.page.getByRole('switch',{name:'设置中的自动回复',exact:true});await toggle.uncheck();
+    await expect.poll(()=>f.service.authority.mode()).toBe('MANUAL');await expect.poll(()=>toggle.isChecked()).toBe(false);await toggle.check();
+    await expect.poll(()=>f.service.authority.mode()).toBe('LIMITED_AUTO');
+    expect(f.service.authority.draftFor(f.a)?.text).toBe('统一开关保持这份人稿');
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
+
+test('a comment follow-up proof shows the exact confirmed reply below its parent without opening an editor',async()=>{
+  const f=await setup();try{
+    const event=f.store.event(f.comment),owner=f.service.authority.claim(f.token,f.comment,0);
+    const draft=f.service.authority.save(f.token,f.comment,owner.generation,0,'针对这条父评论的完整回复');
+    f.store.approve(draft.id,snapshot(event.payload),draft.version,draft.text);
+    const intent=f.store.recordIntent(draft.id,snapshot(event.payload),false,{check:()=>{},committed:()=>{}});
+    f.store.receipt(intent,'UNCERTAIN','synthetic-original-unknown');
+    f.store.db.prepare('INSERT INTO verification_results VALUES(?,?,?,?,?)').run('synthetic-comment-proof',intent,1,'synthetic-readback',Date.now());
+    await f.page.getByRole('combobox',{name:'任务状态'}).selectOption('CONFIRMED');
+    await f.page.locator('.task').filter({hasText:'评论父消息不可丢失'}).click();
+    await f.page.getByRole('region',{name:'我的回复',exact:true}).getByText(draft.text,{exact:true}).waitFor();
+    expect(await f.page.getByRole('heading',{name:'原父评论',exact:true}).count()).toBe(1);
+    expect(await f.page.getByRole('dialog',{name:'人工回复对话框'}).isVisible()).toBe(false);
+    expect(f.store.event(f.comment).status).toBe('UNCERTAIN');expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
 

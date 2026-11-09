@@ -7,7 +7,7 @@ import { ClientService } from "../../src/app/service.js";
 import { DeepSeekProvider } from "../../src/ai/deepseek.js";
 import { migrateClient } from "../../src/storage/client-migration.js";
 import { candidate, database, pending, privateTemp, snapshot } from "../helpers.js";
-import { digest, targetKey, type InboundEvent } from "../../src/core/contracts.js";
+import { Blocked,digest, targetKey, type InboundEvent } from "../../src/core/contracts.js";
 import { defaultSettings } from "../../src/app/contracts.js";
 import type { ReplyPolicy } from "../../src/app/automation-contracts.js";
 
@@ -27,7 +27,7 @@ class AutoFixtureBrowser extends BrowserService {
   }};}
 }
 const policy:ReplyPolicy={ownId:'own-1',channels:['COMMENT_NOTIFICATION','DIRECT_MESSAGE'],model:'deepseek-flash',modelLimit:2,sendLimit:2,expiresAt:null,
-  workIds:['work-1'],futureOwnWorks:false,conversationIds:['conversation-1'],entireInbox:false,containsAny:['hello'],excludesAny:['refund'],instructions:'Reply briefly.',startHour:0,endHour:24};
+  workIds:['work-1'],futureOwnWorks:false,conversationIds:['conversation-1'],entireInbox:false,containsAny:[],excludesAny:['refund'],instructions:'Reply briefly.',startHour:0,endHour:24};
 async function setup(wait:()=>Promise<void>=async()=>{}){
   const store=database(),root=privateTemp('automatic-reply-');await migrateClient(store,join(root,'schema3.sqlite'));
   const dm=pending(store),comment=pending(store,candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',platformEventId:'comment-1',videoId:'work-1',commentId:'parent-1',conversationId:null}));
@@ -56,7 +56,7 @@ test('one explicit policy activation resumes ordinary send pause and authorizes 
     await f.service.dispatch(f.token,{command:'pause',eventId:null});
     f.store.db.prepare("UPDATE budgets SET used=CASE kind WHEN 'MODEL' THEN 1 ELSE 9 END").run();
     const result=await f.service.dispatch(f.token,{command:'enableReplyPolicy',policy,confirmed:true});
-    expect(result).toMatchObject({paused:false,configuredMode:'LIMITED_AUTO',automation:{modelGrant:null,replyPolicy:{scope:policy}}});
+    expect(result).toMatchObject({paused:false,configuredMode:'LIMITED_AUTO',automation:{replyPolicy:{scope:policy}}});
     await f.service.runAutomaticReply();await f.service.runAutomaticReply();await f.service.runAutomaticReply();
     expect(f.models()).toBe(2);expect(f.browser.clicks).toBe(2);
     expect(f.store.db.prepare('SELECT kind,used FROM budgets ORDER BY kind').all()).toEqual([{kind:'MODEL',used:3},{kind:'SEND',used:11}]);
@@ -68,12 +68,13 @@ test('automatic reply switch preserves the policy and remaining budget across of
   const f=await setup();let restarted:ClientService|undefined;
   try{
     const before=(await f.service.dispatch(f.token,{command:'getStatus'}) as {automation:{replyPolicy:{version:number}}}).automation.replyPolicy.version;
+    const grantCount=f.store.db.prepare('SELECT count(*) AS n FROM automation_grants').get();
     await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:false});await f.service.runAutomaticReply();
     expect(f.models()).toBe(0);expect(f.browser.clicks).toBe(0);expect(f.service.authority.paused()).toBe(false);
     await f.service.close();restarted=new ClientService(f.store,f.browser);await restarted.loadSettings();const token=restarted.authority.issueSession();
     expect(await restarted.dispatch(token,{command:'getStatus'})).toMatchObject({configuredMode:'MANUAL',paused:false,automation:{replyPolicy:{version:before}}});
     expect(await restarted.dispatch(token,{command:'setAutomaticReply',enabled:true})).toMatchObject({configuredMode:'LIMITED_AUTO',automation:{replyPolicy:{version:before}}});
-    expect(f.store.db.prepare('SELECT count(*) AS n FROM automation_grants').get()).toEqual({n:1});
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM automation_grants').get()).toEqual(grantCount);
     expect(f.store.db.prepare('SELECT kind,used FROM budgets ORDER BY kind').all()).toEqual([{kind:'MODEL',used:0},{kind:'SEND',used:0}]);
   }finally{await restarted?.close();await f.close();}
 });
@@ -124,18 +125,32 @@ test.each([false,true])('automatic reply switch stops an unsubmitted command but
   }finally{release?.();await task?.catch(()=>{});await f.close();}
 });
 
-test('policy activation preserves global emergency stop and target human pauses',async()=>{
+test('policy activation releases idle per-conversation handoffs and preserves global emergency stop',async()=>{
   const f=await setup();try{
     const thread=await f.service.dispatch(f.token,{command:'openHumanDialog',eventId:f.dm,selectionId:randomUUID()}) as {ownership:{generation:number}};
     await f.service.dispatch(f.token,{command:'closeHumanDialog',eventId:f.dm,generation:thread.ownership.generation});
     await f.service.dispatch(f.token,{command:'enableReplyPolicy',policy,confirmed:true});
-    await f.service.runAutomaticReply();
-    expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(1);expect(f.store.event(f.dm).status).toBe('AWAITING_DRAFT');
+    await f.service.runAutomaticReply();await f.service.runAutomaticReply();
+    expect(f.models()).toBe(2);expect(f.browser.clicks).toBe(2);expect(f.store.event(f.dm).status).toBe('CONFIRMED');
     await f.service.dispatch(f.token,{command:'emergencyStop'});
     const before=f.store.db.prepare('SELECT * FROM automation_grants').all();
     await expect(f.service.dispatch(f.token,{command:'enableReplyPolicy',policy,confirmed:true})).rejects.toThrow('EMERGENCY_STOPPED');
     expect(f.store.db.prepare('SELECT * FROM automation_grants').all()).toEqual(before);
     expect(f.service.authority.paused()).toBe(true);
+  }finally{await f.close();}
+});
+
+test('viewing a conversation does not pause policy while actual human editing remains protected by the same global switch',async()=>{
+  const f=await setup();try{
+    await f.service.dispatch(f.token,{command:'openHumanDialog',eventId:f.dm,selectionId:randomUUID(),editing:false});
+    expect(f.service.authority.ownership(f.store.event(f.dm)).operator_id).toBeNull();
+    const thread=await f.service.dispatch(f.token,{command:'openHumanDialog',eventId:f.dm,selectionId:randomUUID()}) as {ownership:{generation:number}};
+    await f.service.dispatch(f.token,{command:'saveDraft',eventId:f.dm,generation:thread.ownership.generation,expectedVersion:0,text:'Preserved real human draft',suggestionId:null});
+    await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:true});
+    await f.service.runAutomaticReply();await f.service.runAutomaticReply();
+    expect(f.store.event(f.dm).status).toBe('AWAITING_APPROVAL');
+    expect(f.service.authority.draftFor(f.dm)?.text).toBe('Preserved real human draft');
+    expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(1);
   }finally{await f.close();}
 });
 
@@ -190,5 +205,87 @@ test('browser identity and exact target are qualified before any paid automatic 
     expect(f.models()).toBe(0);expect(f.browser.clicks).toBe(0);
     expect(f.store.db.prepare("SELECT reason FROM automation_jobs").get()).toEqual({reason:'ACCOUNT_CHANGED'});
     expect(await f.service.dispatch(f.token,{command:'getStatus'})).toMatchObject({automation:{emergencyStopped:true}});
+  }finally{await f.close();}
+});
+
+test.each(['CLIENT_CLOSING','TARGET_CHANGED_REAPPROVE','NATIVE_REPLY_EXISTING_DRAFT'])('a policy draft stopped before its intent resumes once without another model call or replaying an unknown (%s)',async code=>{
+  const f=await setup();try{
+    f.browser.beforePrepare=async()=>{throw new Blocked(code);};
+    await f.service.runAutomaticReply();expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(0);
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});
+    const text=f.service.authority.draftFor(f.dm)?.text;f.browser.beforePrepare=async()=>{};
+    await f.service.runAutomaticReply();expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(1);
+    expect(f.store.event(f.dm).status).toBe('CONFIRMED');expect(f.service.authority.draftFor(f.dm)?.text).toBe(text);
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:1});
+    expect(f.store.db.prepare("SELECT count(*) n FROM audit_events WHERE event_type='AUTO_DRAFT_RESUMED'").get()).toEqual({n:1});
+  }finally{await f.close();}
+});
+
+test('an independent verified text can use verified text context while prior media stays visible and never reaches the model',async()=>{
+  const f=await setup();try{
+    const media=candidate({platformEventId:'unread-media-context',text:'[图片或表情消息，需人工查看]',occurredAt:'2026-11-04T01:00:00.500Z',
+      contentType:'IMAGE',observationIssue:'DM_CONTENT_UNVERIFIED'});
+    pending(f.store,media);
+    await f.service.runAutomaticReply();
+    expect(f.models()).toBe(1);expect(f.store.event(f.dm).status).toBe('CONFIRMED');
+    expect(f.store.events().find(e=>e.payload.platformEventId==='unread-media-context')?.status).toBe('MANUAL_REVIEW');
+  }finally{await f.close();}
+});
+
+test.each(['intent','human','revoked','context','off'])('policy draft recovery retains the original safety boundary (%s)',async reason=>{
+  const f=await setup();try{
+    f.browser.beforePrepare=async()=>{throw new Blocked('CLIENT_CLOSING');};await f.service.runAutomaticReply();f.browser.beforePrepare=async()=>{};
+    const event=f.store.event(f.dm),draft=f.service.authority.draftFor(f.dm)!;
+    if(reason==='intent'){
+      f.store.approve(draft.id,snapshot(event.payload),draft.version,draft.text);
+      const intent=f.store.recordIntent(draft.id,snapshot(event.payload),false,{check:()=>{},committed:()=>{}});f.store.receipt(intent,'UNCERTAIN','synthetic-existing-intent');
+    }else if(reason==='human'){
+      const owner=f.service.authority.claim(f.token,f.dm,f.service.authority.ownership(event).generation);
+      f.service.authority.save(f.token,f.dm,owner.generation,draft.version,'Actual human revision');
+    }else if(reason==='revoked')await f.service.dispatch(f.token,{command:'setReplyPolicy',policy:null,confirmed:true});
+    else if(reason==='off')await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:false});
+    else pending(f.store,candidate({platformEventId:'new-context',occurredAt:new Date(Date.now()).toISOString()}));
+    await f.service.runAutomaticReply();
+    expect(f.store.db.prepare("SELECT count(*) n FROM audit_events WHERE event_type='AUTO_DRAFT_RESUMED' AND entity_id=?").get(f.dm)).toEqual({n:0});
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents WHERE event_id=?').get(f.dm)).toEqual({n:reason==='intent'?1:0});
+  }finally{await f.close();}
+});
+
+test('pre-intent qualification stops after two bounded recoveries without another model call or a send intent',async()=>{
+  const f=await setup();try{
+    await f.service.dispatch(f.token,{command:'setReplyPolicy',policy:{...policy,channels:['DIRECT_MESSAGE']},confirmed:true});
+    f.browser.beforePrepare=async()=>{throw new Blocked('TARGET_CHANGED_REAPPROVE');};
+    for(let attempt=0;attempt<5;attempt++)await f.service.runAutomaticReply();
+    expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(0);
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});
+    expect(f.store.db.prepare("SELECT count(*) n FROM audit_events WHERE event_type='AUTO_DRAFT_RESUMED'").get()).toEqual({n:2});
+  }finally{await f.close();}
+});
+
+test('an old stale recovery candidate cannot starve another eligible policy draft',async()=>{
+  const f=await setup();try{
+    f.browser.beforePrepare=async()=>{throw new Blocked('CLIENT_CLOSING');};
+    await f.service.runAutomaticReply();
+    f.store.db.prepare("UPDATE automation_jobs SET context_version='synthetic-stale' WHERE event_id=?").run(f.dm);
+    await f.service.runAutomaticReply();expect(f.models()).toBe(2);
+    f.browser.beforePrepare=async()=>{};await f.service.runAutomaticReply();
+    expect(f.models()).toBe(2);expect(f.browser.clicks).toBe(1);
+    expect(f.store.event(f.comment).status).toBe('CONFIRMED');
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents WHERE event_id=?').get(f.dm)).toEqual({n:0});
+  }finally{await f.close();}
+});
+
+test.each(['budget','rules'] as const)('a saved policy revision only reuses a pending paid draft when its reply rules are unchanged (%s)',async change=>{
+  const f=await setup();try{
+    const original={...policy,channels:['DIRECT_MESSAGE' as const]};
+    await f.service.dispatch(f.token,{command:'setReplyPolicy',policy:original,confirmed:true});
+    f.browser.beforePrepare=async()=>{throw new Blocked('CLIENT_CLOSING');};await f.service.runAutomaticReply();
+    const text=f.service.authority.draftFor(f.dm)!.text;
+    await f.service.dispatch(f.token,{command:'setReplyPolicy',policy:{...original,modelLimit:null,sendLimit:null,
+      instructions:change==='rules'?'A materially different reply rule':original.instructions},confirmed:true});
+    f.browser.beforePrepare=async()=>{};await f.service.runAutomaticReply();
+    expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(change==='budget'?1:0);
+    expect(f.service.authority.draftFor(f.dm)!.text).toBe(text);
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents WHERE event_id=?').get(f.dm)).toEqual({n:change==='budget'?1:0});
   }finally{await f.close();}
 });

@@ -105,13 +105,16 @@ export class InboxQueries {
     const nativeId=(id:string)=>`COALESCE((SELECT native_id_digest FROM chat_delivery_links WHERE intent_id=${id}),
       (SELECT json_extract(a.detail_redacted,'$.nativeIdDigest') FROM audit_events a WHERE a.entity_id=${id}
         AND a.event_type IN ('SUBMISSION_PROOF','CLOCK_SKEW_PROOF') ORDER BY a.rowid DESC LIMIT 1))`;
-    const notObserved=hasChat?`AND NOT EXISTS(SELECT 1 FROM chat_messages m WHERE m.account_id=e.account_id AND
-      m.conversation_id=json_extract(e.payload,'$.conversationId') AND m.native_id_digest=${nativeId('i.id')} AND m.conflicted=0)`:'';
+    const notObserved=(boundary:string)=>hasChat?`AND NOT EXISTS(SELECT 1 FROM chat_messages m WHERE m.account_id=e.account_id AND
+      m.conversation_id=json_extract(e.payload,'$.conversationId') AND m.conflicted=0 AND
+      (m.native_id_digest=${nativeId('i.id')} OR (${nativeId('i.id')} IS NULL AND json_extract(m.payload,'$.text')=d.text AND
+        abs(julianday(json_extract(m.payload,'$.occurredAt'))-julianday(${boundary}))*86400000<2000)))`:'';
+    // The legacy fallback suppresses only a redundant display annotation. Native bubbles, intents and proof links remain distinct.
     // Each intent owns immutable text. Match its digest after loading rather than accepting a changed draft.
     const sent=this.store.db.prepare(`SELECT * FROM (SELECT 'out:'||i.id AS id,e.id AS event_id,d.text,
       i.attempt_started_at AS occurred_at,${timeSql('i.attempt_started_at')} AS at,0 AS historical,i.text_digest
       FROM send_intents i JOIN inbound_events e ON e.id=i.event_id JOIN reply_drafts d ON d.id=i.draft_id
-      WHERE ${where} AND ${verified} ${notObserved}) ${bound} ORDER BY at DESC,id DESC LIMIT ?`)
+      WHERE ${where} AND ${verified} ${notObserved('i.attempt_started_at')}) ${bound} ORDER BY at DESC,id DESC LIMIT ?`)
       .all(...args,...boundArgs,pageSize+1) as (MessageRow&{text_digest:string})[];
     const retried=this.store.db.prepare(`SELECT * FROM (SELECT 'retry:'||i.id AS id,e.id AS event_id,d.text,
       i.time AS occurred_at,${timeSql('i.time')} AS at,0 AS historical,json_extract(i.detail_redacted,'$.textDigest') AS text_digest
@@ -119,7 +122,7 @@ export class InboxQueries {
       JOIN reply_drafts d ON d.id=json_extract(i.detail_redacted,'$.draftId')
       WHERE ${where} AND i.event_type='MANUAL_RETRY_INTENT' AND
         (SELECT json_extract(r.detail_redacted,'$.result') FROM audit_events r WHERE r.entity_id=i.id AND r.event_type='MANUAL_RETRY_RECEIPT'
-          ORDER BY r.rowid DESC LIMIT 1)='CONFIRMED' ${notObserved}) ${bound} ORDER BY at DESC,id DESC LIMIT ?`)
+          ORDER BY r.rowid DESC LIMIT 1)='CONFIRMED' ${notObserved('i.time')}) ${bound} ORDER BY at DESC,id DESC LIMIT ?`)
       .all(...args,...boundArgs,pageSize+1) as (MessageRow&{text_digest:string})[];
     const observed=hasChat&&e.channel==='DIRECT_MESSAGE'&&e.conversationId?this.store.db.prepare(`SELECT * FROM (
       SELECT 'observed:'||id AS id,id AS event_id,json_extract(payload,'$.text') AS text,

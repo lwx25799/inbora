@@ -38,6 +38,11 @@ export function ReplyDetail(props:ReplyViewProps) {
         {thread.event.payload.observationIssue&&<p className="hint">{reasons[thread.event.payload.observationIssue]??thread.event.payload.observationIssue}</p>}
         <small>{time(thread.event.payload.occurredAt)}</small>
       </section>
+      {!!thread.timeline?.items.some(message=>message.direction==='OUTGOING')&&<section className="original" aria-label="我的回复">
+        <h3>我的回复</h3>{thread.timeline.items.filter(message=>message.direction==='OUTGOING').map(message=><article key={message.id}>
+          <p>{message.text}</p><small>已回复 · {time(message.occurredAt)}</small>
+        </article>)}
+      </section>}
       <details className="history"><summary>有限上下文 · {thread.history.length} 条</summary>
         {thread.history.map((message,index)=><article key={index} className={message.direction==='OUTGOING'?'outgoing':''}>
           <small>{message.direction==='OUTGOING'?'我方已确认回复':'入站观察'} · {time(message.occurredAt)}</small><p>{message.text}</p>

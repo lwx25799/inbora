@@ -112,6 +112,7 @@ export function proofTimeValid(proof:SendProof,boundary:string):boolean{
 export interface ReplyAdapter {
   inspect(event: InboundEvent): Promise<TargetSnapshot>;
   prepare(event: InboundEvent, text: string): Promise<void>;
+  cancelPreparation?(event: InboundEvent, text: string): Promise<void>;
   verifyPrepared(event: InboundEvent, text: string): Promise<TargetSnapshot>;
   baseline(event: InboundEvent): Promise<string[]>;
   clickOnce(notBefore?:string): Promise<void>;

@@ -144,6 +144,16 @@ test('DM list diagnostic distinguishes missing title and native metadata using f
   }finally{await owner.close();await server.close();}
 });
 
+test('an empty native window cannot count as a completed conversation read',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(()=>document.querySelectorAll('.message').forEach(row=>row.remove()));
+    const mapping=config(server.origin),input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,
+      evidenceId:'fixture-empty-window',peer:mapping.peers[0]!,dmWindow:true};
+    await expect(owner.dm.evaluate(captureObserved,input)).rejects.toThrow('OBSERVATION_DM_MESSAGES_DOM_NOT_READY');
+  }finally{await owner.close();await server.close();}
+});
+
 test('DM message diagnostic distinguishes a visible card from absent or empty mapped text without exposing content',async()=>{
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
   try{

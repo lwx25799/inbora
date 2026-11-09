@@ -49,6 +49,13 @@ ALTER TABLE automation_schema RENAME TO automation_schema_previous;
 CREATE TABLE automation_schema(version INTEGER PRIMARY KEY CHECK(version=2));
 INSERT INTO automation_schema VALUES(2);DROP TABLE automation_schema_previous;`;
 
+const budgetSql=`CREATE TABLE budget_limits(kind TEXT PRIMARY KEY REFERENCES budgets(kind),maximum INTEGER
+  CHECK(maximum IS NULL OR (typeof(maximum)='integer' AND maximum>=0)));
+INSERT INTO budget_limits SELECT kind,maximum FROM budgets;
+ALTER TABLE automation_schema RENAME TO automation_schema_previous;
+CREATE TABLE automation_schema(version INTEGER PRIMARY KEY CHECK(version=3));
+INSERT INTO automation_schema VALUES(3);DROP TABLE automation_schema_previous;`;
+
 function inventory(db: Database.Database, names: string[]): string {
   return digest(names.map(name => [name, db.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}" ORDER BY rowid`).all()]));
 }
@@ -59,12 +66,17 @@ export async function migrateAutomation(store: EventStore, backupFile: string): 
   const hasSchema=!!store.db.prepare("SELECT name FROM sqlite_master WHERE name='automation_schema'").get();
   const versions=hasSchema?
     store.db.prepare('SELECT version FROM automation_schema').all() as {version:number}[]:[];
-  requireSafe(!hasSchema||versions.length===1&&[1,2].includes(versions[0]!.version),'AUTOMATION_SCHEMA_UNSUPPORTED');
-  if(versions[0]?.version===2){
+  requireSafe(!hasSchema||versions.length===1&&[1,2,3].includes(versions[0]!.version),'AUTOMATION_SCHEMA_UNSUPPORTED');
+  if((versions[0]?.version??0)>=2){
     requireSafe((store.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name IN ('chat_messages','chat_delivery_links') AND type='table'").get() as {n:number}).n===2,
-      'AUTOMATION_SCHEMA_UNSUPPORTED');return false;
+      'AUTOMATION_SCHEMA_UNSUPPORTED');
   }
-  const upgradeSql=(versions.length?'':sql)+chatSql;
+  if(versions[0]?.version===3){
+    requireSafe(!!store.db.prepare("SELECT name FROM sqlite_master WHERE name='budget_limits' AND type='table'").get()&&
+      (store.db.prepare('SELECT count(*) n FROM budget_limits JOIN budgets USING(kind)').get() as {n:number}).n===2,'AUTOMATION_SCHEMA_UNSUPPORTED');
+    return false;
+  }
+  const upgradeSql=(versions.length?'':sql)+((versions[0]?.version??0)<2?chatSql:'')+budgetSql;
   const names = (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {name: string}[]).map(x => x.name);
   const before = inventory(store.db, names),preserved=names.filter(name=>name!=='automation_schema'),preservedBefore=inventory(store.db,preserved);
   await mkdir(dirname(backupFile), { recursive: true });
@@ -81,11 +93,11 @@ export async function migrateAutomation(store: EventStore, backupFile: string): 
       trial.pragma("foreign_keys = ON");
       trial.transaction(() => trial.exec(upgradeSql)).immediate();
       requireSafe(trial.pragma("quick_check", {simple: true}) === "ok" && inventory(trial, preserved) === preservedBefore&&
-        (trial.prepare('SELECT version FROM automation_schema').get() as {version:number}).version===2, "MIGRATION_TRIAL_FAILED");
+        (trial.prepare('SELECT version FROM automation_schema').get() as {version:number}).version===3, "MIGRATION_TRIAL_FAILED");
     } finally { trial.close(); }
     requireSafe(inventory(store.db, names) === before, "DATABASE_CHANGED_DURING_MIGRATION");
     store.db.transaction(() => store.db.exec(upgradeSql)).immediate();
-    store.audit("AUTOMATION_SCHEMA_UPGRADED", "automation-2");
+    store.audit("AUTOMATION_SCHEMA_UPGRADED", "automation-3");
     return true;
   } finally { await rm(trialFile, {force: true}); }
 }

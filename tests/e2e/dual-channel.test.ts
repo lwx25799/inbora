@@ -25,9 +25,10 @@ test('comment target loading skips an older hidden root before the visible origi
   }finally{await owner.close();}
 });
 
-test.each([true, false])('both channels use real persistent Edge pages, complete approved receipt chain; headless=%s', async headless => {
-  const owner = await BrowserProfileOwner.launch(join(privateTemp(), 'profile'), headless); const s = database();
+test.each([false,true])('both channels complete the approved receipt chain in headless Edge; reopen owner=%s', async reopen => {
+  const profile=join(privateTemp(),'profile');let owner=await BrowserProfileOwner.launch(profile,true);const s=database();
   try {
+    if(reopen){await owner.close();owner=await BrowserProfileOwner.launch(profile,true);}
     await owner.open(server.origin);
     expect(owner.notification).not.toBe(owner.dm); expect(owner.context.pages()).toHaveLength(2);
     const config = mapping(server.origin);
@@ -146,7 +147,7 @@ test('delayed A-to-B conversation switch verifies both pane and peer, not just a
 });
 
 test('dedicated profile shares state across two pages and restores it after browser close',async()=>{
-  const profile=join(privateTemp(),'profile');let owner=await BrowserProfileOwner.launch(profile,false);
+  const profile=join(privateTemp(),'profile');let owner=await BrowserProfileOwner.launch(profile,true);
   try{
     await owner.open(server.origin);
     await owner.notification.evaluate(()=>{document.cookie='inbora_fixture=shared; Max-Age=300; Path=/';});

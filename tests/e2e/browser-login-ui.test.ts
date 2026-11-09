@@ -32,15 +32,20 @@ test('settings reserves a visible browser for explicit login and offers a headle
   try{
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
     await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await expect.poll(()=>calls.filter(body=>body.command==='browser'&&body.action==='inspectSavedDraftRecovery').length).toBe(1);
     expect(await page.getByRole('button',{name:'打开专属浏览器',exact:true}).count()).toBe(0);
     await page.getByRole('button',{name:'登录或处理验证码',exact:true}).click();
     await page.getByText('浏览器：等待本人登录，完成后自动恢复无头运行',{exact:true}).waitFor();
-    expect(calls.filter(body=>body.command==='browser')).toEqual([{command:'browser',open:true,mode:'headed',loginRecovery:true}]);
+    expect(calls.filter(body=>body.command==='browser')).toEqual([
+      {command:'browser',action:'inspectSavedDraftRecovery'},{command:'browser',open:true,mode:'headed',loginRecovery:true},
+    ]);
     await page.getByRole('button',{name:'返回无头运行',exact:true}).click();
     await expect.poll(()=>native.loginRecovery).toBe(false);
     expect(calls.filter(body=>body.command==='browser')).toEqual([
+      {command:'browser',action:'inspectSavedDraftRecovery'},
       {command:'browser',open:true,mode:'headed',loginRecovery:true},{command:'browser',open:true,mode:'headless'},
     ]);
+    expect(calls.filter(body=>body.command==='browser'&&body.action==='clearSavedDraftRecovery')).toEqual([]);
     expect(calls.some(body=>['sendHumanReply','generateSuggestion','setAutomaticReply','enableReplyPolicy'].includes(String(body.command)))).toBe(false);
     expect(errors).toEqual([]);
   }finally{await browser.close();await server.close();await service.close();store.close();}

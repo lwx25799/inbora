@@ -35,22 +35,38 @@ export class AutomationStore {
   grant(kind: "MODEL", scope: ModelGrant): Grant<ModelGrant>;
   grant(kind: "AUTO_REPLY", scope: ReplyPolicy): Grant<ReplyPolicy>;
   grant(kind: "MODEL" | "AUTO_REPLY", scope: ModelGrant | ReplyPolicy): Grant {
-    const parsed = kind === "MODEL" ? modelGrantSchema.parse(scope) : replyPolicySchema.parse(scope);
+    const parsed = kind === "MODEL" ? modelGrantSchema.parse(scope) : replyPolicySchema.parse({...scope,containsAny:[]});
+    if(kind==='AUTO_REPLY'){
+      const policy=parsed as ReplyPolicy;
+      requireSafe(policy.channels.every(channel=>channel==='DIRECT_MESSAGE'?policy.entireInbox||policy.conversationIds.length>0:
+        policy.futureOwnWorks||policy.workIds.length>0),'POLICY_TARGETS_REQUIRED');
+    }
     this.requireAccount(parsed.ownId);
     requireSafe(parsed.expiresAt === null || parsed.expiresAt > this.now(), "GRANT_EXPIRED");
     return this.store.db.transaction(() => {
-      const remaining = this.store.db.prepare("SELECT maximum-used AS remaining FROM budgets WHERE kind='MODEL'").get() as {remaining: number};
-      requireSafe(parsed.modelLimit <= remaining.remaining, "MODEL_BUDGET_EXCEEDED");
-      if (kind === "AUTO_REPLY") {
-        const budget = this.store.db.prepare("SELECT maximum-used AS remaining FROM budgets WHERE kind='SEND'").get() as {remaining: number};
-        requireSafe((parsed as ReplyPolicy).sendLimit <= budget.remaining, "SEND_BUDGET_EXCEEDED");
-      }
+      const previous=this.active(kind);
+      const used=(budgetKind:'MODEL'|'SEND')=>previous?(this.store.db.prepare('SELECT count(*) n FROM grant_reservations WHERE grant_version=? AND kind=?')
+        .get(previous.version,budgetKind) as {n:number}).n:0;
+      this.saveBudgetLimit('MODEL',parsed.modelLimit,used('MODEL'));
+      if(kind==='AUTO_REPLY')this.saveBudgetLimit('SEND',(parsed as ReplyPolicy).sendLimit,used('SEND'));
       this.revoke(kind);
       const row = this.store.db.prepare("INSERT INTO automation_grants(kind,scope_json,scope_digest,created_at) VALUES(?,?,?,?)")
         .run(kind, JSON.stringify(parsed), digest(parsed), this.now());
       this.store.audit("PERSISTENT_GRANT_ENABLED", String(row.lastInsertRowid));
+      if(previous)this.store.db.prepare('INSERT INTO grant_reservations SELECT ?,kind,job_key,reserved_at FROM grant_reservations WHERE grant_version=?')
+        .run(row.lastInsertRowid,previous.version);
       return {version: Number(row.lastInsertRowid), kind, scope: parsed, createdAt: this.now()};
     }).immediate();
+  }
+  private saveBudgetLimit(kind:'MODEL'|'SEND',limit:number|null,inherited:number):void{
+    const global=this.store.budget(kind);
+    requireSafe(limit===null||limit>=inherited,`${kind}_BUDGET_EXCEEDED`);
+    const maximum=limit===null?null:global.maximum===null?global.used+limit-inherited:global.maximum;
+    requireSafe(limit===null||maximum!==null&&limit-inherited<=maximum-global.used,`${kind}_BUDGET_EXCEEDED`);
+    requireSafe(maximum===null||Number.isSafeInteger(maximum),`${kind}_BUDGET_EXCEEDED`);
+    const result=this.store.db.prepare('UPDATE budget_limits SET maximum=? WHERE kind=?').run(maximum,kind);
+    requireSafe(result.changes===1,'BUDGET_POLICY_UNAVAILABLE');
+    if(maximum!==global.maximum)this.store.audit('BUDGET_POLICY_CHANGED',kind,{unlimited:maximum===null,...(maximum===null?{}:{maximum})});
   }
   revoke(kind: "MODEL" | "AUTO_REPLY"): void {
     this.store.db.prepare("UPDATE automation_grants SET revoked_at=? WHERE kind=? AND revoked_at IS NULL").run(this.now(), kind);
@@ -72,8 +88,8 @@ export class AutomationStore {
     if(!row)return false;
     const grant=this.active(row.kind);if(grant?.version!==version)return false;
     const used=this.store.db.prepare('SELECT count(*) AS used FROM grant_reservations WHERE grant_version=? AND kind=?').get(version,kind) as {used:number};
-    const global=this.store.db.prepare('SELECT used,maximum FROM budgets WHERE kind=?').get(kind) as {used:number;maximum:number};
-    return used.used<(kind==='MODEL'?grant.scope.modelLimit:(grant.scope as ReplyPolicy).sendLimit)&&global.used<global.maximum;
+    const global=this.store.budget(kind),limit=kind==='MODEL'?grant.scope.modelLimit:(grant.scope as ReplyPolicy).sendLimit;
+    return (limit===null||used.used<limit)&&(global.maximum===null||global.used<global.maximum);
   }
   reserve(version: number, kind: "MODEL" | "SEND", jobKey: string): void {
     this.store.db.transaction(() => {
@@ -85,7 +101,7 @@ export class AutomationStore {
       requireSafe(!this.state().emergencyStopped, "EMERGENCY_STOPPED");
       const used = this.store.db.prepare("SELECT count(*) AS used FROM grant_reservations WHERE grant_version=? AND kind=?").get(version, kind) as {used: number};
       const limit = kind === "MODEL" ? grant.scope.modelLimit : (grant.scope as ReplyPolicy).sendLimit;
-      requireSafe(Number.isInteger(limit) && used.used < limit, `${kind}_GRANT_EXHAUSTED`);
+      requireSafe(limit===null||Number.isInteger(limit)&&used.used<limit, `${kind}_GRANT_EXHAUSTED`);
       requireSafe(!this.store.db.prepare("SELECT job_key FROM grant_reservations WHERE grant_version=? AND kind=? AND job_key=?").get(version, kind, jobKey), "GRANT_JOB_ALREADY_RESERVED");
       this.store.db.prepare("INSERT INTO grant_reservations VALUES(?,?,?,?)").run(version, kind, jobKey, this.now());
     }).immediate();
@@ -99,12 +115,11 @@ export class AutomationStore {
     const client = this.store.db.prepare("SELECT paused,mode FROM client_state WHERE id=1").get() as {paused: number; mode: string};
     if (client.paused || client.mode !== "LIMITED_AUTO") return false;
     if (!p.channels.includes(e.payload.channel) || e.payload.direction !== "INCOMING" || e.payload.actorId === p.ownId) return false;
-    if (this.store.db.prepare("SELECT id FROM send_intents WHERE event_id=? OR (target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN'))").get(e.id, targetKey(e.payload))) return false;
+    if (this.store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(e.id)||this.store.sendFrozen(e.id)) return false;
     const paused = this.store.db.prepare("SELECT paused FROM pauses WHERE target_key=?").get(targetKey(e.payload)) as {paused: number} | undefined;
-    // A closed human dialog continues to block AI; only an explicit resume may release it.
-    const owner = this.store.db.prepare("SELECT operator_id FROM thread_ownership WHERE target_key=?").get(targetKey(e.payload)) as {operator_id: string | null} | undefined;
-    const humanPause = this.store.db.prepare("SELECT paused FROM automation_human_pauses WHERE target_key=?").get(targetKey(e.payload)) as {paused: number} | undefined;
-    if (paused?.paused || owner?.operator_id || humanPause?.paused) return false;
+    // Only an active editing lease pauses a conversation; merely viewing it must not leave a persistent handoff.
+    const owner = this.store.db.prepare("SELECT operator_id,lease_expires_at FROM thread_ownership WHERE target_key=?").get(targetKey(e.payload)) as {operator_id: string | null;lease_expires_at:number} | undefined;
+    if (paused?.paused || owner?.operator_id&&owner.lease_expires_at>this.now()) return false;
     const hour = Number(new Intl.DateTimeFormat("en-GB", {timeZone: "Asia/Shanghai", hour: "2-digit", hourCycle: "h23"}).format(this.now()));
     if (hour < p.startHour || hour >= p.endHour) return false;
     const text = e.payload.text.toLocaleLowerCase();

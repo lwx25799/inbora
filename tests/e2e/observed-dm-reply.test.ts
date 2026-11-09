@@ -18,6 +18,68 @@ async function setup(){
   return{server,owner,store,mapping,adapter,event,draft,close:async()=>{store.close();await owner.close();await server.close();}};
 }
 
+test('an exact text reply is not blocked by a separate metadata-bound row whose body is not mounted',async()=>{
+  const f=await setup();try{
+    await f.owner.dm.locator('.message').nth(1).evaluate(row=>{row.replaceChildren();(row as HTMLElement).style.minHeight='24px';});
+    const proof=await f.adapter.inspect(f.event.payload);expect(proof.eventBinding).toBe(f.event.binding);
+    f.store.approve(f.draft.id,proof,f.draft.version,f.draft.text);
+    await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false);
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:1});
+  }finally{f.adapter.dispose();await f.close();}
+});
+
+test('late mounting of reliable older text preserves the approved snapshot and the single refreshed reply',async()=>{
+  const f=await setup();try{
+    await f.owner.dm.locator('.message').nth(1).evaluate(row=>{
+      const message=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
+      message.createdAt=new Date('2026-11-04T23:59:59Z');row.replaceChildren();(row as HTMLElement).style.minHeight='24px';
+    });
+    const approved=await f.adapter.inspect(f.event.payload);f.store.approve(f.draft.id,approved,f.draft.version,f.draft.text);
+    await f.owner.dm.locator('.message').nth(1).evaluate(row=>{
+      const message=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
+      const body=document.createElement('span');body.className='text';body.textContent=message._parsedContent.text;row.append(body);
+    });
+    f.adapter.dispose();f.adapter=new ObservedDmReply(f.owner.dm,f.mapping,250);
+    expect(await f.adapter.inspect(f.event.payload)).toEqual(approved);
+    expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('CONFIRMED');
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(1);
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:1});
+    expect(f.store.db.prepare('SELECT kind,used FROM budgets ORDER BY kind').all()).toEqual([{kind:'MODEL',used:0},{kind:'SEND',used:0}]);
+  }finally{f.adapter.dispose();await f.close();}
+});
+
+test.each(['parsed-text','time','state','new-inbound','original-hidden','missing-parsed','duplicate-body'] as const)(
+  'native text context still blocks %s before intent while allowing only rendering to settle',async change=>{
+  const f=await setup();try{
+    f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
+    await f.owner.dm.evaluate(change=>{
+      const row=document.querySelectorAll<HTMLElement>('.message')[1]!,message=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
+      if(change==='parsed-text'||change==='missing-parsed'){
+        row.replaceChildren();row.style.minHeight='24px';
+        if(change==='parsed-text')message._parsedContent.text='different native historical full text';else delete message._parsedContent.text;
+      }
+      if(change==='time')message.createdAt=new Date('2026-11-04T23:59:59Z');
+      if(change==='state')message.serverStatus=1;
+      if(change==='duplicate-body'){const conflict=document.createElement('span');conflict.className='text';conflict.textContent='conflicting extra body';row.append(conflict);}
+      if(change==='original-hidden'){const original=document.querySelector<HTMLElement>('.message')!;original.replaceChildren();original.style.minHeight='24px';}
+      if(change==='new-inbound'){
+        const box=document.createElement('div'),incoming=document.createElement('div'),text=document.createElement('span');
+        box.className='box';box.dataset.index='99';incoming.className='message';text.className='text';text.textContent='new native inbound';
+        Object.defineProperty(incoming,'__reactProps$fixture',{value:{children:{props:{message:{...message,serverId:'999',_parsedContent:{text:text.textContent}}}}}});
+        incoming.append(text);box.append(incoming);document.querySelector('#chat')!.append(box);
+      }
+    },change);
+    const failure=change==='original-hidden'?'NATIVE_REPLY_ORIGINAL_CHANGED':change==='missing-parsed'?'NATIVE_REPLY_MESSAGE_TEXT_UNVERIFIED':
+      change==='duplicate-body'?'NATIVE_REPLY_MESSAGE_TEXT_CONFLICT':'TARGET_CHANGED_REAPPROVE';
+    f.adapter.dispose();f.adapter=new ObservedDmReply(f.owner.dm,f.mapping,250);
+    await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow(failure);
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
+    expect(f.store.db.prepare('SELECT kind,used FROM budgets ORDER BY kind').all()).toEqual([{kind:'MODEL',used:0},{kind:'SEND',used:0}]);
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {nativeClicks:number}).nativeClicks)).toBe(0);
+  }finally{f.adapter.dispose();await f.close();}
+});
+
 test.each(['fresh','old'] as const)('read-only verification after restart uses strict refreshed evidence without an armed request: %s',async kind=>{
   const f=await setup();try{
     const at=kind==='fresh'?new Date(Date.now()-1000):new Date('2020-01-01T00:00:00Z');
@@ -70,12 +132,12 @@ test('native SMS verification blocks both direct-message reading and reply inspe
     expect(await f.adapter.inspect(f.event.payload)).toHaveProperty('ownId','100');
   }finally{await f.close();}
 });
-test.each([true,false])('native SVG reply commits one durable intent and confirms only a bound new receipt, headless=%s',async headless=>{
+test.each([false,true])('native SVG reply commits one durable intent and confirms only a bound new receipt, restart headless owner=%s',async restart=>{
   const f=await setup();
   try{
-    if(!headless){
-      // Exercise this calibrated contract in a separate headed owner as well.
-      await f.owner.close();f.owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),false);
+    if(restart){
+      // A separate headless owner preserves restart coverage without opening a visible browser.
+      await f.owner.close();f.owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
       await mountDmReply(f.owner,f.server.origin);f.adapter=new ObservedDmReply(f.owner.dm,f.mapping,250);
     }
     const snapshot=await f.adapter.inspect(f.event.payload);f.store.approve(f.draft.id,snapshot,f.draft.version,f.draft.text);

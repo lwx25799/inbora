@@ -75,6 +75,7 @@ export function App() {
   const [dialogOpen,setDialogOpen]=useState(false),[saving,setSaving]=useState(false);
   const saveTask=useRef<Promise<unknown>|null>(null),dialogElement=useRef<HTMLDialogElement|null>(null);
   const navigation=useRef(0);
+  const opening=useRef<{id:string;selectionId:string;task:Promise<void>}|null>(null);
   const localDraftVersions=useRef(new Map<string,number>());
   const dirty =
     !!thread && (text !== (thread.draft?.text ?? "") || suggestionId !== null);
@@ -163,8 +164,9 @@ export function App() {
           const saved=buffers.current.get(selected);setText(saved?.text??detail.draft?.text??'');setSuggestionId(saved?.suggestionId??null);
         }
         if(ignore||!detail||detail.event.payload.channel!=='DIRECT_MESSAGE')return;
-        setDialogOpen(true);
+        setDialogOpen(status?.configuredMode!=='LIMITED_AUTO');
         if(detail.intent)return;
+        if(status?.configuredMode==='LIMITED_AUTO')return;
         const claimed=await request<Thread>({command:'openHumanDialog',eventId:selected,selectionId});
         if(!ignore&&selectedRef.current===selected&&selection.current===selectionId){detailRequest.current++;setThread(claimed);}
       })
@@ -181,6 +183,10 @@ export function App() {
     const id=setTimeout(()=>{void saveDraft().catch(e=>setError(explain(e)));},500);
     return()=>clearTimeout(id);
   },[devRecovery.blockAutosave,dialogOpen,dirty,text,suggestionId,thread?.ownership.isMine,thread?.draft?.version,thread?.intent,saving]);
+  useEffect(()=>{
+    if(!devRecovery.restoring&&dialogOpen&&dirty&&thread&&!thread.ownership.isMine&&!thread.intent)
+      void openDialog().catch(e=>setError(explain(e)));
+  },[devRecovery.restoring,dialogOpen,dirty,thread?.ownership.isMine,thread?.ownership.generation,thread?.intent]);
   useEffect(() => {
     if (!connected || !selected) return;
     const eventId = selected;
@@ -418,11 +424,26 @@ export function App() {
     if (!text.trim()) return "请输入回复";
     return "";
   }
+  async function toggleAuto(enabled:boolean){
+    await saveTask.current;
+    if(dirty&&thread?.ownership.isMine&&!thread.intent)await saveDraft();
+    setStatus(await request<Status>({command:'setAutomaticReply',enabled}));
+    await refreshThread();
+  }
+  async function navigatePage(next:typeof page){
+    if(page==='inbox'&&next!=='inbox'&&thread?.ownership.isMine&&!thread.intent)await closeDialog();
+    setPage(next);setReview(null);
+  }
   async function openDialog(){
     if(!thread)return;
     const id=thread.event.id,selectionId=selection.current;
-    const detail=await request<Thread>({command:'openHumanDialog',eventId:id,selectionId});
-    if(selectedRef.current===id&&selection.current===selectionId){setThread(detail);setDialogOpen(true);}
+    if(opening.current?.id===id&&opening.current.selectionId===selectionId)return opening.current.task;
+    const task=(async()=>{
+      const detail=await request<Thread>({command:'openHumanDialog',eventId:id,selectionId});
+      if(selectedRef.current===id&&selection.current===selectionId){detailRequest.current++;setThread(detail);setDialogOpen(true);}
+    })();
+    opening.current={id,selectionId,task};
+    try{await task;}finally{if(opening.current?.task===task)opening.current=null;}
   }
   async function closeDialog(){
     await saveTask.current;
@@ -522,7 +543,6 @@ export function App() {
   const block = sendDisabled(),
     readOnly =
       devRecovery.restoring || !!thread?.intent ||
-      (!!thread && !thread.ownership.isMine) ||
       status.mode === "OBSERVE";
   return (
     <div className="app">
@@ -547,8 +567,7 @@ export function App() {
               aria-current={page === p ? "page" : undefined}
               className={page === p ? "active" : ""}
               onClick={() => {
-                setPage(p);
-                setReview(null);
+                void navigatePage(p).catch(e=>setError(explain(e)));
               }}
             >
               {p === "inbox"
@@ -602,7 +621,7 @@ export function App() {
           </div>
           <div className="toolbar">
             <label className="check"><input type="checkbox" role="switch" aria-label="自动回复" checked={status.configuredMode==='LIMITED_AUTO'&&!!status.automation?.replyPolicy}
-              disabled={!!busy||!status.automation?.replyPolicy} onChange={e=>{const enabled=e.target.checked;void act('更新自动回复',async()=>setStatus(await request<Status>({command:'setAutomaticReply',enabled})));}}/>
+              disabled={!!busy||!status.automation?.replyPolicy} onChange={e=>{const enabled=e.target.checked;void act('更新自动回复',()=>toggleAuto(enabled));}}/>
               自动回复：{status.configuredMode==='LIMITED_AUTO'&&status.automation?.replyPolicy?'开':'关'}</label>
             {!status.automation?.replyPolicy&&<button onClick={()=>setPage('settings')}>设置自动回复</button>}
             <button
@@ -638,6 +657,7 @@ export function App() {
             busy={busy}
             act={act}
             update={setStatus}
+            toggleAuto={toggleAuto}
             stop={()=>void emergencyStop().catch(e=>setError(explain(e)))}
           />
         ) : page === "audit" ? (

@@ -8,7 +8,7 @@ import { migrateClient } from "../../src/storage/client-migration.js";
 import { migrateAutomation } from "../../src/storage/automation-migration.js";
 import { CollectionScheduler } from "../../src/app/collection-scheduler.js";
 import { InboxCollector } from "../../src/app/inbox-collector.js";
-import { Blocked } from "../../src/core/contracts.js";
+import { Blocked,digest } from "../../src/core/contracts.js";
 import { readdir,readFile } from 'node:fs/promises';
 import { database, privateTemp } from "../helpers.js";
 import { fixtureServer } from "../fixtures/site.js";
@@ -99,13 +99,16 @@ test('a failed native return after successful DM collection retains its read wat
     expect(diagnostic).toMatchObject({phase:'ADVANCE',code,report:{source:'dm',chatVisible:true,chatInViewport:true,backVisible:true,backInViewport:true}});
     for(const privateValue of ['conv-a','peer-sec','controlled-1','controlled-2','controlled-3','owner text'])
       expect(JSON.stringify(diagnostic)).not.toContain(privateValue);
-    // A different LIST stage replaces the fixed latest report, preserving the completed thread read.
+    // Automatic preview priority gets one HINT attempt, then yields the next turn to the ordinary LIST stage.
     await expect(collector.collect('dm',signal)).rejects.toMatchObject({code});
     expect(await diagnostics()).toHaveLength(1);
+    const hintDiagnostic=JSON.parse(await readFile(join(root,'evidence',(await diagnostics())[0]!),'utf8'));
+    expect(hintDiagnostic).toMatchObject({phase:'HINT',code});
+    await expect(collector.collect('dm',signal)).rejects.toMatchObject({code});
     const listDiagnostic=JSON.parse(await readFile(join(root,'evidence',(await diagnostics())[0]!),'utf8'));
     expect(listDiagnostic).toMatchObject({phase:'LIST',code});
     await expect(collector.collect('dm',signal)).rejects.toMatchObject({code});
-    expect(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='COLLECTION_READ_DIAGNOSTIC'").get()).toEqual({n:2});
+    expect(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='COLLECTION_READ_DIAGNOSTIC'").get()).toEqual({n:3});
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='conv-a'").get()).toEqual({last_read:now});
     expect(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='DM_READ_DEFERRED'").get()).toEqual({n:0});
     expect(store.db.prepare('SELECT count(*) AS n FROM model_calls').get()).toEqual({n:0});
@@ -146,14 +149,18 @@ test('one unreadable conversation yields to another native peer across collector
     expect(store.db.prepare("SELECT detail_redacted FROM audit_events WHERE event_type='DM_READ_DEFERRED'").get())
       .toEqual({detail_redacted:'{"threadReadFailed":true}'});
     const saved=store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
-    expect(JSON.parse(saved.cursor_json)).toEqual({deferred:[{id:'a-unavailable',until:now+120_000,code:'OBSERVATION_DM_CHAT_NOT_READY'}],
-      parked:[],recent:['conv-a','a-unavailable'],burst:2});
+    expect(JSON.parse(saved.cursor_json),saved.cursor_json).toEqual({deferred:[{id:'a-unavailable',until:now+120_000,code:'OBSERVATION_DM_CHAT_NOT_READY'}],
+      parked:[],recent:['conv-a','a-unavailable'],burst:2,completed:[],activityNeedsNormal:false,previewRetries:[],previewRetryNeedsNormal:false,
+      activity:{next:now+30_000,initialized:true,items:[{id:'a-unavailable',signature:digest('')},{id:'conv-a',signature:digest('')}]}});
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='a-unavailable'").get()).toEqual({last_read:0});
     collector.dispose();collector=new InboxCollector(owner,mapping,new AutomationStore(store,()=>now),root,'headless');
     await collector.collect('dm',signal);
     expectFixtureInbox(store);
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='a-unavailable'").get()).toEqual({last_read:0});
     now+=120_001;
+    await collector.collect('dm',signal);
+    expect(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='MESSAGE_PREVIEW_RETRY'").get()).toEqual({n:1});
+    // One bounded preview retry cannot postpone the next ordinary retry of the unreadable peer.
     await expect(collector.collect('dm',signal)).rejects.toThrow('OBSERVATION_DM_CHAT_NOT_READY');
     expectFixtureInbox(store);
     expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);
@@ -171,10 +178,20 @@ test.each(['OBSERVATION_ACCOUNT_CHANGED','OBSERVATION_PAGE_BLOCKED'])('DM failur
     await mountObserved(owner,server.origin);
     await owner.dm.evaluate(()=>document.querySelector('#back')!.addEventListener('click',()=>{(document.querySelector('#chat') as HTMLElement).hidden=true;}));
     collector=new InboxCollector(owner,observedMapping(server.origin),data,root,'headless');
-    scheduler=new CollectionScheduler(data,(source,signal)=>collector!.collect(source,signal));await scheduler.tick();
+    scheduler=new CollectionScheduler(data,(source,signal)=>collector!.collect(source,signal));const before=data.now();await scheduler.tick();
     expect(data.state().emergencyStopped).toBe(true);
-    expect(store.db.prepare("SELECT last_error,cursor_json FROM collection_progress WHERE source='dm'").get()).toEqual({last_error:code,cursor_json:'{}'});
+    const stopped=store.db.prepare("SELECT last_error,cursor_json FROM collection_progress WHERE source='dm'").get() as {last_error:string;cursor_json:string};
+    expect(stopped.last_error).toBe(code);
+    const cursor=JSON.parse(stopped.cursor_json);
+    expect(cursor).toEqual({deferred:[],parked:[],recent:[],burst:0,completed:[],activityNeedsNormal:false,previewRetries:[],previewRetryNeedsNormal:false,
+      activity:{next:expect.any(Number),initialized:true,items:[{id:'conv-a',signature:digest('')}]}});
+    expect(cursor.activity.next).toBeGreaterThanOrEqual(before+30_000);expect(cursor.activity.next).toBeLessThanOrEqual(data.now()+30_000);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(store.db.prepare('SELECT last_read FROM discovered_conversations').all()).toEqual([{last_read:0}]);
+    expect(store.db.prepare("SELECT last_success FROM collection_progress WHERE source='dm'").get()).toEqual({last_success:null});
     expect(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='DM_READ_DEFERRED'").get()).toEqual({n:0});
+    expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);
+    expect(store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});
   }finally{read.mockRestore();await scheduler?.close();collector?.dispose();store.close();await owner.close();await server.close();}
 });
 

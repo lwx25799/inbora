@@ -14,7 +14,7 @@ export const modelGrantSchema = z.object({
   ownId: z.string().min(1).max(300),
   channels: channelsSchema,
   model: z.string().regex(/^deepseek-[a-z0-9.-]+$/).max(100),
-  modelLimit: z.number().int().min(1).max(50),
+  modelLimit: z.number().int().min(1).nullable(),
   expiresAt: z.number().int().positive().nullable(),
 }).strict();
 export const replyPolicySchema = modelGrantSchema.extend({
@@ -27,7 +27,7 @@ export const replyPolicySchema = modelGrantSchema.extend({
   instructions: z.string().min(1).max(4000),
   startHour: z.number().int().min(0).max(23),
   endHour: z.number().int().min(1).max(24),
-  sendLimit: z.number().int().min(1).max(20),
+  sendLimit: z.number().int().min(1).nullable(),
 }).strict().refine(p => p.startHour < p.endHour, "INVALID_POLICY_HOURS");
 export type ModelGrant = z.infer<typeof modelGrantSchema>;
 export type ReplyPolicy = z.infer<typeof replyPolicySchema>;

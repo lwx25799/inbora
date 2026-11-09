@@ -52,11 +52,7 @@ export class WorkbenchQueries {
           .get(targetKey(e.payload)) as { paused: number } | undefined
       )?.paused,
     );
-    const frozen = !!this.store.db
-      .prepare(
-        "SELECT id FROM send_intents WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')",
-      )
-      .get(targetKey(e.payload));
+    const frozen = this.store.sendFrozen(e.id);
     return {
       event: e,
       groupKey:inboxGroupKey(e),
@@ -123,7 +119,7 @@ export class WorkbenchQueries {
         channel,
         ...this.authority.capability(channel, this.browser.identity(channel)),
       })),
-      budgets: this.store.db.prepare("SELECT * FROM budgets").all(),
+      budgets: this.store.budgets(),
       usage: this.store.db
         .prepare(
           `SELECT count(*) AS requests,
@@ -139,6 +135,9 @@ export class WorkbenchQueries {
         ...automation.state(),modelGrant:automation.active('MODEL'),replyPolicy:automation.active('AUTO_REPLY'),
         collector:state.collector,inboxRevision:state.inboxRevision,
         pendingWorks:this.store.db.prepare("SELECT count(*) AS count FROM discovered_works WHERE state='REVIEW'").get(),
+        unresolvedSends:this.store.db.prepare(`SELECT e.channel,count(*) AS count FROM send_intents i
+          JOIN inbound_events e ON e.id=i.event_id WHERE i.status IN ('INTENT_RECORDED','UNCERTAIN')
+          AND COALESCE((SELECT v.verified FROM verification_results v WHERE v.intent_id=i.id ORDER BY v.rowid DESC LIMIT 1),0)<>1 GROUP BY e.channel`).all(),
         autoStopReason:configuredMode==='LIMITED_AUTO'&&automation.active('AUTO_REPLY')?(!state.keyPresent?'MODEL_KEY_REQUIRED':!automation.allowance(automation.active('AUTO_REPLY')!.version,'SEND')?'SEND_GRANT_EXHAUSTED':
           !automation.allowance(automation.active('AUTO_REPLY')!.version,'MODEL')?'MODEL_GRANT_EXHAUSTED':this.authority.paused()?'ACCOUNT_PAUSED':null):null,
       }:null,

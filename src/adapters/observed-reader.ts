@@ -3,7 +3,7 @@ import type { Page } from 'playwright';
 import type { ObservationMapping } from '../config/site-mapping.js';
 import { eventSchema, requireSafe, type InboundEvent } from '../core/contracts.js';
 
-export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string }
+export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string;activity?:string }
 interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'diagnostic' | 'dmScroll'; index: number;
   evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number; collectionPartial?:boolean }
 type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'|'collectionPartial'>;
@@ -25,6 +25,7 @@ export interface CollectionReadDiagnostic {
   samples:{visible:boolean;inWindow:boolean;hasBox:boolean;displayContents:boolean;top:number;bottom:number;width:number;height:number;bodies:number;visibleBodies:number}[];
 }
 export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; unsupported: number; loaded: number; incomplete?:'CONTENT_NOT_READY';
+  dmCoverage?:{id:string;occurredAt:string;precisionMs:number;captured:boolean}[];
   conversation?: { rowIndex: number | null; hasList: boolean };
   peers?: DiscoveredPeer[];
   scroll?:{top:number;height:number;viewport:number;atEnd:boolean};
@@ -190,6 +191,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   const avatar = dom.one(document,s.selfAvatar,'OBSERVATION_ACCOUNT_AVATAR'), own = dom.fiberProps(avatar,s.selfFiberDepth);
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
   const events: InboundEvent[] = []; let unsupported = 0, loaded = 0,incomplete=false;
+  const dmCoverage:NonNullable<ObservationBatch['dmCoverage']>=[];
   const bindings: NonNullable<ObservationBatch['bindings']> = [];
   let dmViewport:ObservationBatch['dmViewport'];
   if (channel === 'identity') return { events,evidenceId,unsupported,loaded };
@@ -253,7 +255,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
             return {shareStage:'CONVERSATION_UNVERIFIED',messageSamples:[]};
         }catch{return {shareStage:'HEADER_NOT_READY',messageSamples:[]};}
         const frame=dom.dmFrame(chat,true,true);dom.check(frame.rows.length<=100,'OBSERVATION_WINDOW_TOO_LARGE');
-        const peerUid=dom.dmPeerUid(frame.rows,peer);
+        const peerUid=dom.dmPeerUid(frame.rows.filter(row=>!row.parentElement?.closest(s.messages)),peer);
         const window=frame.rows.map((row,windowIndex)=>({row,windowIndex,content:dom.dmContent(row)}));
         const contentMissingRows=window.filter(item=>item.content.missing).length;
         const messageSamples=window.sort((a,b)=>Number(b.content.missing)-Number(a.content.missing)||a.windowIndex-b.windowIndex).slice(0,6).map(({row,windowIndex,content})=>{
@@ -389,7 +391,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       const title=dom.one(row,s.conversationTitle).textContent?.trim();
       dom.check(title,'OBSERVATION_METADATA_NOT_READY');
       const known=m.peers.find(p=>p.conversationId===id&&p.secUid===secure);
-      peers.push({uid:known?.uid??null,secUid:secure,conversationId:id,title:title!});
+      peers.push({uid:known?.uid??null,secUid:secure,conversationId:id,title:title!,activity:(row.textContent??'').replace(title!,'').slice(0,2000)});
     }
     dom.check(new Set(peers.map(p=>p.conversationId)).size===peers.length,'OBSERVATION_CONVERSATION_NOT_UNIQUE');
     if(list&&input.scroll)list.scrollTop=input.scroll==='start'||list.scrollTop+list.clientHeight>=list.scrollHeight-1?0:
@@ -458,6 +460,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       return {events,evidenceId,unsupported,loaded,dmViewport:dmViewport!};
     }
     loaded=rows.length;
+    dom.check(rows.length>0,'OBSERVATION_DM_MESSAGES_DOM_NOT_READY');
     dom.check(rows.length <= 100,'OBSERVATION_WINDOW_TOO_LARGE');
     // Unknown direct peers are bound by the same native conversation and the unique non-self message sender.
     // Do not derive a UID from a nickname or invent one from a local fingerprint.
@@ -472,6 +475,10 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       for (let node: Element | null = row; node && box!.contains(node); node = node.parentElement)
         if (node.classList.contains(s.fromMeClass)) fromMe = true;
       dom.check(fromMe === (sender === m.self.uid),'OBSERVATION_DIRECTION_CONFLICT');
+      const nativeId=dom.id(dom.data(message,'serverId')),nativeTime=dom.time(dom.data(message,'createdAt'),false);
+      const coverage=input.collectionPartial&&input.peer&&nativeId&&/^[1-9]\d{0,63}$/u.test(nativeId)&&nativeTime?
+        {id:nativeId,occurredAt:nativeTime,precisionMs:1,captured:false}:null;
+      if(coverage)dmCoverage.push(coverage);
       const {texts,media,missing}=dom.dmContent(row);
       let text:string,contentType:InboundEvent['contentType'];
       let nativeShare=false;
@@ -507,6 +514,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
         actorId:sender as string,actorName:fromMe ? null : peer!.title,text,occurredAt:dom.time(dom.data(message,'createdAt'),false),
         videoId:null,commentId:null,conversationId:peer!.conversationId,direction:fromMe?'OUTGOING':'INCOMING',kind:'DM',
         evidenceId,discovery:'DIRECT_MESSAGE',...(contentType?{contentType,observationIssue:'DM_CONTENT_UNVERIFIED' as const}:{}) });
+      if(coverage)coverage.captured=true;
     }
   } else {
     const work = m.works[index]; dom.check(work && location.href.split('?')[0] === work.url.split('?')[0], 'OBSERVATION_WORK_CHANGED');
@@ -550,12 +558,13 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   }
   dom.check(new Set(events.map(e=>e.platformEventId).filter(Boolean)).size === events.filter(e=>e.platformEventId).length,
     'OBSERVATION_MESSAGE_ID_COLLISION');
-  return { events,evidenceId,unsupported,loaded,bindings,...(dmViewport?{dmViewport}:{}),...(incomplete?{incomplete:'CONTENT_NOT_READY' as const}:{}) };
+  return { events,evidenceId,unsupported,loaded,bindings,...(dmViewport?{dmViewport}:{}),...(incomplete?{incomplete:'CONTENT_NOT_READY' as const}:{}),
+    ...(dmCoverage.length===loaded&&loaded>0&&new Set(dmCoverage.map(row=>row.id)).size===loaded?{dmCoverage}:{}) };
 }
 
 /** AccountActor owns the entire call, including opening and switching the permitted chat. */
 export class ObservedReader {
-  constructor(readonly page: Page, readonly mapping: ObservationMapping) {}
+  constructor(readonly page: Page, readonly mapping: ObservationMapping,private readonly collectionOrigin?:number) {}
   private async capture(channel: CaptureInput['channel'], index: number, selection: CaptureOptions = {}): Promise<ObservationBatch> {
     try {
       const result = await this.page.evaluate(captureObserved,{mapping:this.mapping,channel,index,evidenceId:randomUUID(),...selection});
@@ -567,7 +576,13 @@ export class ObservedReader {
   }
   private async ready(channel: CaptureInput['channel'],index: number,options:CaptureOptions={}): Promise<ObservationBatch> {
     const deadline=Date.now()+5000;
-    for(;;)try{return await this.capture(channel,index,options);}catch(error){
+    for(;;)try{
+      const batch=await this.capture(channel,index,options);
+      const oldGaps=options.collectionPartial&&this.collectionOrigin!==undefined&&batch.dmCoverage?.every(row=>row.captured||
+        Date.parse(row.occurredAt)+row.precisionMs<=this.collectionOrigin!);
+      if(batch.incomplete&&options.collectionPartial&&!oldGaps&&Date.now()<deadline){await new Promise(resolve=>setTimeout(resolve,50));continue;}
+      return batch;
+    }catch(error){
       if(!(error instanceof Error)||!/(?:OBSERVATION_(?:[A-Z]+_)*(?:DOM|METADATA)_NOT_READY|RENDERED_BINDING_UNAVAILABLE)/.test(error.message)||Date.now()>=deadline)throw error;
       await new Promise(resolve=>setTimeout(resolve,50));
     }
@@ -583,8 +598,9 @@ export class ObservedReader {
     requireSafe(batch.diagnostic,'OBSERVATION_DIAGNOSTIC_UNAVAILABLE');return batch.diagnostic;
   }
   async dmWindow(peer:DiscoveredPeer,top?:number,collectionPartial=false):Promise<ObservationBatch> {
-    await this.dm(0,peer,collectionPartial);
+    const initial=await this.dm(0,peer,collectionPartial);
     if(top!==undefined)await this.scrollDm(peer,top);
+    if(initial.incomplete&&top===undefined)return this.capture('dm',0,{peer,dmWindow:true,collectionPartial});
     return this.ready('dm',0,{peer,dmWindow:true,collectionPartial});
   }
   async scrollDm(peer:DiscoveredPeer,top:number):Promise<void> {

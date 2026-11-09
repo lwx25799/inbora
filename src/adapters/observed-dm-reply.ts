@@ -8,13 +8,17 @@ import {SubmissionResponse,type SubmissionAck} from './submission-response.js';
 
 interface ReplyCaptureInput {
   mapping: DmReplyMapping; event: InboundEvent;
-  action: 'snapshot' | 'fill' | 'arm' | 'proofs' | 'refresh'; text: string | null; token: string | null;
+  action: 'snapshot' | 'fill' | 'arm' | 'proofs' | 'refresh' | 'cancel' | 'clearSaved'; text: string | null; token: string | null;
   before: {context:unknown[];editorText:string}|null;
   editorShape:string|null;
   manualMedia?:boolean;
 }
 interface MediaObservation {contentType:NonNullable<InboundEvent['contentType']>;nativeKind:number;witness:unknown[]}
 interface ReplyFrame { context: unknown[]; proofs: SendProof[]; outgoingIds: string[]; editorText: string;editorShape:string;latestId:string|null;media?:MediaObservation }
+export interface DmContextChange {
+  stage:'PREPARE'|'FILL'|'PREPARED'|'BASELINE';beforeRows:number;afterRows:number;added:number;removed:number;reordered:boolean;changedRows:number;
+  senderChanged:number;contentChanged:number;timeChanged:number;typeChanged:number;statusChanged:number;pendingChanged:number;failedChanged:number;
+}
 
 /** Serialized without module helpers: fixed rendered paths, never calls website functions. */
 export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
@@ -23,7 +27,8 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
   const manualMedia=input.manualMedia===true&&expected.observationIssue==='DM_CONTENT_UNVERIFIED'&&!!expected.contentType;
   let sourceBudget=1_048_576;
   type Gate={token:string;submit:()=>boolean;remove:()=>void};
-  const host=window as unknown as {__inboraDmReplyGate?:Gate};
+  type Preparation={token:string;editor:HTMLElement;chat:Element;binding:string;text:string;shape:string;foreignInput:boolean;clearing:boolean;remove:()=>void};
+  const host=window as unknown as {__inboraDmReplyGate?:Gate;__inboraDmPreparation?:Preparation};
   const dom={
     check(ok: unknown,code='NATIVE_REPLY_GUARD_BLOCKED'): void {if(!ok)throw new Error(code);},
     // Same MIT dataField adaptation as observed-reader; see UPSTREAM and third_party notice.
@@ -207,7 +212,13 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
         const nativeShare=manualMedia&&texts.length===0?dom.nativeShare(parsed,type):null;
         const media=nativeShare?{contentType:'IMAGE' as const,witness:[nativeShare]}:
           visibleMedia?dom.media(row,parsed,nativeId===expected.platformEventId):null;
-        context.push([nativeId,sender,media?['DM_MEDIA',media.contentType,media.witness]:body,sentAt,type,status,pending,failed]);
+        if(!media&&type===m.textMessageType){
+          dom.check(texts.length<=1,'NATIVE_REPLY_MESSAGE_TEXT_CONFLICT');
+          dom.check(typeof parsedText==='string'&&parsedText.length<=10_000,'NATIVE_REPLY_MESSAGE_TEXT_UNVERIFIED');
+        }
+        // The bound native full text stays stable while an unrelated historical body mounts; visible text still must match it.
+        const contextText=type===m.textMessageType?parsedText:body;
+        context.push([nativeId,sender,media?['DM_MEDIA',media.contentType,media.witness]:contextText,sentAt,type,status,pending,failed]);
         if(body!==null&&nativeId&&sentAt&&!outgoing&&type===m.textMessageType&&!pending&&!failed&&status===m.confirmedServerStatus) {
           const current={...expected,platformEventId:nativeId,actorId:sender as string,text:body,occurredAt:sentAt};
           if(JSON.stringify(dom.binding(current))===JSON.stringify(dom.binding(expected)))originals++;
@@ -237,6 +248,44 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     },
   };
   const state=dom.capture();
+  if(input.action==='clearSaved'){
+    dom.check(text!==null&&text.length>0&&state.editorText===text,'NATIVE_REPLY_SAVED_DRAFT_MISMATCH');
+    const editor=state.editor as HTMLElement,context=JSON.stringify(state.context),shape=state.editorShape,latestId=state.latestId,
+      events=['beforeinput','input','paste','drop','compositionstart'];
+    const guard={foreign:false,clearing:false,
+      changed():void{if(!guard.clearing)guard.foreign=true;},
+      current():void{const current=dom.capture();dom.check(!guard.foreign&&current.editor===editor&&current.editorShape===shape&&
+        current.editorText===text&&current.latestId===latestId&&JSON.stringify(current.context)===context,'NATIVE_REPLY_SAVED_DRAFT_CHANGED');}};
+    for(const event of events)editor.addEventListener(event,guard.changed,true);
+    try{
+      editor.focus({preventScroll:true});guard.current();
+      const selection=getSelection(),range=document.createRange();dom.check(selection,'NATIVE_REPLY_SELECTION_UNAVAILABLE');
+      range.selectNodeContents(editor);selection!.removeAllRanges();selection!.addRange(range);guard.current();
+      host.__inboraDmReplyGate?.remove();guard.clearing=true;
+      dom.check(document.execCommand('delete',false),'NATIVE_REPLY_INPUT_UNSUPPORTED');
+      const after=dom.capture();dom.check(after.editor===editor&&after.editorText===''&&after.latestId===latestId&&
+        JSON.stringify(after.context)===context,'NATIVE_REPLY_SAVED_DRAFT_NOT_CLEARED');
+      if(host.__inboraDmPreparation?.editor===editor)host.__inboraDmPreparation.remove();
+      return{context:after.context,proofs:after.proofs,outgoingIds:after.outgoingIds,editorText:after.editorText,editorShape:after.editorShape,latestId:after.latestId};
+    }finally{for(const event of events)editor.removeEventListener(event,guard.changed,true);}
+  }
+  if(input.action==='cancel'){
+    const owned=host.__inboraDmPreparation;
+    dom.check(owned&&token===owned.token&&text===owned.text&&owned.binding===JSON.stringify(dom.binding(expected))&&
+      !owned.foreignInput&&state.editor===owned.editor&&state.editor.closest(s.chat)===owned.chat&&
+      state.editorText===owned.text&&state.editorShape===owned.shape,'NATIVE_REPLY_PREPARATION_NOT_OWNED');
+    host.__inboraDmReplyGate?.remove();
+    const editor=owned!.editor;editor.focus({preventScroll:true});
+    const selection=getSelection(),range=document.createRange();dom.check(selection,'NATIVE_REPLY_SELECTION_UNAVAILABLE');
+    range.selectNodeContents(editor);selection!.removeAllRanges();selection!.addRange(range);
+    const current=dom.capture();
+    dom.check(!owned!.foreignInput&&current.editor===editor&&current.editorText===owned!.text&&current.editorShape===owned!.shape,'NATIVE_REPLY_PREPARATION_NOT_OWNED');
+    owned!.clearing=true;
+    try{dom.check(document.execCommand('delete',false),'NATIVE_REPLY_INPUT_UNSUPPORTED');}
+    finally{owned!.clearing=false;owned!.remove();}
+    const after=dom.capture();dom.check(after.editor===editor&&after.editorText==='','NATIVE_REPLY_PREPARATION_NOT_CLEARED');
+    return{context:after.context,proofs:after.proofs,outgoingIds:after.outgoingIds,editorText:after.editorText,editorShape:after.editorShape,latestId:after.latestId};
+  }
   if(input.action==='fill') {
     dom.check(input.before&&text!==null,'NATIVE_REPLY_INPUT_REQUIRED');
     const editor=state.editor as HTMLElement,before=input.before!,context=JSON.stringify(before.context);
@@ -257,6 +306,14 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     const after=dom.capture();
     dom.check(after.editor===editor&&JSON.stringify(after.context)===context,'NATIVE_REPLY_CONTEXT_CHANGED');
     dom.check(after.editorText===text,'NATIVE_REPLY_APPROVED_TEXT_CHANGED');
+    if(token){
+      host.__inboraDmPreparation?.remove();
+      const events=['beforeinput','input','paste','drop','compositionstart'];
+      const owned={token,editor,chat:editor.closest(s.chat)!,binding:JSON.stringify(dom.binding(expected)),text:text!,shape:after.editorShape,foreignInput:false,clearing:false,
+        changed():void{if(!owned.clearing)owned.foreignInput=true;},
+        remove():void{for(const event of events)editor.removeEventListener(event,owned.changed,true);if(host.__inboraDmPreparation===owned)delete host.__inboraDmPreparation;}};
+      for(const event of events)editor.addEventListener(event,owned.changed,true);host.__inboraDmPreparation=owned;
+    }
     return{context:after.context,proofs:after.proofs,outgoingIds:after.outgoingIds,editorText:after.editorText,editorShape:after.editorShape,latestId:after.latestId,...(after.media?{media:after.media}:{})};
   }
   if(input.action==='refresh'){
@@ -284,6 +341,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       },
       submit():boolean {
         dom.check(!gate.attempted&&!gate.blocked);gate.attempted=true;gate.validate();
+        host.__inboraDmPreparation?.remove();
         button.removeEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);
         gate.enabled=true;
         try {
@@ -305,11 +363,35 @@ export class ObservedDmReply implements ReplyAdapter {
   private gateToken:string|null=null;
   private prepared:{binding:string;text:string;editorShape:string;contextDigest:string}|null=null;
   private pendingEvent:InboundEvent|null=null;
+  private inspectedContext:unknown[]|null=null;
+  private preparedContext:unknown[]|null=null;
+  private preparationToken:string|null=null;
+  private submissionStarted=false;
   private readonly submission:SubmissionResponse|null;
-  constructor(readonly page:Page,readonly mapping:DmReplyMapping,private readonly receiptTimeoutMs=5000,private readonly options:{manualMedia?:boolean}={}){
+  constructor(readonly page:Page,readonly mapping:DmReplyMapping,private readonly receiptTimeoutMs=5000,
+    private readonly options:{manualMedia?:boolean;onContextChanged?:(report:DmContextChange)=>void}={}){
     this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;
   }
-  dispose():void{this.submission?.dispose();}
+  dispose():void{
+    this.submission?.dispose();this.inspectedContext=null;this.preparedContext=null;
+    this.preparationToken=null;this.prepared=null;this.pendingEvent=null;this.gateToken=null;
+  }
+  private contextChanged(stage:DmContextChange['stage'],before:unknown[]|null,after:unknown[]):void {
+    if(!before||!this.options.onContextChanged||digest(before)===digest(after))return;
+    const original=new Map(before.map(row=>{const tuple=row as unknown[];return [tuple[0],tuple] as const;})),
+      current=new Map(after.map(row=>{const tuple=row as unknown[];return [tuple[0],tuple] as const;}));
+    const report:DmContextChange={stage,beforeRows:before.length,afterRows:after.length,
+      added:[...current.keys()].filter(id=>!original.has(id)).length,removed:[...original.keys()].filter(id=>!current.has(id)).length,
+      reordered:digest([...original.keys()].filter(id=>current.has(id)))!==digest([...current.keys()].filter(id=>original.has(id))),
+      changedRows:0,senderChanged:0,contentChanged:0,timeChanged:0,typeChanged:0,statusChanged:0,pendingChanged:0,failedChanged:0};
+    const fields=['senderChanged','contentChanged','timeChanged','typeChanged','statusChanged','pendingChanged','failedChanged'] as const;
+    for(const [id,row] of current){
+      const prior=original.get(id);if(!prior)continue;
+      if(digest(prior)!==digest(row))report.changedRows++;
+      for(const [index,field] of fields.entries())if(digest(prior[index+1]??null)!==digest(row[index+1]??null))report[field]++;
+    }
+    try{this.options.onContextChanged(report);}catch{/* Diagnostics never alter qualification or expose callback errors. */}
+  }
   private async frame(event:InboundEvent,action:ReplyCaptureInput['action']='snapshot',text:string|null=null,token:string|null=null,
     before:ReplyCaptureInput['before']=null,editorShape:string|null=null):Promise<ReplyFrame>{
     try{return await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape,manualMedia:this.options.manualMedia===true});}
@@ -327,27 +409,51 @@ export class ObservedDmReply implements ReplyAdapter {
     this.gateToken=null;
     const o=this.mapping.observation,index=o.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
     requireSafe(event.channel==='DIRECT_MESSAGE'&&(isStrong(event)||this.options.manualMedia===true&&isManualMediaCandidate(event))&&index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
-    await new ObservedReader(this.page,o).dm(index);
+    await new ObservedReader(this.page,o).dm(index,o.peers[index],true);
     const frame=await this.frame(event);
     requireSafe(frame.editorText===''||this.prepared?.binding===eventBinding(event)&&this.prepared.text===frame.editorText,'NATIVE_REPLY_EXISTING_DRAFT');
+    this.inspectedContext=frame.context;
     return this.snapshot(event,frame);
   }
   async prepare(event:InboundEvent,text:string):Promise<void>{
+    requireSafe(!this.preparationToken&&!this.submissionStarted,'NATIVE_REPLY_PREPARATION_ALREADY_OWNED');
     validText(text);const frame=await this.frame(event);
+    this.contextChanged('PREPARE',this.inspectedContext,frame.context);
     requireSafe(frame.editorText===''||this.prepared?.binding===eventBinding(event)&&this.prepared.text===frame.editorText,'NATIVE_REPLY_EXISTING_DRAFT');
-    const after=await this.frame(event,'fill',text,null,{context:frame.context,editorText:frame.editorText});
+    const preparationToken=randomUUID();
+    const after=await this.frame(event,'fill',text,preparationToken,{context:frame.context,editorText:frame.editorText});
+    this.contextChanged('FILL',frame.context,after.context);
     requireSafe(after.editorText===text,'NATIVE_REPLY_APPROVED_TEXT_CHANGED');
     requireSafe(digest(frame.context)===digest(after.context),'NATIVE_REPLY_CONTEXT_CHANGED');
     this.prepared={binding:eventBinding(event),text,editorShape:after.editorShape,contextDigest:digest(frame.context)};
+    this.preparedContext=frame.context;
+    this.preparationToken=preparationToken;this.submissionStarted=false;
     this.pendingEvent=event;
   }
   async verifyPrepared(event:InboundEvent,text:string):Promise<TargetSnapshot>{
     requireSafe(this.prepared?.binding===eventBinding(event)&&this.prepared.text===text,'NATIVE_REPLY_NOT_PREPARED');
     const token=randomUUID(),frame=await this.frame(event,'arm',text,token,null,this.prepared.editorShape);
+    this.contextChanged('PREPARED',this.preparedContext,frame.context);
     this.gateToken=token;return this.snapshot(event,frame);
   }
-  async baseline(event:InboundEvent):Promise<string[]>{return(await this.frame(event)).outgoingIds;}
+  async baseline(event:InboundEvent):Promise<string[]>{const frame=await this.frame(event);this.contextChanged('BASELINE',this.preparedContext,frame.context);return frame.outgoingIds;}
+  async cancelPreparation(event:InboundEvent,text:string):Promise<void>{
+    requireSafe(!this.submissionStarted&&this.preparationToken&&this.prepared?.binding===eventBinding(event)&&this.prepared.text===text,'NATIVE_REPLY_PREPARATION_NOT_OWNED');
+    await this.frame(event,'cancel',text,this.preparationToken);
+    this.preparationToken=null;this.prepared=null;this.preparedContext=null;this.gateToken=null;
+  }
+  async readSavedDraft(event:InboundEvent):Promise<{text:string;snapshot:TargetSnapshot}>{
+    requireSafe(event.channel==='DIRECT_MESSAGE'&&event.direction==='INCOMING'&&isStrong(event),'NATIVE_REPLY_SAVED_DRAFT_SCOPE_REQUIRED');
+    const frame=await this.frame(event);validText(frame.editorText);
+    return{text:frame.editorText,snapshot:this.snapshot(event,frame)};
+  }
+  async clearSavedDraft(event:InboundEvent,text:string):Promise<void>{
+    validText(text);requireSafe(event.channel==='DIRECT_MESSAGE'&&event.direction==='INCOMING'&&isStrong(event),'NATIVE_REPLY_SAVED_DRAFT_SCOPE_REQUIRED');
+    await this.frame(event,'clearSaved',text);
+    requireSafe((await this.frame(event)).editorText==='','NATIVE_REPLY_SAVED_DRAFT_NOT_CLEARED');
+  }
   async clickOnce(notBefore?:string):Promise<void>{
+    this.submissionStarted=true;
     const token=this.gateToken;this.gateToken=null;requireSafe(token,'NATIVE_REPLY_NOT_PREPARED');
     if(this.submission){requireSafe(notBefore&&this.pendingEvent&&this.prepared,'NATIVE_REPLY_INTENT_REQUIRED');
       this.submission.arm(this.pendingEvent,this.prepared.text,notBefore);}

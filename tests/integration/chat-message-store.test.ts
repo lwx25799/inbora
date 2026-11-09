@@ -14,14 +14,14 @@ test('automation version one upgrades with a consistent restorable backup while 
   const store=database(),root=privateTemp('chat-migration-');
   try{
     await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'first-automation.sqlite'));
-    store.db.exec(`DROP TABLE IF EXISTS chat_messages;DROP TABLE IF EXISTS chat_delivery_links;DROP TABLE automation_schema;
+    store.db.exec(`DROP TABLE IF EXISTS budget_limits;DROP TABLE IF EXISTS chat_messages;DROP TABLE IF EXISTS chat_delivery_links;DROP TABLE automation_schema;
       CREATE TABLE automation_schema(version INTEGER PRIMARY KEY CHECK(version=1));INSERT INTO automation_schema VALUES(1);`);
     store.db.prepare("UPDATE budgets SET used=CASE kind WHEN 'MODEL' THEN 1 ELSE 9 END").run();
     const names=(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('automation_schema','audit_events') ORDER BY name").all() as {name:string}[]).map(row=>row.name);
     const inventory=()=>names.map(name=>[name,store.db.prepare(`SELECT * FROM "${name}" ORDER BY rowid`).all()]);
     const before=inventory(),oldAudit=store.db.prepare('SELECT * FROM audit_events ORDER BY rowid').all(),backup=join(root,'schema-one.sqlite');
     expect(await migrateAutomation(store,backup)).toBe(true);
-    expect(store.db.prepare('SELECT version FROM automation_schema').get()).toEqual({version:2});
+    expect(store.db.prepare('SELECT version FROM automation_schema').get()).toEqual({version:3});
     expect(store.db.pragma('user_version',{simple:true})).toBe(3);expect(store.db.pragma('quick_check',{simple:true})).toBe('ok');
     expect(inventory()).toEqual(before);expect(store.db.prepare('SELECT * FROM audit_events ORDER BY rowid').all().slice(0,oldAudit.length)).toEqual(oldAudit);
     const restored=new Database(backup,{readonly:true});try{
@@ -65,6 +65,26 @@ test('native observed own messages merge with confirmed sends only by exact nati
     expect(outgoing).toHaveLength(2);expect(outgoing.every(item=>item.origin==='OBSERVED'&&item.text===draft.text)).toBe(true);
     expect(outgoing.every(item=>item.id.startsWith('observed:'))).toBe(true);
     expect(store.db.prepare('SELECT native_id_digest FROM chat_delivery_links WHERE intent_id=?').get(intent)).toBeTruthy();
+  }finally{await service.close();store.close();}
+});
+
+test.each([0,10_000])('legacy confirmed display annotations do not duplicate observed native bubbles inside the send-time window (%s)',async offset=>{
+  const store=database(),draft=store.draft(approved(store)),event=store.event(draft.eventId),root=privateTemp('legacy-own-bubble-');
+  const intent=store.recordIntent(draft.id,snapshot(event.payload),false),boundary=Date.parse(event.payload.occurredAt!);
+  store.db.prepare('UPDATE send_intents SET attempt_started_at=? WHERE id=?').run(new Date(boundary).toISOString(),intent);
+  store.receipt(intent,'CONFIRMED','synthetic-legacy-confirmed-without-native-id');
+  await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
+  const own=candidate({actorId:'own-1',direction:'OUTGOING',text:draft.text,platformEventId:'legacy-native-one',occurredAt:new Date(boundary+offset).toISOString()});
+  new ChatMessageStore(store).observe([own,{...own,platformEventId:'legacy-native-two'}],'own-1',Date.parse('2026-11-03T00:00:00Z'));
+  const before=store.db.prepare('SELECT * FROM send_intents').all(),receipts=store.db.prepare('SELECT * FROM delivery_receipts').all();
+  const service=new ClientService(store,new BrowserService(root));await service.loadSettings();
+  try{
+    const detail=await service.dispatch(service.authority.issueSession(),{command:'getThread',eventId:event.id}) as {timeline:{items:{id:string;direction:string}[]}};
+    const outgoing=detail.timeline.items.filter(item=>item.direction==='OUTGOING');
+    expect(outgoing.filter(item=>item.id.startsWith('observed:'))).toHaveLength(2);
+    expect(outgoing).toHaveLength(offset===0?2:3);
+    expect(store.db.prepare('SELECT * FROM send_intents').all()).toEqual(before);expect(store.db.prepare('SELECT * FROM delivery_receipts').all()).toEqual(receipts);
+    expect(store.db.prepare('SELECT count(*) n FROM chat_delivery_links').get()).toEqual({n:0});
   }finally{await service.close();store.close();}
 });
 
