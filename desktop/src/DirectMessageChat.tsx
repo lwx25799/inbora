@@ -3,6 +3,7 @@ import {request,reasons,type Thread,type TimelineItem} from './api';
 import {time} from './presentation';
 import {ReplyComposer} from './ReplyComposer';
 import {MessageAttachments} from './MessageAttachments';
+import {ShareLink,validShare} from './ShareLink';
 import type {ReplyViewProps} from './reply-view-types';
 import './chat.css';
 
@@ -10,7 +11,7 @@ type Timeline=NonNullable<Thread['timeline']>;
 const empty:Timeline={items:[],pageSize:30,hasMore:false,before:null};
 const mediaPlaceholders={IMAGE:'[图片或表情消息，需人工查看]',VIDEO:'[视频消息，需人工查看]',AUDIO:'[音频消息，需人工查看]',MIXED:'[含媒体的消息，需人工查看]'};
 const imageReplacesPlaceholder=(message:TimelineItem)=>message.observationIssue==='DM_CONTENT_UNVERIFIED'&&message.contentType&&
-  message.text===mediaPlaceholders[message.contentType]&&message.attachments.some(item=>item.state==='READY');
+  message.text===mediaPlaceholders[message.contentType]&&(!!validShare(message.share)||message.attachments.some(item=>item.state==='READY'));
 const compare=(a:TimelineItem,b:TimelineItem)=>(Date.parse(a.occurredAt??'')||0)-(Date.parse(b.occurredAt??'')||0)||a.id.localeCompare(b.id);
 function merge(prior:TimelineItem[],next:TimelineItem[]){
   const incoming=new Map(next.map(item=>[item.id,item]));
@@ -70,7 +71,8 @@ export function DirectMessageChat(props:ReplyViewProps & {thread:Thread}){
       {!visible.items.length&&<p className="empty">正在读取会话消息</p>}
       {visible.items.map(message=><article key={message.id} className={'chat-message '+(message.direction==='OUTGOING'?'outgoing':'incoming')}>
         <small>{message.direction==='OUTGOING'?message.origin==='CONFIRMED'?'我方已回复':'我方消息':'对方'} · {time(message.occurredAt)}{message.historical?' · 历史消息':''}</small>
-        <div className="message-bubble">{!imageReplacesPlaceholder(message)&&<p>{message.text}</p>}<MessageAttachments message={message}/>
+        <div className="message-bubble">{!imageReplacesPlaceholder(message)&&<p>{message.text}</p>}
+          {validShare(message.share)?<ShareLink key={message.share!.url} share={message.share!}/>:<MessageAttachments message={message}/>}
           {message.observationIssue&&<p className="message-quality">{reasons[message.observationIssue]??'此消息需人工查看'}</p>}
         </div>
       </article>)}

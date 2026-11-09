@@ -102,6 +102,20 @@
 .task .message-attachments figcaption {
   display: none;
 }
+.shared-work {
+  display: grid;
+  gap: 6px;
+  width: min(360px, 100%);
+}
+.shared-work input {
+  min-width: 0;
+  font-size: 12px;
+}
+.shared-work button {
+  width: fit-content;
+  padding: 4px 9px;
+  font-size: 12px;
+}
 .chat-detail > .reply-composer {
   flex: none;
   max-height: 54%;

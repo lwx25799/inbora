@@ -174,6 +174,70 @@ function noExternalCalls(f:Awaited<ReturnType<typeof twoPeers>>):void{
   expect(new Set(f.store.events().map(event=>event.payload.platformEventId)).size).toBe(f.store.events().length);
 }
 
+test.each([false,true])('a selected preview priority reads one window then preserves the original continuation and normal next slot (list window %s)',async listWindow=>{
+  const f=await twoPeers(listWindow);try{
+    await f.collector.collect('dm',f.signal);const before=f.cursor();
+    expect(before.sweep?.peer.conversationId).toBe('conv-a');
+    f.store.db.prepare(`INSERT INTO discovered_conversations VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(id) DO NOTHING`)
+      .run('conv-b','100','300','b-sec','Peer B',f.origin,f.origin);
+    expect(f.collector.prioritize('100','conv-b')).toBe(true);
+    f.store.db.prepare("UPDATE client_state SET paused=1 WHERE id=1").run();
+    const reads=vi.spyOn(ObservedReader.prototype,'dmWindow');
+    try{await f.collector.collect('dm',f.signal);expect(reads.mock.calls.map(call=>call[0].conversationId)).toEqual(['conv-b']);}
+    finally{reads.mockRestore();}
+    expect(f.cursor()).toEqual(before);expect(f.lastRead('conv-b')).toBe(0);
+    if(listWindow)expect(await f.owner.dm.locator('#peer-contact-list').evaluate(node=>node.scrollTop)).toBe(0);
+    expect(f.store.events().some(event=>event.payload.platformEventId==='4002')).toBe(true);
+    expect(f.collector.prioritize('100','conv-b')).toBe(false);
+    expect(f.collector.prioritize('100','conv-a')).toBe(true);
+    const next=vi.spyOn(ObservedReader.prototype,'dmWindow');
+    try{await f.collector.collect('dm',f.signal);expect(next.mock.calls[0]?.[0].conversationId).toBe('conv-a');}
+    finally{next.mockRestore();}
+    expect(f.cursor()).not.toEqual(before);
+    noExternalCalls(f);
+  }finally{await f.close();}
+});
+
+test.each(['abort','dispose','emergency'])('selected preview priority stops before persistence after %s',async action=>{
+  const f=await twoPeers();try{
+    await f.collector.collect('dm',f.signal);const before=f.cursor();
+    f.store.db.prepare(`INSERT INTO discovered_conversations VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(id) DO NOTHING`)
+      .run('conv-b','100','300','b-sec','Peer B',f.origin,f.origin);
+    expect(f.collector.prioritize('100','conv-b')).toBe(true);
+    const abort=new AbortController(),original=ObservedReader.prototype.dmWindow;
+    const read=vi.spyOn(ObservedReader.prototype,'dmWindow').mockImplementation(async function(this:ObservedReader,peer,top){
+      const result=await original.call(this,peer,top);
+      if(action==='abort')abort.abort();else if(action==='dispose')f.collector.dispose();else f.data.stop(true);
+      return result;
+    });
+    try{await expect(f.collector.collect('dm',abort.signal)).rejects.toThrow('COLLECTION_CANCELLED');}finally{read.mockRestore();}
+    expect(f.cursor()).toEqual(before);expect(f.lastRead('conv-b')).toBe(0);
+    expect(f.store.events().some(event=>event.payload.platformEventId==='4002')).toBe(false);
+    noExternalCalls(f);
+  }finally{await f.close();}
+});
+
+test('preview priority retains collection gates, object cooldown and webpage drafts',async()=>{
+  const f=await twoPeers();try{
+    await f.collector.collect('dm',f.signal);
+    expect(f.collector.prioritize('different-own','conv-a')).toBe(false);
+    expect(f.collector.prioritize('100','not-discovered')).toBe(false);
+    f.data.stop(true);expect(f.collector.prioritize('100','conv-a')).toBe(false);f.data.stop(false);
+    f.data.configureCollection({ownId:'100',comments:false,inbox:false,commentIntervalMs:30000,dmIntervalMs:15000});
+    expect(f.collector.prioritize('100','conv-a')).toBe(false);
+    f.data.configureCollection({ownId:'100',comments:false,inbox:true,commentIntervalMs:30000,dmIntervalMs:15000});
+    const cursor=f.cursor();cursor.deferred.push({id:'conv-a',until:f.origin+200000,code:'OBSERVATION_DOM_NOT_READY'});
+    f.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
+    expect(f.collector.prioritize('100','conv-a')).toBe(false);
+    cursor.deferred=[];f.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
+    expect(f.collector.prioritize('100','conv-a')).toBe(true);
+    await f.owner.dm.evaluate(()=>{const editor=document.createElement('div');editor.contentEditable='true';editor.textContent='网页未发送人稿';document.querySelector('#chat')!.append(editor);});
+    const before=f.cursor();await expect(f.collector.collect('dm',f.signal)).rejects.toThrow();
+    expect(await f.owner.dm.getByText('网页未发送人稿',{exact:true}).textContent()).toBe('网页未发送人稿');
+    expect(checkpoint(f.cursor(),'conv-a')).toEqual(checkpoint(before,'conv-a'));noExternalCalls(f);
+  }finally{await f.close();}
+});
+
 test('two-window quantum discovers a readable peer in the next native contact-list window and keeps the first checkpoint',async()=>{
   const f=await twoPeers(true,false);
   try{

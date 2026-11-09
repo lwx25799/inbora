@@ -342,6 +342,7 @@ export class ClientService {
       case "selectTarget":
         this.closeOtherDialogs(token,c.eventId);
         this.authority.select(token, c.eventId, c.selectionId);
+        if(c.eventId&&this.automation)this.browser.prioritizePreview(this.automation,this.store.event(c.eventId).payload);
         return { selected: true };
       case "claimHuman": {
         const o = this.authority.claim(token, c.eventId, c.generation);

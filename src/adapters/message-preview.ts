@@ -3,6 +3,9 @@ import type { ObservationMapping } from '../config/site-mapping.js';
 import { eventBinding,type InboundEvent } from '../core/contracts.js';
 import { captureObserved,type ObservationBatch,type DiscoveredPeer } from './observed-reader.js';
 import { MessagePreviewStore,maximumPreviewBytes,type CapturedMessageImage } from '../storage/message-previews.js';
+import {MessagePreviewDiagnostics} from '../observability/message-preview-diagnostics.js';
+import {inspectMessageShare} from './message-share.js';
+import {MessageShareStore} from '../storage/message-shares.js';
 
 interface ImageInspection {
   count:number;label:string|null;reason:string|null;sourceFingerprint:string;clip:{x:number;y:number;width:number;height:number}|null;
@@ -11,11 +14,14 @@ interface InspectionInput {mapping:ObservationMapping;event:InboundEvent;imageIn
 /** Native DOM reads only. URLs remain temporary comparison values and are never returned to the application UI. */
 export async function inspectMessageImage(input:InspectionInput):Promise<ImageInspection> {
   const {mapping:m,event,imageIndex,peer}=input,s=m.selectors;
+  let phase:'ENVIRONMENT'|'IDENTITY'|'CHAT'|'HEADER'|'ID'|'PEERSEC'|'TITLE'|'MESSAGE'|'TIME'='ENVIRONMENT';
   const dom={
-    check(condition:unknown):void{if(!condition)throw new Error('MESSAGE_PREVIEW_TARGET_CHANGED');},
+    check(condition:unknown):void{if(!condition)throw new Error('MESSAGE_PREVIEW_INSPECT_'+phase+'_FAILED');},
     value(object:unknown,key:string):unknown{
       if(!object||typeof object!=='object')return undefined;const descriptor=Object.getOwnPropertyDescriptor(object,key);
-      dom.check(!descriptor||Object.hasOwn(descriptor,'value'));return descriptor?.value;
+      const inherited=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(object)??{},key);
+      dom.check((!descriptor||Object.hasOwn(descriptor,'value'))&&(!inherited||Object.hasOwn(inherited,'value'))&&
+        (!descriptor||!inherited||descriptor.value===inherited.value));return descriptor?descriptor.value:inherited?.value;
     },
     visible(node:Element):boolean{
       if(!node.isConnected||!node.getClientRects().length)return false;
@@ -56,17 +62,22 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
   };
   dom.check(location.origin===m.origin&&!/验证码|安全验证/u.test(document.title));
   dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible));
+  phase='IDENTITY';
   const own=dom.props(dom.one(s.selfAvatar),s.selfFiberDepth);
   dom.check(dom.value(own,'uid')===m.self.uid&&dom.value(own,'secUid')===m.self.secUid);
-  const chat=dom.one(s.chat),header=dom.one(s.chatHeader,chat),conversation=dom.value(dom.child(header),'conversation');
-  const nativeConversation=dom.value(conversation,'conversationId')??dom.value(conversation,'id');
-  dom.check(nativeConversation===event.conversationId&&nativeConversation===peer.conversationId&&
-    dom.value(conversation,'_toParticipantSecUserId')===peer.secUid&&dom.one(s.chatTitle,chat).textContent?.trim()===peer.title);
+  phase='CHAT';const chat=dom.one(s.chat);
+  phase='HEADER';const header=dom.one(s.chatHeader,chat),conversation=dom.value(dom.child(header),'conversation');
+  phase='ID';const first=dom.value(conversation,'conversationId'),second=dom.value(conversation,'id'),nativeConversation=first??second;
+  dom.check((first===undefined||second===undefined||first===second)&&nativeConversation===event.conversationId&&nativeConversation===peer.conversationId);
+  phase='PEERSEC';dom.check(dom.value(conversation,'_toParticipantSecUserId')===peer.secUid);
+  phase='TITLE';dom.check(dom.one(s.chatTitle,chat).textContent?.trim()===peer.title);
+  phase='MESSAGE';
   const rows=Array.from(chat.querySelectorAll(s.messages)).filter(row=>{
     const native=dom.value(dom.child(row),'message');return dom.value(native,'serverId')===event.platformEventId;
   });
   dom.check(rows.length===1&&dom.visible(rows[0]!));const row=rows[0]!,native=dom.value(dom.child(row),'message');
   dom.check(dom.value(native,'conversationId')===event.conversationId&&dom.value(native,'sender')===event.actorId);
+  phase='TIME';
   const time=dom.value(native,'createdAt');let observed=NaN;try{observed=Date.prototype.getTime.call(time);}catch{/* Not a native date. */}
   dom.check(Number.isFinite(observed)&&new Date(observed).toISOString()===event.occurredAt);
   const images=Array.from(row.querySelectorAll('img')).filter(image=>image.closest(s.messages)===row&&dom.visible(image));
@@ -102,36 +113,70 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
 }
 
 /** Called only inside the existing account actor while its exact native batch is still mounted. */
-export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,batch:ObservationBatch,root:string,signal:AbortSignal):Promise<void> {
-  const store=new MessagePreviewStore(root);
+export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,batch:ObservationBatch,root:string,signal:AbortSignal,exactPeer?:DiscoveredPeer):Promise<void> {
+  const store=new MessagePreviewStore(root),diagnostics=new MessagePreviewDiagnostics();
+  diagnostics.snapshot.batchDMcount=batch.events.filter(event=>event.channel==='DIRECT_MESSAGE').length;
+  try{
   for(const event of batch.events){
     if(signal.aborted)return;
     if(event.channel!=='DIRECT_MESSAGE'||event.observationIssue!=='DM_CONTENT_UNVERIFIED'||
       !['IMAGE','MIXED'].includes(event.contentType??'')||!event.platformEventId||!event.occurredAt)continue;
+    diagnostics.snapshot.eligibleCount++;
     const binding=batch.bindings?.find(item=>item.conversationId===event.conversationId&&
       (event.direction==='OUTGOING'?event.actorId===mapping.self.uid:item.uid===event.actorId));
-    if(!binding)continue;const peer:DiscoveredPeer={uid:binding.uid,secUid:binding.secUid,conversationId:event.conversationId!,title:binding.title};
-    const previous=store.list(event,mapping.self.uid);if(previous.length&&previous.every(item=>item.state==='READY'))continue;
+    if(binding&&exactPeer&&(binding.conversationId!==exactPeer.conversationId||binding.secUid!==exactPeer.secUid||exactPeer.uid!==null&&binding.uid!==exactPeer.uid)){
+      diagnostics.increment('skipped','BINDING_CONFLICT');continue;
+    }
+    const peer:DiscoveredPeer|undefined=binding?{uid:binding.uid,secUid:binding.secUid,conversationId:event.conversationId!,title:binding.title}:
+      exactPeer?.conversationId===event.conversationId&&(event.direction==='OUTGOING'&&event.actorId===mapping.self.uid||exactPeer.uid===event.actorId)?exactPeer:undefined;
+    if(!peer){diagnostics.increment('skipped','BINDING_MISSING');continue;}
+    try{
+      const inspected=await page.evaluate(inspectMessageShare,{mapping,event,peer});diagnostics.snapshot.shareInspected++;
+      if(inspected.diagnostic&&diagnostics.snapshot.shareSamples.length<8)diagnostics.snapshot.shareSamples.push(inspected.diagnostic);
+      if(inspected.detected){
+        if(inspected.share){try{new MessageShareStore(root).save(event,mapping.self.uid,inspected.share);diagnostics.snapshot.shareLinked++;}catch{diagnostics.increment('caught','SHARE_WRITE');}}
+        else diagnostics.snapshot.shareDetectedNoLink++;
+        continue;
+      }
+    }catch{
+      diagnostics.increment('caught','SHARE_INSPECT');
+      try{store.save(event,mapping.self.uid,[{label:null,reason:'MESSAGE_PREVIEW_SHARE_INSPECT_FAILED'}]);}catch{diagnostics.increment('caught','CACHE_WRITE');}
+      continue;
+    }
+    const previous=store.list(event,mapping.self.uid);if(previous.length&&previous.every(item=>item.state==='READY')){
+      diagnostics.snapshot.reusedReady+=previous.length;continue;
+    }
     const images:CapturedMessageImage[]=[];
     for(let imageIndex=0;imageIndex<4&&!signal.aborted;imageIndex++){
       let before:ImageInspection;
-      try{before=await page.evaluate(inspectMessageImage,{mapping,event,imageIndex,peer});}catch{break;}
-      if(imageIndex>=before.count)break;
+      diagnostics.snapshot.inspected++;
+      try{before=await page.evaluate(inspectMessageImage,{mapping,event,imageIndex,peer});}catch(error){
+        const reason=error instanceof Error?/MESSAGE_PREVIEW_INSPECT_(?:ENVIRONMENT|IDENTITY|CONVERSATION|CHAT|HEADER|ID|PEERSEC|TITLE|MESSAGE|TIME)_FAILED/u.exec(error.message)?.[0]:undefined;
+        diagnostics.increment('caught','INSPECT_BEFORE');images.push({label:null,reason:reason??'MESSAGE_PREVIEW_INSPECT_FAILED'});break;
+      }
+      if(imageIndex>=before.count){if(imageIndex===0)images.push({label:null,reason:'MESSAGE_PREVIEW_NOT_AVAILABLE'});break;}
       if(before.reason||!before.clip){images.push({label:before.label,reason:before.reason??'MESSAGE_PREVIEW_CAPTURE_FAILED'});continue;}
+      let stage:'CAPTURE'|'INSPECT_AFTER'|'VERIFY_BINDING'='CAPTURE';
       try{
         const bytes=await page.screenshot({type:'png',scale:'css',clip:before.clip,timeout:2000,animations:'allow',caret:'initial'});
         if(signal.aborted)return;
+        stage='INSPECT_AFTER';
         const after=await page.evaluate(inspectMessageImage,{mapping,event,imageIndex,peer});
         if(after.reason||after.sourceFingerprint!==before.sourceFingerprint||after.label!==before.label||JSON.stringify(after.clip)!==JSON.stringify(before.clip)){
           images.push({label:before.label,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'});continue;
         }
+        stage='VERIFY_BINDING';
         const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'message-preview-only',dmWindow:true,peer};
         const final=await page.evaluate(captureObserved,input);
         if(!final.events.some(item=>eventBinding(item)===eventBinding(event))){images.push({label:before.label,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'});continue;}
         images.push(bytes.length<=maximumPreviewBytes?{label:before.label,png:bytes,width:Math.round(before.clip.width),height:Math.round(before.clip.height)}:
           {label:before.label,reason:'MESSAGE_PREVIEW_TOO_LARGE'});
-      }catch{images.push({label:before.label,reason:'MESSAGE_PREVIEW_CAPTURE_FAILED'});}
+      }catch{diagnostics.increment('caught',stage);images.push({label:before.label,reason:'MESSAGE_PREVIEW_CAPTURE_FAILED'});}
     }
-    if(images.length&&!signal.aborted)try{store.save(event,mapping.self.uid,images);}catch{/* Cache failure cannot turn an observed inbound into a lost task. */}
+    for(const image of images)if(!image.png)diagnostics.increment('unavailable',image.reason??'MESSAGE_PREVIEW_CAPTURE_FAILED');
+    if(images.length&&!signal.aborted)try{
+      store.save(event,mapping.self.uid,images);diagnostics.snapshot.ready+=store.list(event,mapping.self.uid).filter(item=>item.state==='READY').length;
+    }catch{diagnostics.increment('caught','CACHE_WRITE');}
   }
+  }finally{diagnostics.snapshot.cancelled=signal.aborted;await diagnostics.save(root);}
 }

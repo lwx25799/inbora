@@ -5,8 +5,8 @@ import { eventSchema, requireSafe, type InboundEvent } from '../core/contracts.j
 
 export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string }
 interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'diagnostic' | 'dmScroll'; index: number;
-  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number }
-type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'>;
+  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number }
+type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'>;
 export interface CollectionReadDiagnostic {
   source:'dm'|'comments';containers:number;visibleContainers:number;rows:number;visibleRows:number;roots:number;windowRoots:number;
   viewportHeight:number;containerTop:number;containerBottom:number;scrollTop:number;chatVisible:boolean;
@@ -14,6 +14,10 @@ export interface CollectionReadDiagnostic {
   back?:{count:number;centerHit?:'SELF'|'DESCENDANT'|'OUTSIDE'|'NONE'|'OFFSCREEN';centerIndex?:number|null;
     nodes?:{index:number;parentIndex:number|null;tag:'DIV'|'BUTTON'|'SPAN'|'A'|'SVG'|'PATH'|'OTHER';visible:boolean;inViewport:boolean;width:number;height:number;
       props:'NONE'|'DATA'|'REJECTED';handlers:{onClick:boolean;onMouseDown:boolean;onPointerDown:boolean;onMouseUp:boolean}}[]};
+  shareStage?:'CHAT_NOT_READY'|'HEADER_NOT_READY'|'CONVERSATION_UNVERIFIED'|'VERIFIED';
+  messageSamples?:{nativeIdPresent:boolean;conversationMatches:boolean;senderKnown:boolean;parsedPresent:boolean;parsedTruncated:boolean;
+    visibleTextNodes:number;visibleMediaNodes:number;parsedFields:{key:string;type:'string'|'number'|'boolean'|'object'|'array'|'null'|'undefined'|'accessor'|'other';
+      digitId:boolean;urlKind:'NONE'|'DOUYIN_VIDEO'|'DOUYIN_NOTE'|'HTTP_OTHER'|'DATA'|'BLOB'|'OTHER'}[]}[];
   samples:{visible:boolean;inWindow:boolean;hasBox:boolean;displayContents:boolean;top:number;bottom:number;width:number;height:number;bodies:number;visibleBodies:number}[];
 }
 export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; unsupported: number; loaded: number;
@@ -193,6 +197,50 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
         back.centerIndex=position<0?null:position;
         return back;
       },
+      messages():Pick<CollectionReadDiagnostic,'shareStage'|'messageSamples'> {
+        const chats=Array.from(document.querySelectorAll(s.chat)).filter(dom.visible);
+        if(chats.length!==1)return {shareStage:'CHAT_NOT_READY',messageSamples:[]};
+        const chat=chats[0]!;let peer:DiscoveredPeer|undefined;
+        try{
+          const header=dom.one(chat,s.chatHeader),conversation=dom.data(dom.childProps(header),'conversation'),id=dom.conversationId(conversation),
+            secure=dom.data(conversation,'_toParticipantSecUserId');
+          peer=input.peer??m.peers.find(item=>item.conversationId===id&&item.secUid===secure);
+          if(!peer||peer.conversationId!==id||peer.secUid!==secure)return {shareStage:'CONVERSATION_UNVERIFIED',messageSamples:[]};
+        }catch{return {shareStage:'HEADER_NOT_READY',messageSamples:[]};}
+        const messageSamples=Array.from(chat.querySelectorAll(s.messages)).filter(row=>dom.visible(row)&&row.closest(s.chat)===chat).slice(0,6).map(row=>{
+          const sample:NonNullable<CollectionReadDiagnostic['messageSamples']>[number]={nativeIdPresent:false,conversationMatches:false,senderKnown:false,
+            parsedPresent:false,parsedTruncated:false,visibleTextNodes:0,visibleMediaNodes:0,parsedFields:[]};
+          try{
+            const native=dom.data(dom.childProps(row),'message'),sender=dom.data(native,'sender');
+            sample.nativeIdPresent=!!dom.id(dom.data(native,'serverId'));
+            sample.conversationMatches=dom.data(native,'conversationId')===peer!.conversationId;
+            sample.senderKnown=sender===m.self.uid||peer!.uid!==null&&sender===peer!.uid;
+            if(!sample.nativeIdPresent||!sample.conversationMatches||!sample.senderKnown)return sample;
+            sample.visibleTextNodes=Array.from(row.querySelectorAll(s.messageText)).filter(node=>node.closest(s.messages)===row&&dom.visible(node)).length;
+            sample.visibleMediaNodes=Array.from(row.querySelectorAll('img,video,audio')).filter(node=>node.closest(s.messages)===row&&dom.visible(node)).length;
+            const descriptor=native&&typeof native==='object'?Object.getOwnPropertyDescriptor(native,'_parsedContent'):undefined;
+            const parsed=descriptor&&Object.hasOwn(descriptor,'value')?descriptor.value:undefined;
+            if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))return sample;
+            sample.parsedPresent=true;const keys=Object.getOwnPropertyNames(parsed);sample.parsedTruncated=keys.length>32;
+            for(const name of keys.slice(0,32)){
+              const field=Object.getOwnPropertyDescriptor(parsed,name),data=field&&Object.hasOwn(field,'value'),value=data?field.value:undefined;
+              const type=!data?'accessor':value===null?'null':Array.isArray(value)?'array':
+                ['string','number','boolean','object','undefined'].includes(typeof value)?typeof value:'other';
+              let urlKind:NonNullable<CollectionReadDiagnostic['messageSamples']>[number]['parsedFields'][number]['urlKind']='NONE';
+              if(typeof value==='string'&&value.length<=262144){
+                if(/^https:\/\/www\.douyin\.com\/video\/\d{1,64}(?:[?#]|$)/u.test(value))urlKind='DOUYIN_VIDEO';
+                else if(/^https:\/\/www\.douyin\.com\/note\/\d{1,64}(?:[?#]|$)/u.test(value))urlKind='DOUYIN_NOTE';
+                else if(/^https?:\/\//u.test(value))urlKind='HTTP_OTHER';else if(value.startsWith('data:'))urlKind='DATA';
+                else if(value.startsWith('blob:'))urlKind='BLOB';else if(/^[a-z][a-z0-9+.-]*:/iu.test(value))urlKind='OTHER';
+              }
+              sample.parsedFields.push({key:/^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(name)?name:'OTHER',type:type as typeof sample.parsedFields[number]['type'],
+                digitId:typeof value==='string'&&/^\d{1,64}$/u.test(value)||typeof value==='number'&&Number.isSafeInteger(value)&&value>=0,urlKind});
+            }
+          }catch{/* Missing metadata yields only fixed false flags, never an exception body. */}
+          return sample;
+        });
+        return {shareStage:'VERIFIED',messageSamples};
+      },
     };
     const diagnostic:CollectionReadDiagnostic={source:comments?'comments':'dm',containers:containers.length,visibleContainers:visible.length,
       rows:rows.length,visibleRows:rows.slice(0,250).filter(dom.visible).length,roots:roots.length,windowRoots:roots.filter(probe.inWindow).length,
@@ -201,7 +249,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       chatInViewport:!comments&&Array.from(document.querySelectorAll(s.chat)).some(probe.inViewport),
       backVisible:!comments&&Array.from(document.querySelectorAll(s.chatBack)).some(dom.visible),
       backInViewport:!comments&&Array.from(document.querySelectorAll(s.chatBack)).some(probe.inViewport),samples:roots.slice(0,6).map(probe.sample)};
-    if(!comments)diagnostic.back=probe.back();
+    if(!comments){diagnostic.back=probe.back();Object.assign(diagnostic,probe.messages());}
     return {events,evidenceId,unsupported,loaded,diagnostic};
   }
   if(channel==='navigate') {
@@ -245,6 +293,8 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   }
   if(channel==='conversations') {
     const panel=dom.one(document,s.dmPanel),list=s.conversationList?dom.one(panel,s.conversationList):null;
+    if(input.conversationOffset!==undefined){dom.emptyEditors();dom.check(list&&Number.isFinite(input.conversationOffset),'OBSERVATION_CONVERSATION_NOT_FOUND');
+      list!.scrollTop=Math.max(0,Math.min(list!.scrollHeight-list!.clientHeight,input.conversationOffset));}
     const rows=Array.from(panel.querySelectorAll(s.conversationRows)).filter(row=>dom.visible(row)&&(!list||list.contains(row)));
     dom.check(rows.length<=100,'OBSERVATION_WINDOW_TOO_LARGE');
     const peers:DiscoveredPeer[]=[];
@@ -261,7 +311,8 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     dom.check(new Set(peers.map(p=>p.conversationId)).size===peers.length,'OBSERVATION_CONVERSATION_NOT_UNIQUE');
     if(list&&input.scroll)list.scrollTop=input.scroll==='start'||list.scrollTop+list.clientHeight>=list.scrollHeight-1?0:
       Math.min(list.scrollHeight-list.clientHeight,list.scrollTop+Math.max(1,Math.floor(list.clientHeight*0.8)));
-    return {events,evidenceId,unsupported,loaded:rows.length,peers};
+    return {events,evidenceId,unsupported,loaded:rows.length,peers,...(list?{scroll:{top:list.scrollTop,height:list.scrollHeight,
+      viewport:list.clientHeight,atEnd:list.scrollTop+list.clientHeight>=list.scrollHeight-1}}:{})};
   } else if(channel==='locate') {
     const peer=input.peer??m.peers[index];dom.check(peer,'OBSERVATION_PEER_REQUIRED');
     const panel=dom.one(document,s.dmPanel),list=s.conversationList?dom.one(panel,s.conversationList):null;
@@ -447,8 +498,8 @@ export class ObservedReader {
       throw error;
     }
   }
-  async diagnostic(source:'dm'|'comments',index=0):Promise<CollectionReadDiagnostic> {
-    const batch=await this.capture('diagnostic',index,{diagnosticSource:source});
+  async diagnostic(source:'dm'|'comments',index=0,peer?:DiscoveredPeer):Promise<CollectionReadDiagnostic> {
+    const batch=await this.capture('diagnostic',index,{diagnosticSource:source,...(peer?{peer}:{})});
     requireSafe(batch.diagnostic,'OBSERVATION_DIAGNOSTIC_UNAVAILABLE');return batch.diagnostic;
   }
   async dmWindow(peer:DiscoveredPeer,top?:number):Promise<ObservationBatch> {
@@ -509,7 +560,7 @@ export class ObservedReader {
     }
     requireSafe(false,'OBSERVATION_CONVERSATION_NOT_FOUND');
   }
-  async conversations(scroll?: 'start'|'next'):Promise<ObservationBatch> {
+  async conversations(scroll?: 'start'|'next',offset?:number):Promise<ObservationBatch> {
     await this.guard();
     const s=this.mapping.selectors;
     if(!await this.page.locator(s.dmPanel).isVisible())await this.transition('OBSERVATION_DM_ENTRY_DOM_NOT_READY',()=>this.page.locator(s.dmEntry).click());
@@ -519,7 +570,7 @@ export class ObservedReader {
       await this.capture('back',0);
       await this.transition('OBSERVATION_DM_BACK_DOM_NOT_READY',()=>chat.waitFor({state:'hidden'}));
     }
-    return this.ready('conversations',0,scroll?{scroll}:{});
+    return this.ready('conversations',0,{...(scroll?{scroll}:{}),...(offset!==undefined?{conversationOffset:offset}:{})});
   }
   async navigate(url:string):Promise<void> {
     await this.guard();

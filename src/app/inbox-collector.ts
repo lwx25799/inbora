@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { randomUUID } from 'node:crypto';
-import { mkdir,writeFile } from 'node:fs/promises';
+import { lstat,mkdir,rename,unlink,writeFile } from 'node:fs/promises';
 import { z } from "zod";
 import type { BrowserProfileOwner } from "../browser/profile-owner.js";
 import { ObservedReader, type DiscoveredPeer, type ObservationBatch } from "../adapters/observed-reader.js";
@@ -33,13 +33,17 @@ const objectRetryMs=120_000;
 export class InboxCollector {
   private discovery: OwnWorksDiscovery;
   private diagnosed=new Set<CollectionSource>();
+  private priority:string|undefined;
+  private lastPriority:{id:string;at:number}|undefined;
+  private priorityNeedsNormal=false;
+  private disposed=false;
   constructor(readonly owner: BrowserProfileOwner, readonly mapping: ObservationMapping,
     readonly data: AutomationStore, readonly root: string, readonly mode: "headed" | "headless") {
     this.discovery = new OwnWorksDiscovery(owner.notification, mapping);
   }
   private check(source: CollectionSource, signal: AbortSignal):void {
     const state=this.data.state(),settings=state.collection;
-    requireSafe(!signal.aborted&&!state.emergencyStopped&&settings&&(source==='works'?settings.comments:settings.inbox),'COLLECTION_CANCELLED');
+    requireSafe(!this.disposed&&!signal.aborted&&!state.emergencyStopped&&settings&&(source==='works'?settings.comments:settings.inbox),'COLLECTION_CANCELLED');
     this.data.requireAccount(this.mapping.self.uid);
     requireSafe(settings.ownId===this.mapping.self.uid,'ACCOUNT_CHANGED');
   }
@@ -48,12 +52,54 @@ export class InboxCollector {
     // One object/page turn, never a whole catalog or inbox inside the account lock.
     await this.owner.actor.run(async()=>{
       this.check(source,signal);
-      if(source==='dm')await this.dm(signal);else await this.works(signal);
+      if(source==='dm'){
+        if(this.priority&&!this.priorityNeedsNormal)await this.previewPriority(signal);
+        else{try{await this.dm(signal);}finally{this.priorityNeedsNormal=false;}}
+      }else await this.works(signal);
     },'background');
   }
-  private async persist(source:CollectionSource,scope:string,batch:ObservationBatch,signal:AbortSignal):Promise<void> {
+  prioritize(ownId:string,conversationId:string):boolean {
+    const state=this.data.state();
+    if(this.disposed||state.emergencyStopped||!state.collection?.inbox||state.collection.ownId!==ownId||ownId!==this.mapping.self.uid||
+      this.lastPriority?.id===conversationId&&this.data.now()-this.lastPriority.at<objectRetryMs)return false;
+    const own=this.data.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
+    const peer=this.data.store.db.prepare('SELECT own_id,sec_uid FROM discovered_conversations WHERE id=?').get(conversationId) as {own_id:string;sec_uid:string}|undefined;
+    const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
+    const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
+    if(own?.own_id!==ownId||peer?.own_id!==ownId||!peer.sec_uid||cursor.deferred.some(item=>item.id===conversationId&&item.until>this.data.now()))return false;
+    this.priority=conversationId;return true;
+  }
+  private async previewPriority(signal:AbortSignal):Promise<void> {
+    const id=this.priority!;this.priority=undefined;this.priorityNeedsNormal=true;this.lastPriority={id,at:this.data.now()};
+    this.check('dm',signal);
+    const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
+    const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
+    if(cursor.deferred.some(item=>item.id===id&&item.until>this.data.now()))return;
+    const current=this.data.store.db.prepare('SELECT uid,sec_uid,title FROM discovered_conversations WHERE own_id=? AND id=?')
+      .get(this.mapping.self.uid,id) as {uid:string|null;sec_uid:string;title:string}|undefined;
+    requireSafe(current,'OBSERVATION_CONVERSATION_CHANGED');
+    const reader=new ObservedReader(this.owner.dm,this.mapping),peer={uid:current.uid,secUid:current.sec_uid,title:current.title,conversationId:id};
+    let top:number|undefined,canRestore=false,restoring=false;
+    try{
+      top=(await reader.conversations()).scroll?.top;canRestore=true;this.check('dm',signal);
+      const messages=await reader.dmWindow(peer);this.check('dm',signal);
+      await this.persist('dm',id,messages,signal,peer);
+      this.check('dm',signal);restoring=true;await reader.conversations(undefined,top);
+    }catch(error){
+      const code=error instanceof Blocked?error.code:'DM_THREAD_READ_FAILED';
+      if(collectionStops.has(code)||code==='BROWSER_CLOSED'||signal.aborted||this.disposed)throw error;
+      this.check('dm',signal);
+      // Preserve the complete normal rotation/checkpoints; only the failed object's existing cooldown changes.
+      cursor.deferred=cursor.deferred.filter(item=>item.id!==id);cursor.deferred.push({id,until:this.data.now()+objectRetryMs,code});
+      this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
+      await this.diagnose(reader,'dm',code,signal,peer);
+      if(canRestore&&!restoring)try{await reader.conversations(undefined,top);}catch{/* No second return click if restoration itself failed. */}
+      throw new DeferredObjectRead(code);
+    }
+  }
+  private async persist(source:CollectionSource,scope:string,batch:ObservationBatch,signal:AbortSignal,exactPeer?:DiscoveredPeer):Promise<void> {
     this.check(source,signal);
-    if(source==='dm')await saveMessagePreviews(this.owner.dm,this.mapping,batch,this.root,signal);
+    if(source==='dm')await saveMessagePreviews(this.owner.dm,this.mapping,batch,this.root,signal,exactPeer);
     this.check(source,signal);
     const evidence=await recordEvidence(join(this.root,'evidence'),{
       caseId:source==='dm'?'D01':'N01',browserVersion:this.owner.version(),mode:this.mode,taskId:null,action:'OBSERVE',
@@ -81,14 +127,21 @@ export class InboxCollector {
       throw new Blocked(`DM_${stage}_READ_FAILED`);
     }
   }
-  private async diagnose(reader:ObservedReader,source:CollectionSource,code:string,signal:AbortSignal):Promise<void> {
+  private async diagnose(reader:ObservedReader,source:CollectionSource,code:string,signal:AbortSignal,peer?:DiscoveredPeer):Promise<void> {
     if(this.diagnosed.has(source)||!/^[A-Z][A-Z0-9_]{1,100}$/.test(code))return;
     this.diagnosed.add(source);
     try{
       this.check(source,signal);
-      const report=await reader.diagnostic(source==='works'?'comments':'dm');this.check(source,signal);
+      const report=await reader.diagnostic(source==='works'?'comments':'dm',0,peer);this.check(source,signal);
       const directory=join(this.root,'evidence'),id=randomUUID();await mkdir(directory,{recursive:true});
-      await writeFile(join(directory,`collection-read-${id}.json`),JSON.stringify({version:1,observedAt:new Date(this.data.now()).toISOString(),code,report}),{flag:'wx',mode:0o600});
+      const destination=join(directory,`collection-read-${source}-latest.json`),temporary=join(directory,id+'.read-tmp'),dir=await lstat(directory);
+      requireSafe(dir.isDirectory()&&!dir.isSymbolicLink(),'DIAGNOSTIC_PATH_UNAVAILABLE');
+      try{const file=await lstat(destination);requireSafe(file.isFile()&&!file.isSymbolicLink(),'DIAGNOSTIC_PATH_UNAVAILABLE');}
+      catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+      try{
+        await writeFile(temporary,JSON.stringify({version:1,observedAt:new Date(this.data.now()).toISOString(),code,report}),{flag:'wx',mode:0o600});
+        this.check(source,signal);await rename(temporary,destination);
+      }finally{await unlink(temporary).catch(()=>{});}
       this.data.store.audit('COLLECTION_READ_DIAGNOSTIC',digest(id),{dm:source==='dm'});
     }catch{/* Diagnostic failure must preserve the primary read failure and its watermarks. */}
   }
@@ -170,7 +223,7 @@ export class InboxCollector {
     const anchor=active.anchor!;
     const matches=(batch:ObservationBatch)=>batch.events.some(event=>event.platformEventId!==null&&anchor.ids.includes(event.platformEventId));
     // Preserve new arrivals before leaving a chat that reopened at its latest window.
-    await this.persist('dm',peer.conversationId,messages,signal);
+    await this.persist('dm',peer.conversationId,messages,signal,peer);
     let aligned=messages;
     const initial=messages.dmViewport;requireSafe(initial,'OBSERVATION_DM_SCROLL_UNAVAILABLE');
     const delta=initial.height-anchor.height,direction=initial.minimum<0?-1:1;
@@ -182,7 +235,7 @@ export class InboxCollector {
       // Sticky or nonvirtual lists can expose the same IDs at many offsets: restore geometry before accepting the ID proof.
       if(!aligned.dmViewport||Math.abs(aligned.dmViewport.top-top)>1) {
         aligned=await reader.dmWindow(peer,top);
-        await this.persist('dm',peer.conversationId,aligned,signal);
+        await this.persist('dm',peer.conversationId,aligned,signal,peer);
       }
       const score=aligned.events.filter(event=>event.platformEventId!==null&&anchor.ids.includes(event.platformEventId)).length;
       if(score>bestScore){best=aligned;bestScore=score;}
@@ -234,7 +287,7 @@ export class InboxCollector {
         messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer,top));
         if(messages.dmViewport?.height!==prior.height)prior=undefined;
       }
-      await this.persist('dm',peer.conversationId,messages,signal);
+      await this.persist('dm',peer.conversationId,messages,signal,peer);
       const native=messages.bindings?.[0];
       if(native) {
         requireSafe(peer.uid===null||peer.uid===native.uid,'OBSERVATION_SENDER_UNVERIFIED');
@@ -257,7 +310,7 @@ export class InboxCollector {
           this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
           this.data.store.audit('DM_READ_DEFERRED',digest(peer.conversationId),{threadReadFailed:true});
         }).immediate();
-        await this.diagnose(reader,'dm',code,signal);
+        await this.diagnose(reader,'dm',code,signal,peer);
         throw new DeferredObjectRead(code);
       }
       throw error;
@@ -331,5 +384,5 @@ export class InboxCollector {
     }
     this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
   }
-  dispose():void {this.discovery.dispose();}
+  dispose():void {this.disposed=true;this.priority=undefined;this.discovery.dispose();}
 }

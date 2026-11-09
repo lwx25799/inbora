@@ -73,6 +73,55 @@ test('bounded read diagnostics report geometry without reading bodies, inputs or
   }finally{await owner.close();await server.close();}
 });
 
+test('failed DM diagnostics expose only bounded owned parsed field shapes without reading bodies or getters',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(()=>{
+      const row=document.querySelector('.message')!,native=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
+      native._parsedContent={text:'PRIVATE_BODY_MUST_NOT_LEAVE',itemId:'1234567890123456789',link:'https://www.douyin.com/video/1234567890123456789',
+        privateUrl:'https://private.invalid/SECRET',nested:{private:'PRIVATE_NESTED'}};
+      Object.defineProperty(native._parsedContent,'notRead',{get(){throw Error('PRIVATE_GETTER_EXECUTED');},enumerable:true});
+    });
+    const report=await new ObservedReader(owner.dm,config(server.origin)).diagnostic('dm',0,config(server.origin).peers[0]!);
+    expect(report.shareStage).toBe('VERIFIED');
+    expect(report.messageSamples![0]).toMatchObject({nativeIdPresent:true,conversationMatches:true,senderKnown:true,
+      parsedFields:expect.arrayContaining([{key:'itemId',type:'string',digitId:true,urlKind:'NONE'},
+        {key:'link',type:'string',digitId:false,urlKind:'DOUYIN_VIDEO'},{key:'notRead',type:'accessor',digitId:false,urlKind:'NONE'}])});
+    expect(report.messageSamples!.length).toBeLessThanOrEqual(6);
+    for(const forbidden of ['PRIVATE_','1234567890123456789','private.invalid','conv-a','peer-sec'])expect(JSON.stringify(report)).not.toContain(forbidden);
+  }finally{await owner.close();await server.close();}
+});
+
+test('failed DM parsed diagnostics stop at unverified native headers and row ownership',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);const mapping=config(server.origin),reader=new ObservedReader(owner.dm,mapping);
+    const wrong=await reader.diagnostic('dm',0,{...mapping.peers[0]!,conversationId:'outside'});
+    expect(wrong).toMatchObject({shareStage:'CONVERSATION_UNVERIFIED',messageSamples:[]});
+    await owner.dm.evaluate(()=>{const native=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message;
+      native.conversationId='outside';native._parsedContent={secret:'PRIVATE_BODY_MUST_NOT_LEAVE'};});
+    const report=await reader.diagnostic('dm',0,mapping.peers[0]!);
+    expect(report.messageSamples![0]).toMatchObject({conversationMatches:false,parsedFields:[]});
+    expect(JSON.stringify(report)).not.toContain('secret');expect(JSON.stringify(report)).not.toContain('PRIVATE');
+  }finally{await owner.close();await server.close();}
+});
+
+test('failed DM parsed diagnostics cap messages and keys without treating absent content as a successful read',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(()=>{
+      const row=document.querySelector('.message')!,native=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
+      native._parsedContent=Object.fromEntries(Array.from({length:50},(_,index)=>['field'+index,false]));
+      const box=row.closest('.box')!;
+      for(let index=0;index<10;index++){const clone=box.cloneNode(true) as Element,child=clone.querySelector('.message')!;
+        Object.defineProperty(child,'__reactProps$fixture',{value:{children:{props:{message:{...native,serverId:String(300+index)}}}}});box.parentElement!.append(clone);}
+    });
+    const report=await new ObservedReader(owner.dm,config(server.origin)).diagnostic('dm',0,config(server.origin).peers[0]!);
+    expect(report.messageSamples).toHaveLength(6);expect(report.messageSamples![0]!.parsedFields).toHaveLength(32);
+    expect(report.messageSamples![0]!.parsedTruncated).toBe(true);
+  }finally{await owner.close();await server.close();}
+});
+
 test('bounded back diagnostics distinguish a child control, occlusion and offscreen geometry without leaking content or invoking handlers',async()=>{
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
   try{

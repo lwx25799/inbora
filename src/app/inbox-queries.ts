@@ -3,6 +3,7 @@ import type {EventStore} from '../storage/store.js';
 import type {ClientCommand} from './contracts.js';
 import {MessagePreviewStore,type MessagePreviewAttachment} from '../storage/message-previews.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
+import {MessageShareStore,type MessageShare} from '../storage/message-shares.js';
 
 type ReplyStatus='WAITING'|'REPLIED';
 export interface TimelineItem {
@@ -16,6 +17,7 @@ export interface TimelineItem {
   contentType?:StoredEvent['payload']['contentType'];
   observationIssue?:StoredEvent['payload']['observationIssue'];
   attachments:MessagePreviewAttachment[];
+  share?:MessageShare;
 }
 interface TimelineCursor {group:string;at:number;order:string}
 interface MessageRow {id:string;event_id:string;text:string;occurred_at:string|null;at:number;historical:number}
@@ -51,15 +53,17 @@ export class InboxQueries {
         c.status==='UNCERTAIN'?row.members.some(e=>e.status==='UNCERTAIN'||e.status==='INTENT_RECORDED'):true)
       .sort((a,b)=>time(b.latest)-time(a.latest)||(order.get(b.latest.id)??0)-(order.get(a.latest.id)??0));
     const own=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
-    const previews=new MessagePreviewStore(this.root);
-    return {total:rows.length,page:c.page,pageSize:20,items:rows.slice(c.page*20,c.page*20+20).map(row=>({
+    const previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
+    return {total:rows.length,page:c.page,pageSize:20,items:rows.slice(c.page*20,c.page*20+20).map(row=>{
+      const share=own?shares.read(row.latest.payload,own.own_id):null;
+      return {
       id:row.selected.id,status:row.selected.status,replyStatus:row.replyStatus,channel:row.latest.payload.channel,
       author:row.latest.payload.actorName,preview:row.latest.payload.text,time:row.latest.payload.occurredAt,
       source:row.latest.payload.discovery??(row.latest.payload.channel==='DIRECT_MESSAGE'?'DIRECT_MESSAGE':'NOTIFICATION'),
       groupKey:row.groupKey,latestEventId:row.latest.id,messageCount:row.members.length,
       resumeEventId:this.resumeEvent(row.members,row.replyStatus),previewEventId:row.latest.id,
-      attachments:own?previews.list(row.latest.payload,own.own_id):[],
-    }))};
+      attachments:!share&&own?previews.list(row.latest.payload,own.own_id):[],...(share?{share}:{}),
+    };})};
   }
 
   private resumeEvent(members:StoredEvent[],status:ReplyStatus):string|null {
@@ -126,14 +130,15 @@ export class InboxQueries {
       .sort((a,b)=>b.at-a.at||b.id.localeCompare(a.id));
     const selected=messages.slice(0,pageSize),hasMore=messages.length>pageSize;
     const own=this.store.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(e.accountId) as {own_id:string}|undefined;
-    const previews=new MessagePreviewStore(this.root);
+    const previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
     const items=selected.reverse().map((row):TimelineItem=>{
       const inbound=row.id.startsWith('in:'),native=row.id.startsWith('observed:'),
         payload=inbound?this.store.event(row.event_id).payload:native?new ChatMessageStore(this.store).get(row.event_id)?.payload:null;
+      const share=payload&&own?shares.read(payload,own.own_id):null;
       return {id:row.id,eventId:row.event_id,direction:inbound?'INCOMING':'OUTGOING',text:row.text,occurredAt:row.occurred_at,
         historical:!!row.historical,origin:inbound||native?'OBSERVED':'CONFIRMED',...(payload?.contentType?{contentType:payload.contentType}:{}),
         ...(payload?.observationIssue?{observationIssue:payload.observationIssue}:{}),
-        attachments:payload&&own?previews.list(payload,own.own_id):[]};
+        attachments:!share&&payload&&own?previews.list(payload,own.own_id):[],...(share?{share}:{})};
     });
     const oldest=selected[0];
     return {items,pageSize,hasMore,projectionRevision:this.projectionRevision(event),

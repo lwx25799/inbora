@@ -1,6 +1,7 @@
 import type {Inbox} from './api';
 import {time} from './presentation';
 import {MessageAttachments} from './MessageAttachments';
+import {validShare,sharedWorkLabel} from './ShareLink';
 
 interface InboxListProps {
   inbox:Inbox;selected:string|null;selectedGroup?:string;channel:'ALL'|'COMMENT_NOTIFICATION'|'DIRECT_MESSAGE';
@@ -21,12 +22,13 @@ export function InboxList({inbox,selected,selectedGroup,channel,setChannel,filte
     </div>
     <div className="task-list scroll">{inbox.items.map(item=>{
       const active=selected===item.id||!!selectedGroup&&item.groupKey===selectedGroup;
+      const share=validShare(item.share);
       return <button key={item.groupKey??item.id} className={'task '+(active?'selected':'')} aria-pressed={active} onClick={()=>{if(!active)choose(item.resumeEventId??item.id);}}>
         <div><strong>{item.author||'当前联系人'}</strong><span className={'badge '+(['UNCERTAIN','MANUAL_REVIEW'].includes(item.status)?'warn':'')}>
           {item.replyStatus==='REPLIED'?'已回复':'等待回复'}
         </span></div>
-        <p>{item.attachments?.[0]?.label||item.preview}</p>
-        {item.previewEventId&&item.attachments?.length?<MessageAttachments message={{eventId:item.previewEventId,attachments:item.attachments.slice(0,1)}}/>:null}
+        <p>{share?`分享${sharedWorkLabel(share)} · ${share.url}`:item.attachments?.[0]?.label||item.preview}</p>
+        {!share&&item.previewEventId&&item.attachments?.length?<MessageAttachments message={{eventId:item.previewEventId,attachments:item.attachments.slice(0,1)}}/>:null}
         <small>{item.channel==='DIRECT_MESSAGE'?'私信':'评论'} · {time(item.time)}
           {item.channel==='DIRECT_MESSAGE'&&item.messageCount?` · ${item.messageCount} 条入站`:''}</small>
       </button>;

@@ -192,3 +192,20 @@ test('a target change during capture discards pixels instead of binding them to 
     expect(readdirSync(join(f.root,'evidence','message-previews')).filter(name=>name.endsWith('.png'))).toEqual([]);f.noExternal();
   }finally{await f.close();}
 });
+
+test.each(['DATA','ACCESSOR','CONFLICT'] as const)('native inherited conversation values reuse the calibrated reader data contract (%s)',async mode=>{
+  const f=await setup();
+  try{
+    await images(f,[{id:'9903',alt:'native prototype image'}]);
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    await f.owner.dm.evaluate(mode=>{
+      const conversation=Object.getOwnPropertyDescriptor(document.querySelector('#header')!,'__reactProps$fixture')!.value.children.props.conversation;
+      const prototype={};
+      Object.defineProperty(prototype,'id',mode==='ACCESSOR'?{get(){throw Error('getter must not run');}}:{value:mode==='CONFLICT'?'different-native':'conv-a'});
+      Object.setPrototypeOf(conversation,prototype);if(mode!=='CONFLICT')delete conversation.id;
+    },mode);
+    const inspecting=f.owner.dm.evaluate(inspectMessageImage,{mapping:f.mapping,event:batch.events[0]!,imageIndex:0,peer:f.mapping.peers[0]!});
+    if(mode==='DATA')expect(await inspecting).toMatchObject({reason:null,count:1});
+    else await expect(inspecting).rejects.toThrow('MESSAGE_PREVIEW_INSPECT_ID_FAILED');
+  }finally{await f.close();}
+});

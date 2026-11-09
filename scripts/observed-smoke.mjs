@@ -79,7 +79,9 @@ try {
   const windowed=await new ObservedReader(owner.dm,config).dmWindow(config.peers[0],0);
   assert.equal(windowed.dmViewport.viewport,40);assert.equal(windowed.events[0].platformEventId,'1');
   await new ObservedReader(owner.dm,config).scrollDm(config.peers[0],windowed.dmViewport.maximum);
-  const backDiagnostic=(await new ObservedReader(owner.dm,config).diagnostic('dm')).back;
+  const dmDiagnostic=await new ObservedReader(owner.dm,config).diagnostic('dm');
+  assert.equal(dmDiagnostic.shareStage,'VERIFIED');assert.ok(dmDiagnostic.messageSamples[0].parsedFields.some(field=>field.key==='text'&&field.type==='string'));
+  const backDiagnostic=dmDiagnostic.back;
   assert.equal(backDiagnostic.count,1);assert.equal(backDiagnostic.nodes[0].tag,'BUTTON');
   assert.ok(!JSON.stringify(backDiagnostic).includes('fixture'));
   await owner.dm.evaluate(()=>{

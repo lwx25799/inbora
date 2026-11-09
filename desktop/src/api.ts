@@ -71,6 +71,7 @@ export interface Inbox {
     resumeEventId?:string|null;
     previewEventId?:string;
     attachments?:TimelineItem['attachments'];
+    share?:TimelineItem['share'];
   }[];
 }
 export interface Thread {
