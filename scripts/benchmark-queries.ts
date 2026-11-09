@@ -2,6 +2,7 @@ import {performance} from 'node:perf_hooks';
 import {randomUUID} from 'node:crypto';
 import {mkdtempSync,mkdirSync} from 'node:fs';
 import {join,resolve} from 'node:path';
+import Database from 'better-sqlite3';
 import {EventStore} from '../src/storage/store.js';
 import {eventBinding,targetKey,digest,type InboundEvent} from '../src/core/contracts.js';
 import {ClientService} from '../src/app/service.js';
@@ -15,10 +16,17 @@ const results:Record<string,unknown>[]=[];
 
 async function measure(mixed:boolean):Promise<void>{
   const root=join(fixture,mixed?'mixed':'sparse');mkdirSync(root,{recursive:true});
-  const store=new EventStore(join(root,'synthetic.sqlite'),true);
+  let executions=0,selects=0;
+  const file=join(root,'synthetic.sqlite'),store=new EventStore(file,true);
+  store.close();
+  // SQLite's trace also counts cached BEGIN/COMMIT, exec and pragma statements, not prepare calls.
+  Object.defineProperty(store,'db',{value:new Database(file,{verbose:sql=>{executions++;if(/^\s*(SELECT|WITH)\b/iu.test(sql))selects++;}})});
+  store.db.pragma('journal_mode = WAL');store.db.pragma('synchronous = FULL');store.db.pragma('foreign_keys = ON');store.db.pragma('busy_timeout = 3000');
   await migrateClient(store,join(root,'client-backup.sqlite'));
   const service=new ClientService(store,new BrowserService(root));await service.loadSettings();
   const token=service.authority.issueSession();store.bindAccount('own-synthetic');
+  // Performance fixtures must not schedule unrelated browser verification for their synthetic unknown intents.
+  store.db.prepare('UPDATE automation_state SET emergency_stopped=1 WHERE id=1').run();
   // Exercise the old slow status-capability fallback, not merely DRAFT_ONLY's short circuit.
   store.db.prepare("UPDATE client_state SET mode='MANUAL'").run();
   const insert=store.db.prepare('INSERT INTO inbound_events VALUES(?,?,?,?,?,?,?,?,?)');
@@ -50,29 +58,27 @@ async function measure(mixed:boolean):Promise<void>{
     store.db.prepare('INSERT INTO observations VALUES(?,?,?,?,?,?)').run(randomUUID(),event.channel,event.conversationId,
       event.occurredAt,1,'synthetic-only');
   }});
-  let executions=0;const prepare=store.db.prepare.bind(store.db);
-  store.db.prepare=((sql:string)=>{
-    const statement=prepare(sql);
-    return new Proxy(statement,{get(target,key){const value=Reflect.get(target,key,target);
-      if(typeof value!=='function')return value;
-      return (...args:unknown[])=>{if(['all','get','iterate','run'].includes(String(key)))executions++;return value.apply(target,args);};
-    }});
-  }) as typeof store.db.prepare;
+  const prepare=store.db.prepare.bind(store.db);
   try{
     let previous=0;
     for(const size of large?[100,1000,10000,100000]:[100,1000,10000]){
       append(previous,size);previous=size;
-      for(const command of [{command:'getInbox',channel:'DIRECT_MESSAGE',status:'ALL',page:0},{command:'getStatus'}] as const){
-        await service.dispatch(token,command);const samples:number[]=[],counts:number[]=[];
+      const eventId=(prepare('SELECT id FROM inbound_events ORDER BY rowid DESC LIMIT 1').get() as {id:string}).id;
+      for(const command of [{command:'getInbox',channel:'DIRECT_MESSAGE',status:'ALL',page:0},{command:'getStatus'},
+        {command:'getThread',eventId}] as const){
+        process.stderr.write(`Benchmark ${mixed?'mixed':'sparse'} ${size} ${command.command}\n`);
+        const firstStarted=performance.now();await service.dispatch(token,command);const firstMs=performance.now()-firstStarted;
+        const samples:number[]=[],counts:number[]=[],selectCounts:number[]=[];
         const before=process.memoryUsage();
         for(let run=0;run<runs;run++){
-          executions=0;const started=performance.now();await service.dispatch(token,command);
-          samples.push(performance.now()-started);counts.push(executions);
+          executions=0;selects=0;const started=performance.now();await service.dispatch(token,command);
+          samples.push(performance.now()-started);counts.push(executions);selectCounts.push(selects);
         }
         samples.sort((a,b)=>a-b);const after=process.memoryUsage();
         results.push({fixture:mixed?'mixed':'sparse',events:size,groups:size/10,command:command.command,runs,
-          medianMs:Number(samples[Math.floor(runs/2)]!.toFixed(2)),p95Ms:Number(samples[Math.ceil(runs*0.95)-1]!.toFixed(2)),
+          firstMs:Number(firstMs.toFixed(2)),medianMs:Number(samples[Math.floor(runs/2)]!.toFixed(2)),p95Ms:Number(samples[Math.ceil(runs*0.95)-1]!.toFixed(2)),
           sqlExecutionsMin:Math.min(...counts),sqlExecutionsMax:Math.max(...counts),
+          sqlSelectsMin:Math.min(...selectCounts),sqlSelectsMax:Math.max(...selectCounts),
           heapDeltaBytes:after.heapUsed-before.heapUsed,rssDeltaBytes:after.rss-before.rss});
       }
     }
@@ -80,4 +86,5 @@ async function measure(mixed:boolean):Promise<void>{
 }
 await measure(false);await measure(true);
 process.stdout.write(JSON.stringify({runtime:process.version,fixture:'SYNTHETIC_ONLY',runs,results,
-  artifactDirectory:fixture,limits:'No browser/model/send. Heap/RSS are before-after samples, not peak memory. Sparse mirrors the prior input; mixed adds drafts/intents/receipts/proofs/collisions.'},null,2)+'\n');
+  artifactDirectory:fixture,sqlCounting:'SQLite verbose trace including transaction control, not prepare calls',
+  limits:'No browser/model/send. Heap/RSS are before-after samples, not peak memory. Sparse mirrors the prior input; mixed adds drafts/intents/receipts/proofs/collisions.'},null,2)+'\n');

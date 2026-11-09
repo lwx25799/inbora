@@ -70,13 +70,30 @@ async function setup(viewport={width:1240,height:800},weakMedia=false,nested=fal
     }
     return result;
   });
-  await page.addInitScript(()=>{const fixture=window as unknown as {__TAURI_INTERNALS__:unknown;fixtureInvoke:(command:string,args:unknown)=>Promise<unknown>};fixture.__TAURI_INTERNALS__={invoke:(command:string,args:unknown)=>fixture.fixtureInvoke(command,args)};});
+  await page.addInitScript(()=>{
+    const callbacks=new Map<number,(event:unknown)=>void>(),listeners=new Map<number,{event:string;handler:number}>();let next=0;
+    const fixture=window as unknown as {__TAURI_INTERNALS__:unknown;__TAURI_EVENT_PLUGIN_INTERNALS__:unknown;
+      fixtureInvoke:(command:string,args:unknown)=>Promise<unknown>;fixtureEmit:(name:string)=>void;fixtureListenerCount:()=>number};
+    fixture.__TAURI_INTERNALS__={transformCallback:(callback:(event:unknown)=>void)=>{callbacks.set(++next,callback);return next;},
+      invoke:async(command:string,args:Record<string,unknown>)=>{
+        if(command==='plugin:event|listen'){const id=++next;listeners.set(id,{event:args.event as string,handler:args.handler as number});return id;}
+        if(command==='plugin:event|unlisten')return;
+        return fixture.fixtureInvoke(command,args);
+      }};
+    fixture.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:(_event:string,id:number)=>{const listener=listeners.get(id);if(listener)callbacks.delete(listener.handler);listeners.delete(id);}};
+    fixture.fixtureListenerCount=()=>listeners.size;
+    fixture.fixtureEmit=name=>{for(const [id,listener]of listeners)if(listener.event==='inbora_status_updated')
+      callbacks.get(listener.handler)?.({event:listener.event,id,payload:{event:name}});};
+  });
   await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
+  await page.waitForFunction(()=>(window as unknown as {fixtureListenerCount:()=>number}).fixtureListenerCount()>0);
+  const forward=({event}:{event:string})=>{void page.evaluate(name=>(window as unknown as {fixtureEmit:(name:string)=>void}).fixtureEmit(name),event).catch(()=>{});};
+  service.events.on('update',forward);
   return {root,store,page,a,b,comment,nestedId,calls,errors,service,token,preview,
     conversationStatus:(value:NonNullable<Thread['conversationReplyStatus']>)=>{conversationStatus=value;},
     timeline:(value:NonNullable<Thread['timeline']>,older?:NonNullable<Thread['timeline']>)=>{timeline=value;olderTimeline=older;},
     hold:(command:string)=>{hold=command;entered=false;},held:()=>entered,release:()=>{release?.();release=undefined;},
-    close:async()=>{release?.();await page.screenshot({path:join(root,'last-state.png')}).catch(()=>{});
+    close:async()=>{release?.();service.events.off('update',forward);await page.screenshot({path:join(root,'last-state.png')}).catch(()=>{});
       await writeFile(join(root,'ui-trace.json'),JSON.stringify({calls,errors,text:await page.locator('body').innerText().catch(()=> '')},null,2));
       await browser.close();await server.close();await service.close();store.close();}};
 }

@@ -1,6 +1,7 @@
 import {expect,test} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
+import Database from 'better-sqlite3';
 import {ClientService} from '../../src/app/service.js';
 import {BrowserService} from '../../src/app/browser-service.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
@@ -9,6 +10,9 @@ import {eventBinding,targetKey} from '../../src/core/contracts.js';
 
 test('events decode one ordered query and inbox SQL executions do not grow with message count',async()=>{
   const store=database(),root=privateTemp('query-batch-');
+  let reads=0;const file=store.db.name;store.close();
+  Object.defineProperty(store,'db',{value:new Database(file,{verbose:()=>{reads++;}})});
+  store.db.pragma('foreign_keys = ON');
   await migrateClient(store,join(root,'client.sqlite'));
   const service=new ClientService(store,new BrowserService(root));await service.loadSettings();
   const token=service.authority.issueSession();store.bindAccount('own-1');
@@ -19,14 +23,8 @@ test('events decode one ordered query and inbox SQL executions do not grow with 
         occurredAt:new Date(Date.UTC(2026,10,1)+i*1000).toISOString()});
       insert.run(randomUUID(),e.accountId,e.channel,e.platformEventId,e.conversationId,targetKey(e),eventBinding(e),JSON.stringify(e),'AWAITING_DRAFT');
     }})();
-    let reads=0;const original=store.db.prepare.bind(store.db);
-    store.db.prepare=((sql:string)=>{
-      const statement=original(sql);
-      return new Proxy(statement,{get(target,key){const value=Reflect.get(target,key,target);
-        if(typeof value!=='function')return value;
-        return (...args:unknown[])=>{if(['all','get','iterate'].includes(String(key)))reads++;return value.apply(target,args);};
-      }});
-    }) as typeof store.db.prepare;
+    // Native trace includes actual cached statements and transaction control.
+    reads=0;
     const rows=store.events();expect(rows).toHaveLength(1000);expect(reads).toBe(1);
     expect(rows[0]!.payload.platformEventId).toBe('batch-0');expect(rows.at(-1)!.payload.platformEventId).toBe('batch-999');
     reads=0;

@@ -15,10 +15,10 @@ const parent=privateTemp('dm-pre-origin-gap-');
 let server:Awaited<ReturnType<typeof fixtureServer>>,owner:BrowserProfileOwner;
 beforeAll(async()=>{server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(parent,'profile'),true);});
 afterAll(async()=>{await owner?.close();await server?.close();});
-async function setup(spec:{restoredOld?:boolean;latestNew?:boolean;gapOffset?:number|null}={}){
+async function setup(spec:{restoredOld?:boolean;latestNew?:boolean;gapOffset?:number|null}={},now:()=>number=Date.now){
   const root=privateTemp('dm-pre-origin-db-'),store=new EventStore(join(root,'poc.sqlite'),true),origin=Date.now()-60_000;
   await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
-  const data=new AutomationStore(store);data.initialize(origin);store.bindAccount('100');
+  const data=new AutomationStore(store,now);data.initialize(origin);store.bindAccount('100');
   data.configureCollection({ownId:'100',comments:false,inbox:true,commentIntervalMs:30_000,dmIntervalMs:15_000});
   await mountObserved(owner,server.origin);await owner.dm.evaluate(({origin,spec})=>{
     const chat=document.querySelector('#chat') as HTMLElement;for(const box of chat.querySelectorAll('.box'))box.remove();
@@ -46,7 +46,7 @@ async function setup(spec:{restoredOld?:boolean;latestNew?:boolean;gapOffset?:nu
   const cursor=()=>JSON.parse((store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string}).cursor_json);
   const lastRead=()=>(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='conv-a'").get() as {last_read:number}|undefined)?.last_read??0;
   return {root,store,data,origin,mapping,cursor,lastRead,get collector(){return collector;},
-    restart(){collector.dispose();collector=new InboxCollector(owner,mapping,new AutomationStore(store),root,'headless');},
+    restart(){collector.dispose();collector=new InboxCollector(owner,mapping,new AutomationStore(store,now),root,'headless');},
     close(){collector.dispose();store.close();}};
 }
 function noExternal(store:EventStore){
@@ -87,10 +87,16 @@ test.each([false,true])('pre-origin content gaps can close a bounded historical 
 });
 
 test('an old restored window cannot stop before the other physical edge containing a new message is checked',async()=>{
-  const f=await setup({restoredOld:true,latestNew:true});try{
+  let now=Date.now();const f=await setup({restoredOld:true,latestNew:true},()=>now);try{
     for(let turn=0;turn<32&&f.lastRead()===0;turn++)await f.collector.collect('dm',new AbortController().signal);
-    // This on/after-origin event arrived behind an already observed high-water mark, so the existing late-event rule requires review.
+    // The physical-edge proof is independent of host speed; the first late-event qualification remains review-only.
     expect(f.lastRead()).toBeGreaterThan(0);expect(f.store.events().find(event=>event.payload.platformEventId==='6204')?.status).toBe('MANUAL_REVIEW');noExternal(f.store);
+    expect(f.store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='LATE_ARRIVAL_QUALIFIED'").get()).toEqual({n:0});
+    now+=1000;
+    for(let turn=0;turn<2;turn++)await f.collector.collect('dm',new AbortController().signal);
+    expect(f.store.events().find(event=>event.payload.platformEventId==='6204')?.status).toBe('AWAITING_DRAFT');
+    expect(f.store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='LATE_ARRIVAL_QUALIFIED'").get()).toEqual({n:1});
+    noExternal(f.store);
   }finally{f.close();}
 });
 
