@@ -290,3 +290,15 @@ inbora独立使用`DeferredObjectRead`表示已成功持久化的对象退避：
 `diagnostics.mjs:9–38`使用固定检查代码和有界步骤。采用结构化诊断思路，独立实现失败时的只读组件几何报告：在同任务核对账号及准确作品，限定已映射范围、最多250行计数及6个根行样本，只输出数值/布尔和固定枚举，无正文、输入值、原生编号、选择器或网站状态遍历。每个collector每通道至多一次，保存私有evidence，不改变原错误、意图或成功水位。Playwright固定Apache-2.0提交`cfe490d941f992655948eee8fd4fd94e1c4234bf`的`packages/injected/src/domUtils.ts`另用于核对display:contents可见性语义；未取得实机几何证据前不据此放宽根评论门禁或猜改映射。[诊断源码](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/diagnostics.mjs#L9-L38)
 
 自动开关及一次启用由本项目应用服务事务实现，不复制上游代码。关开竞态覆盖模型资格返回边界、迟到结果、未提交命令及意图后回读；取消状态在请求前和预算预占回调检查。原生指令允许列表与应用合同逐项比对，缺少新命令的旧Rust入口已在隔离检出实际失败。模块按职责拆分以满足800物理行限制，未更改唯一SendCoordinator和历史证据。
+
+## 2026-11-09：私信跨窗口补收与评论进入视口
+
+再次读取已核准MIT固定提交`7989640e340f0fd79e2de9874880d5197546e755`的`chat-browser.mjs:386–393`、`:864–869`和`:1119–1142`。前者识别column-reverse及纵向transform，第二段滚动的是会话列表，最后一段没有消息历史续查；不能将它们冒称现成私信历史分页。采用标准DOM几何、小窗口读取和原生稳定身份的思路，独立实现已映射聊天内唯一消息overflow祖先的滚动；没有复制上游代码、接口或网页函数调用。[方向与渲染](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/chat-browser.mjs#L386-L393)
+
+每个后台回合只收一个窗口，复用私有cursor_json保存准确peer、两物理方向的续查及边界样本，避免凭CSS猜较早消息在哪一端。高度变化丢弃旧偏移；完成前不推进last_read，失败仍退避并让其它对象继续。整窗旧历史判断须覆盖所有行、无unsupported、时间可靠且早于持久起点；原生恢复在旧位置时先有界探测两个端点，不直接宣布收完，也不逐窗归档更旧历史。恢复只在相同本人、会话和原生身份下刷新可变显示名。没有新增模型或发送路径。
+
+0.3.3实机无正文诊断已证明某视频评论列表top818、首根评论top827，而viewportHeight720；五条根评论及其正文已加载，读取失败因列表在视口下方。复读同MIT提交`comment-browser.mjs:169`的正常scrollIntoView用途后，采用标准DOM滚入视口，不复制其输入/鼠标见证路线。新commentReveal及续查滚动均在同一任务验证账号、准确作品、唯一已映射列表和空编辑器；正文/原生ID校验不变。[正常滚入视口](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/comment-browser.mjs#L169)
+
+旧55f3047的两窗口补收回归实际只收到104/105而漏102/103；恢复旧窗及显示名变化另有独立红测，修复后通过。评论视口用例在有效夹具上以ROOTS_DOM_NOT_READY先红后绿，网页人稿仍拒绝滚动并保留。源码tsx与构建Node分别执行新增滚动/进入视口冒烟。合成通过不代表现有0.3.3进程已加载这些源码修复。
+
+同提交`chat-browser.mjs:1023–1028`的返回动作选择更具体backBtn并使用Playwright click；本项目历史实机A/B切换亦走locator click，而新后台走映射wrapper的DOM click。当前实机证据仅证明后者点击后聊天未隐藏，未证明子控件/事件归属，不猜改选择器或派发事件。独立补充唯一已映射返回控件的有界无正文诊断：最多12节点、固定标签/中心命中枚举/尺寸/事件函数存在布尔，仅own data descriptor，accessor及多props拒绝，不执行处理器或getter。先取得归属证据再选择修复；源码及编译Node均执行该诊断冒烟。[上游返回实现](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/chat-browser.mjs#L1023-L1028)

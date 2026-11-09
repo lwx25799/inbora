@@ -4,12 +4,16 @@ import type { ObservationMapping } from '../config/site-mapping.js';
 import { eventSchema, requireSafe, type InboundEvent } from '../core/contracts.js';
 
 export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string }
-interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'diagnostic'; index: number;
-  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; diagnosticSource?:'dm'|'comments' }
-type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'>;
+interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'diagnostic' | 'dmScroll'; index: number;
+  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number }
+type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'>;
 export interface CollectionReadDiagnostic {
   source:'dm'|'comments';containers:number;visibleContainers:number;rows:number;visibleRows:number;roots:number;windowRoots:number;
   viewportHeight:number;containerTop:number;containerBottom:number;scrollTop:number;chatVisible:boolean;
+  chatInViewport:boolean;backVisible:boolean;backInViewport:boolean;
+  back?:{count:number;centerHit?:'SELF'|'DESCENDANT'|'OUTSIDE'|'NONE'|'OFFSCREEN';centerIndex?:number|null;
+    nodes?:{index:number;parentIndex:number|null;tag:'DIV'|'BUTTON'|'SPAN'|'A'|'SVG'|'PATH'|'OTHER';visible:boolean;inViewport:boolean;width:number;height:number;
+      props:'NONE'|'DATA'|'REJECTED';handlers:{onClick:boolean;onMouseDown:boolean;onPointerDown:boolean;onMouseUp:boolean}}[]};
   samples:{visible:boolean;inWindow:boolean;hasBox:boolean;displayContents:boolean;top:number;bottom:number;width:number;height:number;bodies:number;visibleBodies:number}[];
 }
 export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; unsupported: number; loaded: number;
@@ -17,6 +21,7 @@ export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; 
   peers?: DiscoveredPeer[];
   scroll?:{top:number;height:number;viewport:number;atEnd:boolean};
   diagnostic?:CollectionReadDiagnostic;
+  dmViewport?:{top:number;height:number;viewport:number;minimum:number;maximum:number};
   bindings?: {targetKey: string; uid: string; secUid: string; title: string; conversationId: string | null}[] }
 
 /** Fixed paths in the currently rendered, authorized components; never calls website functions or getters. */
@@ -138,6 +143,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
   const events: InboundEvent[] = []; let unsupported = 0, loaded = 0;
   const bindings: NonNullable<ObservationBatch['bindings']> = [];
+  let dmViewport:ObservationBatch['dmViewport'];
   if (channel === 'identity') return { events,evidenceId,unsupported,loaded };
   if(channel==='diagnostic') {
     const comments=input.diagnosticSource==='comments';
@@ -155,11 +161,47 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
           displayContents:getComputedStyle(row).display==='contents',top:probe.number(r.top),bottom:probe.number(r.bottom),width:probe.number(r.width),height:probe.number(r.height),
           bodies:bodies.length,visibleBodies:bodies.filter(dom.visible).length};
       },
+      inViewport(node:Element):boolean{const r=node.getBoundingClientRect();return dom.visible(node)&&r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth;},
+      back():NonNullable<CollectionReadDiagnostic['back']> {
+        const matches=Array.from(document.querySelectorAll(s.chatBack)),back:NonNullable<CollectionReadDiagnostic['back']>={count:matches.length};
+        if(matches.length!==1)return back;
+        const wrapper=matches[0]!,nodes=[wrapper],walk=document.createTreeWalker(wrapper,NodeFilter.SHOW_ELEMENT);
+        for(let next=walk.nextNode();next&&nodes.length<12;next=walk.nextNode())nodes.push(next as Element);
+        back.nodes=nodes.map((node,index)=>{
+          const r=node.getBoundingClientRect(),tag=node.tagName.toUpperCase();
+          const shape:NonNullable<NonNullable<CollectionReadDiagnostic['back']>['nodes']>[number]={index,parentIndex:index===0?null:nodes.indexOf(node.parentElement!),
+            tag:tag==='DIV'||tag==='BUTTON'||tag==='SPAN'||tag==='A'||tag==='SVG'||tag==='PATH'?tag:'OTHER',
+            visible:dom.visible(node),inViewport:probe.inViewport(node),width:probe.number(r.width),height:probe.number(r.height),props:'NONE',
+            handlers:{onClick:false,onMouseDown:false,onPointerDown:false,onMouseUp:false}};
+          const keys=Object.getOwnPropertyNames(node).filter(key=>key.startsWith('__reactProps$'));
+          if(!keys.length)return shape;
+          shape.props='REJECTED';
+          if(keys.length!==1)return shape;
+          const descriptor=Object.getOwnPropertyDescriptor(node,keys[0]!);
+          if(!descriptor||!Object.hasOwn(descriptor,'value')||!descriptor.value||typeof descriptor.value!=='object')return shape;
+          const handlers=Object.keys(shape.handlers) as (keyof typeof shape.handlers)[];
+          const fields=handlers.map(key=>Object.getOwnPropertyDescriptor(descriptor.value,key));
+          if(fields.some(field=>field&&!Object.hasOwn(field,'value')))return shape;
+          shape.props='DATA';
+          for(const [position,key] of handlers.entries())shape.handlers[key]=typeof fields[position]?.value==='function';
+          return shape;
+        });
+        const r=wrapper.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
+        if(!dom.visible(wrapper)||x<0||x>=innerWidth||y<0||y>=innerHeight){back.centerHit='OFFSCREEN';back.centerIndex=null;return back;}
+        const hit=document.elementFromPoint(x,y),position=hit?nodes.indexOf(hit):-1;
+        back.centerHit=!hit?'NONE':hit===wrapper?'SELF':wrapper.contains(hit)?'DESCENDANT':'OUTSIDE';
+        back.centerIndex=position<0?null:position;
+        return back;
+      },
     };
     const diagnostic:CollectionReadDiagnostic={source:comments?'comments':'dm',containers:containers.length,visibleContainers:visible.length,
       rows:rows.length,visibleRows:rows.slice(0,250).filter(dom.visible).length,roots:roots.length,windowRoots:roots.filter(probe.inWindow).length,
       viewportHeight:innerHeight,containerTop:probe.number(box?.top??0),containerBottom:probe.number(box?.bottom??0),scrollTop:container?.scrollTop??0,
-      chatVisible:!comments&&Array.from(document.querySelectorAll(s.chat)).some(dom.visible),samples:roots.slice(0,6).map(probe.sample)};
+      chatVisible:!comments&&Array.from(document.querySelectorAll(s.chat)).some(dom.visible),
+      chatInViewport:!comments&&Array.from(document.querySelectorAll(s.chat)).some(probe.inViewport),
+      backVisible:!comments&&Array.from(document.querySelectorAll(s.chatBack)).some(dom.visible),
+      backInViewport:!comments&&Array.from(document.querySelectorAll(s.chatBack)).some(probe.inViewport),samples:roots.slice(0,6).map(probe.sample)};
+    if(!comments)diagnostic.back=probe.back();
     return {events,evidenceId,unsupported,loaded,diagnostic};
   }
   if(channel==='navigate') {
@@ -175,7 +217,15 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     dom.check(back instanceof HTMLElement,'OBSERVATION_DOM_NOT_READY');(back as HTMLElement).click();
     return {events,evidenceId,unsupported,loaded};
   }
+  if(channel==='commentReveal') {
+    const work=m.works[index];dom.check(work&&location.href.split('?')[0]===work.url.split('?')[0],'OBSERVATION_WORK_CHANGED');
+    const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);
+    dom.check(lists.length===1,'OBSERVATION_COMMENT_LIST_DOM_NOT_UNIQUE');
+    dom.emptyEditors();lists[0]!.scrollIntoView({block:'start',inline:'nearest',behavior:'instant'});
+    return {events,evidenceId,unsupported,loaded};
+  }
   if(channel==='commentScroll') {
+    const work=m.works[index];dom.check(work&&location.href.split('?')[0]===work.url.split('?')[0],'OBSERVATION_WORK_CHANGED');
     dom.emptyEditors();
     const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);dom.check(lists.length===1,'OBSERVATION_DOM_NOT_UNIQUE');
     let list=lists[0]!,found=false;
@@ -250,14 +300,38 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       } finally {row.removeEventListener(event,gate.handle,true);}
     }
     return {events,evidenceId,unsupported,loaded};
-  } else if (channel === 'dm') {
+  } else if (channel === 'dm'||channel==='dmScroll') {
     const peer = input.peer??m.peers[index]; dom.check(peer,'OBSERVATION_PEER_REQUIRED');
     const chat = dom.one(document,s.chat), header = dom.one(chat,s.chatHeader);
     const conversation = dom.data(dom.childProps(header),'conversation');
     const id = dom.conversationId(conversation);
     dom.check(id === peer!.conversationId && dom.data(conversation,'_toParticipantSecUserId') === peer!.secUid &&
       dom.one(chat,s.chatTitle).textContent?.trim() === peer!.title,'OBSERVATION_CONVERSATION_CHANGED');
-    const rows = Array.from(chat.querySelectorAll(s.messages)).filter(dom.visible).filter(row=>!input.peer||row.getBoundingClientRect().bottom>0&&row.getBoundingClientRect().top<innerHeight); loaded = rows.length;
+    const mounted=Array.from(chat.querySelectorAll(s.messages)),candidates=new Set<Element>();
+    if(input.dmWindow||channel==='dmScroll') {
+      for(const row of mounted.slice(0,100)) {
+        let node=row.closest(s.messageBox)?.parentElement??row.parentElement;
+        for(let depth=0;node&&chat.contains(node)&&depth<8;depth++,node=node.parentElement) {
+          if(/auto|scroll/.test(getComputedStyle(node).overflowY)&&node.clientHeight>0&&node.scrollHeight>node.clientHeight&&mounted.every(message=>node!.contains(message)))candidates.add(node);
+          if(node===chat)break;
+        }
+      }
+      dom.check(candidates.size<=1,'OBSERVATION_DM_SCROLL_NOT_UNIQUE');
+    }
+    const scroller=Array.from(candidates)[0];
+    if(scroller){
+      const range=Math.max(0,scroller.scrollHeight-scroller.clientHeight);
+      const reverse=scroller.scrollTop<0||getComputedStyle(scroller).flexDirection==='column-reverse';
+      dmViewport={top:scroller.scrollTop,height:scroller.scrollHeight,viewport:scroller.clientHeight,minimum:reverse?-range:0,maximum:reverse?0:range};
+    }
+    if(channel==='dmScroll') {
+      dom.emptyEditors();
+      dom.check(scroller&&dmViewport&&Number.isFinite(input.dmTop),'OBSERVATION_DM_SCROLL_UNAVAILABLE');
+      scroller!.scrollTop=Math.max(dmViewport!.minimum,Math.min(dmViewport!.maximum,input.dmTop!));
+      return {events,evidenceId,unsupported,loaded,dmViewport:dmViewport!};
+    }
+    const clip=(scroller??chat).getBoundingClientRect();
+    const rows = mounted.filter(dom.visible).filter(row=>!input.peer||row.getBoundingClientRect().bottom>Math.max(0,input.dmWindow?clip.top:0)&&row.getBoundingClientRect().top<Math.min(innerHeight,input.dmWindow?clip.bottom:innerHeight)); loaded = rows.length;
     dom.check(rows.length <= 100,'OBSERVATION_WINDOW_TOO_LARGE');
     // Unknown direct peers are bound by the same native conversation and the unique non-self message sender.
     // Do not derive a UID from a nickname or invent one from a local fingerprint.
@@ -327,7 +401,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   }
   dom.check(new Set(events.map(e=>e.platformEventId).filter(Boolean)).size === events.filter(e=>e.platformEventId).length,
     'OBSERVATION_MESSAGE_ID_COLLISION');
-  return { events,evidenceId,unsupported,loaded,bindings };
+  return { events,evidenceId,unsupported,loaded,bindings,...(dmViewport?{dmViewport}:{}) };
 }
 
 /** AccountActor owns the entire call, including opening and switching the permitted chat. */
@@ -358,6 +432,15 @@ export class ObservedReader {
   async diagnostic(source:'dm'|'comments',index=0):Promise<CollectionReadDiagnostic> {
     const batch=await this.capture('diagnostic',index,{diagnosticSource:source});
     requireSafe(batch.diagnostic,'OBSERVATION_DIAGNOSTIC_UNAVAILABLE');return batch.diagnostic;
+  }
+  async dmWindow(peer:DiscoveredPeer,top?:number):Promise<ObservationBatch> {
+    await this.dm(0,peer);
+    if(top!==undefined)await this.scrollDm(peer,top);
+    return this.ready('dm',0,{peer,dmWindow:true});
+  }
+  async scrollDm(peer:DiscoveredPeer,top:number):Promise<void> {
+    await this.capture('dmScroll',0,{peer,dmTop:top});
+    await new Promise(resolve=>setTimeout(resolve,150));
   }
   async guard(): Promise<void> {
     await this.page.waitForFunction(({selector,depth})=>{
@@ -435,6 +518,7 @@ export class ObservedReader {
       await this.page.locator(this.mapping.selectors.commentEntry).click();
     await this.page.waitForFunction(selector=>Array.from(document.querySelectorAll(selector)).filter(n=>n.getClientRects().length).length===1,
       this.mapping.selectors.commentList);
+    if(allCommentAuthors&&offset===0)await this.capture('commentReveal',index);
     try {
       await this.page.waitForFunction(({rows,empty})=>{
         const visible={check(node:Element):boolean{const r=node.getBoundingClientRect(),style=getComputedStyle(node);

@@ -16,7 +16,13 @@ import { Blocked } from "../core/contracts.js";
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
   pending: z.array(z.object({aweme_id:z.string(),create_time:z.number().nullable().optional(),author:z.object({uid:z.string(),sec_uid:z.string()})})).default([])});
-const dmCursorSchema=z.object({deferred:z.array(z.object({id:z.string().min(1),until:z.number().int().nonnegative(),code:z.string()})).default([])});
+const dmSweepSchema=z.object({peer:z.object({uid:z.string().nullable(),secUid:z.string(),conversationId:z.string(),title:z.string()}),
+  phase:z.enum(['MIN','MAX','PROBE_MIN','PROBE_MAX']),top:z.number().finite(),height:z.number().nonnegative(),signature:z.string(),
+  edge:z.number().int().nonnegative(),legHasNew:z.boolean(),minimumOld:z.boolean().default(false)});
+const dmCursorSchema=z.object({deferred:z.array(z.object({id:z.string().min(1),until:z.number().int().nonnegative(),code:z.string()})).default([]),
+  sweep:dmSweepSchema.optional()});
+type DmCursor=z.infer<typeof dmCursorSchema>;
+type DmSweep=z.infer<typeof dmSweepSchema>;
 const objectRetryMs=120_000;
 
 /** Only this backend extends observed targets from the explicitly enabled own-account collection scope. */
@@ -79,8 +85,14 @@ export class InboxCollector {
       this.data.store.audit('COLLECTION_READ_DIAGNOSTIC',digest(id),{dm:source==='dm'});
     }catch{/* Diagnostic failure must preserve the primary read failure and its watermarks. */}
   }
-  private async dm(signal:AbortSignal):Promise<void> {
-    const reader=new ObservedReader(this.owner.dm,this.mapping);
+  private async advanceDm(reader:ObservedReader,signal:AbortSignal):Promise<void> {
+    try{await this.dmStage('ADVANCE',()=>reader.conversations('next'));}catch(error){
+      const code=error instanceof Blocked?error.code:'DM_ADVANCE_READ_FAILED';
+      if(!collectionStops.has(code)&&code!=='BROWSER_CLOSED'&&!signal.aborted)await this.diagnose(reader,'dm',code,signal);
+      throw error;
+    }
+  }
+  private async dmPeer(reader:ObservedReader,cursor:DmCursor,signal:AbortSignal):Promise<DiscoveredPeer|undefined> {
     let batch:ObservationBatch;
     try{batch=await this.dmStage('LIST',()=>reader.conversations());}catch(error){
       const code=error instanceof Blocked?error.code:'DM_LIST_READ_FAILED';
@@ -96,8 +108,6 @@ export class InboxCollector {
     }
     const visible=(batch.peers??[]).map(p=>p.conversationId);
     if(!visible.length)return;
-    const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
-    const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
     const candidates=this.data.store.db.prepare(`SELECT * FROM discovered_conversations WHERE own_id=? AND id IN (${visible.map(()=>'?').join(',')}) ORDER BY last_read,first_seen,id`).all(this.mapping.self.uid,...visible) as {
       id:string;uid:string|null;sec_uid:string;title:string;last_read:number;
     }[];
@@ -106,36 +116,102 @@ export class InboxCollector {
     candidates.sort((a,b)=>Math.max(a.last_read,attempts.get(a.id)??0)-Math.max(b.last_read,attempts.get(b.id)??0));
     const deferred=new Set(cursor.deferred.filter(item=>item.until>this.data.now()).map(item=>item.id));
     const next=candidates.find(candidate=>!deferred.has(candidate.id));
-    if(!next){await this.dmStage('ADVANCE',()=>reader.conversations('next'));return;}
-    const peer:DiscoveredPeer={uid:next.uid,secUid:next.sec_uid,conversationId:next.id,title:next.title};
-    let messages:ObservationBatch;
-    try{messages=await this.dmStage('THREAD',()=>reader.dm(0,peer));}
+    if(!next){await this.advanceDm(reader,signal);return;}
+    return {uid:next.uid,secUid:next.sec_uid,conversationId:next.id,title:next.title};
+  }
+  private dmSweep(peer:DiscoveredPeer,batch:ObservationBatch,prior:DmSweep|undefined,restarted:boolean):DmSweep|undefined {
+    const viewport=batch.dmViewport;
+    if(!viewport){requireSafe(!restarted,'OBSERVATION_DM_SCROLL_UNAVAILABLE');return;}
+    const boundary=this.data.state().startedAt;
+    const allOld=batch.unsupported===0&&batch.events.length===batch.loaded&&batch.events.length>0&&batch.events.every(event=>{
+      const at=Date.parse(event.occurredAt??'');return Number.isFinite(at)&&at+(event.occurredAtPrecisionMs??1)<=boundary;
+    });
+    const hasNew=batch.events.some(event=>{const at=Date.parse(event.occurredAt??'');return Number.isFinite(at)&&at>=boundary;});
+    const signature=digest(batch.events.map(event=>[event.platformEventId,event.occurredAt]).sort());
+    // An accurate native chat may reopen at a saved historical position, so an old first window proves neither end.
+    if(!prior&&allOld)return {peer,phase:'PROBE_MIN',top:viewport.minimum,height:viewport.height,signature,
+      edge:0,legHasNew:false,minimumOld:false};
+    let phase=prior?.phase??'MIN',legHasNew=(prior?.legHasNew??false)||hasNew,minimumOld=prior?.minimumOld??false;
+    const atEdge=Math.abs(viewport.top-(phase==='MIN'||phase==='PROBE_MIN'?viewport.minimum:viewport.maximum))<=1;
+    let edge=atEdge?(prior?.height===viewport.height&&prior.signature===signature?prior.edge+1:1):0;
+    // Scan both physical directions: CSS order alone must not decide which end contains older messages.
+    if(phase==='PROBE_MIN'||phase==='PROBE_MAX') {
+      if(hasNew){phase=phase==='PROBE_MIN'?'MAX':'MIN';edge=0;legHasNew=true;}
+      else if(edge>=2) {
+        if(phase==='PROBE_MIN'){phase='PROBE_MAX';minimumOld=allOld;}
+        else {if(minimumOld&&allOld)return;phase='MIN';}
+        edge=0;legHasNew=false;
+      }
+    } else if(edge>=2||allOld&&(prior?.legHasNew??false)) {
+      if(phase==='MAX')return;
+      phase='MAX';edge=0;legHasNew=hasNew;
+    }
+    const step=Math.max(1,Math.floor(viewport.viewport*0.8));
+    const top=phase==='PROBE_MIN'?viewport.minimum:phase==='PROBE_MAX'?viewport.maximum:
+      Math.max(viewport.minimum,Math.min(viewport.maximum,viewport.top+(phase==='MIN'?-step:step)));
+    return {peer,phase,top,height:viewport.height,signature,edge,legHasNew,minimumOld};
+  }
+  private async dm(signal:AbortSignal):Promise<void> {
+    const reader=new ObservedReader(this.owner.dm,this.mapping);
+    const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
+    const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
+    const active=cursor.sweep&&!cursor.deferred.some(item=>item.id===cursor.sweep!.peer.conversationId&&item.until>this.data.now())?cursor.sweep:undefined;
+    let peer:DiscoveredPeer|undefined;
+    if(active) {
+      const current=this.data.store.db.prepare('SELECT uid,sec_uid,title FROM discovered_conversations WHERE own_id=? AND id=?')
+        .get(this.mapping.self.uid,active.peer.conversationId) as {uid:string|null;sec_uid:string;title:string}|undefined;
+      requireSafe(current&&current.sec_uid===active.peer.secUid&&(active.peer.uid===null||current.uid===active.peer.uid),'OBSERVATION_CONVERSATION_CHANGED');
+      peer={...active.peer,uid:current.uid,title:current.title};
+    } else peer=await this.dmPeer(reader,cursor,signal);
+    if(!peer)return;
+    let nextSweep:DmSweep|undefined;
+    try{
+      let messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer));
+      this.check('dm',signal);
+      // A changed virtual height invalidates a raw offset. Rescan both ends from the current window instead.
+      let prior=active&&messages.dmViewport?.height===active.height?active:undefined;
+      if(prior&&Math.abs(messages.dmViewport!.top-prior.top)>1) {
+        const top=prior.top;
+        messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer,top));
+        if(messages.dmViewport?.height!==prior.height)prior=undefined;
+      }
+      await this.persist('dm',peer.conversationId,messages,signal);
+      const native=messages.bindings?.[0];
+      if(native) {
+        requireSafe(peer.uid===null||peer.uid===native.uid,'OBSERVATION_SENDER_UNVERIFIED');
+        this.data.store.db.prepare('UPDATE discovered_conversations SET uid=? WHERE id=?').run(native.uid,peer.conversationId);
+        peer.uid=native.uid;
+      }
+      nextSweep=this.dmSweep(peer,messages,prior,!!active);
+      if(nextSweep)await this.dmStage('THREAD',()=>reader.scrollDm(peer,nextSweep!.top));
+      this.check('dm',signal);
+    }
     catch(error){
       const code=error instanceof Blocked?error.code:'DM_THREAD_READ_FAILED';
       if(!collectionStops.has(code)&&code!=='BROWSER_CLOSED'&&!signal.aborted){
         this.check('dm',signal);
-        cursor.deferred=cursor.deferred.filter(item=>item.id!==next.id);
-        cursor.deferred.push({id:next.id,until:this.data.now()+objectRetryMs,code});
+        cursor.deferred=cursor.deferred.filter(item=>item.id!==peer.conversationId);
+        cursor.deferred.push({id:peer.conversationId,until:this.data.now()+objectRetryMs,code});
         this.data.store.db.transaction(()=>{
           this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
-          this.data.store.audit('DM_READ_DEFERRED',digest(next.id),{threadReadFailed:true});
+          this.data.store.audit('DM_READ_DEFERRED',digest(peer.conversationId),{threadReadFailed:true});
         }).immediate();
         await this.diagnose(reader,'dm',code,signal);
         throw new DeferredObjectRead(code);
       }
       throw error;
     }
-    await this.persist('dm',next.id,messages,signal);
-    const native=messages.bindings?.[0];
-    if(native) {
-      requireSafe(next.uid===null||next.uid===native.uid,'OBSERVATION_SENDER_UNVERIFIED');
-      this.data.store.db.prepare('UPDATE discovered_conversations SET uid=? WHERE id=?').run(native.uid,next.id);
-    }
-    this.data.store.db.prepare('UPDATE discovered_conversations SET last_read=? WHERE id=?').run(this.data.now(),next.id);
-    cursor.deferred=cursor.deferred.filter(item=>item.id!==next.id);
-    this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
+    cursor.deferred=cursor.deferred.filter(item=>item.id!==peer.conversationId);
+    // A cooled-down failure may yield its single continuation slot to another readable conversation.
+    if(nextSweep)cursor.sweep=nextSweep;
+    else if(cursor.sweep?.peer.conversationId===peer.conversationId)delete cursor.sweep;
+    this.data.store.db.transaction(()=>{
+      if(!nextSweep)this.data.store.db.prepare('UPDATE discovered_conversations SET last_read=? WHERE id=?').run(this.data.now(),peer.conversationId);
+      this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
+    }).immediate();
+    if(nextSweep)return;
     this.check('dm',signal);
-    await this.dmStage('ADVANCE',()=>reader.conversations('next'));
+    await this.advanceDm(reader,signal);
   }
   private async works(signal:AbortSignal):Promise<void> {
     const row=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='works'").get() as {cursor_json:string};

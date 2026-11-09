@@ -48,6 +48,9 @@ try {
   assert.equal(await owner.dm.evaluate(()=>window.outsideOpened),0);
   assert.ok(await owner.dm.evaluate(()=>window.listScrolls>0));
   await mountCommentReply(owner,server.origin);
+  await owner.notification.locator('#comment-list').evaluate(node=>node.style.marginTop='818px');
+  await owner.notification.evaluate(captureObserved,{mapping:config,channel:'commentReveal',index:0,evidenceId:'fixture-reveal'});
+  assert.ok(await owner.notification.evaluate(()=>scrollY>0&&document.querySelector('#comment-list').getBoundingClientRect().top<innerHeight));
   await owner.notification.evaluate(()=>{
     const root=document.querySelector('#root-comment');
     Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture').value.return.memoizedProps.commentInfo.text='root fixture input[赞]';
@@ -58,6 +61,18 @@ try {
   const diagnostic=await new ObservedReader(owner.notification,config).diagnostic('comments');
   assert.equal(diagnostic.source,'comments');assert.ok(diagnostic.samples.length>0);
   assert.ok(!JSON.stringify(diagnostic).includes('root fixture input'));
+  await mountObserved(owner,server.origin);
+  await owner.dm.evaluate(()=>{
+    const list=document.createElement('div');list.id='history-window';list.style.cssText='height:40px;overflow-y:auto;width:300px';
+    for(const box of document.querySelectorAll('.box'))list.append(box);
+    document.querySelector('#chat').append(list);
+  });
+  const windowed=await new ObservedReader(owner.dm,config).dmWindow(config.peers[0],0);
+  assert.equal(windowed.dmViewport.viewport,40);assert.equal(windowed.events[0].platformEventId,'1');
+  await new ObservedReader(owner.dm,config).scrollDm(config.peers[0],windowed.dmViewport.maximum);
+  const backDiagnostic=(await new ObservedReader(owner.dm,config).diagnostic('dm')).back;
+  assert.equal(backDiagnostic.count,1);assert.equal(backDiagnostic.nodes[0].tag,'BUTTON');
+  assert.ok(!JSON.stringify(backDiagnostic).includes('fixture'));
   await owner.notification.locator('.body img').evaluate(node=>node.removeAttribute('alt'));
   const unverified=await owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-review'});
   assert.equal(unverified.events[0].observationIssue,'COMMENT_TEXT_UNVERIFIED');

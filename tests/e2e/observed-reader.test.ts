@@ -3,9 +3,53 @@ import { join } from 'node:path';
 import { BrowserProfileOwner } from '../../src/browser/profile-owner.js';
 import { ObservedReader, captureObserved } from '../../src/adapters/observed-reader.js';
 import { validateObservationMapping } from '../../src/config/site-mapping.js';
-import { observedMapping as config, mountObserved as mount, mountVirtualizedConversations, mountCommentReply } from '../fixtures/observed-site.js';
+import { observedMapping as config, mountObserved as mount, mountVirtualizedConversations, mountCommentReply, reloadableCommentReply } from '../fixtures/observed-site.js';
 import { fixtureServer } from '../fixtures/site.js';
 import { database, privateTemp } from '../helpers.js';
+
+test.each([false,true])('background comments reveal an offscreen list without discarding webpage input (human input: %s)',async humanInput=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mountCommentReply(owner,server.origin);
+    await reloadableCommentReply(owner.notification,server.origin);
+    await owner.notification.addInitScript(humanInput=>document.addEventListener('DOMContentLoaded',()=>{
+      (document.querySelector('#comment-list') as HTMLElement).style.marginTop='818px';
+      if(humanInput){const input=document.createElement('textarea');input.value='keep unsent webpage draft';input.style.cssText='position:fixed;top:0';document.body.append(input);}
+    }),humanInput);
+    const task=new ObservedReader(owner.notification,config(server.origin)).comments(0,true);
+    if(humanInput){
+      await expect(task).rejects.toThrow('OBSERVATION_EXISTING_HUMAN_INPUT');
+      expect(await owner.notification.locator('textarea').inputValue()).toBe('keep unsent webpage draft');
+      expect(await owner.notification.evaluate(()=>scrollY)).toBe(0);
+    }else{
+      expect((await task).events).toHaveLength(1);
+      expect(await owner.notification.evaluate(()=>scrollY)).toBeGreaterThan(0);
+    }
+  }finally{await owner.close();await server.close();}
+});
+
+test('DM window scrolling stays in its exact native chat and preserves existing webpage input',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);
+    await owner.dm.evaluate(()=>{
+      const list=document.createElement('div');list.id='history-window';list.style.cssText='height:40px;overflow-y:auto;width:300px';
+      for(const box of document.querySelectorAll('.box'))list.append(box);
+      document.querySelector('#chat')!.append(list);
+    });
+    const reader=new ObservedReader(owner.dm,config(server.origin)),peer=config(server.origin).peers[0]!;
+    const batch=await reader.dmWindow(peer,0);
+    expect(batch.dmViewport).toMatchObject({top:0,viewport:40,minimum:0});
+    expect(batch.events.length).toBeGreaterThan(0);expect(batch.events.length).toBeLessThan(4);
+    expect(batch.events[0]!.platformEventId).toBe('1');
+    await expect(reader.scrollDm({...peer,conversationId:'outside'},50)).rejects.toThrow('OBSERVATION_CONVERSATION_CHANGED');
+    expect(await owner.dm.locator('#history-window').evaluate(node=>node.scrollTop)).toBe(0);
+    await owner.dm.evaluate(()=>{const input=document.createElement('textarea');input.value='unsent human text';document.querySelector('#chat')!.append(input);});
+    await expect(reader.scrollDm(peer,50)).rejects.toThrow('OBSERVATION_EXISTING_HUMAN_INPUT');
+    expect(await owner.dm.locator('textarea').inputValue()).toBe('unsent human text');
+    expect(await owner.dm.locator('#history-window').evaluate(node=>node.scrollTop)).toBe(0);
+  }finally{await owner.close();await server.close();}
+});
 
 test('bounded read diagnostics report geometry without reading bodies, inputs or native identifiers',async()=>{
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
@@ -19,13 +63,81 @@ test('bounded read diagnostics report geometry without reading bodies, inputs or
     const diagnostic=await new ObservedReader(owner.notification,config(server.origin)).diagnostic('comments');
     expect(diagnostic).toMatchObject({source:'comments',containers:1,visibleContainers:1,roots:1,samples:[{displayContents:true,hasBox:false,bodies:1,visibleBodies:1}]});
     const dm=await new ObservedReader(owner.dm,config(server.origin)).diagnostic('dm');
-    expect(dm).toMatchObject({source:'dm',visibleContainers:1,chatVisible:true,rows:1});
+    expect(dm).toMatchObject({source:'dm',visibleContainers:1,chatVisible:true,chatInViewport:true,backVisible:true,backInViewport:true,rows:1});
     const serialized=JSON.stringify([diagnostic,dm]);
     for(const forbidden of ['PRIVATE-BODY','PRIVATE-KEY','conv-a','peer-sec','controlled-1'])expect(serialized).not.toContain(forbidden);
     const wrong=config(server.origin);wrong.works[0]!.url=server.origin+'/video/999';
     await expect(new ObservedReader(owner.notification,wrong).diagnostic('comments')).rejects.toThrow('OBSERVATION_WORK_CHANGED');
     await owner.dm.evaluate(()=>{Object.getOwnPropertyDescriptor(document.querySelector('#self')!,'__reactFiber$fixture')!.value.return.memoizedProps.uid='outside';});
     await expect(new ObservedReader(owner.dm,config(server.origin)).diagnostic('dm')).rejects.toThrow('OBSERVATION_ACCOUNT_CHANGED');
+  }finally{await owner.close();await server.close();}
+});
+
+test('bounded back diagnostics distinguish a child control, occlusion and offscreen geometry without leaking content or invoking handlers',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);
+    await owner.dm.evaluate(()=>{
+      const state=window as unknown as {backHandlers:number};state.backHandlers=0;
+      const wrapper=document.createElement('div');wrapper.id='back';wrapper.className='PRIVATE-WRAPPER';
+      wrapper.style.cssText='position:fixed;left:24px;top:24px;width:80px;height:40px;z-index:1000';
+      wrapper.setAttribute('data-private','PRIVATE-ATTRIBUTE');
+      const button=document.createElement('button');button.style.cssText='position:absolute;inset:0;width:80px;height:40px';
+      button.innerHTML='<span style="pointer-events:none">PRIVATE-CONTROL-TEXT</span>';
+      Object.defineProperty(button,'__reactProps$private',{value:{onClick:()=>state.backHandlers++,onMouseDown:()=>state.backHandlers++,
+        onPointerDown:()=>state.backHandlers++,onMouseUp:()=>state.backHandlers++,privateValue:'PRIVATE-PROPS-VALUE'}});
+      wrapper.append(button);
+      for(let i=0;i<16;i++){const child=document.createElement('private-secret-tag');child.hidden=true;wrapper.append(child);}
+      document.querySelector('#back')!.replaceWith(wrapper);
+    });
+    const reader=new ObservedReader(owner.dm,config(server.origin)),diagnostic=await reader.diagnostic('dm');
+    expect(diagnostic.back).toMatchObject({count:1,centerHit:'DESCENDANT',centerIndex:1});
+    expect(diagnostic.back!.nodes).toHaveLength(12);
+    expect(diagnostic.back!.nodes![0]).toMatchObject({index:0,parentIndex:null,tag:'DIV',visible:true,inViewport:true,width:80,height:40,props:'NONE'});
+    expect(diagnostic.back!.nodes![1]).toMatchObject({index:1,parentIndex:0,tag:'BUTTON',props:'DATA',
+      handlers:{onClick:true,onMouseDown:true,onPointerDown:true,onMouseUp:true}});
+    expect(diagnostic.back!.nodes![3]!.tag).toBe('OTHER');
+    for(const forbidden of ['PRIVATE-WRAPPER','PRIVATE-ATTRIBUTE','PRIVATE-CONTROL-TEXT','PRIVATE-PROPS-VALUE','PRIVATE-SECRET-TAG','private-secret-tag','conv-a','peer-sec'])
+      expect(JSON.stringify(diagnostic)).not.toContain(forbidden);
+    await owner.dm.evaluate(()=>{
+      const cover=document.createElement('div');cover.id='cover';cover.textContent='PRIVATE-OVERLAY';
+      cover.style.cssText='position:fixed;left:24px;top:24px;width:80px;height:40px;z-index:2000';document.body.append(cover);
+    });
+    expect((await reader.diagnostic('dm')).back).toMatchObject({centerHit:'OUTSIDE',centerIndex:null});
+    await owner.dm.evaluate(()=>{
+      document.querySelector('#cover')!.remove();
+      for(const child of document.querySelector('#back')!.querySelectorAll<HTMLElement>('*'))child.style.pointerEvents='none';
+    });
+    expect((await reader.diagnostic('dm')).back).toMatchObject({centerHit:'SELF',centerIndex:0});
+    await owner.dm.evaluate(()=>(document.querySelector('#back') as HTMLElement).style.left='-5000px');
+    expect((await reader.diagnostic('dm')).back).toMatchObject({centerHit:'OFFSCREEN',centerIndex:null});
+    expect(await owner.dm.evaluate(()=>(window as unknown as {backHandlers:number}).backHandlers)).toBe(0);
+  }finally{await owner.close();await server.close();}
+});
+
+test.each(['props','handler','multiple'])('back diagnostic rejects %s descriptors without invoking a getter and omits shapes for multiple mapped controls',async kind=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);
+    await owner.dm.evaluate(kind=>{
+      const state=window as unknown as {backGetters:number};state.backGetters=0;
+      const back=document.querySelector('#back')!,props={};
+      if(kind==='props')Object.defineProperty(back,'__reactProps$private',{get(){state.backGetters++;throw new Error('PRIVATE-GETTER');}});
+      else if(kind==='handler'){
+        Object.defineProperty(props,'onClick',{get(){state.backGetters++;throw new Error('PRIVATE-HANDLER');}});
+        Object.defineProperty(back,'__reactProps$private',{value:props});
+      }else{
+        Object.defineProperty(back,'__reactProps$first',{value:{onClick:()=>state.backGetters++}});
+        Object.defineProperty(back,'__reactProps$second',{value:{onClick:()=>state.backGetters++}});
+      }
+    },kind);
+    const reader=new ObservedReader(owner.dm,config(server.origin));
+    expect((await reader.diagnostic('dm')).back!.nodes![0]).toMatchObject({props:'REJECTED',
+      handlers:{onClick:false,onMouseDown:false,onPointerDown:false,onMouseUp:false}});
+    expect(await owner.dm.evaluate(()=>(window as unknown as {backGetters:number}).backGetters)).toBe(0);
+    await owner.dm.evaluate(()=>document.querySelector('#chat')!.append(document.querySelector('#back')!.cloneNode(true)));
+    expect((await reader.diagnostic('dm')).back).toEqual({count:2});
+    expect(await owner.dm.evaluate(()=>(window as unknown as {backGetters:number}).backGetters)).toBe(0);
   }finally{await owner.close();await server.close();}
 });
 

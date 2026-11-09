@@ -62,6 +62,45 @@ test("background conversation discovery preserves a nonempty page editor before 
   }finally{await owner.close();await server.close();}
 });
 
+test('a failed native return after successful DM collection retains its read watermark and records one private-safe diagnostic',async()=>{
+  const server=await fixtureServer(),root=privateTemp('dm-advance-diagnostic-'),owner=await BrowserProfileOwner.launch(join(root,'profile'),true),store=database();
+  let collector:InboxCollector|undefined;
+  const now=Date.now(),code='OBSERVATION_DM_BACK_DOM_NOT_READY';
+  try{
+    await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
+    const data=new AutomationStore(store,()=>now);data.initialize(now-10_000);store.bindAccount('100');
+    data.configureCollection({ownId:'100',comments:false,inbox:true,commentIntervalMs:30_000,dmIntervalMs:15_000});
+    await mountObserved(owner,server.origin);owner.context.setDefaultTimeout(100);
+    await owner.dm.evaluate(now=>{
+      const chat=document.querySelector('#chat') as HTMLElement;chat.hidden=true;
+      document.querySelector('.conversation')!.addEventListener('click',()=>{chat.hidden=false;});
+      // The native back control remains visible but does not hide the chat after its ordinary click.
+      for(const row of document.querySelectorAll('.message'))
+        Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message.createdAt=new Date(now-1000);
+    },now);
+    collector=new InboxCollector(owner,observedMapping(server.origin),data,root,'headless');
+    const signal=new AbortController().signal;
+    await expect(collector.collect('dm',signal)).rejects.toMatchObject({code});
+    expect(store.events()).toHaveLength(3);
+    expect(store.events().every(event=>event.status==='AWAITING_DRAFT'&&event.payload.conversationId==='conv-a')).toBe(true);
+    expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='conv-a'").get()).toEqual({last_read:now});
+    const diagnostics=()=>readdir(join(root,'evidence')).then(names=>names.filter(name=>name.startsWith('collection-read-')));
+    expect(await diagnostics()).toHaveLength(1);
+    const diagnostic=JSON.parse(await readFile(join(root,'evidence',(await diagnostics())[0]!),'utf8'));
+    expect(diagnostic).toMatchObject({code,report:{source:'dm',chatVisible:true,chatInViewport:true,backVisible:true,backInViewport:true}});
+    for(const privateValue of ['conv-a','peer-sec','controlled-1','controlled-2','controlled-3','owner text'])
+      expect(JSON.stringify(diagnostic)).not.toContain(privateValue);
+    // The next LIST recovery failure must retain the first diagnostic and the completed thread read.
+    await expect(collector.collect('dm',signal)).rejects.toMatchObject({code});
+    expect(await diagnostics()).toHaveLength(1);
+    expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='conv-a'").get()).toEqual({last_read:now});
+    expect(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='DM_READ_DEFERRED'").get()).toEqual({n:0});
+    expect(store.db.prepare('SELECT count(*) AS n FROM model_calls').get()).toEqual({n:0});
+    expect(store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
+    expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);
+  }finally{collector?.dispose();store.close();await owner.close();await server.close();}
+});
+
 test('one unreadable conversation yields to another native peer across collector restart without recording a false successful read',async()=>{
   const server=await fixtureServer(),root=privateTemp('dm-read-fairness-'),owner=await BrowserProfileOwner.launch(join(root,'profile'),true),store=database();
   let collector:InboxCollector|undefined;
