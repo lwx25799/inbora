@@ -53,7 +53,8 @@ test('settings shows cumulative diagnostics, combines events and rejects results
     expect(await panel.innerText()).toContain('用量未知 1 次');expect(await panel.innerText()).toContain('125 ms');
     expect(await panel.innerText()).toContain('200 ms');expect(await panel.innerText()).toContain('排队等待');
     expect(await panel.innerText()).toContain('证据元数据');expect(await panel.innerText()).toContain('不是整个运行目录的磁盘占用');
-    expect(await panel.innerText()).toContain('引用尚未全部确认');expect(await panel.innerText()).not.toMatch(/今日|费用|¥|￥/u);
+    expect(await panel.innerText()).toContain('引用尚未全部确认');expect(await panel.innerText()).toContain('费用：未知');
+    expect(await panel.innerText()).not.toMatch(/今日|¥|￥|(?:费用|成本)\s*[：:]\s*\d/u);
     usage.requests=7;
     const focusBefore=calls.filter(name=>name==='getDiagnostics').length;
     await page.evaluate(()=>window.dispatchEvent(new Event('focus')));

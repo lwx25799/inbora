@@ -1,5 +1,13 @@
 # 来源与许可
 
+## 2026-11-10：优化实施与直接复用
+
+本次已将固定 MIT 提交 `4073159bea585de6d33a4747a475669440737932` 的响应分类、回复指令及去重、累计统计和有界维护组织适配到业务源码。对应文件为 `src/adapters/normal-response-reader.ts`、`src/ai/reply-style.ts`、`src/app/diagnostics.ts` 和 `src/app/evidence-maintenance.ts`；完整版权许可保存在 `third_party/douyin-cli/LICENSE`，统计来源补充见 [复用说明](docs/UPSTREAM-REUSE-DIAGNOSTICS.md)。不复制损失大整数精度的转换、混排提前结束、私有协议、重复提交回退或无依据价格。
+
+查询批量投影、六个兼容索引、事件刷新和引用保护为本项目适配实现，沿用准确目标、全文、持久意图和未知不重发合同。共享响应按具体 Response 只解析一次，再由消费者核验账号、页面代际、请求顺序和准确目标；2 MiB 限制是接受与 JSON 解析上限，Playwright 的正文缓冲及超时后底层读取不因此获得硬内存或取消保证。
+
+实施结果、可复现基准、离线与实机证据边界、差异人工检查和回退方式见 [优化交付记录](docs/OPTIMIZATION-DELIVERY-2026-11-10.zh-CN.md)。下文保留审查时点的历史结论，不将过去“尚未复制”解释为当前实施状态。
+
 ## 2026-11-10：douyin-cli 关键链路完整审查与直接复用计划
 
 用户要求审查 [`Yht20927/douyin-cli`](https://github.com/Yht20927/douyin-cli/tree/4073159bea585de6d33a4747a475669440737932)，并明确允许确认可复用的源码直接复制、移植或改造；已同步项目规则。固定SHA仍为 `4073159bea585de6d33a4747a475669440737932`，核对根LICENSE及package声明为MIT（Copyright 2026 Yht20927）。此前下文只覆盖评论增量，本次扩展Bridge、账号、IM、SQLite、ReplyEngine、模型、统计和保留维护。
