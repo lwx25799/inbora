@@ -12,12 +12,20 @@ interface ReplyCaptureInput {
   before: {context:unknown[];editorText:string}|null;
   editorShape:string|null;
   manualMedia?:boolean;
+  preparationToken?:string|null;
 }
 interface MediaObservation {contentType:NonNullable<InboundEvent['contentType']>;nativeKind:number;witness:unknown[]}
-interface ReplyFrame { context: unknown[]; proofs: SendProof[]; outgoingIds: string[]; editorText: string;editorShape:string;latestId:string|null;media?:MediaObservation }
+interface ProofScroll {top:number;minimum:number;maximum:number;viewport:number}
+interface ReplyFrame { context: unknown[]; proofs: SendProof[]; outgoingIds: string[]; editorText: string;editorShape:string;latestId:string|null;media?:MediaObservation;scroll?:ProofScroll }
+interface ReplyViewport {node:HTMLElement;height:number;width:number;edgeIds:unknown[]}
+interface CapturedReplyFrame extends ReplyFrame {editor:Element;button:Element;viewport:ReplyViewport|null}
 export interface DmContextChange {
   stage:'PREPARE'|'FILL'|'PREPARED'|'BASELINE';beforeRows:number;afterRows:number;added:number;removed:number;reordered:boolean;changedRows:number;
   senderChanged:number;contentChanged:number;timeChanged:number;typeChanged:number;statusChanged:number;pendingChanged:number;failedChanged:number;
+}
+export interface DmReadbackDiagnostic {
+  stage:'ACK_WAIT'|'FIRST_POLL'|'EMPTY_EDITOR'|'REFRESH'|'RESELECT'|'REFRESH_POLL'|'RESULT'|'CONTEXT_WINDOW'|'WINDOW_RESTORE';code:string;
+  ackAvailable:boolean;candidateCount:number;within2s:boolean;candidateLatest:boolean;contextMatches:boolean;rawRows:number;trimmedRows:number;windowReads:number;
 }
 
 /** Serialized without module helpers: fixed rendered paths, never calls website functions. */
@@ -27,7 +35,8 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
   const manualMedia=input.manualMedia===true&&expected.observationIssue==='DM_CONTENT_UNVERIFIED'&&!!expected.contentType;
   let sourceBudget=1_048_576;
   type Gate={token:string;submit:()=>boolean;remove:()=>void};
-  type Preparation={token:string;editor:HTMLElement;chat:Element;binding:string;text:string;shape:string;foreignInput:boolean;clearing:boolean;remove:()=>void};
+  type Preparation={token:string;editor:HTMLElement;chat:Element;binding:string;text:string;shape:string;foreignInput:boolean;clearing:boolean;
+    context:unknown[];latestId:string|null;viewport:ReplyViewport|null;remove:()=>void};
   const host=window as unknown as {__inboraDmReplyGate?:Gate;__inboraDmPreparation?:Preparation};
   const dom={
     check(ok: unknown,code='NATIVE_REPLY_GUARD_BLOCKED'): void {if(!ok)throw new Error(code);},
@@ -172,7 +181,34 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     ownedMedia(row:Element,selector:string):Element[]{
       return Array.from(row.querySelectorAll(selector)).filter(node=>node.closest(s.messages)===row&&dom.visible(node));
     },
-    capture(): ReplyFrame & {editor: Element;button: Element} {
+    viewport(rows:Element[],chat:Element):ReplyViewport|null{
+      let node=rows[0]?.parentElement??null;
+      for(let depth=0;node&&chat.contains(node)&&depth<64;node=node.parentElement,depth++)
+        if(node instanceof HTMLElement&&['auto','scroll'].includes(getComputedStyle(node).overflowY)&&node.clientHeight>0&&rows.every(row=>node!.contains(row))){
+          const bounds=node.getBoundingClientRect(),top=bounds.top+node.clientTop,bottom=top+node.clientHeight;
+          const edgeIds=rows.filter(row=>{const rect=(row.closest(s.messageBox)??row).getBoundingClientRect();return rect.top<=top+1||rect.bottom>=bottom-1;})
+            .map(row=>dom.data(dom.data(dom.childProps(row),'message'),'serverId'));
+          return{node,height:node.clientHeight,width:node.clientWidth,edgeIds};
+        }
+      return null;
+    },
+    preparedWindow(frame:CapturedReplyFrame,preparationToken:string|null|undefined):CapturedReplyFrame{
+      const owned=host.__inboraDmPreparation;
+      if(!owned||owned.token!==preparationToken||JSON.stringify(frame.context)===JSON.stringify(owned.context))return frame;
+      const before=owned.context as unknown[][],current=frame.context as unknown[][],targetAt=Date.parse(expected.occurredAt??'');
+      if(owned.foreignInput||owned.binding!==JSON.stringify(dom.binding(expected))||frame.editor!==owned.editor||
+        frame.editor.closest(s.chat)!==owned.chat||frame.editorText!==owned.text||frame.editorShape!==owned.shape||frame.latestId!==owned.latestId||
+        !owned.viewport||!frame.viewport||frame.viewport.node!==owned.viewport.node||frame.viewport.width!==owned.viewport.width||
+        frame.viewport.height>=owned.viewport.height||before.length!==current.length+1||!Number.isFinite(targetAt))return frame;
+      for(const index of [0,before.length-1]){
+        const removed=before[index]!,at=typeof removed[3]==='string'?Date.parse(removed[3]):NaN;
+        if(!owned.viewport.edgeIds.includes(removed[0])||removed[0]===expected.platformEventId||removed[0]===owned.latestId||!Number.isFinite(at)||at>=targetAt||
+          before.some(row=>typeof row[3]!=='string'||!Number.isFinite(Date.parse(row[3]))||Date.parse(row[3])<at))continue;
+        if(JSON.stringify(before.filter((_,position)=>position!==index))===JSON.stringify(current))return{...frame,context:owned.context};
+      }
+      return frame;
+    },
+    capture(): CapturedReplyFrame {
       sourceBudget=1_048_576;
       dom.check(peer&&expected.channel==='DIRECT_MESSAGE'&&expected.direction==='INCOMING'&&expected.kind==='DM','NATIVE_REPLY_SCOPE_REQUIRED');
       dom.check(location.origin===o.origin&&!/验证码|安全验证|访问受限/.test(document.title),'NATIVE_REPLY_PAGE_BLOCKED');
@@ -244,10 +280,10 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       dom.check(editor instanceof HTMLElement&&editor.isContentEditable,'NATIVE_REPLY_EDITOR_UNSUPPORTED');
       dom.check(m.submission==='html-click'?button instanceof HTMLElement:button instanceof SVGElement,'NATIVE_REPLY_CONTROL_CHANGED');
       const editorText=dom.editorText(editor);
-      return{context,proofs,outgoingIds,editorText,editorShape:editor.innerHTML,editor,button,latestId,...(originalMedia?{media:originalMedia}:{})};
+      return{context,proofs,outgoingIds,editorText,editorShape:editor.innerHTML,editor,button,latestId,viewport:dom.viewport(rows,chat),...(originalMedia?{media:originalMedia}:{})};
     },
   };
-  const state=dom.capture();
+  const captured=dom.capture(),state=input.action==='arm'||input.action==='snapshot'?dom.preparedWindow(captured,input.preparationToken):captured;
   if(input.action==='clearSaved'){
     dom.check(text!==null&&text.length>0&&state.editorText===text,'NATIVE_REPLY_SAVED_DRAFT_MISMATCH');
     const editor=state.editor as HTMLElement,context=JSON.stringify(state.context),shape=state.editorShape,latestId=state.latestId,
@@ -304,17 +340,19 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     checkInput.current();
     dom.check(document.execCommand('insertText',false,text!),'NATIVE_REPLY_INPUT_UNSUPPORTED');
     const after=dom.capture();
-    dom.check(after.editor===editor&&JSON.stringify(after.context)===context,'NATIVE_REPLY_CONTEXT_CHANGED');
+    dom.check(after.editor===editor,'NATIVE_REPLY_CONTEXT_CHANGED');
     dom.check(after.editorText===text,'NATIVE_REPLY_APPROVED_TEXT_CHANGED');
     if(token){
       host.__inboraDmPreparation?.remove();
       const events=['beforeinput','input','paste','drop','compositionstart'];
       const owned={token,editor,chat:editor.closest(s.chat)!,binding:JSON.stringify(dom.binding(expected)),text:text!,shape:after.editorShape,foreignInput:false,clearing:false,
+        context:state.context,latestId:state.latestId,viewport:state.viewport,
         changed():void{if(!owned.clearing)owned.foreignInput=true;},
         remove():void{for(const event of events)editor.removeEventListener(event,owned.changed,true);if(host.__inboraDmPreparation===owned)delete host.__inboraDmPreparation;}};
       for(const event of events)editor.addEventListener(event,owned.changed,true);host.__inboraDmPreparation=owned;
     }
-    return{context:after.context,proofs:after.proofs,outgoingIds:after.outgoingIds,editorText:after.editorText,editorShape:after.editorShape,latestId:after.latestId,...(after.media?{media:after.media}:{})};
+    const prepared=dom.preparedWindow(after,token);dom.check(JSON.stringify(prepared.context)===context,'NATIVE_REPLY_CONTEXT_CHANGED');
+    return{context:prepared.context,proofs:prepared.proofs,outgoingIds:prepared.outgoingIds,editorText:prepared.editorText,editorShape:prepared.editorShape,latestId:prepared.latestId,...(prepared.media?{media:prepared.media}:{})};
   }
   if(input.action==='refresh'){
     dom.check(state.editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
@@ -328,7 +366,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     const button=state.button,editor=state.editor,editorShape=state.editorShape,baseline=JSON.stringify(state.context);
     const gate={token:token!,enabled:false,attempted:false,used:false,blocked:false,
       validate():void {
-        const current=dom.capture();
+        const current=dom.preparedWindow(dom.capture(),input.preparationToken);
         dom.check(current.button===button&&current.editor===editor&&current.editorShape===editorShape&&
           JSON.stringify(current.context)===baseline&&current.editorText===text);
         dom.check(!button.closest('[disabled],[aria-disabled="true"],.disabled')&&getComputedStyle(button).pointerEvents!=='none');
@@ -341,13 +379,12 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       },
       submit():boolean {
         dom.check(!gate.attempted&&!gate.blocked);gate.attempted=true;gate.validate();
-        host.__inboraDmPreparation?.remove();
         button.removeEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);
         gate.enabled=true;
         try {
           if(m.submission==='html-click')(button as HTMLElement).click();
           else button.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,composed:true,view:window}));
-        } finally {gate.enabled=false;gate.remove();}
+        } finally {gate.enabled=false;gate.remove();const owned=host.__inboraDmPreparation;if(owned&&owned.token===input.preparationToken)owned.remove();}
         return gate.used&&!gate.blocked;
       },
       remove():void {window.removeEventListener('click',gate.handle,true);button.removeEventListener('click',gate.handle,true);},
@@ -355,7 +392,10 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     gate.validate();
     window.addEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);host.__inboraDmReplyGate=gate;
   }
-  return{context:state.context,proofs:state.proofs,outgoingIds:state.outgoingIds,editorText:state.editorText,editorShape:state.editorShape,latestId:state.latestId,...(state.media?{media:state.media}:{})};
+  const viewport=state.viewport,range=viewport?Math.max(0,viewport.node.scrollHeight-viewport.height):0,
+    reverse=viewport&&(viewport.node.scrollTop<0||getComputedStyle(viewport.node).flexDirection==='column-reverse');
+  return{context:state.context,proofs:state.proofs,outgoingIds:state.outgoingIds,editorText:state.editorText,editorShape:state.editorShape,latestId:state.latestId,...(state.media?{media:state.media}:{}),
+    ...(input.action==='proofs'&&viewport&&range>0?{scroll:{top:viewport.node.scrollTop,minimum:reverse?-range:0,maximum:reverse?0:range,viewport:viewport.height}}:{})};
 }
 
 /** Uses only the independently installed, calibrated DM reply mapping. */
@@ -367,9 +407,12 @@ export class ObservedDmReply implements ReplyAdapter {
   private preparedContext:unknown[]|null=null;
   private preparationToken:string|null=null;
   private submissionStarted=false;
+  private proofWindowReads=0;
+  private readbackStage:DmReadbackDiagnostic['stage']='FIRST_POLL';
+  private readbackAck=false;
   private readonly submission:SubmissionResponse|null;
   constructor(readonly page:Page,readonly mapping:DmReplyMapping,private readonly receiptTimeoutMs=5000,
-    private readonly options:{manualMedia?:boolean;onContextChanged?:(report:DmContextChange)=>void}={}){
+    private readonly options:{manualMedia?:boolean;onContextChanged?:(report:DmContextChange)=>void;onReadbackDiagnostic?:(report:DmReadbackDiagnostic)=>void;readonlySignal?:AbortSignal}={}){
     this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;
   }
   dispose():void{
@@ -394,7 +437,9 @@ export class ObservedDmReply implements ReplyAdapter {
   }
   private async frame(event:InboundEvent,action:ReplyCaptureInput['action']='snapshot',text:string|null=null,token:string|null=null,
     before:ReplyCaptureInput['before']=null,editorShape:string|null=null):Promise<ReplyFrame>{
-    try{return await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape,manualMedia:this.options.manualMedia===true});}
+    requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
+    try{const frame=await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape,manualMedia:this.options.manualMedia===true,preparationToken:this.preparationToken});
+      requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');return frame;}
     catch(error){const code=error instanceof Error?error.message.match(/NATIVE_REPLY_[A-Z_]+/)?.[0]:null;
       if(code)requireSafe(false,code);throw error;}
   }
@@ -409,11 +454,18 @@ export class ObservedDmReply implements ReplyAdapter {
     this.gateToken=null;
     const o=this.mapping.observation,index=o.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
     requireSafe(event.channel==='DIRECT_MESSAGE'&&(isStrong(event)||this.options.manualMedia===true&&isManualMediaCandidate(event))&&index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
-    await new ObservedReader(this.page,o).dm(index,o.peers[index],true);
+    await new ObservedReader(this.page,o,undefined,this.options.readonlySignal).dm(index,o.peers[index],true);
     const frame=await this.frame(event);
     requireSafe(frame.editorText===''||this.prepared?.binding===eventBinding(event)&&this.prepared.text===frame.editorText,'NATIVE_REPLY_EXISTING_DRAFT');
     this.inspectedContext=frame.context;
     return this.snapshot(event,frame);
+  }
+  async locateSavedDraft(event:InboundEvent,signal:AbortSignal):Promise<void>{
+    requireSafe(!signal.aborted,'BROWSER_DRAFT_INSPECTION_CANCELLED');
+    const o=this.mapping.observation,index=o.peers.findIndex(peer=>peer.uid===event.actorId&&peer.conversationId===event.conversationId);
+    requireSafe(event.channel==='DIRECT_MESSAGE'&&isStrong(event)&&index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
+    await new ObservedReader(this.page,o,undefined,signal).dm(index,o.peers[index],true);
+    requireSafe(!signal.aborted,'BROWSER_DRAFT_INSPECTION_CANCELLED');
   }
   async prepare(event:InboundEvent,text:string):Promise<void>{
     requireSafe(!this.preparationToken&&!this.submissionStarted,'NATIVE_REPLY_PREPARATION_ALREADY_OWNED');
@@ -421,6 +473,8 @@ export class ObservedDmReply implements ReplyAdapter {
     this.contextChanged('PREPARE',this.inspectedContext,frame.context);
     requireSafe(frame.editorText===''||this.prepared?.binding===eventBinding(event)&&this.prepared.text===frame.editorText,'NATIVE_REPLY_EXISTING_DRAFT');
     const preparationToken=randomUUID();
+    this.preparationToken=preparationToken;this.preparedContext=frame.context;this.pendingEvent=event;
+    this.prepared={binding:eventBinding(event),text,editorShape:frame.editorShape,contextDigest:digest(frame.context)};
     const after=await this.frame(event,'fill',text,preparationToken,{context:frame.context,editorText:frame.editorText});
     this.contextChanged('FILL',frame.context,after.context);
     requireSafe(after.editorText===text,'NATIVE_REPLY_APPROVED_TEXT_CHANGED');
@@ -444,7 +498,7 @@ export class ObservedDmReply implements ReplyAdapter {
   }
   async readSavedDraft(event:InboundEvent):Promise<{text:string;snapshot:TargetSnapshot}>{
     requireSafe(event.channel==='DIRECT_MESSAGE'&&event.direction==='INCOMING'&&isStrong(event),'NATIVE_REPLY_SAVED_DRAFT_SCOPE_REQUIRED');
-    const frame=await this.frame(event);validText(frame.editorText);
+    const frame=await this.frame(event);if(frame.editorText!=='')validText(frame.editorText);
     return{text:frame.editorText,snapshot:this.snapshot(event,frame)};
   }
   async clearSavedDraft(event:InboundEvent,text:string):Promise<void>{
@@ -465,53 +519,127 @@ export class ObservedDmReply implements ReplyAdapter {
     requireSafe(accepted,'NATIVE_REPLY_CLICK_BLOCKED');
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
+    this.proofWindowReads=0;this.readbackAck=false;this.readbackStage='ACK_WAIT';
+    try{
     let ack=null;
     if(this.submission){const deadline=Date.now()+this.receiptTimeoutMs;
       while(!(ack=this.submission.current())&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,25));
-      if(!ack)return null;
+      if(!ack){this.readDiagnostic('ACK_WAIT','ACK_MISSING');return null;}
     }
-    return this.refreshedProof(event,text,before,notBefore,ack??undefined,this.prepared?.contextDigest);
+    this.readbackAck=!!ack;this.readDiagnostic('ACK_WAIT','OK');
+    return await this.refreshedProof(event,text,before,notBefore,ack??undefined,this.prepared?.contextDigest);
+    }catch(error){this.readFailure(error);throw error;}
   }
   async verifyExisting(event:InboundEvent,text:string,notBefore:string,baselineContextDigest?:string):Promise<SendProof|null>{
+    this.proofWindowReads=0;this.readbackAck=false;this.readbackStage='RESELECT';
+    try{
+    requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
     requireSafe(Number.isFinite(Date.parse(notBefore)),'NATIVE_REPLY_INTENT_REQUIRED');
     await this.inspect(event);
     // A new read-only adapter cannot reconstruct the prior attempt's ephemeral acknowledgement.
     // Small clock differences require the persisted pre-send context, never an invented acknowledgement.
-    return this.refreshedProof(event,text,[],notBefore,undefined,baselineContextDigest);
+    return await this.refreshedProof(event,text,[],notBefore,undefined,baselineContextDigest);
+    }catch(error){this.readFailure(error);throw error;}
   }
   private async refreshedProof(event:InboundEvent,text:string,before:string[],notBefore:string,ack?:SubmissionAck,baselineContextDigest?:string):Promise<SendProof|null>{
+    this.readbackStage='FIRST_POLL';
     const initial=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest);
-    if(!initial)return null;
+    if(!initial){this.readDiagnostic('FIRST_POLL','NO_COMPLETE_PROOF');return null;}
     // A serverId can coexist with a temporary local createdAt. Require a fresh page model.
-    requireSafe((await this.frame(event,'proofs')).editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
+    this.readbackStage='EMPTY_EDITOR';requireSafe((await this.frame(event,'proofs')).editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
     if(ack)requireSafe(this.submission!.expectRefresh(ack),'NATIVE_REPLY_ACK_REVOKED');
-    await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15_000}),this.frame(event,'refresh')]);
+    this.readbackStage='REFRESH';await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15_000}),this.frame(event,'refresh')]);
     const index=this.mapping.observation.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
     requireSafe(index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
-    await new ObservedReader(this.page,this.mapping.observation).dm(index);
+    this.readbackStage='RESELECT';await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).dm(index,this.mapping.observation.peers[index],true);
+    this.readbackStage='REFRESH_POLL';
     const refreshed=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest);
     if(ack&&this.submission!.current()!==ack)return null;
     const result=refreshed?.id===initial.id?{...refreshed,...(ack?{submission:ack.submission}:{}),
       ...(refreshed.clockSkew?{clockSkew:{...refreshed.clockSkew,refreshedId:refreshed.id}}:{})}:null;
-    this.submission?.dispose();return result;
+    this.submission?.dispose();this.readDiagnostic('RESULT',result?'OK':'NO_COMPLETE_PROOF');return result;
+  }
+  private readDiagnostic(stage:DmReadbackDiagnostic['stage'],code:string,fields:Partial<DmReadbackDiagnostic>={}):void{
+    this.readbackStage=stage;
+    try{this.options.onReadbackDiagnostic?.({stage,code,ackAvailable:this.readbackAck,candidateCount:0,within2s:false,candidateLatest:false,
+      contextMatches:false,rawRows:0,trimmedRows:0,windowReads:this.proofWindowReads,...fields});}catch{/* Fixed diagnostic fields never change proof validity. */}
+  }
+  private readFailure(error:unknown):void{
+    const code=error instanceof Error&&/^(?:NATIVE_REPLY_(?:ACCOUNT_CHANGED|CONVERSATION_CHANGED|DOM_CHANGED|ORIGINAL_CHANGED|WINDOW_UNVERIFIED|MESSAGE_CONFLICT|MESSAGE_TEXT_CONFLICT|MESSAGE_TEXT_UNVERIFIED|MESSAGE_STATE_MISSING|ACCESSOR_UNSUPPORTED|FIELD_CONFLICT|METADATA_MISSING|EDITOR_MEDIA|EXISTING_DRAFT|RECEIPT_AMBIGUOUS|ACK_REVOKED|LATEST_END_MISSING|SCOPE_REQUIRED|COMPOSER_CONFLICT|CONTEXT_CHANGED|PAGE_BLOCKED)|OBSERVATION_(?:ACCOUNT_CHANGED|PAGE_BLOCKED|CONVERSATION_CHANGED|EXISTING_HUMAN_INPUT|DM_SCROLL_NOT_UNIQUE|DM_SCROLL_UNAVAILABLE|CANCELLED|METADATA_NOT_READY|DOM_NOT_READY|CONVERSATION_NOT_FOUND|CONVERSATION_NOT_UNIQUE|DM_CHAT_NOT_READY|DM_MESSAGES_DOM_NOT_READY|DM_CONTENT_DOM_NOT_READY|SENDER_UNVERIFIED|MESSAGE_CONVERSATION_CONFLICT|CONVERSATION_ID_CONFLICT|PEER_UID_CONFLICT)|RENDERED_(?:BINDING_UNAVAILABLE|ACCESSOR_UNSUPPORTED|FIELD_CONFLICT)|VERIFICATION_CANCELLED)$/u.test(error.message)
+      ?error.message:error instanceof Error&&error.name==='TimeoutError'?'BROWSER_TIMEOUT':'READBACK_UNCLASSIFIED';
+    this.readDiagnostic(this.readbackStage,code);
+  }
+  private clockContext(frame:ReplyFrame,event:InboundEvent,id:string,expected:string|undefined):{matches:boolean;trimmed:number;digest:string|null}{
+    if(!expected||!/^[a-f0-9]{64}$/u.test(expected)||frame.latestId!==id)return{matches:false,trimmed:0,digest:null};
+    const rows=(frame.context as unknown[][]).filter(row=>row[0]!==id),at=Date.parse(event.occurredAt??'');
+    if(!Number.isFinite(at)||rows.length>100||!rows.some(row=>row[0]===event.platformEventId)||rows.some(row=>
+      typeof row[0]!=='string'||!/^[1-9]\d{0,63}$/u.test(row[0])||typeof row[3]!=='string'||!Number.isFinite(Date.parse(row[3]))))return{matches:false,trimmed:0,digest:null};
+    const older=(row:unknown[]):boolean=>row[0]!==event.platformEventId&&typeof row[3]==='string'&&Number.isFinite(Date.parse(row[3]))&&Date.parse(row[3])<at;
+    const windows:unknown[][][]=[rows];
+    for(let start=1;start<rows.length&&older(rows[start-1]!);start++)windows.push(rows.slice(start));
+    for(let end=rows.length-1;end>0&&older(rows[end]!);end--)windows.push(rows.slice(0,end));
+    const matches=windows.filter(window=>digest(window)===expected);
+    return{matches:matches.length===1,trimmed:matches.length===1?rows.length-matches[0]!.length:0,digest:matches.length===1?digest(matches[0]):null};
+  }
+  private sameProofWindow(before:ReplyFrame,after:ReplyFrame,event:InboundEvent,candidate:SendProof):boolean{
+    const old=before.context as unknown[][],fresh=after.context as unknown[][],prior=new Map(old.map(row=>[row[0],row])),current=new Map(fresh.map(row=>[row[0],row]));
+    const at=Date.parse(event.occurredAt??''),oldEnough=(row:unknown[]):boolean=>typeof row[0]==='string'&&/^[1-9]\d{0,63}$/u.test(row[0])&&
+      typeof row[3]==='string'&&Date.parse(row[3])<at;
+    return after.latestId===candidate.id&&after.proofs.some(proof=>digest(proof)===digest(candidate))&&
+      old.every(row=>current.has(row[0])?digest(current.get(row[0]))===digest(row):oldEnough(row))&&
+      fresh.every(row=>prior.has(row[0])||oldEnough(row))&&
+      digest(old.filter(row=>current.has(row[0])).map(row=>row[0]))===digest(fresh.filter(row=>prior.has(row[0])).map(row=>row[0]));
+  }
+  private async seekClockContext(event:InboundEvent,frame:ReplyFrame,candidate:SendProof,expected:string):Promise<{frame:ReplyFrame;restore:()=>Promise<void>}|null>{
+    const viewport=frame.scroll,peer=this.mapping.observation.peers.find(peer=>peer.uid===event.actorId&&peer.conversationId===event.conversationId);
+    if(!viewport||!peer||frame.editorText!=='')return null;
+    const reader=new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal),step=Math.max(1,Math.floor(viewport.viewport*0.8));
+    const candidates=[Math.max(viewport.minimum,viewport.top-step),Math.min(viewport.maximum,viewport.top+step)];
+    for(const top of new Set(candidates)){
+      if(top===viewport.top||this.proofWindowReads>=2)continue;this.proofWindowReads++;this.readDiagnostic('CONTEXT_WINDOW','CONTEXT_INCOMPLETE');
+      requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
+      await reader.scrollDm(peer,top);let selected=false,fatal=false;
+      try{
+        const fresh=await this.frame(event,'proofs');
+        if(fresh.editorText===''&&this.sameProofWindow(frame,fresh,event,candidate)&&this.clockContext(fresh,event,candidate.id,expected).matches){
+          selected=true;return{frame:fresh,restore:async()=>{this.readbackStage='WINDOW_RESTORE';await reader.scrollDm(peer,viewport.top);
+            const current=await this.frame(event,'proofs');requireSafe(current.editorText===''&&this.sameProofWindow(fresh,current,event,candidate),'NATIVE_REPLY_CONTEXT_CHANGED');}};
+        }
+      }catch(error){if(!(error instanceof Error)||!/^NATIVE_REPLY_(?:ORIGINAL_CHANGED|LATEST_END_MISSING|WINDOW_UNVERIFIED)$/u.test(error.message)){fatal=true;throw error;}}
+      finally{if(!selected&&!fatal)await reader.scrollDm(peer,viewport.top);}
+    }
+    return null;
   }
   private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string,baselineContextDigest?:string):Promise<SendProof|null>{
-    const deadline=Date.now()+this.receiptTimeoutMs;let previous:string|null=null;
+    const deadline=Date.now()+this.receiptTimeoutMs,stage=this.readbackStage;let previous:string|null=null,diagnosed=false,searched=false,restore:(()=>Promise<void>)|undefined,failed=false;
+    try{
     do {
-      const frame=await this.frame(event,'proofs');
+      requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
+      let frame=await this.frame(event,'proofs');
       const start=Date.parse(notBefore);
+      const possible=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&Date.parse(p.sentAt)>=start-dmClockToleranceMs&&Date.parse(p.sentAt)<=Date.now());
+      if(!ackId)requireSafe(possible.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
+      const skew=possible[0];
+      if(!ackId&&!searched&&skew&&Date.parse(skew.sentAt)<=start&&frame.latestId===skew.id&&baselineContextDigest&&
+        !this.clockContext(frame,event,skew.id,baselineContextDigest).matches){
+        searched=true;const found=await this.seekClockContext(event,frame,skew,baselineContextDigest);if(found){frame=found.frame;restore=found.restore;}
+      }
       const matches=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&
         (ackId?p.id===ackId:Date.parse(p.sentAt)>start||Boolean(baselineContextDigest&&
           Date.parse(p.sentAt)>=start-dmClockToleranceMs&&frame.latestId===p.id&&
-          digest(frame.context.filter(row=>(row as unknown[])[0]!==p.id))===baselineContextDigest))&&Date.parse(p.sentAt)<=Date.now());
+          this.clockContext(frame,event,p.id,baselineContextDigest).matches))&&Date.parse(p.sentAt)<=Date.now());
       requireSafe(matches.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
       const candidate=matches[0],proof=candidate&&!ackId&&Date.parse(candidate.sentAt)<=start?{...candidate,
         clockSkew:{boundary:notBefore,baselineContextDigest:baselineContextDigest!,
-          remainingContextDigest:digest(frame.context.filter(row=>(row as unknown[])[0]!==candidate.id)),refreshedId:''}}:candidate;
+          remainingContextDigest:this.clockContext(frame,event,candidate.id,baselineContextDigest).digest!,refreshedId:''}}:candidate;
+      if(!diagnosed){const context=skew?this.clockContext(frame,event,skew.id,baselineContextDigest):{matches:false,trimmed:0};
+        this.readDiagnostic(stage,proof?'OK':'CONTEXT_INCOMPLETE',{candidateCount:possible.length,within2s:!!skew&&Date.parse(skew.sentAt)<=start,
+          candidateLatest:!!skew&&frame.latestId===skew.id,contextMatches:context.matches,rawRows:frame.context.length,trimmedRows:context.trimmed});diagnosed=true;}
       if(proof&&digest(proof)===previous)return frame.editorText===''?proof:null;
       previous=proof?digest(proof):null;
       await new Promise(resolve=>setTimeout(resolve,75));
     }while(Date.now()<deadline);
     return null;
+    }catch(error){failed=true;throw error;}finally{if(restore&&!failed)await restore();}
   }
 }

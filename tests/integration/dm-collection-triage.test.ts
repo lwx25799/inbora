@@ -9,6 +9,8 @@ import {migrateAutomation} from '../../src/storage/automation-migration.js';
 import {fixtureServer} from '../fixtures/site.js';
 import {mountObserved,observedMapping} from '../fixtures/observed-site.js';
 import {database,privateTemp} from '../helpers.js';
+import {DeepSeekProvider} from '../../src/ai/deepseek.js';
+import {defaultSettings} from '../../src/app/contracts.js';
 
 let server:Awaited<ReturnType<typeof fixtureServer>>,owner:BrowserProfileOwner;
 beforeAll(async()=>{server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(privateTemp('dm-batch-triage-'),'profile'),true);});
@@ -27,21 +29,21 @@ test.each(['locate','conversations'] as const)('a metadata-incomplete unrelated 
   expect(batch.unsupported).toBe(1);
 });
 
-test('an unrecognized content row retains other exact window messages without marking a completed read',async()=>{
+test.each([17,999])('an unmounted native content row (%s) does not block an exact verified text or falsely complete collection',async nativeType=>{
   await mountObserved(owner,server.origin);const origin=Date.now()-10_000;
-  await owner.dm.evaluate(origin=>{
+  await owner.dm.evaluate(({origin,nativeType})=>{
     const chat=document.querySelector('#chat') as HTMLElement;chat.querySelectorAll('.box').forEach(box=>box.remove());
     for(let index=0;index<4;index++){
       const box=document.createElement('div');box.className='box';const row=document.createElement('div');row.className='message';row.style.minHeight='24px';
       const text=index<3?'synthetic safe message '+index:'';
       if(index<3){const body=document.createElement('span');body.className='text';body.textContent=text;row.append(body);}
       Object.defineProperty(row,'__reactProps$fixture',{value:{children:{props:{message:{serverId:String(8100+index),conversationId:'conv-a',sender:'200',
-        createdAt:new Date(origin+1000+index),type:index<3?7:999,serverStatus:0,_parsedContent:{text}}}}}});
+        createdAt:new Date(origin+1000+index),type:index<3?7:nativeType,serverStatus:0,_parsedContent:{text}}}}}});
       box.append(row);chat.append(box);
     }
     document.querySelector('#back')!.addEventListener('click',()=>{chat.hidden=true;});
     document.querySelector('.conversation')!.addEventListener('click',()=>{chat.hidden=false;});
-  },origin);
+  },{origin,nativeType});
   const store=database(),root=privateTemp('dm-partial-window-');
   await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
   let clock=Date.now();const data=new AutomationStore(store,()=>clock);data.initialize(origin);store.bindAccount('100');
@@ -54,7 +56,17 @@ test('an unrecognized content row retains other exact window messages without ma
     expect(store.db.prepare("SELECT last_success FROM collection_progress WHERE source='dm'").get()).toEqual({last_success:null});
     expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);
     expect(store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
-    for(const event of store.events())expect(()=>store.assertModelObservation(event.payload)).toThrow('DM_CONTENT_UNVERIFIED');
+    for(const event of store.events())expect(()=>store.assertModelObservation(event.payload)).not.toThrow();
+    const current=store.events()[2]!,grant=data.grant('AUTO_REPLY',{ownId:'100',channels:['DIRECT_MESSAGE'],model:'deepseek-flash',modelLimit:1,sendLimit:1,
+      expiresAt:null,workIds:[],futureOwnWorks:false,conversationIds:[],entireInbox:true,containsAny:[],excludesAny:[],instructions:'Synthetic text only',startHour:0,endHour:24});
+    store.db.prepare("UPDATE client_state SET mode='LIMITED_AUTO'").run();expect(data.policyMatches(grant,current)).toBe(true);
+    let calls=0,body='';const provider=new DeepSeekProvider(async(_url,request)=>{calls++;body=String(request!.body);return new Response(JSON.stringify({model:'deepseek-flash',
+      choices:[{index:0,finish_reason:'stop',message:{role:'assistant',content:'Synthetic verified text response'}}],usage:{prompt_tokens:2,completion_tokens:3,total_tokens:5}}));});
+    await provider.generate(store,current.payload,store.history(current.payload).filter(item=>!item.observationIssue&&!item.contentType),defaultSettings,'synthetic-only-key',true,
+      undefined,()=>data.reserve(grant.version,'MODEL',current.id));
+    expect(calls).toBe(1);expect(body).toContain(current.payload.text);expect(body).not.toContain('8103');
+    expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='conv-a'").get()).toEqual({last_read:0});
+    expect(store.db.prepare("SELECT last_success FROM collection_progress WHERE source='dm'").get()).toEqual({last_success:null});
     const mapping=observedMapping(server.origin);
     await expect(new ObservedReader(owner.dm,mapping).dm(0,mapping.peers[0]!)).rejects.toThrow('OBSERVATION_DM_CONTENT_DOM_NOT_READY');
     const oldIds=store.events().map(event=>event.id);
@@ -68,6 +80,7 @@ test('an unrecognized content row retains other exact window messages without ma
     for(const event of store.events())expect(()=>store.assertModelObservation(event.payload)).not.toThrow();
     expect(store.db.prepare('SELECT count(*) AS n FROM source_collisions').get()).toEqual({n:0});
     expect(store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
+    expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:1},{used:0}]);
   }finally{collector.dispose();store.close();}
 });
 

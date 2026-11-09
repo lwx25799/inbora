@@ -1,4 +1,4 @@
-import {expect,test} from 'vitest';
+import {expect,test,vi} from 'vitest';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
@@ -7,20 +7,25 @@ import {BrowserService} from '../../src/app/browser-service.js';
 import {ClientService} from '../../src/app/service.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
 import {AutomationStore} from '../../src/storage/automation-store.js';
+import {BrowserDraftRecovery} from '../../src/app/browser-draft-recovery.js';
 import {Blocked,digest,targetKey,type InboundEvent} from '../../src/core/contracts.js';
 import {database,privateTemp,pending,candidate,snapshot} from '../helpers.js';
 
 async function setup(){
   const root=privateTemp('saved-browser-draft-'),store=database(),eventId=pending(store);await migrateClient(store,join(root,'backup.sqlite'));
-  let web='Persisted automatic draft',clears=0,wrongTarget=false,reads=0,afterRead:(()=>void)|undefined,readError:Error|undefined;
+  let web='Persisted automatic draft',clears=0,wrongTarget=false,reads=0,afterRead:(()=>void)|undefined,readError:Error|undefined,opened=true;
+  let locate:((signal:AbortSignal)=>Promise<void>)|undefined;
+  const openModes:string[]=[];
   const browser=new class extends BrowserService{
     override get actor(){return actor;}
-    override status(){return {state:'OPEN_LAST_READ_VERIFIED',mode:'headless' as const,version:'synthetic'};}
+    override status(){return {state:opened?'OPEN_LAST_READ_VERIFIED':'CLOSED',mode:'headless' as const,version:'synthetic'};}
+    override async open(mode:'headed'|'headless'='headless'){openModes.push(mode);opened=true;}
     override async adapter(){return {dispose:()=>{},adapter:{
       inspect:async(event:InboundEvent)=>snapshot(event),prepare:async()=>{throw Error('MUST_NOT_PREPARE');},verifyPrepared:async(event:InboundEvent)=>snapshot(event),
       baseline:async()=>[],clickOnce:async()=>{throw Error('MUST_NOT_SEND');},readback:async()=>null,
       readSavedDraft:async(event:InboundEvent)=>{reads++;if(readError)throw readError;const result={text:web,snapshot:{...snapshot(event),...(wrongTarget?{targetKey:'dm:outside'}:{})}};afterRead?.();return result;},
       clearSavedDraft:async(_event:InboundEvent,expected:string)=>{expect(web).toBe(expected);clears++;web='';},
+      ...(locate?{locateSavedDraft:async(_event:InboundEvent,signal:AbortSignal)=>locate!(signal)}:{}),
     }};}
     override async close(){}
   }(root),actor=new AccountActor(),service=new ClientService(store,browser);await service.loadSettings();const token=service.authority.issueSession();
@@ -32,8 +37,9 @@ async function setup(){
   const commandId=randomUUID(),params={eventId,generation:0,draftId,draftVersion:1,text:web,contextVersion:service.authority.contextVersion(store.event(eventId)),selectionId:randomUUID()};
   store.db.prepare('INSERT INTO manual_send_commands VALUES(?,?,?,?,?,?,?,?,?)').run(commandId,eventId,service.authority.operator(token).id,digest(params),JSON.stringify(params),'FAILED_BEFORE_CLICK',null,'TARGET_CHANGED_REAPPROVE',Date.now());
   store.db.prepare('INSERT INTO policy_commands VALUES(?,?,0)').run(commandId,grant.version);
-  return {root,store,service,token,eventId,draftId,commandId,get clears(){return clears;},get web(){return web;},get reads(){return reads;},
+  return {root,store,service,browser,token,eventId,draftId,commandId,openModes,setOpen:(value:boolean)=>{opened=value;},get clears(){return clears;},get web(){return web;},get reads(){return reads;},
     readError:(error:Error)=>{readError=error;},
+    locate:(handler:(signal:AbortSignal)=>Promise<void>)=>{locate=handler;},
     webText:(value:string)=>{web=value;},wrongTarget:()=>{wrongTarget=true;},afterRead:(fn:()=>void)=>{afterRead=fn;},
     close:async()=>{await service.close();store.close();}};
 }
@@ -49,6 +55,54 @@ test('readonly discovery preserves the exact persisted draft and only the explic
     expect(f.clears).toBe(1);expect(f.web).toBe('');
     expect(['reply_drafts','draft_revisions','manual_send_commands','send_intents','delivery_receipts','budgets'].map(name=>f.store.db.prepare('SELECT * FROM '+name).all())).toEqual(before);
   }finally{await f.close();}
+});
+
+test.each(['limit','cancel'] as const)('normal recovery location retains its two-candidate and shared cancellation bound (%s)',async action=>{
+  const f=await setup();try{
+    for(let index=0;index<2;index++){
+      const id=pending(f.store,candidate({platformEventId:'later-'+index,occurredAt:`2026-11-04T01:0${index+1}:00Z`})),draftId=randomUUID(),commandId=randomUUID();
+      f.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,'deepseek-flash',1,'DRAFT',NULL,NULL)").run(draftId,id,f.web);
+      f.store.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(id);
+      f.store.db.prepare("INSERT INTO draft_revisions VALUES(?,1,'AUTO_POLICY',?,'policy:synthetic',?)").run(draftId,f.web,Date.now()+index+1);
+      const params={eventId:id,generation:0,draftId,draftVersion:1,text:f.web,contextVersion:f.service.authority.contextVersion(f.store.event(id)),selectionId:randomUUID()};
+      f.store.db.prepare('INSERT INTO manual_send_commands VALUES(?,?,?,?,?,?,?,?,?)').run(commandId,id,f.service.authority.operator(f.token).id,digest(params),JSON.stringify(params),'FAILED_BEFORE_CLICK',null,'TARGET_CHANGED_REAPPROVE',Date.now());
+      const grant=f.store.db.prepare("SELECT version FROM automation_grants WHERE kind='AUTO_REPLY'").get() as {version:number};
+      f.store.db.prepare('INSERT INTO policy_commands VALUES(?,?,0)').run(commandId,grant.version);
+    }
+    let locations=0;const abort=new AbortController();f.readError(new Blocked('NATIVE_REPLY_DOM_CHANGED'));
+    f.locate(async signal=>{expect(signal).toBe(abort.signal);locations++;if(action==='cancel')abort.abort();});
+    const result=await new BrowserDraftRecovery(f.store,f.service.authority,f.browser).available(f.token,abort.signal);
+    expect(result).toBeNull();expect(locations).toBe(action==='cancel'?1:2);expect(f.clears).toBe(0);expect(f.web).toBe('Persisted automatic draft');
+    const report=JSON.parse(await readFile(join(f.root,'evidence','browser-draft-recovery-latest.json'),'utf8'));
+    expect(report.locations).toBe(action==='cancel'?1:2);expect(f.reads).toBe(action==='cancel'?1:5);
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});expect(f.store.db.prepare('SELECT count(*) n FROM model_calls').get()).toEqual({n:0});
+  }finally{await f.close();}
+});
+
+test.each(['open','closed-then-open','no-candidate','emergency'] as const)('startup performs at most one readonly saved-draft diagnosis without a settings page (%s)',async state=>{
+  const f=await setup();let restarted:ClientService|undefined;
+  try{
+    await f.service.close();
+    if(state==='no-candidate')f.store.db.prepare("UPDATE draft_revisions SET origin='HUMAN_TYPED'").run();
+    if(state==='emergency')new AutomationStore(f.store).stop(true);
+    if(state==='closed-then-open')f.setOpen(false);
+    const before=['reply_drafts','draft_revisions','manual_send_commands','send_intents','delivery_receipts','budgets'].map(name=>f.store.db.prepare('SELECT * FROM '+name).all());
+    vi.useFakeTimers();restarted=new ClientService(f.store,f.browser);await restarted.loadSettings();
+    const token=restarted.authority.issueSession();
+    for(let index=0;index<3;index++)await restarted.dispatch(token,{command:'getStatus'});expect(f.reads).toBe(0);
+    restarted.startOnline();
+    if(state==='closed-then-open'){expect(f.reads).toBe(0);expect(f.openModes).toEqual(['headless']);}
+    await vi.advanceTimersByTimeAsync(1000);await restarted.drain();
+    const expected=['no-candidate','emergency'].includes(state)?0:1;
+    expect(f.reads).toBe(expected);expect(f.clears).toBe(0);
+    for(let index=0;index<3;index++){restarted.startOnline();await restarted.dispatch(token,{command:'getStatus'});}
+    await vi.advanceTimersByTimeAsync(5000);await restarted.drain();expect(f.reads).toBe(expected);
+    if(expected){const report=JSON.parse(await readFile(join(f.root,'evidence','browser-draft-recovery-latest.json'),'utf8'));expect(report).toMatchObject({phase:'MATCHED',frames:1,matches:1});
+      const diagnosticSession=f.store.db.prepare("SELECT permissions,expires_at FROM operator_sessions ORDER BY rowid DESC LIMIT 1").get() as {permissions:string;expires_at:number};
+      expect(diagnosticSession.permissions).toBe('["READ"]');expect(diagnosticSession.expires_at).toBe(0);}
+    expect(['reply_drafts','draft_revisions','manual_send_commands','send_intents','delivery_receipts','budgets'].map(name=>f.store.db.prepare('SELECT * FROM '+name).all())).toEqual(before);
+    expect(f.store.db.prepare('SELECT count(*) n FROM model_calls').get()).toEqual({n:0});
+  }finally{await restarted?.close();vi.useRealTimers();await f.close();}
 });
 
 test.each(['match','empty','mismatch','original-missing','conversation','db-state','private-error','private-code'] as const)(

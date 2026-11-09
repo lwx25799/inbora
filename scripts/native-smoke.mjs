@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile,readFile,access } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
@@ -57,6 +57,7 @@ initial.observe(
 await migrateClient(initial,join(root,'schema3-backup.sqlite'));
 await migrateAutomation(initial,join(root,'automation-backup.sqlite'));
 const automation=new AutomationStore(initial);automation.initialize(Date.now());automation.stop(true);
+const eventId=initial.events().find(item=>item.payload.platformEventId===event.platformEventId).id;
 initial.close();
 
 async function launch(index) {
@@ -121,7 +122,7 @@ async function launch(index) {
 }
 async function connect(page) {
   await page.getByRole("textbox", { name: "私有运行目录" }).fill(root);
-  await page.getByRole("checkbox").nth(1).check();
+  await page.getByRole("checkbox",{name:'我确认这是已授权账号的本地运行目录，允许读取并升级数据库',exact:true}).check();
   await page.getByRole("button", { name: "连接收件箱", exact: true }).click();
   try {
     await page
@@ -134,8 +135,18 @@ async function connect(page) {
     throw error;
   }
 }
+const rpc=(page,body)=>page.evaluate(body=>window.__TAURI_INTERNALS__.invoke('client_request',{body}),body);
+async function waitFor(check,message){
+  const deadline=Date.now()+10_000;while(Date.now()<deadline){if(await check())return;await delay(100);}throw Error(message);
+}
+async function assertStopped(page){
+  const status=await rpc(page,{command:'getStatus'});assert.equal(status.runtime,root);assert.equal(status.automation.emergencyStopped,true);
+  assert.equal(status.browser.state,'CLOSED');assert.equal(status.automation.replyPolicy,null);assert.equal(status.automation.collection,null);
+  assert.ok(status.budgets.every(item=>item.used===0));assert.equal(status.usage.requests,0);return status;
+}
+const draftText='原生客户端人工持久化验证。';
 const result = {
-  source: "INSTALLED_NATIVE_TAURI_WEBVIEW2",
+  source: "PACKAGED_NATIVE_TAURI_WEBVIEW2",
   executable,
   synthetic: true,
   root,
@@ -143,19 +154,22 @@ const result = {
   modelRequests: 0,
   realSends: 0,
 };
-if (configuredPort) result.source = "NATIVE_TAURI_QA_CONFIG_API_DEBUG_ARGUMENT";
+if (configuredPort) result.debugPortConfigured = true;
 let run;
 try {
   run = await launch(1);
-  console.log("Installed native app and actual Tauri WebView attached");
+  console.log("Packaged native app and actual Tauri WebView attached");
   await connect(run.page);
-  await run.page.getByRole("button", { name: /合成原生私信/ }).click();
-  await run.page.getByRole("button", { name: "打开人工回复", exact: true }).click();
-  const dialog=run.page.getByRole('dialog',{name:'人工回复对话框'});
-  await run.page
-    .getByRole("textbox", { name: "人工回复草稿" })
-    .fill("原生客户端人工持久化验证。");
-  await dialog.getByText('修改已保存',{exact:true}).waitFor();
+  await assertStopped(run.page);
+  await run.page.locator('.task').filter({hasText:'合成原生私信'}).click();
+  const editor=run.page.getByRole('textbox',{name:'人工回复草稿'}),composer=run.page.locator('.reply-composer');
+  await editor.waitFor();await waitFor(()=>editor.isEditable(),'INLINE_COMPOSER_NOT_EDITABLE');
+  assert.equal(await run.page.getByRole('button',{name:'打开人工回复',exact:true}).count(),0);
+  assert.equal(await run.page.getByRole('dialog',{name:'人工回复对话框'}).count(),0);
+  assert.equal(await run.page.getByRole('log',{name:'私信消息流'}).count(),1);
+  await editor.fill(draftText);
+  await waitFor(async()=>{const thread=await rpc(run.page,{command:'getThread',eventId});return thread.ownership.isMine&&thread.draft?.text===draftText;},'INLINE_DRAFT_NOT_AUTOSAVED');
+  await composer.getByText('修改已保存',{exact:true}).waitFor();result.automaticInlineComposer=true;
   assert.deepEqual(await run.page.getByRole('combobox',{name:'任务状态'}).locator('option').allTextContents(),['等待回复','已回复']);
   assert.equal(await run.page.getByRole('button',{name:'全局急停',exact:true}).count(),0);
   assert.equal(await run.page.getByRole('button',{name:'只读核验',exact:true}).count(),0);
@@ -183,21 +197,25 @@ try {
     await run.page.setViewportSize(viewport);
     assert.equal(
       await run.page.evaluate(
-        () =>
-          document.documentElement.scrollWidth > innerWidth ||
-          document.documentElement.scrollHeight > innerHeight,
+        () => document.documentElement.scrollWidth > innerWidth || document.documentElement.scrollHeight > innerHeight,
       ),
       false,
     );
+    for(const control of [editor,composer.getByRole('button',{name:'发送',exact:true})]){
+      const box=await control.boundingBox();assert.ok(box&&box.x>=0&&box.y>=0&&box.x+box.width<=viewport.width&&box.y+box.height<=viewport.height);
+    }
     await run.page.screenshot({
       path: join(root, `native-${viewport.width}x${viewport.height}.png`),
     });
     result.viewports.push(viewport);
   }
-  await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
   await run.page
     .getByRole("button", { name: "AI 与设置", exact: true })
     .click();
+  const nested=run.page.getByRole('checkbox',{name:'自动回复楼中楼评论',exact:true});
+  assert.equal(await nested.isChecked(),true);await nested.uncheck();assert.equal(await nested.isChecked(),false);
+  await assertStopped(run.page);await nested.check();assert.equal(await nested.isChecked(),true);await assertStopped(run.page);
+  result.nestedReplyChoice={defaultOn:true,offDisplayed:true,onDisplayed:true,policySaved:false};
   await run.page
     .getByRole("textbox", { name: "本次 API Key" })
     .fill("synthetic-native-memory-key");
@@ -209,8 +227,12 @@ try {
     "",
   );
   await run.page
-    .getByText("模型：未授权 · Key：仅后端内存持有", { exact: true })
+    .getByText("模型：持续授权有效 · Key：仅后端内存持有", { exact: true })
     .waitFor();
+  const keyed=await assertStopped(run.page);assert.equal(keyed.keyPresent,true);assert.equal(keyed.keyStored,false);
+  assert.ok(keyed.automation.modelGrant);assert.equal(await run.page.getByRole('checkbox',{name:'在本机安全保存 Key（Windows 当前用户 DPAPI，默认关闭）',exact:true}).isChecked(),false);
+  assert.equal((await readFile(join(root,'client-settings.json'),'utf8')).includes('synthetic-native-memory-key'),false);
+  await assert.rejects(access(join(root,'model-key.dpapi')),{code:'ENOENT'});
   await run.page.reload();
   await run.page
     .getByRole("heading", { name: "收件箱", exact: true })
@@ -224,8 +246,8 @@ try {
   run = await launch(2);
   await run.page.getByRole('heading',{name:'收件箱',exact:true}).waitFor({timeout:10_000});
   result.autoReconnect=true;
-  await run.page.getByRole("button", { name: /合成原生私信/ }).click();
-  await run.page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+  await assertStopped(run.page);
+  await run.page.locator('.task').filter({hasText:'合成原生私信'}).click();
   await run.page.waitForFunction(
     () =>
       document.querySelector('textarea[aria-label="人工回复草稿"]')?.value ===
@@ -233,15 +255,18 @@ try {
   );
   assert.equal(
     await run.page.getByRole("textbox", { name: "人工回复草稿" }).inputValue(),
-    "原生客户端人工持久化验证。",
+    draftText,
   );
-  await run.page.getByRole('dialog',{name:'人工回复对话框'}).getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
+  const resumed=await rpc(run.page,{command:'getThread',eventId});assert.equal(resumed.draft.text,draftText);assert.equal(resumed.draft.origin,'HUMAN_TYPED');
   await run.page
     .getByRole("button", { name: "AI 与设置", exact: true })
     .click();
   await run.page
-    .getByText("模型：未授权 · Key：未配置", { exact: true })
+    .getByText("模型：持续授权有效 · Key：未配置", { exact: true })
     .waitFor();
+  const restarted=await assertStopped(run.page);assert.equal(restarted.keyPresent,false);assert.equal(restarted.keyStored,false);
+  assert.equal(restarted.automation.modelGrant?.version,keyed.automation.modelGrant.version);
+  assert.equal(await run.page.getByRole('checkbox',{name:'自动回复楼中楼评论',exact:true}).isChecked(),true);
   await run.page.getByText('故障处理',{exact:true}).click();
   await run.page.getByRole("button", { name: "全局急停", exact: true }).click();
   await run.page
@@ -322,6 +347,8 @@ try {
     persisted.db.prepare("SELECT count(*) AS n FROM model_calls").get().n,
     0,
   );
+  assert.equal(persisted.db.prepare('SELECT count(*) AS n FROM send_intents').get().n,0);
+  assert.equal(persisted.draft(persisted.db.prepare('SELECT id FROM reply_drafts WHERE event_id=?').get(eventId).id).text,draftText);
   assert.equal(
     persisted.db.prepare("SELECT paused FROM client_state WHERE id=1").get()
       .paused,

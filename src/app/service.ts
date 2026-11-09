@@ -72,6 +72,7 @@ export class ClientService {
   private onlineTask:Promise<void>|null=null;
   private onlineRetryAt=0;
   private onlineAbort=new AbortController();
+  private recoveryDiagnosticPending=false;
   private sync: InboxSync = {
     runId: null, running: false, cancelled: false, source: null, results: [],
   };
@@ -93,6 +94,7 @@ export class ClientService {
       await migrateAutomation(this.store,join(this.browser.root,"backups",`automation-${randomUUID()}.sqlite`));
       this.automation=new AutomationStore(this.store,this.authority.now);
       this.automation.initialize(this.startedAt);
+      this.recoveryDiagnosticPending=new BrowserDraftRecovery(this.store,this.authority,this.browser).hasStartupCandidate();
       if(this.authority.mode()==='LIMITED_AUTO')this.authority.resumeIdleAutomation();
       if(!this.automation.state().emergencyStopped&&this.authority.paused()) {
         this.store.db.prepare('UPDATE client_state SET paused=0 WHERE id=1').run();
@@ -131,6 +133,12 @@ export class ClientService {
   startOnline():void {
     this.onlineEnabled=true;this.keepOnline();
   }
+  private inspectStartupRecovery():void{
+    if(!this.recoveryDiagnosticPending||!this.browser.status().state.startsWith('OPEN'))return;
+    this.recoveryDiagnosticPending=false;const token=this.authority.issueSession(['READ']);
+    const task=new BrowserDraftRecovery(this.store,this.authority,this.browser).available(token).catch(()=>{}).finally(()=>this.authority.revoke(token));
+    this.track(task);
+  }
   private keepOnline():void {
     if(!this.onlineEnabled||this.closing||this.onlineTask||!this.automation||this.automation.state().emergencyStopped||
       !this.store.db.prepare("SELECT id FROM accounts WHERE id='account_001'").get()||this.authority.now()<this.onlineRetryAt)return;
@@ -141,6 +149,7 @@ export class ClientService {
         .catch(()=>{}).finally(()=>{this.onlineTask=null;if(!this.closing)this.emit('status_updated');});
       this.onlineTask=task;this.track(task);return;
     }
+    this.inspectStartupRecovery();
     if(!['CLOSED','BROWSER_START_FAILED'].includes(this.browser.status().state))return;
     if(this.onlineAbort.signal.aborted)this.onlineAbort=new AbortController();
     const task=this.browser.open('headless',this.onlineAbort.signal).catch(error=>{

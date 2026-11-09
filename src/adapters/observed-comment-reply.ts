@@ -7,9 +7,12 @@ import {ObservedReader} from './observed-reader.js';
 import {CommentResponses,type NativeCommentReply} from './comment-responses.js';
 import {SubmissionResponse} from './submission-response.js';
 
-interface Input{mapping:CommentReplyMapping;event:InboundEvent;action:'open'|'expand'|'snapshot'|'fill'|'finish'|'arm'|'proofs'|'refresh';text:string|null;
+interface Input{mapping:CommentReplyMapping;event:InboundEvent;action:'open'|'expand'|'snapshot'|'fill'|'finish'|'arm'|'proofs'|'refresh'|'diagnostic';text:string|null;
   token:string|null;before:{context:unknown[];editorText:string}|null;shape:string|null;receipts?:NativeCommentReply[]}
-interface Frame{context:unknown[];proofs:SendProof[];ids:string[];editorText:string;shape:string}
+export interface CommentQualification {nested:boolean;stage:'EXPAND'|'OPEN'|'SNAPSHOT';verified:boolean;code:string|null;
+  composerCount:number;metadataReady:boolean;level:0|1|2|'OTHER'|'MISSING';cidMatches:boolean;rootMatches:boolean;workMatches:boolean;rowOwned:boolean}
+type ComposerQualification=Pick<CommentQualification,'composerCount'|'metadataReady'|'level'|'cidMatches'|'rootMatches'|'workMatches'|'rowOwned'>;
+interface Frame{context:unknown[];proofs:SendProof[];ids:string[];editorText:string;shape:string;qualification?:ComposerQualification}
 
 /** Fixed, bounded rendered paths. No calls to website handlers, getters or private endpoints. */
 export function captureCommentReply(input:Input):Frame{
@@ -81,9 +84,10 @@ export function captureCommentReply(input:Input):Frame{
       };
       return traversal.walk(content);
     },
-    root():{root:Element;context:unknown[];proofs:SendProof[];ids:string[]}{
+    root():{root:Element;thread:Element;context:unknown[];proofs:SendProof[];ids:string[]}{
       const work=o.works.find(w=>w.id===e.videoId),peer=[...o.peers,...o.commentAuthors??[]].find(p=>p.uid===e.actorId);
-      dom.check(work&&peer&&e.channel==='COMMENT_NOTIFICATION'&&e.kind==='COMMENT'&&e.direction==='INCOMING','COMMENT_REPLY_SCOPE_REQUIRED');
+      const nested=e.kind==='REPLY',rootId=nested?e.rootCommentId:e.commentId;
+      dom.check(work&&peer&&e.channel==='COMMENT_NOTIFICATION'&&(e.kind==='COMMENT'||nested&&rootId&&rootId!==e.commentId&&e.replyToCommentId===e.commentId)&&e.direction==='INCOMING','COMMENT_REPLY_SCOPE_REQUIRED');
       dom.check(location.origin===o.origin&&location.href.split('?')[0]===work!.url.split('?')[0]&&
         !/验证码|安全验证|访问受限/.test(document.title)&&!Array.from(document.querySelectorAll(m.blockers)).some(dom.visible),'COMMENT_REPLY_PAGE_BLOCKED');
       dom.check(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.visible),'COMMENT_REPLY_PAGE_BLOCKED');
@@ -94,25 +98,33 @@ export function captureCommentReply(input:Input):Frame{
       const list=lists[0]!,rows=Array.from(list.querySelectorAll(s.commentRows));
       dom.check(rows.length<=100,'COMMENT_REPLY_WINDOW_TOO_LARGE');
       const roots=rows.filter(n=>!n.parentElement?.closest(s.commentRows)&&dom.visible(n)&&
-        dom.data(dom.data(dom.props(n,s.commentFiberDepth),'commentInfo'),'cid')===e.commentId);
+        dom.data(dom.data(dom.props(n,s.commentFiberDepth),'commentInfo'),'cid')===rootId);
       dom.check(roots.length===1,'COMMENT_REPLY_ROOT_NOT_UNIQUE');const root=roots[0]!,p=dom.props(root,s.commentFiberDepth),c=dom.data(p,'commentInfo');
-      const author=dom.data(c,'user'),texts=dom.owned(root,s.commentText).filter(n=>dom.commentText(n,root,s.commentRows,o.environment==='fixture')===e.text),
-        tooltips=dom.owned(root,s.commentTooltip).filter(n=>n.id===`tooltip_${e.commentId}`),links=dom.owned(root,s.commentAuthor);
+      dom.check(dom.data(p,'level')===m.rootLevel&&dom.data(c,'replyId')==='0'&&dom.data(c,'cid')===rootId&&
+        dom.data(dom.data(p,'awemeInfo'),'awemeId')===e.videoId&&dom.data(dom.data(p,'userInfo'),'uid')===o.self.uid,'COMMENT_REPLY_ORIGINAL_CHANGED');
+      const targetRows=nested?Array.from(root.querySelectorAll(s.commentRows)).filter(row=>row.parentElement?.closest(s.commentRows)===root&&dom.visible(row)&&
+        dom.data(dom.data(dom.props(row,s.commentFiberDepth),'commentInfo'),'cid')===e.commentId):[root];
+      if(nested&&input.action==='expand'&&targetRows.length===0)return{root,thread:root,context:[],proofs:[],ids:[]};
+      dom.check(targetRows.length===1,'COMMENT_REPLY_ORIGINAL_CHANGED');const target=targetRows[0]!,targetProps=dom.props(target,s.commentFiberDepth),original=dom.data(targetProps,'commentInfo');
+      const author=dom.data(original,'user'),texts=dom.owned(target,s.commentText).filter(n=>dom.commentText(n,target,s.commentRows,o.environment==='fixture')===e.text),
+        tooltips=dom.owned(target,s.commentTooltip).filter(n=>n.id===`tooltip_${e.commentId}`),links=dom.owned(target,s.commentAuthor).filter(n=>{
+          if(!nested)return true;const url=new URL(n.getAttribute('href')??'',location.origin);
+          return dom.visible(n)&&url.origin===o.origin&&url.pathname===`/user/${peer!.secUid}`;});
       const profile=links.length===1?new URL(links[0]!.getAttribute('href')??'',location.origin):null;
-      dom.check(dom.data(p,'level')===m.rootLevel&&dom.data(c,'replyId')==='0'&&dom.data(c,'cid')===e.commentId&&
-        dom.data(dom.data(p,'awemeInfo'),'awemeId')===e.videoId&&dom.data(dom.data(p,'userInfo'),'uid')===o.self.uid&&
+      dom.check(dom.data(targetProps,'level')===(nested?2:m.rootLevel)&&dom.data(original,'replyId')===(nested?rootId:'0')&&dom.data(original,'cid')===e.commentId&&
+        (!nested||dom.data(targetProps,'levelOneCid')===rootId)&&dom.data(dom.data(targetProps,'awemeInfo'),'awemeId')===e.videoId&&
         dom.data(author,'uid')===e.actorId&&dom.data(author,'secUid')===peer!.secUid&&
         profile?.origin===o.origin&&profile.pathname===`/user/${peer!.secUid}`&&
-        texts.length===1&&dom.visible(texts[0]!)&&dom.commentText(texts[0]!,root,s.commentRows,o.environment==='fixture')===e.text&&dom.data(c,'text')===e.text&&
-        dom.time(dom.data(c,'createTime'))===e.occurredAt&&dom.data(c,'status')===m.confirmedStatus&&
+        texts.length===1&&dom.visible(texts[0]!)&&dom.commentText(texts[0]!,target,s.commentRows,o.environment==='fixture')===e.text&&dom.data(original,'text')===e.text&&
+        dom.time(dom.data(original,'createTime'))===e.occurredAt&&dom.data(original,'status')===m.confirmedStatus&&
         tooltips.length===1&&tooltips[0]!.id===`tooltip_${e.commentId}`,'COMMENT_REPLY_ORIGINAL_CHANGED');
       const replies=dom.data(c,'replyComment'),total=dom.data(c,'replyTotal');
       dom.check(Array.isArray(replies)&&replies.length<=100&&typeof total==='number'&&total>=replies.length,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
-      const context:unknown[]=[e.commentId,total],proofs:SendProof[]=[],ids:string[]=[],seen=new Set<string>();
+      const context:unknown[]=nested?['NESTED_COMMENT',rootId,e.commentId,total,e.text,e.actorId,e.occurredAt]:[e.commentId,total],proofs:SendProof[]=[],ids:string[]=[],seen=new Set<string>();
       for(const r of replies as unknown[]){
         const id=dom.data(r,'cid'),text=dom.data(r,'text'),parent=dom.data(r,'replyId'),user=dom.data(r,'user'),uid=dom.data(user,'uid');
         const sec=dom.data(user,'secUid'),at=dom.time(dom.data(r,'createTime')),status=dom.data(r,'status');
-        const strong=typeof id==='string'&&/^[1-9]\d{0,63}$/.test(id)&&typeof text==='string'&&typeof uid==='string'&&at&&parent===e.commentId;
+        const strong=typeof id==='string'&&/^[1-9]\d{0,63}$/.test(id)&&typeof text==='string'&&typeof uid==='string'&&at&&parent===rootId;
         if(input.action!=='proofs'&&input.action!=='refresh')dom.check(strong,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
         if(typeof id==='string'){dom.check(!seen.has(id),'COMMENT_REPLY_ID_COLLISION');seen.add(id);ids.push(id);}
         context.push([id,text,parent,uid,sec,at,status]);
@@ -124,9 +136,9 @@ export function captureCommentReply(input:Input):Frame{
         const childProps=dom.props(child,s.commentFiberDepth),native=dom.data(childProps,'commentInfo'),nativeUser=dom.data(native,'user');
         const id=dom.data(native,'cid'),text=dom.data(native,'text'),uid=dom.data(nativeUser,'uid'),sec=dom.data(nativeUser,'secUid'),
           at=dom.time(dom.data(native,'createTime')),status=dom.data(native,'status'),parent=dom.data(native,'replyId');
-        const strong=typeof id==='string'&&/^[1-9]\d{0,63}$/.test(id)&&typeof text==='string'&&typeof uid==='string'&&at&&parent===e.commentId&&
+        const strong=typeof id==='string'&&/^[1-9]\d{0,63}$/.test(id)&&typeof text==='string'&&typeof uid==='string'&&at&&parent===rootId&&
           dom.data(childProps,'level')===2&&dom.data(dom.data(childProps,'awemeInfo'),'awemeId')===e.videoId&&
-          (dom.data(childProps,'levelOneCid')===undefined||dom.data(childProps,'levelOneCid')===e.commentId);
+          (dom.data(childProps,'levelOneCid')===undefined||dom.data(childProps,'levelOneCid')===rootId);
         if(input.action!=='proofs'&&input.action!=='refresh')dom.check(strong,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
         if(typeof id!=='string')continue;
         dom.check(!childIds.has(id),'COMMENT_REPLY_ID_COLLISION');childIds.add(id);
@@ -135,9 +147,11 @@ export function captureCommentReply(input:Input):Frame{
         if(!strong||uid!==o.self.uid||sec!==o.self.secUid)continue;
         const responses=(input.receipts??[]).filter(r=>r.cid===id);
         const server=responses.length===1?responses[0]:null;
-        const serverMatches=server&&server.aweme_id===e.videoId&&server.reply_id===e.commentId&&server.text===text&&
+        const serverMatches=server&&server.aweme_id===e.videoId&&server.reply_id===rootId&&server.text===text&&
           server.user.uid===uid&&server.user.sec_uid===sec&&dom.time(server.create_time)===at;
         if(server&&(!serverMatches||server.status!==m.confirmedStatus))continue;
+        if(nested&&(!serverMatches||server.reply_to_reply_id!==e.commentId))continue;
+        if(!nested&&server?.reply_to_reply_id!==undefined&&server.reply_to_reply_id!=='0')continue;
         if(status!==undefined&&status!==m.confirmedStatus||status===undefined&&!(serverMatches&&server.status===m.confirmedStatus))continue;
         const tooltip=Array.from(root.querySelectorAll(s.commentTooltip)).filter(n=>n.id===`tooltip_${id}`);
         if(tooltip.length!==1)continue;
@@ -146,7 +160,9 @@ export function captureCommentReply(input:Input):Frame{
         if(prior.length){const r=prior[0],u=dom.data(r,'user');if(dom.data(r,'text')!==text||dom.data(r,'replyId')!==parent||
           dom.data(u,'uid')!==uid||dom.data(u,'secUid')!==sec||dom.time(dom.data(r,'createTime'))!==at||
           dom.data(r,'status')!==undefined&&dom.data(r,'status')!==m.confirmedStatus)continue;}
-        const bodies=dom.owned(child,s.commentText).filter(dom.visible),authors=dom.owned(child,s.commentAuthor).filter(dom.visible);
+        const bodies=dom.owned(child,s.commentText).filter(dom.visible),authors=dom.owned(child,s.commentAuthor).filter(n=>{
+          if(!dom.visible(n))return false;if(!nested)return true;const url=new URL(n.getAttribute('href')??'',location.origin);
+          return url.origin===o.origin&&url.pathname===`/user/${o.self.secUid}`;});
         const authorUrl=authors.length===1?new URL(authors[0]!.getAttribute('href')??'',location.origin):null;
         const flagged=Array.from(child.querySelectorAll(`${m.pending},${m.failed}`)).some(dom.visible)||child.matches(`${m.pending},${m.failed}`);
         if(bodies.length===1&&dom.commentText(bodies[0]!,child,s.commentRows,o.environment==='fixture')===text&&authorUrl?.origin===o.origin&&!authorUrl.username&&!authorUrl.password&&
@@ -154,7 +170,7 @@ export function captureCommentReply(input:Input):Frame{
           proofs.push({id:id as string,ownId:o.self.uid,targetKey:`comment:${e.videoId}:${e.commentId}`,text:text as string,pending:false,sentAt:at as string});
       }
       dom.check(typeof total==='number'&&total>=ids.length,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
-      return{root,context,proofs,ids};
+      return{root:target,thread:root,context,proofs,ids};
     },
     editorText(editor:Element):string{
       dom.check(editor instanceof HTMLElement&&editor.isContentEditable&&!editor.querySelector('img,video,audio,input,[contenteditable]'),'COMMENT_REPLY_EDITOR_UNSUPPORTED');
@@ -180,7 +196,7 @@ export function captureCommentReply(input:Input):Frame{
           const editors=scope.querySelectorAll(m.composer);dom.check(editors.length<=1,'COMMENT_REPLY_COMPOSER_CHANGED');
           if(editors[0])dom.check(dom.editorText(editors[0])==='','COMMENT_REPLY_EXISTING_DRAFT');continue;
         }
-        dom.check(cid===e.commentId&&dom.data(p,'level')===m.rootLevel&&dom.data(p,'levelOneCid')===undefined&&
+        dom.check(cid===e.commentId&&dom.data(p,'level')===(e.kind==='REPLY'?2:m.rootLevel)&&dom.data(p,'levelOneCid')===(e.kind==='REPLY'?e.rootCommentId:undefined)&&
           dom.data(dom.data(p,'awemeInfo'),'awemeId')===e.videoId,'COMMENT_REPLY_COMPOSER_CHANGED');bound.push(scope);
       }
       dom.check(bound.length<=1,'COMMENT_REPLY_COMPOSER_CHANGED');return bound[0]??null;
@@ -188,8 +204,8 @@ export function captureCommentReply(input:Input):Frame{
     capture():Frame&{root:Element;editor:HTMLElement;button:HTMLElement}{
       const state=dom.root(),scope=dom.scope(state.root);dom.check(scope,'COMMENT_REPLY_DOM_NOT_READY');
       const p=dom.props(scope!,m.composerFiberDepth);
-      dom.check((scope!.closest(s.commentRows)===state.root||m.portalWorkIds.includes(e.videoId!)&&scope!.closest(s.commentRows)===null)&&dom.data(p,'cid')===e.commentId&&dom.data(p,'level')===m.rootLevel&&
-        dom.data(p,'levelOneCid')===undefined&&dom.data(dom.data(p,'awemeInfo'),'awemeId')===e.videoId,'COMMENT_REPLY_COMPOSER_CHANGED');
+      dom.check((scope!.closest(s.commentRows)===state.root||m.portalWorkIds.includes(e.videoId!)&&scope!.closest(s.commentRows)===null)&&dom.data(p,'cid')===e.commentId&&dom.data(p,'level')===(e.kind==='REPLY'?2:m.rootLevel)&&
+        dom.data(p,'levelOneCid')===(e.kind==='REPLY'?e.rootCommentId:undefined)&&dom.data(dom.data(p,'awemeInfo'),'awemeId')===e.videoId,'COMMENT_REPLY_COMPOSER_CHANGED');
       const editor=dom.one(scope!,m.composer),button=dom.one(scope!,m.send,false);
       dom.check(editor instanceof HTMLElement&&button instanceof HTMLElement&&editor.closest(m.composerScope)===scope&&
         button.closest(m.composerScope)===scope&&!button.contains(editor),'COMMENT_REPLY_COMPOSER_CHANGED');
@@ -197,14 +213,25 @@ export function captureCommentReply(input:Input):Frame{
     },
     frame(state:Frame):Frame{return{context:state.context,proofs:state.proofs,ids:state.ids,editorText:state.editorText,shape:state.shape};},
   };
+  if(input.action==='diagnostic'){
+    const state=dom.root(),scopes=Array.from(document.querySelectorAll(m.composerScope)).filter(dom.visible);
+    const report:ComposerQualification={composerCount:Math.min(10,scopes.length),metadataReady:false,level:'MISSING',cidMatches:false,rootMatches:false,workMatches:false,rowOwned:false};
+    if(scopes.length===1){
+      const scope=scopes[0]!,props=dom.props(scope,m.composerFiberDepth),level=dom.data(props,'level');report.metadataReady=!!props&&typeof props==='object';
+      report.level=level===undefined?'MISSING':level===0||level===1||level===2?level:'OTHER';
+      report.cidMatches=dom.data(props,'cid')===e.commentId;report.rootMatches=dom.data(props,'levelOneCid')===(e.kind==='REPLY'?e.rootCommentId:undefined);
+      report.workMatches=dom.data(dom.data(props,'awemeInfo'),'awemeId')===e.videoId;report.rowOwned=scope.closest(s.commentRows)===state.root;
+    }
+    return{context:[],proofs:[],ids:[],editorText:'',shape:'',qualification:report};
+  }
   if(input.action==='proofs'){const state=dom.root();return dom.frame({...state,editorText:'',shape:''});}
   if(input.action==='expand'){
-    const state=dom.root(),buttons=Array.from(state.root.querySelectorAll('span,button,div')).filter(n=>
-      n.closest(s.commentRows)===state.root&&!n.childElementCount&&dom.visible(n)&&/^展开\d+条回复$/.test(n.textContent??''));
+    const state=dom.root(),buttons=Array.from(state.thread.querySelectorAll('span,button,div')).filter(n=>
+      n.closest(s.commentRows)===state.thread&&!n.childElementCount&&dom.visible(n)&&/^展开\d+条回复$/.test(n.textContent??''));
     dom.check(buttons.length<=1,'COMMENT_REPLY_EXPAND_NOT_UNIQUE');
     const button=buttons[0];
     if(button){
-      const gate={handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root().root===state.root&&button.isConnected);}
+      const gate={handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root().thread===state.thread&&button.isConnected);}
         catch{event.preventDefault();event.stopImmediatePropagation();}}};
       button.addEventListener('click',gate.handle,true);
       try{dom.check(button instanceof HTMLElement);(button as HTMLElement).click();}finally{button.removeEventListener('click',gate.handle,true);}
@@ -221,6 +248,11 @@ export function captureCommentReply(input:Input):Frame{
   if(input.action==='open'){
     const state=dom.root();
     if(!dom.scope(state.root)){
+      if(e.kind==='REPLY'){
+        const scopes=Array.from(document.querySelectorAll(m.composerScope)).filter(dom.visible);dom.check(scopes.length<=10,'COMMENT_REPLY_COMPOSER_CHANGED');
+        for(const scope of scopes){const editors=scope.querySelectorAll(m.composer);dom.check(editors.length<=1,'COMMENT_REPLY_COMPOSER_CHANGED');
+          if(editors[0])dom.check(dom.editorText(editors[0])==='','COMMENT_REPLY_EXISTING_DRAFT');}
+      }
       const action=dom.one(state.root,m.replyAction);dom.check(action.textContent==='回复','COMMENT_REPLY_ACTION_CHANGED');
       const gate={handle(event:Event):void{if(event.currentTarget!==action)return;try{dom.check(dom.root().root===state.root&&action.isConnected);}
         catch{event.preventDefault();event.stopImmediatePropagation();}}};
@@ -294,7 +326,8 @@ export class ObservedCommentReply implements ReplyAdapter{
   private readonly responses:CommentResponses;
   private readonly submission:SubmissionResponse|null;
   private pendingEvent:InboundEvent|null=null;
-  constructor(readonly page:Page,readonly mapping:CommentReplyMapping,private readonly timeoutMs=5000){this.responses=new CommentResponses(page,mapping);
+  constructor(readonly page:Page,readonly mapping:CommentReplyMapping,private readonly timeoutMs=5000,
+    private readonly options:{onQualification?:(report:CommentQualification)=>void}={}){this.responses=new CommentResponses(page,mapping);
     this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;}
   dispose():void{this.responses.dispose();this.submission?.dispose();}
   private async frame(event:InboundEvent,action:Input['action']='snapshot',text:string|null=null,token:string|null=null,
@@ -305,19 +338,27 @@ export class ObservedCommentReply implements ReplyAdapter{
   private snapshot(event:InboundEvent,state:Frame):TargetSnapshot{return{accountId:event.accountId,ownId:this.mapping.observation.self.uid,
     targetKey:targetKey(event),eventBinding:eventBinding(event),composerKey:targetKey(event),contextDigest:digest(state.context),mappingDigest:digest(this.mapping)};}
   async inspect(event:InboundEvent):Promise<TargetSnapshot>{
+    let stage:CommentQualification['stage']='EXPAND',verified=false,code:string|null=null;
+    try{
     this.responses.watch(event);
     this.token=null;const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);
     requireSafe(isStrong(event)&&index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
     if(this.page.url().split('?')[0]!==this.mapping.observation.works[index]!.url.split('?')[0])
       await new ObservedReader(this.page,this.mapping.observation).comments(index);
     await this.frame(event,'expand');
-    await this.frame(event,'open');const deadline=Date.now()+5000;let frame:Frame;
+    stage='OPEN';await this.frame(event,'open');stage='SNAPSHOT';const deadline=Date.now()+5000;let frame:Frame;
     for(;;)try{frame=await this.frame(event);break;}catch(error){
       if(!(error instanceof Error)||!error.message.includes('COMMENT_REPLY_DOM_NOT_READY')||Date.now()>=deadline)throw error;
       await new Promise(resolve=>setTimeout(resolve,50));
     }
     requireSafe(frame.editorText===''||this.prepared?.binding===eventBinding(event)&&this.prepared.text===frame.editorText,'COMMENT_REPLY_EXISTING_DRAFT');
-    return this.snapshot(event,frame);
+    verified=true;return this.snapshot(event,frame);
+    }catch(error){code=error instanceof Error?error.message.match(/^COMMENT_REPLY_[A-Z_]+$/)?.[0]??'COMMENT_REPLY_QUALIFICATION_FAILED':'COMMENT_REPLY_QUALIFICATION_FAILED';throw error;}
+    finally{if(event.kind==='REPLY'&&this.options.onQualification){
+      let fields:ComposerQualification={composerCount:0,metadataReady:false,level:'MISSING',cidMatches:false,rootMatches:false,workMatches:false,rowOwned:false};
+      try{fields=(await this.frame(event,'diagnostic')).qualification??fields;}catch{/* Missing native shape supplies no qualification. */}
+      try{this.options.onQualification({nested:true,stage,verified,code,...fields});}catch{/* Diagnostic callback cannot change qualification. */}
+    }}
   }
   async prepare(event:InboundEvent,text:string):Promise<void>{
     validText(text);requireSafe(!/[\r\n]/.test(text),'COMMENT_REPLY_SINGLE_LINE_ONLY');let before=await this.frame(event);

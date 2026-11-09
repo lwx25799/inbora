@@ -79,7 +79,7 @@ export class CollectionScheduler {
       } catch (cause) {
         error = cause instanceof Blocked ? cause.code : "COLLECTION_FAILED_PRIVATE_DIAGNOSTICS";
         objectDeferred=cause instanceof DeferredObjectRead;
-        cancelled=error==='COLLECTION_CANCELLED'||abort.signal.aborted&&(!(cause instanceof Blocked)||error==='BROWSER_CLOSED');
+        cancelled=error==='COLLECTION_CANCELLED'||abort.signal.aborted&&(!(cause instanceof Blocked)||error==='BROWSER_CLOSED'||error==='OBSERVATION_CANCELLED');
       }
       const now = this.persistence.now();
       if(cancelled){

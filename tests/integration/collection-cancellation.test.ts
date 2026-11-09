@@ -48,9 +48,9 @@ test('repeated explicit cancellation and a named cancelled slice never create a 
   f.advance(15_000);await f.scheduler.tick();expect(calls).toBe(3);expect(f.progress()).toMatchObject({last_success:f.data.now(),last_error:null,failures:0});
 });
 
-test('an unclassified driver rejection after abort remains a cancellation without persisting its private message',async()=>{
+test.each(['DRIVER','OBSERVATION_CANCELLED'])('a cooperative %s rejection after abort remains a cancellation without persisting its private message',async code=>{
   let fail!:(error:Error)=>void;const f=await setup(async()=>new Promise<void>((_resolve,reject)=>{fail=reject;}));
-  const task=f.scheduler.tick();await Promise.resolve();f.scheduler.cancel();fail(Error('PRIVATE_DRIVER_TEXT'));
+  const task=f.scheduler.tick();await Promise.resolve();f.scheduler.cancel();fail(code==='DRIVER'?Error('PRIVATE_DRIVER_TEXT'):new Blocked('OBSERVATION_CANCELLED'));
   await task;expect(f.progress()).toEqual({next_at:f.data.now()+15_000,last_success:null,last_error:null,failures:0,cursor_json:'{}'});
   expect(JSON.stringify(f.scheduler.status())).not.toContain('PRIVATE_DRIVER_TEXT');
 });

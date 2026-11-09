@@ -78,8 +78,10 @@ export class SubmissionResponse{
       if(!this.mapping.works.some(w=>w.id===event.videoId&&this.page.url().split('?')[0]===w.url.split('?')[0]))throw Error('WORK_CHANGED');
       const form=new URLSearchParams(body.toString('utf8'));
       for(const key of ['aweme_id','reply_id','text'])if(form.getAll(key).length!==1)throw Error('FORM_BINDING');
-      if(form.get('aweme_id')!==event.videoId||form.get('reply_id')!==event.commentId||form.get('text')!==text||
-        form.getAll('reply_to_reply_id').length>1||form.has('reply_to_reply_id')&&!['0',event.commentId].includes(form.get('reply_to_reply_id')))
+      const nested=event.kind==='REPLY',root=nested?event.rootCommentId:event.commentId;
+      if(!root||nested&&event.replyToCommentId!==event.commentId||form.get('aweme_id')!==event.videoId||form.get('reply_id')!==root||form.get('text')!==text||
+        (nested?form.getAll('reply_to_reply_id').length!==1||form.get('reply_to_reply_id')!==event.commentId:
+          form.getAll('reply_to_reply_id').length>1||form.has('reply_to_reply_id')&&!['0',event.commentId].includes(form.get('reply_to_reply_id'))))
         throw Error('FORM_BINDING');
     }else{
       if(this.page.url().split('?')[0]!==new URL(this.mapping.entryUrl).href.split('?')[0]||!this.mapping.peers.some(p=>p.uid===event.actorId&&p.conversationId===event.conversationId))throw Error('DM_SCOPE');
@@ -98,10 +100,11 @@ export class SubmissionResponse{
       if(attempt.event.channel==='DIRECT_MESSAGE')id=decodeDmAcknowledgement(body,token.parsed!,this.mapping.self.uid);
       else{
         const data=JSON.parse(body.toString('utf8')),c=data.comment;
-        if(data.status_code!==0||!c||!native(c.cid)||c.reply_id!==attempt.event.commentId||
+        const nested=attempt.event.kind==='REPLY',root=nested?attempt.event.rootCommentId:attempt.event.commentId;
+        if(!root||data.status_code!==0||!c||!native(c.cid)||c.reply_id!==root||
           c.aweme_id!==undefined&&c.aweme_id!==attempt.event.videoId||c.text!==attempt.text||
           c.user?.uid!==this.mapping.self.uid||c.user?.sec_uid!==this.mapping.self.secUid||
-          c.reply_to_reply_id!=='0'||c.status!==7||!Number.isFinite(c.create_time))throw Error('COMMENT_RESPONSE_BINDING');
+          c.reply_to_reply_id!==(nested?attempt.event.commentId:'0')||c.status!==7||!Number.isFinite(c.create_time))throw Error('COMMENT_RESPONSE_BINDING');
         id=c.cid;
       }
       if(token.epoch!==this.epoch||attempt!==this.attempt||this.blocked||this.count!==1)return;

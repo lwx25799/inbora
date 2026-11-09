@@ -189,6 +189,7 @@ export const reasons: Record<string, string> = {
   OBSERVATION_COMMENT_TEXT_DOM_NOT_UNIQUE:'评论正文组件不唯一，已停止当前作品读取',
   OBSERVATION_COMMENT_TOOLTIP_DOM_NOT_UNIQUE:'评论原生编号组件不唯一，已停止当前作品读取',
   COMMENT_TEXT_UNVERIFIED:'评论正文尚未完整核验，已保留待核对；完成核验前不会调用模型或发送',
+  COMMENT_PARENT_UNVERIFIED:'评论所属层级尚未完整核验，消息已保留；后台完成核验前不会自动回复',
   DM_CONTENT_UNVERIFIED:'内容仅供人工查看，AI不会自动处理',
   HUMAN_MEDIA_TEXT_REQUIRED:'请直接输入人工回复，此消息不能使用已有的非人工草稿',
   HUMAN_MEDIA_APPROVAL_REQUIRED:'本次人工回复的后台核验已失效，草稿已保留',

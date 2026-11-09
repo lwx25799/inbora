@@ -14,19 +14,24 @@ interface ImageClipping {
 }
 interface ImageInspection {
   count:number;label:string|null;reason:string|null;sourceFingerprint:string;clip:{x:number;y:number;width:number;height:number}|null;
+  canvas?:{dataUrl:string|null;width:number;height:number};canvasTainted?:boolean;
   obstruction?:{stage:'HIT'|'OVERLAP'|'LIMIT';imagePointerEvents:string;tag:string|null;ancestor:boolean;pointerEvents:string|null;position:string|null;zIndex:string|null;
+    flow?:{sameStack:boolean;reason:'NOT_CANDIDATE'|'STACK'|'PAINT'|'FLOW'|'LIMIT'|'PROVEN';branchPositioned:boolean;branchGrouped:boolean;parentGrouped:boolean};
     hits?:('IMAGE'|'ANCESTOR'|'OTHER'|'NONE')[];borderRadius?:string;clipPath?:boolean;clipping?:ImageClipping;
     paint?:{backgroundTransparent:boolean;backgroundImage:boolean;borderWidths:boolean;borderStyles:boolean;shadow:boolean;outline:boolean;filter:boolean;backdrop:boolean;
       mask:boolean;directText:boolean;pseudo:boolean;childCount:number;insideImage:boolean;coversImage:boolean;beforeImage:boolean;
       scrollbar:boolean;replacementContent:boolean;borderImage:boolean;textShadow:boolean;textDecoration:boolean;appearance:boolean;reflection:boolean;topLayer:boolean;structuralDisplay:boolean}};
 }
-interface InspectionInput {mapping:ObservationMapping;event:InboundEvent;imageIndex:number;peer:DiscoveredPeer}
+interface InspectionInput {mapping:ObservationMapping;event:InboundEvent;imageIndex:number;peer:DiscoveredPeer;mode?:'CANVAS'|'CANVAS_VERIFY'}
 /** Native DOM reads only. URLs remain temporary comparison values and are never returned to the application UI. */
 export async function inspectMessageImage(input:InspectionInput):Promise<ImageInspection> {
   const {mapping:m,event,imageIndex,peer}=input,s=m.selectors;
   let phase:'ENVIRONMENT'|'IDENTITY'|'CHAT'|'HEADER'|'ID'|'PEERSEC'|'TITLE'|'MESSAGE'|'TIME'='ENVIRONMENT';
   const dom={
     check(condition:unknown):void{if(!condition)throw new Error('MESSAGE_PREVIEW_INSPECT_'+phase+'_FAILED');},
+    imageValue(image:HTMLImageElement,key:'currentSrc'|'complete'|'naturalWidth'|'naturalHeight'):unknown{
+      return Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,key)?.get?.call(image);
+    },
     value(object:unknown,key:string):unknown{
       if(!object||typeof object!=='object')return undefined;const descriptor=Object.getOwnPropertyDescriptor(object,key);
       const inherited=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(object)??{},key);
@@ -69,8 +74,38 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
       while(index<foreign.length&&index<target.length&&foreign[index]!.node===target[index]!.node)index++;
       return (foreign[index]?.z??0)<(target[index]?.z??0);
     },
+    ownedVisual(node:Element,image:Element,row:Element):boolean{
+      // The calibrated message selector is the native body, separate from the outer author/direction box.
+      if(image.closest(s.messages)!==row||!row.contains(node)||node.contains(image)||node.closest(s.messages)!==row)return false;
+      const decoration=node.closest('header,nav,blockquote,q,[role="menu"],[role="dialog"],[aria-modal="true"],dialog,[popover],img,video,audio,iframe,object,embed,canvas,input,textarea,select,image,foreignObject');
+      return !decoration||!row.contains(decoration);
+    },
+    flowEvidence(node:Element,image:Element):NonNullable<NonNullable<ImageInspection['obstruction']>['flow']>{
+      const result={sameStack:false,reason:'NOT_CANDIDATE' as NonNullable<NonNullable<ImageInspection['obstruction']>['flow']>['reason'],branchPositioned:false,branchGrouped:false,parentGrouped:false};
+      if(!(node instanceof HTMLDivElement||node instanceof HTMLSpanElement)||!(node.compareDocumentPosition(image)&Node.DOCUMENT_POSITION_FOLLOWING))return result;
+      const foreign=dom.stack(node),target=dom.stack(image);
+      result.sameStack=foreign.length===target.length&&!foreign.some((item,index)=>item.node!==target[index]!.node);
+      const foregroundContext=foreign.length<target.length&&foreign.every((item,index)=>item.node===target[index]!.node)&&
+        target.slice(foreign.length).every(item=>item.z>=0);
+      if(!result.sameStack&&!foregroundContext){result.reason='STACK';return result;}
+      const paint=dom.paint(node,image);
+      if(paint.backgroundImage||paint.borderWidths||paint.borderStyles||paint.shadow||paint.outline||paint.filter||paint.backdrop||paint.mask||
+        paint.directText||paint.pseudo||paint.scrollbar||paint.replacementContent||paint.borderImage||paint.textShadow||paint.textDecoration||
+        paint.appearance||paint.reflection||paint.topLayer){result.reason='PAINT';return result;}
+      let current:Element|null=node,index=0;
+      for(;current&&!current.contains(image)&&index<64;current=current.parentElement,index++){
+        const style=getComputedStyle(current),parent=current.parentElement?getComputedStyle(current.parentElement):null;
+        result.branchPositioned=style.position!=='static';result.branchGrouped=style.cssFloat!=='none'||style.display!=='block';result.parentGrouped=!parent||parent.display!=='block';
+        if(result.branchPositioned||result.branchGrouped||result.parentGrouped){result.reason='FLOW';return result;}
+      }
+      result.reason=current&&current.contains(image)?'PROVEN':'LIMIT';return result;
+    },
+    flowBackground(node:Element,image:Element):boolean{
+      return dom.flowEvidence(node,image).reason==='PROVEN';
+    },
     imageHit(hit:Element|null,image:Element,row:Element,x:number,y:number):boolean{
       if(hit===image)return true;
+      if(hit&&dom.ownedVisual(hit,image,row))return true;
       if(!hit||!row.contains(hit)||!hit.contains(image))return false;
       // A clipped corner or pointer-free image can hit its own wrapper; generated overlays remain unproven.
       for(let node=image.parentElement;node&&row.contains(node);node=node.parentElement)
@@ -139,7 +174,7 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
     obstruction(stage:'HIT'|'OVERLAP'|'LIMIT',node:Element|null,image:Element):NonNullable<ImageInspection['obstruction']>{
       const style=node?getComputedStyle(node):null,paint=node?dom.paint(node,image):undefined;
       return {stage,imagePointerEvents:getComputedStyle(image).pointerEvents,tag:node?.tagName??null,ancestor:!!node?.contains(image),
-        pointerEvents:style?.pointerEvents??null,position:style?.position??null,zIndex:style?.zIndex??null,...(paint?{paint}:{})};
+        pointerEvents:style?.pointerEvents??null,position:style?.position??null,zIndex:style?.zIndex??null,...(paint?{paint}:{}),...(node?{flow:dom.flowEvidence(node,image)}:{})};
     },
   };
   dom.check(location.origin===m.origin&&!/验证码|安全验证/u.test(document.title));
@@ -165,39 +200,60 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
   const images=Array.from(row.querySelectorAll('img')).filter(image=>image.closest(s.messages)===row&&dom.visible(image));
   const image=images[imageIndex];if(!image)return {count:images.length,label:null,reason:'MESSAGE_PREVIEW_NOT_AVAILABLE',sourceFingerprint:'',clip:null};
   const label=image.getAttribute('alt')?.replace(/[\u0000-\u001f\u007f]/gu,'').slice(0,120)||null;
-  const decoration=image.closest('[role="menu"],[aria-hidden="true"],header');
+  const decoration=image.closest('[role="menu"],[aria-hidden="true"],header,nav,blockquote,q,[role="dialog"],[aria-modal="true"],dialog,[popover]');
   if(decoration&&row.contains(decoration))return {count:images.length,label,reason:'MESSAGE_PREVIEW_NOT_CONTENT',sourceFingerprint:'',clip:null};
   // Use the browser's resolved image source, including srcset; never invoke an own page-defined getter.
-  const currentSource=Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,'currentSrc')?.get?.call(image) as string|undefined;
+  const currentSource=dom.imageValue(image,'currentSrc') as string|undefined;
   const source=currentSource||image.getAttribute('src')||'';
   let safe=false;try{const url=new URL(source,location.href);safe=!!source&&!url.username&&!url.password&&
     source.length<=262_144&&(url.protocol==='https:'||m.environment==='fixture'&&url.origin===m.origin&&url.protocol==='http:'||
       /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=\r\n]+$/u.test(source)||url.protocol==='blob:'&&url.origin===m.origin);}
   catch{/* Unsafe source never triggers a fetch. */}
   if(!safe)return {count:images.length,label,reason:'MESSAGE_PREVIEW_UNSAFE_SOURCE',sourceFingerprint:'',clip:null};
-  if(!image.complete||image.naturalWidth<=0||image.naturalHeight<=0)return {count:images.length,label,reason:'MESSAGE_PREVIEW_NOT_LOADED',sourceFingerprint:'',clip:null};
+  const naturalWidth=dom.imageValue(image,'naturalWidth'),naturalHeight=dom.imageValue(image,'naturalHeight');
+  if(dom.imageValue(image,'complete')!==true||typeof naturalWidth!=='number'||typeof naturalHeight!=='number'||naturalWidth<=0||naturalHeight<=0)
+    return {count:images.length,label,reason:'MESSAGE_PREVIEW_NOT_LOADED',sourceFingerprint:'',clip:null};
+  let canvasTainted=false;
+  if(input.mode){
+    const ratio=Math.min(1,512/naturalWidth,512/naturalHeight),width=Math.max(1,Math.round(naturalWidth*ratio)),height=Math.max(1,Math.round(naturalHeight*ratio));
+    try{
+      let dataUrl:string|null=null;
+      if(input.mode==='CANVAS'){
+        // An unmounted canvas copies only the already loaded image; no DOM paint, URL request or CORS bypass.
+        const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;
+        const context=HTMLCanvasElement.prototype.getContext.call(canvas,'2d');dom.check(context instanceof CanvasRenderingContext2D);
+        const draw=CanvasRenderingContext2D.prototype.drawImage as (this:CanvasRenderingContext2D,image:CanvasImageSource,x:number,y:number,width:number,height:number)=>void;
+        draw.call(context as CanvasRenderingContext2D,image,0,0,width,height);
+        dataUrl=HTMLCanvasElement.prototype.toDataURL.call(canvas,'image/png');
+        if(!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/u.test(dataUrl)||dataUrl.length>218_478)throw Error('MESSAGE_PREVIEW_CANVAS_TOO_LARGE');
+      }
+      const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([source,naturalWidth,naturalHeight])));
+      const sourceFingerprint=Array.from(new Uint8Array(hash)).map(byte=>byte.toString(16).padStart(2,'0')).join('');
+      return {count:images.length,label,reason:null,sourceFingerprint,clip:null,canvas:{dataUrl,width,height}};
+    }catch(error){canvasTainted=error instanceof DOMException&&error.name==='SecurityError';}
+  }
   const bounds=image.getBoundingClientRect();
-  if(bounds.width<=0||bounds.height<=0||bounds.width>512||bounds.height>512)return {count:images.length,label,reason:'MESSAGE_PREVIEW_TOO_LARGE',sourceFingerprint:'',clip:null};
-  if(bounds.left<0||bounds.top<0||bounds.right>innerWidth||bounds.bottom>innerHeight)return {count:images.length,label,reason:'MESSAGE_PREVIEW_OUT_OF_VIEW',sourceFingerprint:'',clip:null};
+  if(bounds.width<=0||bounds.height<=0||bounds.width>512||bounds.height>512)return {count:images.length,label,reason:'MESSAGE_PREVIEW_TOO_LARGE',sourceFingerprint:'',clip:null,canvasTainted};
+  if(bounds.left<0||bounds.top<0||bounds.right>innerWidth||bounds.bottom>innerHeight)return {count:images.length,label,reason:'MESSAGE_PREVIEW_OUT_OF_VIEW',sourceFingerprint:'',clip:null,canvasTainted};
   const points=[[0.5,0.5],[0.05,0.05],[0.95,0.05],[0.05,0.95],[0.95,0.95]];
   const hits=points.map(([x,y])=>document.elementFromPoint(bounds.left+bounds.width*x!,bounds.top+bounds.height*y!));
   const hit=hits.find((node,index)=>!dom.imageHit(node,image,row,bounds.left+bounds.width*points[index]![0]!,bounds.top+bounds.height*points[index]![1]!));
-  if(hit!==undefined)return {count:images.length,label,reason:'MESSAGE_PREVIEW_OBSCURED',sourceFingerprint:'',clip:null,obstruction:{...dom.obstruction('HIT',hit,image),
+  if(hit!==undefined)return {count:images.length,label,reason:'MESSAGE_PREVIEW_OBSCURED',sourceFingerprint:'',clip:null,canvasTainted,obstruction:{...dom.obstruction('HIT',hit,image),
     hits:hits.map(node=>node===image?'IMAGE':!node?'NONE':node.contains(image)?'ANCESTOR':'OTHER'),
     borderRadius:getComputedStyle(image).borderRadius.replace(/[^0-9.% /]/gu,'').slice(0,80),clipPath:getComputedStyle(image).clipPath!=='none',
     clipping:dom.clipping(image,row,chat,points,hits)}};
-  // Point hit tests miss narrow/pointer-events:none overlays; ignore only proven lower layers or containers without their own paint.
+  // Point hit tests miss narrow overlays; renderer-owned UI and proven earlier paint stay inside the exact image clip.
   const elements=document.querySelectorAll('*');
   const overlap=Array.from(elements).find(node=>node!==image&&!node.contains(image)&&dom.visible(node)&&
     Array.from(node.getClientRects()).some(rect=>rect.width>0&&rect.height>0&&rect.left<bounds.right&&rect.right>bounds.left&&rect.top<bounds.bottom&&rect.bottom>bounds.top)&&
-    !dom.below(node,image)&&!dom.structural(node,image));
-  if(elements.length>10_000||overlap)return {count:images.length,label,reason:'MESSAGE_PREVIEW_OBSCURED',sourceFingerprint:'',clip:null,
+    !dom.below(node,image)&&!dom.structural(node,image)&&!dom.ownedVisual(node,image,row)&&!dom.flowBackground(node,image));
+  if(elements.length>10_000||overlap)return {count:images.length,label,reason:'MESSAGE_PREVIEW_OBSCURED',sourceFingerprint:'',clip:null,canvasTainted,
     obstruction:dom.obstruction(elements.length>10_000?'LIMIT':'OVERLAP',overlap??null,image)};
   // Transformed image boxes can expose neighbouring text even when their centre is correctly bound.
-  if(getComputedStyle(image).transform!=='none')return {count:images.length,label,reason:'MESSAGE_PREVIEW_TRANSFORMED',sourceFingerprint:'',clip:null};
+  if(getComputedStyle(image).transform!=='none')return {count:images.length,label,reason:'MESSAGE_PREVIEW_TRANSFORMED',sourceFingerprint:'',clip:null,canvasTainted};
   const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(source));
   const sourceFingerprint=Array.from(new Uint8Array(hash)).map(byte=>byte.toString(16).padStart(2,'0')).join('');
-  return {count:images.length,label,reason:null,sourceFingerprint,clip:{x:bounds.left,y:bounds.top,width:bounds.width,height:bounds.height}};
+  return {count:images.length,label,reason:null,sourceFingerprint,clip:{x:bounds.left,y:bounds.top,width:bounds.width,height:bounds.height},canvasTainted};
 }
 
 /** Called only inside the existing account actor while its exact native batch is still mounted. */
@@ -238,27 +294,31 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
     for(let imageIndex=0;imageIndex<4&&!signal.aborted;imageIndex++){
       let before:ImageInspection;
       diagnostics.snapshot.inspected++;
-      try{before=await page.evaluate(inspectMessageImage,{mapping,event,imageIndex,peer});}catch(error){
+      const beforeInput:InspectionInput={mapping,event,imageIndex,peer,mode:'CANVAS'};
+      try{before=await page.evaluate(inspectMessageImage,beforeInput);}catch(error){
         const reason=error instanceof Error?/MESSAGE_PREVIEW_INSPECT_(?:ENVIRONMENT|IDENTITY|CONVERSATION|CHAT|HEADER|ID|PEERSEC|TITLE|MESSAGE|TIME)_FAILED/u.exec(error.message)?.[0]:undefined;
         diagnostics.increment('caught','INSPECT_BEFORE');images.push({label:null,reason:reason??'MESSAGE_PREVIEW_INSPECT_FAILED'});break;
       }
+      if(before.canvasTainted)diagnostics.increment('caught','MESSAGE_PREVIEW_CANVAS_TAINTED');
       if(before.obstruction&&diagnostics.snapshot.imageObstructions.length<8)diagnostics.snapshot.imageObstructions.push(before.obstruction);
       if(imageIndex>=before.count){if(imageIndex===0)images.push({label:null,reason:'MESSAGE_PREVIEW_NOT_AVAILABLE'});break;}
-      if(before.reason||!before.clip){images.push({label:before.label,reason:before.reason??'MESSAGE_PREVIEW_CAPTURE_FAILED'});continue;}
+      if(before.reason||!before.clip&&!before.canvas?.dataUrl){images.push({label:before.label,reason:before.reason??'MESSAGE_PREVIEW_CAPTURE_FAILED'});continue;}
       let stage:'CAPTURE'|'INSPECT_AFTER'|'VERIFY_BINDING'='CAPTURE';
       try{
-        const bytes=await page.screenshot({type:'png',scale:'css',clip:before.clip,timeout:2000,animations:'allow',caret:'initial'});
+        const bytes=before.canvas?.dataUrl?Buffer.from(before.canvas.dataUrl.slice('data:image/png;base64,'.length),'base64'):
+          await page.screenshot({type:'png',scale:'css',clip:before.clip!,timeout:2000,animations:'allow',caret:'initial'});
         if(signal.aborted)return;
         stage='INSPECT_AFTER';
-        const after=await page.evaluate(inspectMessageImage,{mapping,event,imageIndex,peer});
-        if(after.reason||after.sourceFingerprint!==before.sourceFingerprint||after.label!==before.label||JSON.stringify(after.clip)!==JSON.stringify(before.clip)){
+        const after=await page.evaluate(inspectMessageImage,{mapping,event,imageIndex,peer,...(before.canvas?{mode:'CANVAS_VERIFY' as const}:{})});
+        if(after.reason||after.sourceFingerprint!==before.sourceFingerprint||after.label!==before.label||
+          (before.canvas?!after.canvas||after.canvas.width!==before.canvas.width||after.canvas.height!==before.canvas.height:JSON.stringify(after.clip)!==JSON.stringify(before.clip))){
           images.push({label:before.label,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'});break;
         }
         stage='VERIFY_BINDING';
         const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'message-preview-only',dmWindow:true,peer};
         const final=await page.evaluate(captureObserved,input);
         if(!final.events.some(item=>eventBinding(item)===eventBinding(event))){images.push({label:before.label,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'});break;}
-        images.push(bytes.length<=maximumPreviewBytes?{label:before.label,png:bytes,width:Math.round(before.clip.width),height:Math.round(before.clip.height)}:
+        images.push(bytes.length<=maximumPreviewBytes?{label:before.label,png:bytes,width:before.canvas?.width??Math.round(before.clip!.width),height:before.canvas?.height??Math.round(before.clip!.height)}:
           {label:before.label,reason:'MESSAGE_PREVIEW_TOO_LARGE'});
       }catch{diagnostics.increment('caught',stage);images.push({label:before.label,reason:'MESSAGE_PREVIEW_CAPTURE_FAILED'});break;}
     }

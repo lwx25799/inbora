@@ -241,7 +241,7 @@ export class BrowserService {
       }
     }
   }
-  async adapter(e: InboundEvent, store?:EventStore, signal?:AbortSignal,options:{manualMedia?:boolean}={}): Promise<AdapterHandle> {
+  async adapter(e: InboundEvent, store?:EventStore, signal?:AbortSignal,options:{manualMedia?:boolean;readonlySignal?:AbortSignal}={}): Promise<AdapterHandle> {
     await this.open(this.mode,signal);
     const owner = this.owner!;
     const native =
@@ -280,13 +280,22 @@ export class BrowserService {
               expanded as NonNullable<
                 Awaited<ReturnType<typeof loadDmReplyMapping>>
               >,
-              undefined,{...options,onContextChanged:({stage,...counts})=>store?.audit(`DM_CONTEXT_CHANGED_${stage}`,digest(['dm',e.conversationId,e.platformEventId]),counts)},
+              undefined,{...options,onContextChanged:({stage,...counts})=>store?.audit(`DM_CONTEXT_CHANGED_${stage}`,digest(['dm',e.conversationId,e.platformEventId]),counts),
+                onReadbackDiagnostic:({stage,code,...counts})=>{
+                  const safeCode=/^[A-Z_]{1,80}$/u.test(code)?code:'PRIVATE_DIAGNOSTICS';
+                  store?.audit(`DM_READBACK_${stage}_${safeCode}`,digest(['dm',e.conversationId,e.platformEventId]),counts);
+                }},
             )
           : new ObservedCommentReply(
               owner.notification,
               expanded as NonNullable<
                 Awaited<ReturnType<typeof loadCommentReplyMapping>>
               >,
+              undefined,{onQualification:({stage,code,level,...counts})=>{
+                const safeCode=code&&/^COMMENT_REPLY_[A-Z_]+$/u.test(code)?code:'COMPLETE';
+                store?.audit(`COMMENT_NESTED_${stage}_${safeCode}`,digest(['comment',e.videoId,e.commentId]),{
+                  ...counts,level:typeof level==='number'?level:level==='OTHER'?-1:-2});
+              }},
             );
       return { adapter, dispose: () => adapter.dispose() };
     }
@@ -477,7 +486,7 @@ export class BrowserService {
       !!store.db.prepare(`SELECT c.command_id FROM manual_send_commands c JOIN manual_send_inputs h ON h.command_id=c.command_id
         JOIN draft_revisions r ON r.draft_id=? AND r.version=? WHERE c.intent_id=? AND c.event_id=? AND r.origin='HUMAN_TYPED'
         AND NOT EXISTS(SELECT 1 FROM policy_commands p WHERE p.command_id=c.command_id)`).get(draft.id,store.draft(draft.id).version,intent.id,eventId);
-    const handle = await this.adapter(event.payload,store,undefined,{manualMedia});
+    const handle = await this.adapter(event.payload,store,undefined,{manualMedia,...(options.signal?{readonlySignal:options.signal}:{})});
     try {
       const proof = await owner.actor.run(async () => {
         requireSafe(!options.signal?.aborted,'COLLECTION_CANCELLED');

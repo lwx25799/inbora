@@ -291,7 +291,7 @@ test("SQLite collection resumes discovery after restart and includes downtime wo
       return route.fulfill({contentType:'text/html',body:`<a id="self">Self</a><section id="comment-list">${id==='10'?'<div id="empty-comments">No comments</div>':
         `<div class="comment"><a class="author" href="/user/new-commenter-sec">New commenter</a><div class="body">${message}</div><div class="tooltip" id="tooltip_${cid}">Menu</div></div>`}</section><script>${selfScript}
         const row=document.querySelector('.comment');if(row)Object.defineProperty(row,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:{cid:'${cid}',text:'${message}',
-          createTime:${published+1},user:{uid:'400',secUid:'new-commenter-sec'}},awemeInfo:{awemeId:'${id}'},userInfo:{uid:'100'}}}}});</script>`});
+          createTime:${published+1},replyTotal:0,replyId:'0',user:{uid:'400',secUid:'new-commenter-sec'}},level:1,awemeInfo:{awemeId:'${id}'},userInfo:{uid:'100'}}}}});</script>`});
     });
     const mapping=observedMapping(server.origin),signal=new AbortController().signal;
     collector=new InboxCollector(owner,mapping,data,root,'headless');

@@ -6,6 +6,7 @@ import {ClientService} from '../../src/app/service.js';
 import {BrowserService} from '../../src/app/browser-service.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
 import {AutomationStore} from '../../src/storage/automation-store.js';
+import type {ReplyPolicy} from '../../src/app/automation-contracts.js';
 import {database,privateTemp} from '../helpers.js';
 
 test('unlimited model and send choices apply only on explicit policy save and keep accumulated use across reopening settings',async()=>{
@@ -28,17 +29,22 @@ test('unlimited model and send choices apply only on explicit policy save and ke
   try{
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
     await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    expect(await page.getByLabel('自动回复楼中楼评论',{exact:true}).isChecked()).toBe(true);
     expect(await page.getByRole('spinbutton',{name:'本次持续授权的模型次数',exact:true}).inputValue()).toBe('10');
     expect(await page.getByRole('spinbutton',{name:'本次持续授权的发送次数',exact:true}).inputValue()).toBe('10');
     await page.getByLabel('模型次数无上限',{exact:true}).check();await page.getByLabel('发送次数无上限',{exact:true}).check();
     expect(data.active('AUTO_REPLY')!.version).toBe(original.version);expect(data.active('AUTO_REPLY')!.scope.modelLimit).toBe(10);
     expect(store.budget('MODEL')).toMatchObject({used:4,maximum:50});expect(store.budget('SEND')).toMatchObject({used:6,maximum:20});
+    await page.getByLabel('自动回复楼中楼评论',{exact:true}).uncheck();
+    expect((data.active('AUTO_REPLY')!.scope as ReplyPolicy).replyToNestedComments).toBeUndefined();
     await page.getByRole('button',{name:'按此范围启用规则自动回复',exact:true}).click();
     await expect.poll(()=>data.active('AUTO_REPLY')!.scope.modelLimit).toBeNull();expect(data.active('AUTO_REPLY')!.scope).toMatchObject({modelLimit:null,sendLimit:null});
+    expect((data.active('AUTO_REPLY')!.scope as ReplyPolicy).replyToNestedComments).toBe(false);
     expect(store.budgets()).toEqual([{kind:'MODEL',used:4,maximum:null},{kind:'SEND',used:6,maximum:null}]);
     await expect.poll(()=>page.locator('.settings').innerText()).toContain('MODEL 4/无上限');
     await page.getByRole('button',{name:'收件箱',exact:true}).click();await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
     expect(await page.getByLabel('模型次数无上限',{exact:true}).isChecked()).toBe(true);expect(await page.getByLabel('发送次数无上限',{exact:true}).isChecked()).toBe(true);
+    expect(await page.getByLabel('自动回复楼中楼评论',{exact:true}).isChecked()).toBe(false);
     await page.getByLabel('模型次数无上限',{exact:true}).uncheck();await page.getByLabel('发送次数无上限',{exact:true}).uncheck();
     await page.getByRole('spinbutton',{name:'本次持续授权的模型次数',exact:true}).fill('4');
     await page.getByRole('spinbutton',{name:'本次持续授权的发送次数',exact:true}).fill('3');

@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { Page } from 'playwright';
 import type { ObservationMapping } from '../config/site-mapping.js';
 import { eventSchema, requireSafe, type InboundEvent } from '../core/contracts.js';
+import {captureCommentThread,type CommentThreadWindow} from './comment-thread-capture.js';
 
 export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string;activity?:string }
 interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'diagnostic' | 'dmScroll'; index: number;
-  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number; collectionPartial?:boolean }
-type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'|'collectionPartial'>;
+  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; commentStay?:boolean;
+  commentRootId?:string;commentChildOffset?:number;conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number; collectionPartial?:boolean }
+type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'|'collectionPartial'|'navigationUrl'|'commentRootId'|'commentChildOffset'>;
 export interface CollectionReadDiagnostic {
   source:'dm'|'comments';containers:number;visibleContainers:number;rows:number;visibleRows:number;roots:number;windowRoots:number;
   viewportHeight:number;containerTop:number;containerBottom:number;scrollTop:number;chatVisible:boolean;
@@ -14,6 +16,8 @@ export interface CollectionReadDiagnostic {
   back?:{count:number;centerHit?:'SELF'|'DESCENDANT'|'OUTSIDE'|'NONE'|'OFFSCREEN';centerIndex?:number|null;
     nodes?:{index:number;parentIndex:number|null;tag:'DIV'|'BUTTON'|'SPAN'|'A'|'SVG'|'PATH'|'OTHER';visible:boolean;inViewport:boolean;width:number;height:number;
       props:'NONE'|'DATA'|'REJECTED';handlers:{onClick:boolean;onMouseDown:boolean;onPointerDown:boolean;onMouseUp:boolean}}[]};
+  commentChildren?:{rootRows:number;childRows:number;samples:{ownedAuthors:number;visibleProfiles:number;nativeUidPresent:boolean;nativeSecurePresent:boolean;
+    profileMatchesNative:boolean;nativeProfileMatches:number;metadataReadable:boolean;hasRootNative:boolean;levelIs2:boolean;rootMatches:boolean;visibleBodies:number}[]};
   shareStage?:'CHAT_NOT_READY'|'HEADER_NOT_READY'|'CONVERSATION_UNVERIFIED'|'VERIFIED';
   windowRows?:number;contentMissingRows?:number;
   conversationSamples?:{titleCount:number;titleVisible:boolean;titleNonEmpty:boolean;nativeConversationPresent:boolean;securePeerPresent:boolean;metadataReadable:boolean}[];
@@ -31,6 +35,8 @@ export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; 
   scroll?:{top:number;height:number;viewport:number;atEnd:boolean};
   diagnostic?:CollectionReadDiagnostic;
   dmViewport?:{top:number;height:number;viewport:number;minimum:number;maximum:number};
+  commentThreads?:{id:string;total:number|null;expandable:boolean;mounted:number}[];
+  commentThread?:CommentThreadWindow&{beforeTotal:number};
   bindings?: {targetKey: string; uid: string; secUid: string; title: string; conversationId: string | null}[] }
 
 /** Fixed paths in the currently rendered, authorized components; never calls website functions or getters. */
@@ -190,7 +196,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_PAGE_BLOCKED');
   const avatar = dom.one(document,s.selfAvatar,'OBSERVATION_ACCOUNT_AVATAR'), own = dom.fiberProps(avatar,s.selfFiberDepth);
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
-  const events: InboundEvent[] = []; let unsupported = 0, loaded = 0,incomplete=false;
+  const events: InboundEvent[] = [],commentThreads:NonNullable<ObservationBatch['commentThreads']>=[]; let unsupported = 0, loaded = 0,incomplete=false;
   const dmCoverage:NonNullable<ObservationBatch['dmCoverage']>=[];
   const bindings: NonNullable<ObservationBatch['bindings']> = [];
   let dmViewport:ObservationBatch['dmViewport'];
@@ -333,6 +339,21 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       chatInViewport:!comments&&Array.from(document.querySelectorAll(s.chat)).some(probe.inViewport),
       backVisible:!comments&&Array.from(document.querySelectorAll(s.chatBack)).some(dom.visible),
       backInViewport:!comments&&Array.from(document.querySelectorAll(s.chatBack)).some(probe.inViewport),samples:roots.slice(0,6).map(probe.sample)};
+    if(comments){const children=rows.filter(row=>!!row.parentElement?.closest(s.commentRows)&&dom.visible(row));
+      diagnostic.commentChildren={rootRows:roots.length,childRows:children.length,samples:children.slice(0,6).map(row=>{
+        const authors=Array.from(row.querySelectorAll(s.commentAuthor)).filter(n=>n.closest(s.commentRows)===row&&dom.visible(n));
+        const profiles=authors.map(n=>n.getAttribute('href')).filter(Boolean),sample={ownedAuthors:authors.length,visibleProfiles:profiles.length,
+          nativeUidPresent:false,nativeSecurePresent:false,profileMatchesNative:false,nativeProfileMatches:0,metadataReadable:false,hasRootNative:false,levelIs2:false,rootMatches:false,
+          visibleBodies:Array.from(row.querySelectorAll(s.commentText)).filter(n=>n.closest(s.commentRows)===row&&dom.visible(n)).length};
+        try{const props=dom.fiberProps(row,s.commentFiberDepth),native=dom.data(props,'commentInfo'),user=dom.data(native,'user'),uid=dom.data(user,'uid'),secure=dom.data(user,'secUid');
+          const parent=row.parentElement?.closest(s.commentRows),root=parent?dom.data(dom.fiberProps(parent,s.commentFiberDepth),'commentInfo'):null,id=dom.data(root,'cid');
+          sample.nativeUidPresent=typeof uid==='string'&&/^[1-9]\d{0,63}$/.test(uid);sample.nativeSecurePresent=typeof secure==='string'&&/^[A-Za-z0-9_-]{1,300}$/.test(secure);
+          sample.metadataReadable=true;sample.hasRootNative=typeof id==='string';sample.levelIs2=dom.data(props,'level')===2;sample.rootMatches=id!==undefined&&dom.data(native,'replyId')===id;
+          if(typeof secure==='string')for(const href of profiles)try{const url=new URL(href!,location.origin);if(url.origin===m.origin&&url.pathname===`/user/${secure}`)
+            sample.nativeProfileMatches=Math.min(2,sample.nativeProfileMatches+1);}catch{/* Malformed links cannot provide native author evidence. */}
+          sample.profileMatchesNative=profiles.length===1&&sample.nativeProfileMatches===1;
+        }catch{sample.metadataReadable=false;}return sample;
+      })};}
     if(!comments){diagnostic.back=probe.back();diagnostic.conversationSamples=probe.conversations();Object.assign(diagnostic,probe.messages());}
     return {events,evidenceId,unsupported,loaded,diagnostic};
   }
@@ -372,7 +393,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     if(!found)list=document.scrollingElement??list;
     dom.check(list.clientHeight>0,'OBSERVATION_DOM_NOT_READY');
     const before=list.scrollTop,maximum=Math.max(0,list.scrollHeight-list.clientHeight);
-    list.scrollTop=input.commentOffset!==undefined?Math.min(maximum,input.commentOffset):Math.min(maximum,before+Math.max(1,Math.floor(list.clientHeight*0.8)));
+    list.scrollTop=input.commentStay?before:input.commentOffset!==undefined?Math.min(maximum,input.commentOffset):Math.min(maximum,before+Math.max(1,Math.floor(list.clientHeight*0.8)));
     return {events,evidenceId,unsupported,loaded,scroll:{top:list.scrollTop,height:list.scrollHeight,viewport:list.clientHeight,atEnd:list.scrollTop>=maximum-1}};
   }
   if(channel==='conversations') {
@@ -520,27 +541,40 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     const work = m.works[index]; dom.check(work && location.href.split('?')[0] === work.url.split('?')[0], 'OBSERVATION_WORK_CHANGED');
       const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);
       dom.check(lists.length>0,'OBSERVATION_COMMENT_LIST_DOM_NOT_READY');dom.check(lists.length===1,'OBSERVATION_COMMENT_LIST_DOM_NOT_UNIQUE');
-      const list=lists[0]!,rows = Array.from(list.querySelectorAll(s.commentRows)).filter(row=>!input.allCommentAuthors||
+      const list=lists[0]!,mounted=Array.from(list.querySelectorAll(s.commentRows));
+      const thread=input.commentRootId?mounted.find(row=>!row.parentElement?.closest(s.commentRows)&&
+        dom.data(dom.data(dom.fiberProps(row,s.commentFiberDepth),'commentInfo'),'cid')===input.commentRootId):undefined;
+      dom.check(!input.commentRootId||thread,'OBSERVATION_COMMENT_THREAD_CHANGED');
+      const rows=thread?[thread,...Array.from(thread.querySelectorAll(s.commentRows)).filter(n=>n.parentElement?.closest(s.commentRows)===thread&&dom.visible(n))
+        .slice(input.commentChildOffset??0,(input.commentChildOffset??0)+100)]:mounted.filter(row=>!input.allCommentAuthors||
         row.getBoundingClientRect().bottom>Math.max(0,list.getBoundingClientRect().top)&&row.getBoundingClientRect().top<Math.min(innerHeight,list.getBoundingClientRect().bottom)); loaded = rows.length;
-    dom.check(rows.length <= 100,'OBSERVATION_WINDOW_TOO_LARGE');
+    dom.check(rows.length <= (thread?101:100),'OBSERVATION_WINDOW_TOO_LARGE');
     const visibleRoots=rows.filter(row=>dom.visible(row)&&!row.parentElement?.closest(s.commentRows));
     const empty=s.commentEmpty?Array.from(list.querySelectorAll(s.commentEmpty)).filter(dom.visible):[];
     dom.check(visibleRoots.length>0||empty.length===1,'OBSERVATION_COMMENT_ROOTS_DOM_NOT_READY');
     for (const row of rows) {
-      if (!dom.visible(row) || row.parentElement?.closest(s.commentRows)) continue;
+      if (!dom.visible(row)) continue;
+      const parent=row.parentElement?.closest(s.commentRows)??null;
+      if(parent?.parentElement?.closest(s.commentRows))continue;
       const authors = Array.from(row.querySelectorAll(s.commentAuthor)).filter(n=>n.closest(s.commentRows)===row&&dom.visible(n));
+      if(parent&&authors.length===0){unsupported++;continue;}
       const profiles = authors.map(a => a.getAttribute('href')).filter(Boolean).map(href => new URL(href!,location.origin));
       const knownPeer=[...m.peers,...m.commentAuthors??[]].find(p => profiles.some(url => url.origin === m.origin && url.pathname === `/user/${p.secUid}`));
       if(!input.allCommentAuthors&&!knownPeer)continue;
       const props = dom.fiberProps(row,s.commentFiberDepth), comment = dom.data(props,'commentInfo');
-      const author = dom.data(comment,'user'), aweme = dom.data(props,'awemeInfo'), self = dom.data(props,'userInfo');
-      dom.check(dom.data(aweme,'awemeId') === work!.id && dom.data(self,'uid') === m.self.uid,'OBSERVATION_COMMENT_WORK_CONFLICT');
+      const rootProps=parent?dom.fiberProps(parent,s.commentFiberDepth):props,rootComment=dom.data(rootProps,'commentInfo');
+      const author = dom.data(comment,'user'), aweme = dom.data(props,'awemeInfo'), self = dom.data(rootProps,'userInfo');
+      dom.check(dom.data(aweme,'awemeId') === work!.id &&dom.data(dom.data(rootProps,'awemeInfo'),'awemeId')===work!.id&&
+        dom.data(self,'uid') === m.self.uid,'OBSERVATION_COMMENT_WORK_CONFLICT');
       const nativeUid=dom.id(dom.data(author,'uid')),nativeSecure=dom.data(author,'secUid');
+      const matchingAuthors=parent?authors.filter(node=>{const url=new URL(node.getAttribute('href')??'',location.origin);
+        return typeof nativeSecure==='string'&&url.origin===m.origin&&url.pathname===`/user/${nativeSecure}`;}):authors;
+      if(parent)dom.check(matchingAuthors.length===1,'OBSERVATION_COMMENT_AUTHOR_UNVERIFIED');
       const discoveredPeer=input.allCommentAuthors&&nativeUid&&typeof nativeSecure==='string'&&/^[A-Za-z0-9_-]{1,300}$/.test(nativeSecure)&&
-        profiles.length===1&&profiles[0]!.origin===m.origin&&profiles[0]!.pathname===`/user/${nativeSecure}`
-        ? {uid:nativeUid,secUid:nativeSecure,title:authors[0]!.textContent?.trim()??''}:null;
+        (parent?matchingAuthors.length===1:profiles.length===1&&profiles[0]!.origin===m.origin&&profiles[0]!.pathname===`/user/${nativeSecure}`)
+        ? {uid:nativeUid,secUid:nativeSecure,title:matchingAuthors[0]!.textContent?.trim()??''}:null;
       if(input.allCommentAuthors)dom.check(discoveredPeer,'OBSERVATION_COMMENT_AUTHOR_UNVERIFIED');
-      const peer = discoveredPeer??knownPeer;
+      const peer = discoveredPeer??(parent?[...m.peers,...m.commentAuthors??[]].find(p=>p.uid===nativeUid&&p.secUid===nativeSecure):knownPeer);
       if (!peer) continue;
       dom.check(dom.data(author,'uid') === peer.uid && dom.data(author,'secUid') === peer.secUid,'OBSERVATION_COMMENT_AUTHOR_CONFLICT');
       const id = dom.id(dom.data(comment,'cid')), tooltip = dom.ownedOne(row,s.commentTooltip,false,'OBSERVATION_COMMENT_TOOLTIP');
@@ -548,29 +582,42 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       const body=dom.ownedOne(row,s.commentText,true,'OBSERVATION_COMMENT_TEXT'),rendered=dom.commentText(body,row,s.commentRows,m.environment==='fixture');
       const native=dom.data(comment,'text'),verified=rendered!==null&&rendered.length>0&&rendered===native;
       const text=typeof native==='string'&&native.length>0&&native.length<=10_000?native:rendered||'[非文本评论，待核对]';
-      if(!verified)unsupported++;
+      const rootId=parent?dom.id(dom.data(rootComment,'cid')):null;
+      if(!parent&&input.allCommentAuthors){const total=dom.data(comment,'replyTotal'),expandable=Array.from(row.querySelectorAll('span,button,div')).some(n=>
+        n.closest(s.commentRows)===row&&!n.childElementCount&&dom.visible(n)&&/^展开\d+条回复$/.test(n.textContent??''));
+        commentThreads.push({id:id!,total:typeof total==='number'&&Number.isSafeInteger(total)&&total>=0?total:null,expandable,
+          mounted:Array.from(row.querySelectorAll(s.commentRows)).filter(n=>n.parentElement?.closest(s.commentRows)===row&&dom.visible(n)).length});}
+      const parentVerified=!parent||rootId!==null&&/^[1-9]\d{0,63}$/.test(rootId)&&id!==rootId&&/^[1-9]\d{0,63}$/.test(id!)&&
+        dom.data(rootProps,'level')===1&&dom.data(rootComment,'replyId')==='0'&&dom.data(props,'level')===2&&
+        dom.data(comment,'replyId')===rootId&&(dom.data(props,'levelOneCid')===undefined||dom.data(props,'levelOneCid')===rootId);
+      if(!verified||!parentVerified)unsupported++;
       bindings.push({targetKey:`comment:${work!.id}:${id}`,uid:peer.uid,secUid:peer.secUid,title:peer.title,conversationId:null});
       events.push({ accountId:'account_001',channel:'COMMENT_NOTIFICATION',platformEventId:id,actorId:peer.uid,
         actorName:peer.title,text,occurredAt:dom.time(dom.data(comment,'createTime'),true),occurredAtPrecisionMs:1000,videoId:work!.id,commentId:id,
-        conversationId:null,direction:'INCOMING',kind:'COMMENT',evidenceId,discovery:'ALLOWED_WORK',
-        ...(verified?{}:{observationIssue:'COMMENT_TEXT_UNVERIFIED' as const}) });
+        conversationId:null,direction:'INCOMING',kind:parent?'REPLY':'COMMENT',evidenceId,discovery:'ALLOWED_WORK',
+        ...(parent&&parentVerified?{rootCommentId:rootId!,replyToCommentId:id!}:{}),
+        ...(!parentVerified?{observationIssue:'COMMENT_PARENT_UNVERIFIED' as const}:verified?{}:{observationIssue:'COMMENT_TEXT_UNVERIFIED' as const}) });
     }
   }
   dom.check(new Set(events.map(e=>e.platformEventId).filter(Boolean)).size === events.filter(e=>e.platformEventId).length,
     'OBSERVATION_MESSAGE_ID_COLLISION');
   return { events,evidenceId,unsupported,loaded,bindings,...(dmViewport?{dmViewport}:{}),...(incomplete?{incomplete:'CONTENT_NOT_READY' as const}:{}),
+    ...(commentThreads.length?{commentThreads}:{}),
     ...(dmCoverage.length===loaded&&loaded>0&&new Set(dmCoverage.map(row=>row.id)).size===loaded?{dmCoverage}:{}) };
 }
 
 /** AccountActor owns the entire call, including opening and switching the permitted chat. */
 export class ObservedReader {
-  constructor(readonly page: Page, readonly mapping: ObservationMapping,private readonly collectionOrigin?:number) {}
+  constructor(readonly page: Page, readonly mapping: ObservationMapping,private readonly collectionOrigin?:number,private readonly signal?:AbortSignal) {}
   private async capture(channel: CaptureInput['channel'], index: number, selection: CaptureOptions = {}): Promise<ObservationBatch> {
+    requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
     try {
       const result = await this.page.evaluate(captureObserved,{mapping:this.mapping,channel,index,evidenceId:randomUUID(),...selection});
+      requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
       return {...result,events:result.events.map(e=>eventSchema.parse(e))};
     } catch(error) {
       const code=error instanceof Error ? error.message.match(/(?:OBSERVATION|RENDERED)_[A-Z_]+/)?.[0] : null;
+      if(!code||/(?:DOM|METADATA)_NOT_READY|RENDERED_BINDING_UNAVAILABLE/.test(code))requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
       if(code) requireSafe(false,code);throw error;
     }
   }
@@ -608,6 +655,7 @@ export class ObservedReader {
     await new Promise(resolve=>setTimeout(resolve,150));
   }
   async guard(): Promise<void> {
+    requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
     await this.page.waitForFunction(({selector,depth})=>{
       const nodes=document.querySelectorAll(selector); if(nodes.length!==1)return false;
       const keys=Object.getOwnPropertyNames(nodes[0]!).filter(k=>k.startsWith('__reactFiber$'));
@@ -670,13 +718,29 @@ export class ObservedReader {
   }
   async navigate(url:string):Promise<void> {
     await this.guard();
-    const input:CaptureInput={mapping:this.mapping,channel:'navigate',index:0,evidenceId:randomUUID(),navigationUrl:url};
-    await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded'}),this.page.evaluate(captureObserved,input)]);
+    await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded'}),this.capture('navigate',0,{navigationUrl:url})]);
     await this.guard();
   }
-  async comments(index: number, allCommentAuthors=false, offset=0): Promise<ObservationBatch> {
+  async commentThread(event:InboundEvent,offset=0):Promise<ObservationBatch> {
+    const evaluate=async(action:'open'|'position'|'inspect')=>{
+      requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
+      try{const value=await this.page.evaluate(captureCommentThread,{mapping:this.mapping,event,action,offset});
+        requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');return value;
+      }catch(error){const code=error instanceof Error?error.message.match(/(?:OBSERVATION|RENDERED)_[A-Z_]+/)?.[0]:null;
+        if(code)requireSafe(false,code);throw error;}
+    };
+    const before=await evaluate('open');if(before.expanded)await new Promise(resolve=>setTimeout(resolve,150));
+    const positioned=await evaluate('position');await new Promise(resolve=>setTimeout(resolve,150));
+    const index=this.mapping.works.findIndex(work=>work.id===event.videoId);requireSafe(index>=0,'OBSERVATION_WORK_REQUIRED');
+    const batch=await this.capture('comments',index,{allCommentAuthors:true,commentRootId:event.commentId!,commentChildOffset:positioned.offset});
+    const after=await evaluate('inspect');return {...batch,commentThread:{...after,expanded:before.expanded,offset:positioned.offset,nextOffset:positioned.nextOffset,beforeTotal:before.initialTotal}};
+  }
+  async advanceComments(index:number):Promise<NonNullable<ObservationBatch['scroll']>> {
+    const batch=await this.capture('commentScroll',index);requireSafe(batch.scroll,'OBSERVATION_COMMENT_SCROLL_UNAVAILABLE');return batch.scroll;
+  }
+  async comments(index: number, allCommentAuthors=false, offset=0,collection?:{holdScroll:boolean;stay:boolean}): Promise<ObservationBatch> {
     const work = this.mapping.works[index]; requireSafe(work,'OBSERVATION_WORK_REQUIRED');
-    if(allCommentAuthors){if(offset===0||this.page.url().split('?')[0]!==work.url)await this.navigate(work.url);}
+    if(allCommentAuthors){if(offset===0&&!collection?.stay||this.page.url().split('?')[0]!==work.url)await this.navigate(work.url);}
     else await this.page.goto(work.url,{waitUntil:'domcontentloaded'});
     await this.guard();
     if (!await this.page.evaluate(selector=>Array.from(document.querySelectorAll(selector)).some(n=>n.getClientRects().length),this.mapping.selectors.commentList))
@@ -700,7 +764,7 @@ export class ObservedReader {
     }
     const batch=await this.ready('comments',index,{allCommentAuthors});
     if(allCommentAuthors) {
-      const input:CaptureInput={mapping:this.mapping,channel:'commentScroll',index,evidenceId:randomUUID()};
+      const input:CaptureInput={mapping:this.mapping,channel:'commentScroll',index,evidenceId:randomUUID(),...(collection?{commentStay:collection.holdScroll}:{})};
       const next=await this.page.evaluate(captureObserved,input);if(next.scroll)batch.scroll=next.scroll;
     }
     return batch;

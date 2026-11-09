@@ -108,9 +108,10 @@ export class AutomationStore {
   }
   policyMatches(grant: Grant<ReplyPolicy>, e: StoredEvent, status: 'NEW'|'DRAFT'='NEW'): boolean {
     const active = this.active("AUTO_REPLY");
-    if (active?.version !== grant.version || this.state().emergencyStopped || !isStrong(e.payload) ||this.store.dmContentIncomplete(e.payload)||
+    if (active?.version !== grant.version || this.state().emergencyStopped || !isStrong(e.payload) ||
       !(status==='NEW'?['AWAITING_DRAFT']:['AWAITING_APPROVAL','APPROVED']).includes(e.status)) return false;
     const p = active.scope as ReplyPolicy;
+    if(e.payload.channel==='COMMENT_NOTIFICATION'&&e.payload.kind==='REPLY'&&p.replyToNestedComments===false)return false;
     this.requireAccount(p.ownId);
     const client = this.store.db.prepare("SELECT paused,mode FROM client_state WHERE id=1").get() as {paused: number; mode: string};
     if (client.paused || client.mode !== "LIMITED_AUTO") return false;

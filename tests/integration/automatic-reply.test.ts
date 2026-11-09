@@ -262,6 +262,18 @@ test('pre-intent qualification stops after two bounded recoveries without anothe
   }finally{await f.close();}
 });
 
+test('the corrected viewport contract permits only one new qualification after the original two attempts, without resetting them',async()=>{
+  const f=await setup();try{
+    await f.service.dispatch(f.token,{command:'setReplyPolicy',policy:{...policy,channels:['DIRECT_MESSAGE']},confirmed:true});
+    f.browser.beforePrepare=async()=>{throw new Blocked('TARGET_CHANGED_REAPPROVE');};
+    for(let attempt=0;attempt<6;attempt++)await f.service.runAutomaticReply();
+    expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(0);
+    expect(f.store.db.prepare("SELECT count(*) n FROM audit_events WHERE event_type='AUTO_DRAFT_RESUMED'").get()).toEqual({n:2});
+    expect(f.store.db.prepare("SELECT count(*) n FROM audit_events WHERE event_type='AUTO_VIEWPORT_REQUALIFIED'").get()).toEqual({n:1});
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});
+  }finally{await f.close();}
+});
+
 test('an old stale recovery candidate cannot starve another eligible policy draft',async()=>{
   const f=await setup();try{
     f.browser.beforePrepare=async()=>{throw new Blocked('CLIENT_CLOSING');};

@@ -162,7 +162,6 @@ export class EventStore {
   }
   assertModelObservation(event:InboundEvent):void {
     const dm=event.channel==='DIRECT_MESSAGE';
-    requireSafe(!this.dmContentIncomplete(event),'DM_CONTENT_UNVERIFIED');
     // DM quality belongs to one native message; callers separately validate every bounded history item.
     const scope=dm?'e.source_key=?':'e.target_key=?';
     const unresolved=this.db.prepare(`SELECT e.id FROM inbound_events e WHERE e.account_id=? AND e.channel=? AND ${scope}
@@ -171,12 +170,6 @@ export class EventStore {
           (json_extract(c.payload,'$.observationIssue') IS NOT NULL OR json_extract(c.payload,'$.contentType') IS NOT NULL))) LIMIT 1`)
       .get(event.accountId,event.channel,dm?event.platformEventId:targetKey(event));
     requireSafe(!event.observationIssue&&!event.contentType&&!unresolved,dm?'DM_CONTENT_UNVERIFIED':'COMMENT_TEXT_UNVERIFIED');
-  }
-  dmContentIncomplete(event:InboundEvent):boolean {
-    if(event.channel!=='DIRECT_MESSAGE'||!this.db.prepare("SELECT name FROM sqlite_master WHERE name='collection_progress'").get())return false;
-    return !!this.db.prepare(`SELECT 1 FROM collection_progress p,json_each(json_extract(p.cursor_json,'$.deferred')) d
-      WHERE p.source='dm' AND json_extract(d.value,'$.id')=? AND json_extract(d.value,'$.code')='OBSERVATION_DM_CONTENT_DOM_NOT_READY' LIMIT 1`)
-      .get(event.conversationId);
   }
   events(): StoredEvent[] {
     return (this.db.prepare('SELECT id FROM inbound_events ORDER BY rowid').all() as { id: string }[]).map(r => this.event(r.id));

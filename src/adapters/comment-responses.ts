@@ -1,10 +1,10 @@
 import type {Page,Request,Response,Frame} from 'playwright';
 import {z} from 'zod';
 import {nativeCommentReplyPath,type CommentReplyMapping} from '../config/site-mapping.js';
-import type {InboundEvent} from '../core/contracts.js';
+import {eventBinding,type InboundEvent} from '../core/contracts.js';
 
 const id=z.string().regex(/^[1-9]\d{0,63}$/);
-const nativeReply=z.object({cid:id,aweme_id:id,reply_id:id,text:z.string().max(4000),status:z.number().int(),
+const nativeReply=z.object({cid:id,aweme_id:id,reply_id:id,reply_to_reply_id:z.union([id,z.literal('0')]).optional(),text:z.string().max(4000),status:z.number().int(),
   create_time:z.number().finite(),user:z.object({uid:id,sec_uid:z.string().min(1).max(300)})});
 export type NativeCommentReply=z.infer<typeof nativeReply>;
 const batch=z.object({status_code:z.literal(0),comments:z.array(nativeReply).max(100)});
@@ -23,11 +23,11 @@ export class CommentResponses{
     page.on('request',this.request);page.on('response',this.response);page.on('framenavigated',this.navigation);page.once('close',this.dispose);
   }
   watch(event:InboundEvent):void{
-    if(this.event?.commentId!==event.commentId||this.event.videoId!==event.videoId){this.epoch++;this.rows=[];this.clock=null;}
+    if(!this.event||eventBinding(this.event)!==eventBinding(event)){this.epoch++;this.rows=[];this.clock=null;}
     this.event=event;
   }
   snapshot(event:InboundEvent):NativeCommentReply[]{
-    return this.event?.commentId===event.commentId&&this.event.videoId===event.videoId?this.rows:[];
+    return this.event&&eventBinding(this.event)===eventBinding(event)?this.rows:[];
   }
   clockLag():number|null{return this.clock&&Date.now()>=this.clock.sampledAt&&Date.now()-this.clock.sampledAt<=30_000?this.clock.lagMs:null;}
   private navigation=(frame:Frame):void=>{if(frame===this.page.mainFrame()){this.epoch++;this.rows=[];this.clock=null;}};
@@ -38,14 +38,14 @@ export class CommentResponses{
         !o.works.some(w=>w.id===e.videoId&&this.page.url().split('?')[0]===w.url.split('?')[0]))return;
       const clock=url.pathname==='/aweme/v1/web/comment/list/'&&url.searchParams.getAll('aweme_id').length===1&&url.searchParams.get('aweme_id')===e.videoId;
       if(clock){this.clock=null;this.requests.set(request,{epoch:this.epoch,sequence:++this.clockSequence,clock:true});return;}
-      if(url.pathname!==nativeCommentReplyPath||url.searchParams.getAll('comment_id').length!==1||url.searchParams.get('comment_id')!==e.commentId)return;
+      if(url.pathname!==nativeCommentReplyPath||url.searchParams.getAll('comment_id').length!==1||url.searchParams.get('comment_id')!==(e.rootCommentId??e.commentId))return;
       this.rows=[];this.requests.set(request,{epoch:this.epoch,sequence:++this.sequence,clock:false});
     }catch{/* Unknown/service-worker requests are not evidence. */}
   };
   private response=(response:Response):void=>{void this.capture(response);};
   private async capture(response:Response):Promise<void>{
     const request=response.request(),token=this.requests.get(request);
-    if(!token||response.status()!==200||this.active>=4)return;
+    if(!token||response.status()!==200||response.fromServiceWorker()||this.active>=4)return;
     this.requests.delete(request);
     this.active++;
     try{
@@ -64,7 +64,7 @@ export class CommentResponses{
       }
       const result=batch.safeParse(body);if(!result.success||token.sequence!==this.sequence)return;
       const rows=result.data.comments;
-      if(new Set(rows.map(r=>r.cid)).size!==rows.length||rows.some(r=>r.aweme_id!==e.videoId||r.reply_id!==e.commentId))return;
+      if(new Set(rows.map(r=>r.cid)).size!==rows.length||rows.some(r=>r.aweme_id!==e.videoId||r.reply_id!==(e.rootCommentId??e.commentId)))return;
       this.rows=rows;
     }catch{/* Missing/invalid body never supplies a confirmation status. */}
     finally{this.active--;}

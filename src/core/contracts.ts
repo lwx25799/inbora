@@ -20,17 +20,25 @@ export const eventSchema = z.object({
   occurredAtPrecisionMs: z.number().int().min(1).max(86_400_000).optional(),
   videoId: z.string().min(1).nullable(),
   commentId: z.string().min(1).nullable(),
+  rootCommentId: z.string().regex(/^[1-9]\d{0,63}$/).optional(),
+  // The exact inbound child to reply to; not the original message's intermediate parent.
+  replyToCommentId: z.string().regex(/^[1-9]\d{0,63}$/).optional(),
   conversationId: z.string().min(1).nullable(),
   direction: z.enum(['INCOMING', 'OUTGOING', 'SYSTEM', 'UNKNOWN']),
   kind: z.enum(['COMMENT', 'REPLY', 'DM', 'LIKE', 'FOLLOW', 'SYSTEM', 'UNKNOWN']),
   evidenceId: z.string().min(1),
   discovery: z.enum(['NOTIFICATION', 'ALLOWED_WORK', 'DIRECT_MESSAGE']).optional(),
-  observationIssue: z.enum(['COMMENT_TEXT_UNVERIFIED', 'DM_CONTENT_UNVERIFIED']).optional(),
+  observationIssue: z.enum(['COMMENT_TEXT_UNVERIFIED', 'COMMENT_PARENT_UNVERIFIED', 'DM_CONTENT_UNVERIFIED']).optional(),
   contentType: z.enum(['IMAGE', 'VIDEO', 'AUDIO', 'MIXED']).optional(),
 }).refine(event=>!event.contentType||event.channel==='DIRECT_MESSAGE'&&event.observationIssue==='DM_CONTENT_UNVERIFIED',
   {message:'DM_MEDIA_NEEDS_UNVERIFIED_CONTENT',path:['contentType']})
   .refine(event=>event.observationIssue!=='DM_CONTENT_UNVERIFIED'||event.channel==='DIRECT_MESSAGE',
-    {message:'DM_CONTENT_REQUIRES_DIRECT_MESSAGE',path:['observationIssue']});
+    {message:'DM_CONTENT_REQUIRES_DIRECT_MESSAGE',path:['observationIssue']})
+  .refine(event=>event.rootCommentId===undefined&&event.replyToCommentId===undefined||event.channel==='COMMENT_NOTIFICATION'&&
+    event.kind==='REPLY'&&event.rootCommentId!==undefined&&event.rootCommentId!==event.commentId&&event.replyToCommentId===event.commentId,
+    {message:'NESTED_COMMENT_TARGET_REQUIRED',path:['rootCommentId']})
+  .refine(event=>event.observationIssue!=='COMMENT_PARENT_UNVERIFIED'||event.channel==='COMMENT_NOTIFICATION'&&event.kind==='REPLY',
+    {message:'COMMENT_PARENT_REQUIRES_REPLY',path:['observationIssue']});
 export type InboundEvent = z.infer<typeof eventSchema>;
 export function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -45,11 +53,14 @@ export function eventBinding(e: InboundEvent): string {
   // Keep all pre-existing event bindings byte-for-byte compatible.
   if(e.observationIssue)fields.push(e.observationIssue);
   if(e.contentType)fields.push(e.contentType);
+  if(e.rootCommentId!==undefined||e.replyToCommentId!==undefined)fields.push('NESTED_COMMENT',e.rootCommentId??null,e.replyToCommentId??null);
   return digest(fields);
 }
 export function isStrong(e: InboundEvent): boolean {
   return Boolean(!e.observationIssue && !e.contentType && e.platformEventId && e.actorId && (e.channel === 'DIRECT_MESSAGE'
-    ? e.conversationId : e.videoId && e.commentId));
+    ? e.conversationId : e.videoId && e.commentId&&(e.kind!=='REPLY'||e.rootCommentId&&/^[1-9]\d{0,63}$/.test(e.rootCommentId)&&
+      e.rootCommentId!==e.commentId&&e.replyToCommentId===e.commentId&&/^[1-9]\d{0,63}$/.test(e.commentId)&&
+      e.occurredAt&&Number.isFinite(Date.parse(e.occurredAt)))));
 }
 export function isEligible(e: InboundEvent, ownId: string): boolean {
   return e.direction === 'INCOMING' && e.actorId !== ownId &&

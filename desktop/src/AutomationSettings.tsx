@@ -9,6 +9,7 @@ export function AutomationSettings({status,busy,act,update}:{status:Status;busy:
   const saved=state.replyPolicy?.scope;
   const savedModelLimit=saved?saved.modelLimit:state.modelGrant?.scope.modelLimit;
   const [commentReply,setCommentReply]=useState(saved?.channels.includes('COMMENT_NOTIFICATION')??true),[dmReply,setDmReply]=useState(saved?.channels.includes('DIRECT_MESSAGE')??true);
+  const [replyToNestedComments,setReplyToNestedComments]=useState(saved?.replyToNestedComments!==false);
   const [workIds,setWorkIds]=useState(saved?.workIds.join('\n')??''),[conversations,setConversations]=useState(saved?.conversationIds.join('\n')??'');
   const [future,setFuture]=useState(saved?.futureOwnWorks??false),[entireInbox,setEntireInbox]=useState(saved?.entireInbox??false);
   const [excludes,setExcludes]=useState(saved?.excludesAny.join(', ')??'');
@@ -33,6 +34,8 @@ export function AutomationSettings({status,busy,act,update}:{status:Status;busy:
     <hr/><h3>模型与自动回复范围</h3>
     <label className="check"><input type="checkbox" checked={commentReply} onChange={e=>setCommentReply(e.target.checked)}/>评论通道</label>
     <label className="check"><input type="checkbox" checked={dmReply} onChange={e=>setDmReply(e.target.checked)}/>私信通道</label>
+    <label className="check"><input type="checkbox" checked={replyToNestedComments} onChange={e=>setReplyToNestedComments(e.target.checked)}/>自动回复楼中楼评论</label>
+    <p className="hint">默认开启。关闭仅停止楼中楼自动回复，仍继续收取、展示并允许人工回复；一级评论和私信按原策略运行。保存规则后生效。</p>
     <div className="policy-fields"><div><label>本次持续授权的模型次数<input type="number" min="1" disabled={unlimitedModel} value={modelLimit} onChange={e=>setModelLimit(Number(e.target.value))}/></label>
       <label className="check"><input type="checkbox" checked={unlimitedModel} onChange={e=>setUnlimitedModel(e.target.checked)}/>模型次数无上限</label></div>
       <div><label>本次持续授权的发送次数<input type="number" min="1" disabled={unlimitedSend} value={sendLimit} onChange={e=>setSendLimit(Number(e.target.value))}/></label>
@@ -56,7 +59,7 @@ export function AutomationSettings({status,busy,act,update}:{status:Status;busy:
     <p className="hint">一次启用即允许范围内模型调用与发送，并恢复普通发送暂停。人工接管、历史基线、我方消息、未知冻结和范围外任务均不自动外发；全局急停须先显式恢复。失败的模型调用不自动重试。</p>
     {!targetsValid&&<p className="hint">请为每个已选通道填写作品或会话 ID，或选择对应的新视频／收件箱覆盖范围；空范围不会自动回复。</p>}
     <div className="row"><button className="primary" disabled={!ownId||!channels.length||!targetsValid||!instructions.trim()||!!busy} onClick={()=>void act('启用规则自动回复',async()=>{
-      const policy:ReplyPolicy={ownId,channels,model:status.settings.model,modelLimit:unlimitedModel?null:modelLimit,sendLimit:unlimitedSend?null:sendLimit,expiresAt:null,workIds:list(workIds),futureOwnWorks:future,conversationIds:list(conversations),entireInbox,containsAny:[],excludesAny:list(excludes),instructions,startHour,endHour};
+      const policy:ReplyPolicy={ownId,channels,replyToNestedComments,model:status.settings.model,modelLimit:unlimitedModel?null:modelLimit,sendLimit:unlimitedSend?null:sendLimit,expiresAt:null,workIds:list(workIds),futureOwnWorks:future,conversationIds:list(conversations),entireInbox,containsAny:[],excludesAny:list(excludes),instructions,startHour,endHour};
       update(await request<Status>({command:'enableReplyPolicy',policy,confirmed:true}));
     })}>按此范围启用规则自动回复</button>
       <button disabled={!state.replyPolicy||!!busy} onClick={()=>void act('撤销自动回复策略',async()=>update(await request<Status>({command:'setReplyPolicy',policy:null,confirmed:true})))}>撤销自动回复策略</button></div>

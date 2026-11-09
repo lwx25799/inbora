@@ -11,6 +11,7 @@ import {sendParamsSchema,type BrowserDraftChoice,type ClientCommand} from './con
 interface SavedDraftAdapter extends ReplyAdapter {
   readSavedDraft(event:InboundEvent):Promise<{text:string;snapshot:TargetSnapshot}>;
   clearSavedDraft(event:InboundEvent,text:string):Promise<void>;
+  locateSavedDraft?(event:InboundEvent,signal:AbortSignal):Promise<void>;
 }
 function supported(adapter:ReplyAdapter):adapter is SavedDraftAdapter {
   return typeof (adapter as Partial<SavedDraftAdapter>).readSavedDraft==='function'&&typeof (adapter as Partial<SavedDraftAdapter>).clearSavedDraft==='function';
@@ -28,16 +29,24 @@ const frameCodes=new Set(['NATIVE_REPLY_ORIGINAL_CHANGED','NATIVE_REPLY_CONVERSA
   'NATIVE_REPLY_ACCESSOR_UNSUPPORTED','NATIVE_REPLY_FIELD_CONFLICT','NATIVE_REPLY_MESSAGE_CONFLICT','NATIVE_REPLY_DIRECTION_CONFLICT',
   'NATIVE_REPLY_MESSAGE_TEXT_CONFLICT','NATIVE_REPLY_MESSAGE_TEXT_UNVERIFIED','NATIVE_REPLY_MESSAGE_STATE_MISSING',
   'NATIVE_REPLY_MESSAGE_ID_COLLISION','NATIVE_REPLY_WINDOW_UNVERIFIED','NATIVE_REPLY_LATEST_END_MISSING','NATIVE_REPLY_PAGE_BLOCKED',
-  'NATIVE_REPLY_SAVED_DRAFT_SCOPE_REQUIRED','INVALID_TEXT']);
+  'NATIVE_REPLY_SAVED_DRAFT_SCOPE_REQUIRED','OBSERVATION_EXISTING_HUMAN_INPUT','BROWSER_DRAFT_INSPECTION_CANCELLED','INVALID_TEXT']);
+const locatable=new Set(['NATIVE_REPLY_DOM_CHANGED','NATIVE_REPLY_CONVERSATION_CHANGED','NATIVE_REPLY_ORIGINAL_CHANGED',
+  'NATIVE_REPLY_METADATA_MISSING','NATIVE_REPLY_WINDOW_UNVERIFIED','NATIVE_REPLY_LATEST_END_MISSING']);
 interface RecoveryDiagnostic {
-  version:1;at:string;phase:'BROWSER_UNAVAILABLE'|'CANDIDATES'|'FRAME'|'MATCHED'|'NO_MATCH'|'AMBIGUOUS'|'FAILED';
-  candidateLimit:number;candidates:number;dbAccepted:number;frames:number;matches:number;
+  version:1;at:string;phase:'BROWSER_UNAVAILABLE'|'CANDIDATES'|'FRAME'|'LOCATE'|'MATCHED'|'NO_MATCH'|'AMBIGUOUS'|'FAILED';
+  candidateLimit:number;candidates:number;dbAccepted:number;frames:number;locations:number;matches:number;
   dbRejected:Record<string,number>;readFailures:Record<string,number>;
 }
 
 /** Explicit user recovery only. It never creates, retries, approves or submits a send command. */
 export class BrowserDraftRecovery {
   constructor(readonly store:EventStore,readonly authority:WorkbenchAuthority,readonly browser:BrowserService){}
+  hasStartupCandidate():boolean{
+    return !!this.store.db.prepare(`SELECT d.id FROM reply_drafts d JOIN draft_revisions r ON r.draft_id=d.id AND r.version=d.version
+      JOIN manual_send_commands c ON c.event_id=d.event_id JOIN policy_commands p ON p.command_id=c.command_id
+      WHERE r.origin='AUTO_POLICY' AND d.status IN ('DRAFT','APPROVED') AND length(d.text)>0 AND c.status='FAILED_BEFORE_CLICK'
+      AND c.intent_id IS NULL AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=d.event_id) LIMIT 1`).get();
+  }
   private candidate(eventId:string):BrowserDraftChoice{
     const event=this.store.event(eventId),payload=event.payload,draft=this.authority.draftFor(eventId);
     gate(payload.channel==='DIRECT_MESSAGE'&&isStrong(payload)&&!!payload.conversationId,'dbRejected','EVENT_NOT_STRONG_DM');
@@ -72,10 +81,10 @@ export class BrowserDraftRecovery {
       snapshot.targetKey===targetKey(event.payload)&&snapshot.composerKey===snapshot.targetKey,'readFailures','IDENTITY_OR_TARGET_MISMATCH','BROWSER_DRAFT_NOT_MATCHED');
     this.same(choice);
   }
-  async available(token:string):Promise<BrowserDraftChoice|null>{
+  async available(token:string,signal:AbortSignal=AbortSignal.timeout(30_000)):Promise<BrowserDraftChoice|null>{
     this.authority.operator(token,'READ');
     const report:RecoveryDiagnostic={version:1,at:new Date().toISOString(),phase:'BROWSER_UNAVAILABLE',candidateLimit:10,candidates:0,
-      dbAccepted:0,frames:0,matches:0,dbRejected:{},readFailures:{}};
+      dbAccepted:0,frames:0,locations:0,matches:0,dbRejected:{},readFailures:{}};
     try{
     if(this.browser.loginRecovery||!this.browser.status().state.startsWith('OPEN'))return null;
     const epoch=this.browser.ownerEpoch;
@@ -85,22 +94,31 @@ export class BrowserDraftRecovery {
     report.phase='CANDIDATES';report.candidates=candidates.length;
     return await this.browser.actor.run(async()=>{
       requireSafe(this.browser.ownerEpoch===epoch&&!this.browser.loginRecovery&&this.browser.status().state.startsWith('OPEN'),'BROWSER_NOT_RUNNING');
-      let match:BrowserDraftChoice|null=null;
       for(const row of candidates){let dispose=()=>{};
-        try{const choice=this.candidate(row.event_id);report.dbAccepted++;report.phase='FRAME';
+        try{requireSafe(!signal.aborted,'BROWSER_DRAFT_INSPECTION_CANCELLED');const choice=this.candidate(row.event_id);report.dbAccepted++;report.phase='FRAME';
           const handle=await this.browser.adapter(this.store.event(row.event_id).payload,this.store);dispose=handle.dispose;
           requireSafe(this.browser.ownerEpoch===epoch&&!this.browser.loginRecovery,'BROWSER_CLOSED');
-          gate(supported(handle.adapter),'readFailures','ADAPTER_UNSUPPORTED');report.frames++;await this.read(handle.adapter,choice);report.matches++;
-          if(match){report.phase='AMBIGUOUS';return null;}match=choice;
+          gate(supported(handle.adapter),'readFailures','ADAPTER_UNSUPPORTED');report.frames++;
+          try{await this.read(handle.adapter,choice);}
+          catch(error){
+            if(!(error instanceof Blocked)||!locatable.has(error.code)||!handle.adapter.locateSavedDraft||report.locations>=2)throw error;
+            requireSafe(!signal.aborted,'BROWSER_DRAFT_INSPECTION_CANCELLED');report.phase='LOCATE';report.locations++;
+            await handle.adapter.locateSavedDraft(this.store.event(row.event_id).payload,signal);
+            requireSafe(!signal.aborted&&this.browser.ownerEpoch===epoch&&!this.browser.loginRecovery,'BROWSER_DRAFT_INSPECTION_CANCELLED');
+            report.phase='FRAME';report.frames++;await this.read(handle.adapter,choice);
+          }
+          requireSafe(!signal.aborted,'BROWSER_DRAFT_INSPECTION_CANCELLED');report.matches++;report.phase='MATCHED';return choice;
         }catch(error){
           const bucket=error instanceof RecoveryRejection?error.bucket:'readFailures',reason=error instanceof RecoveryRejection?error.reason:
             error instanceof Blocked&&frameCodes.has(error.code)?'READ_FRAME_'+error.code:'READ_FRAME_UNCLASSIFIED';
           report[bucket][reason]=(report[bucket][reason]??0)+1;
           if(!(error instanceof Blocked)||collectionStops.has(error.code)||['BROWSER_NOT_RUNNING','BROWSER_CLOSED','LOGIN_RECOVERY_IN_PROGRESS'].includes(error.code))throw error;
+          if(signal.aborted||error instanceof RecoveryRejection&&['TEXT_MISMATCH','IDENTITY_OR_TARGET_MISMATCH'].includes(error.reason)||
+            error.code==='OBSERVATION_EXISTING_HUMAN_INPUT'){report.phase='NO_MATCH';return null;}
           /* A nonmatching current page cannot authorize another target. */}
         finally{dispose();}
       }
-      report.phase=match?'MATCHED':'NO_MATCH';return match;
+      report.phase='NO_MATCH';return null;
     });
     }catch(error){report.phase='FAILED';throw error;}
     finally{await this.diagnostic(report);}

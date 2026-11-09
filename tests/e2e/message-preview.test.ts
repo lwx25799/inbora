@@ -23,6 +23,8 @@ async function setup(){
   const data=new AutomationStore(store,()=>now);data.initialize(origin);store.bindAccount('100');
   data.configureCollection({ownId:'100',comments:false,inbox:true,commentIntervalMs:30_000,dmIntervalMs:15_000});
   await mountObserved(owner,server.origin);let requests=0;
+  // This suite exercises the screenshot fallback; the native Canvas/CORS route has its own browser regressions.
+  await owner.dm.evaluate(()=>{HTMLCanvasElement.prototype.toDataURL=function(){throw new DOMException('Synthetic screenshot fallback','SecurityError');};});
   await owner.dm.route(server.origin+'/preview.png',route=>{requests++;return route.fulfill({contentType:'image/png',body:png});});
   const mapping=observedMapping(server.origin),signal=new AbortController().signal;let collector=new InboxCollector(owner,mapping,data,root,'headless');
   return {root,server,owner,store,data,mapping,signal,origin,get collector(){return collector;},cache:new MessagePreviewStore(root),requests:()=>requests,
@@ -220,15 +222,106 @@ test.each(['ELEMENT','GENERATED'] as const)('a pointer-free image still rejects 
     await images(f,[{id:'9812',alt:'covered image'}]);
     await f.owner.dm.evaluate(kind=>{
       const image=document.querySelector('.message img') as HTMLElement,row=image.closest('.message') as HTMLElement;
-      image.style.pointerEvents='none';row.style.position='relative';
+      const renderer=document.createElement('span');renderer.style.cssText='display:inline-block;position:relative;width:24px;height:24px';
+      image.replaceWith(renderer);renderer.append(image);image.style.pointerEvents='none';row.style.position='relative';
       if(kind==='GENERATED'){
         const style=document.createElement('style');style.textContent='.message::after{content:"";position:absolute;left:0;top:0;width:24px;height:24px;pointer-events:none;z-index:10;background:red}';document.head.append(style);
-      }else{const overlay=document.createElement('span');overlay.style.cssText='position:absolute;left:0;top:0;width:24px;height:24px;z-index:10;background:red';row.append(overlay);}
+      }else{const bounds=image.getBoundingClientRect(),overlay=document.createElement('span');
+        overlay.style.cssText=`position:fixed;left:${bounds.left}px;top:${bounds.top}px;width:24px;height:24px;z-index:10;background:red`;
+        row.parentElement!.append(overlay);}
     },kind);
     const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
     await saveMessagePreviews(f.owner.dm,f.mapping,batch,f.root,f.signal);
     expect(f.cache.list(batch.events[0]!,'100')[0]).toMatchObject({state:'UNAVAILABLE',reason:'MESSAGE_PREVIEW_OBSCURED'});
     expect(readdirSync(join(f.root,'evidence','message-previews')).filter(name=>name.endsWith('.png'))).toEqual([]);f.noExternal();
+  }finally{await f.close();}
+});
+
+test.each(['SVG','CAPTION'])('an exact message renderer may include its own %s visual control in the bounded preview',async kind=>{
+  const f=await setup();try{
+    await images(f,[{id:'9819',alt:'owned renderer image'}]);
+    await f.owner.dm.evaluate(kind=>{
+      const image=document.querySelector('.message img') as HTMLElement,renderer=document.createElement('span');
+      renderer.style.cssText='display:inline-block;position:relative;width:24px;height:24px';image.replaceWith(renderer);renderer.append(image);
+      const control=kind==='SVG'?document.createElementNS('http://www.w3.org/2000/svg','svg'):document.createElement('span');
+      control.setAttribute('style','position:absolute;inset:0;width:24px;height:24px;font-size:8px;z-index:1');
+      if(kind==='SVG')control.innerHTML='<circle cx="12" cy="12" r="10" fill="gray"/><path d="M9 7L18 12L9 17Z" fill="white"/>';
+      else control.textContent='owned';renderer.append(control);
+    },kind);
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    await saveMessagePreviews(f.owner.dm,f.mapping,batch,f.root,f.signal);
+    expect(f.cache.list(batch.events[0]!,'100')[0]).toMatchObject({state:'READY',width:24,height:24});f.noExternal();
+  }finally{await f.close();}
+});
+
+test.each(['BODY_CONTROL','NESTED_ZERO_CONTEXT'] as const)('the mapped native message body stays previewable with %s',async shape=>{
+  const f=await setup();try{
+    await images(f,[{id:'9829',alt:'bound native body'}]);
+    await f.owner.dm.evaluate(shape=>{
+      const image=document.querySelector('.message img') as HTMLElement,row=image.closest('.message') as HTMLElement;
+      if(shape==='BODY_CONTROL'){
+        const inner=document.createElement('span');inner.style.cssText='display:inline-block;width:24px;height:24px';image.replaceWith(inner);inner.append(image);
+        row.style.position='relative';const control=document.createElement('div');control.style.cssText='position:absolute;left:0;top:0;width:24px;height:24px';
+        control.innerHTML='<svg width="24" height="24"><path fill="blue" d="M0 0H24V24H0Z"/></svg>';row.append(control);
+      }else{
+        const background=document.createElement('div');background.style.cssText='display:block;background:#333;width:24px;height:24px';
+        const child=document.createElement('div');child.style.cssText='display:block;height:1px';background.append(child,child.cloneNode());row.before(background);
+        row.style.cssText='display:block;transform:translateY(0);margin-top:-24px';
+      }
+    },shape);
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    await saveMessagePreviews(f.owner.dm,f.mapping,batch,f.root,f.signal);
+    expect(f.cache.list(batch.events[0]!,'100')[0]).toMatchObject({state:'READY',width:24,height:24});f.noExternal();
+  }finally{await f.close();}
+});
+
+test.each(['OUTER_MESSAGE_BOX','OTHER_MESSAGE','MENU','HEADER','QUOTE','AVATAR','MODAL'] as const)
+  ('renderer ownership never includes %s overlays',async kind=>{
+  const f=await setup();try{
+    await images(f,[{id:'9820',alt:'guarded renderer image'}]);
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    await f.owner.dm.evaluate(kind=>{
+      const image=document.querySelector('.message img') as HTMLElement,row=image.closest('.message')!,renderer=document.createElement('span');
+      renderer.style.cssText='display:inline-block;position:relative;width:24px;height:24px';image.replaceWith(renderer);renderer.append(image);
+      const r=image.getBoundingClientRect(),control=document.createElement(kind==='HEADER'?'header':kind==='QUOTE'?'blockquote':kind==='AVATAR'?'img':'div');
+      control.setAttribute('style',`position:fixed;left:${r.left}px;top:${r.top}px;width:24px;height:24px;margin:0;background:red;z-index:10000`);
+      if(kind==='OTHER_MESSAGE'){control.className='message';Object.defineProperty(control,'__reactProps$fixture',{value:{children:{props:{message:{serverId:'other-native'}}}}});}
+      if(kind==='MENU')control.setAttribute('role','menu');
+      if(kind==='MODAL')control.setAttribute('role','dialog');
+      if(kind==='OUTER_MESSAGE_BOX')row.parentElement!.append(control);else renderer.append(control);
+    },kind);
+    const report=await f.owner.dm.evaluate(inspectMessageImage,{mapping:f.mapping,event:batch.events[0]!,imageIndex:0,peer:f.mapping.peers[0]!});
+    expect(report.reason).toBe('MESSAGE_PREVIEW_OBSCURED');expect(report.clip).toBeNull();f.noExternal();
+  }finally{await f.close();}
+});
+
+test.each([false,true])('a flat ordinary block background is drawn below the image while its positioned descendants remain guarded (%s)',async childOverlay=>{
+  const f=await setup();try{
+    await images(f,[{id:'9821',alt:'image above normal background'}]);
+    await f.owner.dm.evaluate(childOverlay=>{
+      const image=document.querySelector('.message img')!,row=image.closest('.message')!,background=document.createElement('div'),renderer=document.createElement('span');
+      renderer.style.cssText='display:inline-block;width:24px;height:24px';image.replaceWith(renderer);renderer.append(image);
+      background.style.cssText='width:24px;height:24px;margin-bottom:-24px;background:red;pointer-events:none';
+      background.append(document.createElement('span'),document.createElement('span'));row.before(background);
+      if(childOverlay){const r=image.getBoundingClientRect(),child=document.createElement('div');child.style.cssText=`position:fixed;left:${r.left+6}px;top:${r.top+6}px;width:2px;height:2px;background:blue;z-index:10000;pointer-events:none`;background.append(child);}
+    },childOverlay);
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    const report=await f.owner.dm.evaluate(inspectMessageImage,{mapping:f.mapping,event:batch.events[0]!,imageIndex:0,peer:f.mapping.peers[0]!});
+    expect(report.reason).toBe(childOverlay?'MESSAGE_PREVIEW_OBSCURED':null);f.noExternal();
+  }finally{await f.close();}
+});
+
+test('a static background inside a positioned-auto group cannot masquerade as an earlier ordinary-flow layer',async()=>{
+  const f=await setup();try{
+    await images(f,[{id:'9822',alt:'protected positioned-group image'}]);
+    await f.owner.dm.evaluate(()=>{
+      const r=document.querySelector('.message img')!.getBoundingClientRect(),group=document.createElement('div'),background=document.createElement('div');
+      group.style.cssText=`position:absolute;left:${r.left}px;top:${r.top}px;width:24px;height:24px;pointer-events:none`;
+      background.style.cssText='width:24px;height:24px;background:red;pointer-events:none';group.append(background);document.body.prepend(group);
+    });
+    const batch=await new ObservedReader(f.owner.dm,f.mapping).dmWindow(f.mapping.peers[0]!);
+    const report=await f.owner.dm.evaluate(inspectMessageImage,{mapping:f.mapping,event:batch.events[0]!,imageIndex:0,peer:f.mapping.peers[0]!});
+    expect(report.reason).toBe('MESSAGE_PREVIEW_OBSCURED');expect(report.obstruction?.stage).toBe('OVERLAP');f.noExternal();
   }finally{await f.close();}
 });
 

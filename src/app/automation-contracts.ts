@@ -18,6 +18,7 @@ export const modelGrantSchema = z.object({
   expiresAt: z.number().int().positive().nullable(),
 }).strict();
 export const replyPolicySchema = modelGrantSchema.extend({
+  replyToNestedComments:z.boolean().optional(),
   workIds: z.array(z.string().min(1).max(64)).max(1000),
   futureOwnWorks: z.boolean(),
   conversationIds: z.array(z.string().min(1).max(512)).max(1000),

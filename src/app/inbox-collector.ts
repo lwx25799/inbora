@@ -19,10 +19,12 @@ import {MessagePreviewStore} from '../storage/message-previews.js';
 import {dmLatestSchema,dmWindowCoverage,latestDmWindow,overlapsCompletedDm} from './dm-incremental.js';
 import {dmActivitySchema,readDmActivity} from './dm-activity.js';
 import {previewRetryFields,preparePreviewRetry,finishPreviewNormalTurn} from './preview-retry.js';
+import {commentThreadsSchema,collectCommentThread} from './comment-thread-collection.js';
 
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
-  pending: z.array(z.object({aweme_id:z.string(),create_time:z.number().nullable().optional(),author:z.object({uid:z.string(),sec_uid:z.string()})})).default([])});
+  pending: z.array(z.object({aweme_id:z.string(),create_time:z.number().nullable().optional(),author:z.object({uid:z.string(),sec_uid:z.string()})})).default([]),
+  commentThreads:commentThreadsSchema,threadBurst:z.number().int().nonnegative().default(0)});
 const dmSweepSchema=z.object({peer:z.object({uid:z.string().nullable(),secUid:z.string(),conversationId:z.string(),title:z.string()}),
   phase:z.enum(['MIN','MAX','PROBE_MIN','PROBE_MAX']),top:z.number().finite(),height:z.number().nonnegative(),signature:z.string(),
   edge:z.number().int().nonnegative(),legHasNew:z.boolean(),minimumOld:z.boolean().default(false),
@@ -389,7 +391,7 @@ export class InboxCollector {
       for(const work of result.works)this.data.registerWork(work);
       cursor.pending=result.pending.slice(0,2000);cursor.first=result.complete;
       // A missing native link is retained for later review, never a barrier to already proven works.
-      cursor.phase=result.complete?'comments':'discovery';cursor.workIndex=0;
+      cursor.phase=result.complete?'comments':'discovery';cursor.workIndex=0;cursor.threadBurst=0;
     } else {
       const registered=this.data.store.db.prepare("SELECT id,url FROM discovered_works WHERE own_id=? AND state='INCLUDED' ORDER BY published_at,id").all(this.mapping.self.uid) as {id:string;url:string}[];
       const works=Array.from(new Map([...this.mapping.works,...registered].map(w=>[w.id,w])).values());
@@ -397,37 +399,56 @@ export class InboxCollector {
       let done=true;
       if(work) {
         const mapping={...this.mapping,works:[work]};
-        const progress=this.data.store.db.prepare('SELECT scroll_top,last_height,end_observations,next_at FROM work_collection_progress WHERE work_id=?').get(work.id) as {
-          scroll_top:number;last_height:number;end_observations:number;next_at:number;
+        const progress=this.data.store.db.prepare('SELECT scroll_top,last_height,end_observations,next_at,last_read FROM work_collection_progress WHERE work_id=?').get(work.id) as {
+          scroll_top:number;last_height:number;end_observations:number;next_at:number;last_read:number;
         }|undefined;
         if(progress&&progress.next_at>this.data.now()){
+          cursor.threadBurst=0;
           cursor.workIndex++;if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
           this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));return;
         }
-        let batch:ObservationBatch;
-        const reader=new ObservedReader(this.owner.notification,mapping);
-        try{batch=await reader.comments(0,true,progress?.scroll_top??0);}
+        let batch:ObservationBatch|undefined,threadsPending=false,persisted=false;
+        const reader=new ObservedReader(this.owner.notification,mapping,undefined,signal);
+        try{
+          batch=await reader.comments(0,true,progress?.scroll_top??0,{holdScroll:true,stay:cursor.commentThreads.some(item=>item.workId===work.id&&!item.done&&item.retryAt<=this.data.now())});
+          const initial=batch;
+          threadsPending=await collectCommentThread(reader,work.id,batch,cursor.commentThreads,this.data.now(),async part=>{
+            const ids=new Set(part.events.map(event=>event.platformEventId));
+            await this.persist('works',`work:${work.id}`,{...part,events:[...initial.events.filter(event=>!ids.has(event.platformEventId)),...part.events],
+              bindings:[...initial.bindings??[],...part.bindings??[]]},signal);persisted=true;
+          });
+          if(!persisted){await this.persist('works',`work:${work.id}`,batch,signal);persisted=true;}
+        }
         catch(error){
           const code=error instanceof Blocked?error.code:'WORK_READ_FAILED_PRIVATE_DIAGNOSTICS';
           if(!collectionStops.has(code)&&code!=='BROWSER_CLOSED'&&!signal.aborted){
+            if(batch&&!persisted)await this.persist('works',`work:${work.id}`,batch,signal);
+            const next=batch&&/^OBSERVATION_COMMENT_(THREAD|EXPAND)_/.test(code)?await reader.advanceComments(0):undefined;
             cursor.workIndex++;
+            cursor.threadBurst=0;
             if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
             this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
             this.data.store.audit('WORK_READ_DEFERRED',digest(work.id));
             this.data.store.db.prepare(`INSERT INTO work_collection_progress VALUES(?,0,0,0,?,?,?) ON CONFLICT(work_id)
               DO UPDATE SET last_error=excluded.last_error,next_at=excluded.next_at`).run(work.id,0,code,this.data.now()+objectRetryMs);
+            if(next)this.data.store.db.prepare('UPDATE work_collection_progress SET scroll_top=?,last_height=?,end_observations=0 WHERE work_id=?').run(next.top,next.height,work.id);
             await this.diagnose(reader,'works',code,signal,undefined,'THREAD');
             throw new DeferredObjectRead(code);
           }
           throw error;
         }
-        await this.persist('works',`work:${work.id}`,batch,signal);
-        const scroll=batch.scroll!;
-        const end=scroll.atEnd&&(progress?.last_height??scroll.height)===scroll.height?(progress?.end_observations??0)+1:0;
+        const incomplete=cursor.commentThreads.some(item=>item.workId===work.id&&!item.done);
+        const yieldWork=threadsPending&&++cursor.threadBurst>=2;
+        if(!threadsPending||yieldWork)cursor.threadBurst=0;
+        if(yieldWork){cursor.workIndex++;if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}}
+        // Checkpoint the unfinished root and rotation before an advance can fail, cancel or close the browser.
+        this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
+        const scroll=threadsPending&&!yieldWork?batch.scroll!:await reader.advanceComments(0);
+        const end=!threadsPending&&scroll.atEnd&&(progress?.last_height??scroll.height)===scroll.height?(progress?.end_observations??0)+1:0;
         done=end>=2;
-        this.data.store.db.prepare(`INSERT INTO work_collection_progress VALUES(?,?,?,?,?,NULL,0) ON CONFLICT(work_id)
-          DO UPDATE SET scroll_top=excluded.scroll_top,last_height=excluded.last_height,end_observations=excluded.end_observations,last_read=excluded.last_read,last_error=NULL,next_at=0`)
-          .run(work.id,done?0:scroll.top,scroll.height,done?0:end,this.data.now());
+        this.data.store.db.prepare(`INSERT INTO work_collection_progress VALUES(?,?,?,?,?,?,0) ON CONFLICT(work_id)
+          DO UPDATE SET scroll_top=excluded.scroll_top,last_height=excluded.last_height,end_observations=excluded.end_observations,last_read=excluded.last_read,last_error=excluded.last_error,next_at=0`)
+          .run(work.id,done?0:scroll.top,scroll.height,done?0:end,incomplete?progress?.last_read??0:this.data.now(),incomplete?'OBSERVATION_COMMENT_THREAD_INCOMPLETE':null);
       }
       if(done)cursor.workIndex++;
       if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
