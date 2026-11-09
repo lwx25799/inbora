@@ -115,8 +115,31 @@ export function request<T>(
 ): Promise<T> {
   return invoke<T>("client_request", { body });
 }
-export function desktopInfo(): Promise<{ runtime: string; version: string }> {
+export function desktopInfo(): Promise<{ runtime: string; version: string; rememberedRuntime?: string|null }> {
   return invoke("desktop_info");
+}
+export async function restoreDesktop() {
+  let status:Status|null=null,unconnected=false;
+  for(let attempt=0;attempt<20;attempt++){
+    try{status=await request<Status>({command:'getStatus'});break;}
+    catch(error){
+      const code=typeof error==='string'?error:error instanceof Error?error.message:'';
+      if(code==='CONNECT_RUNTIME_FIRST'){unconnected=true;break;}
+      if(code!=='DEV_BACKEND_RESTARTING_READ_STATUS'||attempt===19)break;
+      await new Promise(resolve=>setTimeout(resolve,250));
+    }
+  }
+  const info=await desktopInfo();
+  const previous=info.rememberedRuntime||localStorage.getItem('inbora-runtime');
+  let runtime=status?.runtime??previous??info.runtime,error=!status&&!unconnected?'无法自动连接已保存的运行目录，请检查目录或重新连接。':'';
+  if(!status&&unconnected&&previous){
+    try{
+      status=await request<Status>({command:'connect',runtime:previous,initialize:false,consent:true});
+      runtime=status.runtime;
+    }catch{error='无法自动连接已保存的运行目录，请检查目录或重新连接。';}
+  }
+  if(status)localStorage.setItem('inbora-runtime',status.runtime);
+  return {runtime,version:info.version,status,error};
 }
 export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");

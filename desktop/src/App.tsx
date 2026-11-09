@@ -5,7 +5,7 @@ import { modes, time } from './presentation';
 import { useDevelopmentReconnect } from './useDevelopmentReconnect';
 import {
   request,
-  desktopInfo,
+  restoreDesktop,
   explain,
   reasons,
   type Status,
@@ -90,19 +90,12 @@ export function App() {
   }, [thread?.event.id]);
 
   useEffect(() => {
-    void desktopInfo()
-      .then((i) => {
-        setRuntime(i.runtime);
-        setVersion(i.version);
-      })
-      .catch((e) => setError(explain(e)));
-    const previous=localStorage.getItem('inbora-runtime');
-    void request<Status>({ command: "getStatus" })
-      .then((s) => {
-        setRuntime(s.runtime);
-        setStatus(s);
-      })
-      .catch(() => {if(previous)void request<Status>({command:'connect',runtime:previous,initialize:false,consent:true}).then(s=>{setRuntime(s.runtime);setStatus(s);}).catch(e=>setError(explain(e)));});
+    let ignore=false;
+    void restoreDesktop().then(result=>{
+      if(ignore)return;
+      setRuntime(result.runtime);setVersion(result.version);setStatus(result.status);setError(result.error);
+    }).catch(()=>{if(!ignore)setError('无法读取本地客户端信息，请重新连接。');});
+    return()=>{ignore=true;};
   }, []);
   useEffect(() => {
     if (!connected) return;

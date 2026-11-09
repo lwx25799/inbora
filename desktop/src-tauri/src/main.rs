@@ -82,8 +82,16 @@ fn valid_window(window: &WebviewWindow) -> Result<(), String> {
 fn desktop_info(window: WebviewWindow) -> Result<Value, String> {
     valid_window(&window)?;
     let root = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA_REQUIRED")?;
+    let remembered_runtime = if cfg!(debug_assertions) {
+        std::env::var("INBORA_DEV_RUNTIME")
+            .ok()
+            .filter(|value| std::path::Path::new(value).is_absolute())
+    } else {
+        None
+    };
     Ok(
-        json!({"runtime":std::path::Path::new(&root).join("inbora"),"version":env!("CARGO_PKG_VERSION")}),
+        json!({"runtime":std::path::Path::new(&root).join("inbora"),"version":env!("CARGO_PKG_VERSION"),
+            "rememberedRuntime":remembered_runtime}),
     )
 }
 #[tauri::command]
