@@ -27,13 +27,15 @@ async function setup(){
   const event={accountId:'account_001' as const,channel:'DIRECT_MESSAGE' as const,platformEventId:'6501',actorId:'200',actorName:a.title,
     text:'[图片或表情消息，需人工查看]',occurredAt:new Date(origin+1000).toISOString(),videoId:null,commentId:null,conversationId:a.conversationId,
     direction:'INCOMING' as const,kind:'DM' as const,evidenceId:'synthetic-preview-retry',contentType:'IMAGE' as const,observationIssue:'DM_CONTENT_UNVERIFIED' as const};
-  const calls:string[]=[],mapping=observedMapping('http://127.0.0.1:1'),owner={actor:new AccountActor(),dm:{},notification:new EventEmitter(),version:()=> '123.0.0.0'} as unknown as BrowserProfileOwner;
+  const calls:string[]=[],mapping=observedMapping('http://127.0.0.1:1'),actor=new AccountActor();
+  const activate=vi.fn(async()=>{expect(actor.idle).toBe(false);});
+  const owner={actor,dm:{bringToFront:activate},notification:new EventEmitter(),version:()=> '123.0.0.0'} as unknown as BrowserProfileOwner;
   vi.spyOn(ObservedReader.prototype,'conversations').mockResolvedValue({events:[],loaded:2,unsupported:0,evidenceId:'fixture-list',peers:[a,b],scroll:{top:24,height:100,viewport:60,atEnd:false}});
   vi.spyOn(ObservedReader.prototype,'dmWindow').mockImplementation(async peer=>{calls.push(peer.conversationId);return {events:peer.conversationId===a.conversationId?[event]:[],loaded:peer.conversationId===a.conversationId?1:0,
     unsupported:peer.conversationId===a.conversationId?1:0,evidenceId:'fixture-window'};});
   const capture=vi.spyOn(previews,'saveMessagePreviews').mockResolvedValue();
   let collector=new InboxCollector(owner,mapping,data,root,'headless');cleanup.push(()=>{collector.dispose();store.close();});
-  return {root,store,data,origin,event,a,b,calls,capture,get collector(){return collector;},advance:(ms:number)=>{now+=ms;},
+  return {root,store,data,origin,event,a,b,calls,capture,activate,get collector(){return collector;},advance:(ms:number)=>{now+=ms;},
     restart(){collector.dispose();collector=new InboxCollector(owner,mapping,new AutomationStore(store,()=>now),root,'headless');},
     cursor:()=>JSON.parse((store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string}).cursor_json),
     noExternal(){expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);expect(store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});expect(data.state().startedAt).toBe(origin);}};
@@ -45,6 +47,7 @@ test('new unavailable media is retried without selecting its conversation or lea
   await f.collector.collect('dm',new AbortController().signal);expect(f.calls).toEqual(['conv-a','conv-a']);
   expect(new MessagePreviewStore(f.root).list(f.event,'100')).toMatchObject([{state:'READY'}]);
   await f.collector.collect('dm',new AbortController().signal);expect(f.calls.at(-1)).toBe('conv-b');
+  expect(f.activate).toHaveBeenCalledTimes(3);
   expect(f.store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='MESSAGE_PREVIEW_RETRY'").get()).toEqual({n:1});f.noExternal();
 });
 
