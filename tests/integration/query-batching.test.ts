@@ -33,6 +33,7 @@ test('events decode one ordered query and inbox SQL executions do not grow with 
     const inbox=await service.dispatch(token,{command:'getInbox',channel:'ALL',status:'ALL',page:0}) as {total:number;items:unknown[]};
     expect(inbox).toMatchObject({total:100});expect(inbox.items).toHaveLength(20);expect(reads).toBeLessThanOrEqual(15);
     reads=0;await service.dispatch(token,{command:'getStatus'});expect(reads).toBeLessThan(40);
+    reads=0;service.authority.expireOperators();expect(reads).toBeLessThan(10);
   }finally{await service.close();store.close();}
 });
 

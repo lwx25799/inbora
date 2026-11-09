@@ -10,7 +10,7 @@ import {replyPolicySchema} from './automation-contracts.js';
 
 /** Requalify one generated policy draft that never acquired an intent. No model call or submit replay is available here. */
 export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAuthority,auto:AutomationStore,
-  workflow:HumanReplyWorkflow,grant:Grant<ReplyPolicy>):Promise<boolean>{
+  workflow:HumanReplyWorkflow,grant:Grant<ReplyPolicy>,beforeWork:()=>void=()=>{}):Promise<boolean>{
   if(!auto.allowance(grant.version,'SEND'))return false;
   const jobs=store.db.prepare(`SELECT j.event_id,j.context_version,j.draft_version,j.command_id,j.grant_version,j.reason,g.scope_json FROM automation_jobs j
     JOIN automation_grants g ON g.version=j.grant_version AND g.kind='AUTO_REPLY'
@@ -53,6 +53,7 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
     }
     const attempts=(store.db.prepare("SELECT count(*) n FROM audit_events WHERE event_type='AUTO_DRAFT_RESUMED' AND entity_id=?").get(event.id) as {n:number}).n;
     if(attempts>=2&&!commentRoot&&!rootClose&&event.payload.channel!=='DIRECT_MESSAGE')continue;
+    beforeWork();
     const commandId=randomUUID(),token=authority.issueSession();
     try{
       store.db.transaction(()=>{

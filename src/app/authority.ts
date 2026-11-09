@@ -722,7 +722,11 @@ export class WorkbenchAuthority {
   expireOperators(): void {
     this.store.db
       .transaction(() => {
-        for (const e of this.store.events()) this.invalidate(e);
+        // Expiry invalidates each unsubmitted approval once, rather than re-scanning its target for every historical message.
+        const drafts=this.store.db.prepare(`SELECT d.id FROM reply_drafts d JOIN inbound_events e ON e.id=d.event_id
+          WHERE d.status='APPROVED' AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id) ORDER BY d.rowid`)
+          .all() as {id:string}[];
+        for(const draft of drafts)this.store.invalidateApproval(draft.id);
         this.store.db
           .prepare(
             "UPDATE thread_ownership SET operator_id=NULL,generation=generation+1,lease_expires_at=0 WHERE operator_id IS NOT NULL",

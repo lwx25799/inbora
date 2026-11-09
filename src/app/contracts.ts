@@ -66,6 +66,7 @@ const ordinaryCommandSchema = z.discriminatedUnion("command", [
   z.object({command:z.literal("clearModelKey")}).strict(),
   z.object({command:z.literal('setKeyStorage'),storage:z.enum(['MEMORY','DPAPI','DELETE'])}).strict(),
   z.object({ command: z.literal("getStatus") }).strict(),
+  z.object({ command: z.literal('getDiagnostics') }).strict(),
   z
     .object({
       command: z.literal("getInbox"),

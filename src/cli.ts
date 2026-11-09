@@ -18,7 +18,9 @@ import { Blocked, digest, requireSafe, targetKey, type ReplyAdapter } from './co
 import { SendCoordinator } from './core/send-coordinator.js';
 import { ManualCommentRetry } from './core/manual-comment-retry.js';
 import { diagnostic } from './observability/audit.js';
-import { caseIds, pruneEvidence, recordEvidence } from './observability/evidence.js';
+import { caseIds, recordEvidence } from './observability/evidence.js';
+import {readDiagnostics} from './app/diagnostics.js';
+import {EvidenceMaintenance} from './app/evidence-maintenance.js';
 import { ClientService } from './app/service.js';
 import { BrowserService } from './app/browser-service.js';
 import { randomUUID } from 'node:crypto';
@@ -30,6 +32,7 @@ const help = `inbora ${manifest.version} · 单账号双通道内核 / 自动化
 pnpm inbora <command> [id] [options]
   init                         初始化私有运行目录（只执行一次）
   status                       脱敏任务状态、预算和未知态统计
+  diagnostics                  只读累计模型用量、耗时及当前阻塞统计
   login --real-account --private-access --headed
   install-mapping --file PATH --real-account --private-access
   observe notifications|dm|works --real-account --private-access
@@ -47,7 +50,7 @@ pnpm inbora <command> [id] [options]
   compare-modes                历史模式比较已停用，保留既有证据
   real-test --case ID --real-account --private-access
   authorize-model --endpoint HTTPS_URL --model NAME
-  prune-evidence               按本机配置保留期清理脱敏证据
+  prune-evidence [--dry-run]    保护持久引用，报告或分批清理过期证据元数据
 
 通用选项：--runtime PATH（默认 %LOCALAPPDATA%\\inbora），普通操作默认 --headless；--headed 仅供 login 登录或验证码恢复。
 默认 test:e2e 只访问本地合成页面。真实网页需本次显式声明访问权限。
@@ -132,13 +135,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     headed: { type: 'boolean' }, headless: { type: 'boolean' },
     'real-account': { type: 'boolean' }, 'private-access': { type: 'boolean' },
     file: { type: 'string' }, 'real-model': { type: 'boolean' }, endpoint: { type: 'string' }, model: { type: 'string' },
-    case: { type: 'string' },
+    case: { type: 'string' },'dry-run':{type:'boolean'},
   } });
   if (values.help || positionals.length === 0) { stdout.write(`${help}\n`); return; }
   requireSafe(!(values.headed && values.headless), 'CONFLICTING_BROWSER_MODE');
   const command = positionals[0]!; const id = positionals[1];
   const known = ['init','status','login','install-mapping','observe','draft','show','edit','approve','reject','send-once','calibrate-client','retry-comment-once','verify-comment',
-    'pause','resume','review-uncertain','compare-modes','real-test','authorize-model','prune-evidence'];
+    'pause','resume','review-uncertain','compare-modes','real-test','authorize-model','prune-evidence','diagnostics'];
   requireSafe(known.includes(command), 'UNKNOWN_COMMAND');
   requireSafe(!values.headed||command==='login','HEADED_ONLY_FOR_LOGIN');
   requireSafe(command!=='compare-modes','BROWSER_MODE_COMPARISON_DISABLED');
@@ -162,8 +165,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === 'init') {
       await initRuntime(root); store = new EventStore(join(root, 'poc.sqlite'), true); print({ initialized: true }); return;
     }
-    const config = await loadRuntime(root); store = new EventStore(join(root, 'poc.sqlite')); store.recover();
+    const config = await loadRuntime(root); store = new EventStore(join(root, 'poc.sqlite'));
+    if(!['diagnostics','prune-evidence'].includes(command))store.recover();
     if (command === 'status') { print(store.stats()); return; }
+    if(command==='diagnostics'){print(readDiagnostics(store));return;}
     if (command === 'install-mapping') {
       realAccess(); requireSafe(values.file, 'FILE_REQUIRED');
       const raw = JSON.parse(await readFile(values.file,'utf8')) as unknown;
@@ -201,7 +206,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       config.modelGrant = { endpoint: url.href, model: values.model, approvedAt: new Date().toISOString() };
       await writeFile(join(root, 'runtime.json'), JSON.stringify(config, null, 2), { mode: 0o600 }); print({ authorized: true }); return;
     }
-    if (command === 'prune-evidence') { print({ deleted: await pruneEvidence(join(root, 'evidence'), config.evidenceRetentionDays) }); return; }
+    if(command==='prune-evidence'){
+      const maintenance=new EvidenceMaintenance(store,root);
+      try{print(await (values['dry-run']?maintenance.report():maintenance.prune()));}finally{await maintenance.close();}
+      return;
+    }
     if (command === 'review-uncertain') {
       print(store.uncertain().map(i => ({ intentId: i.id, eventId: i.event_id, targetDigest: digest(i.target_key), status: i.status }))); return;
     }

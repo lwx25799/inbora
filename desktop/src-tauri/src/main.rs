@@ -116,6 +116,7 @@ async fn client_request(
         "connect",
         "disconnect",
         "getStatus",
+        "getDiagnostics",
         "getInbox",
         "getThread",
         "getMessagePreview",

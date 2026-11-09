@@ -10,5 +10,8 @@ test('evidence enforces redacted metadata and retention touches only owned valid
   await expect(recordEvidence(dir,{...input,diagnostics:['private message body']})).rejects.toThrow();
   const id=await recordEvidence(dir,input);const path=join(dir,`${id}.json`);const evidence=JSON.parse(await readFile(path,'utf8'));
   evidence.time='2020-01-01T00:00:00Z';await writeFile(path,JSON.stringify(evidence));await writeFile(join(dir,'keep.txt'),'user-owned');
-  expect(await pruneEvidence(dir,14)).toBe(1);expect(await readFile(join(dir,'keep.txt'),'utf8')).toBe('user-owned');
+  expect(await pruneEvidence(dir,14)).toBe(0);
+  expect(await pruneEvidence(dir,14,{protection:{ids:new Set([id]),complete:true,unknownReferences:0}})).toBe(0);
+  expect(await pruneEvidence(dir,14,{protection:{ids:new Set(),complete:true,unknownReferences:0}})).toBe(1);
+  expect(await readFile(join(dir,'keep.txt'),'utf8')).toBe('user-owned');
 });
