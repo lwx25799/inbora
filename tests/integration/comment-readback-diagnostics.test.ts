@@ -13,7 +13,7 @@ const event=candidate({channel:'COMMENT_NOTIFICATION',kind:'REPLY',platformEvent
 function fixture(proofs:unknown[]=[],submission=false,timeout=20,throwCallback=false){
   const page=new EventEmitter() as EventEmitter&{mainFrame:()=>unknown;url:()=>string;evaluate:ReturnType<typeof vi.fn>},frame={};
   page.mainFrame=()=>frame;page.url=()=> 'http://127.0.0.1:1/video/10';
-  page.evaluate=vi.fn(async()=>({context:[],proofs,ids:[],editorText:'',shape:'',readbackCounts:{visibleChildren:2,strongChildren:2,ownChildren:1,proofs:proofs.length}}));
+  page.evaluate=vi.fn(async()=>({rootCount:1,context:[],proofs,ids:[],editorText:'',shape:'',readbackCounts:{visibleChildren:2,strongChildren:2,ownChildren:1,proofs:proofs.length}}));
   const reports:CommentReadbackDiagnostic[]=[];
   const mapping={...commentReplyMapping('http://127.0.0.1:1'),submissionReceipts:submission};
   vi.spyOn(ObservedReader.prototype,'comments').mockResolvedValue({events:[],loaded:0,unsupported:0,evidenceId:'fixture'});
@@ -48,7 +48,8 @@ test('stable complete proofs are unchanged even when the diagnostic callback rej
 
 test('a context guard still throws its original error and only a fixed diagnostic enum is recorded',async()=>{
   const f=fixture();try{
-    f.page.evaluate.mockResolvedValueOnce({context:[],proofs:[],ids:[],editorText:'',shape:''})
+    f.page.evaluate.mockResolvedValueOnce({rootCount:1,context:[],proofs:[],ids:[],editorText:'',shape:''})
+      .mockResolvedValueOnce({context:[],proofs:[],ids:[],editorText:'',shape:''})
       .mockRejectedValueOnce(Error('COMMENT_REPLY_CONTEXT_UNVERIFIED'));
     await expect(f.adapter.verifyExisting(event,'PRIVATE_APPROVED_BODY',new Date().toISOString())).rejects.toThrow('COMMENT_REPLY_CONTEXT_UNVERIFIED');
     expect(f.reports.at(-1)).toMatchObject({stage:'VERIFY_EXISTING',reason:'GUARD_ERROR',guardCode:'COMMENT_REPLY_CONTEXT_UNVERIFIED'});
@@ -62,7 +63,7 @@ test.each(['ACCEPTED','SCHEMA','ROOT','SERVICE_WORKER'] as const)('only already 
     const request={method:()=> 'GET',frame:()=>f.frame,url:()=> 'http://127.0.0.1:1/aweme/v1/web/comment/list/reply/?comment_id=11'};
     const row={cid:'901',aweme_id:'10',reply_id:mode==='ROOT'?'12':'11',reply_to_reply_id:'21',text:'PRIVATE_RESPONSE_BODY',status:1,create_time:Date.now()/1000,user:{uid:'100',sec_uid:'PRIVATE_SEC'}};
     f.page.emit('request',request);f.page.emit('response',{request:()=>request,status:()=>200,fromServiceWorker:()=>mode==='SERVICE_WORKER',headers:()=>({}),
-      text:async()=>JSON.stringify({status_code:0,comments:[mode==='SCHEMA'?{...row,cid:null}:row]})});
+      body:async()=>Buffer.from(JSON.stringify({status_code:0,comments:[mode==='SCHEMA'?{...row,cid:null}:row]}))});
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(responses.diagnostics()).toMatchObject({requests:1,responses:1,accepted:mode==='ACCEPTED'?1:0,rows:mode==='ACCEPTED'?1:0,stage:mode});
     expect(JSON.stringify(responses.diagnostics())).not.toMatch(/PRIVATE_|901|reply|http|\/video\//i);

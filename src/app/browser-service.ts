@@ -31,6 +31,7 @@ export interface AdapterHandle {
   dispose(): void;
 }
 export class BrowserService {
+  isIdle():boolean {return !this.owner||this.owner.actor.idle;}
   private owner: BrowserProfileOwner | undefined;
   private mode: "headed" | "headless" = "headless";
   private currentIdentity = new Map<Channel, CapabilityIdentity>();

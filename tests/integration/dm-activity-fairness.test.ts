@@ -21,7 +21,7 @@ async function setup(){
   data.configureCollection({ownId:'100',comments:false,inbox:true,commentIntervalMs:30_000,dmIntervalMs:30_000});
   const a:DiscoveredPeer={uid:'200',secUid:'peer-sec',conversationId:'conv-a',title:'Fixture A'},b:DiscoveredPeer={uid:'201',secUid:'peer-b',conversationId:'conv-b',title:'Fixture B'};
   const calls:string[]=[],mapping=observedMapping('http://127.0.0.1:1');
-  const owner={actor:new AccountActor(),dm:{},notification:new EventEmitter(),version:()=> '123.0.0.0'} as unknown as BrowserProfileOwner;
+  const owner={actor:new AccountActor(),dm:{bringToFront:async()=>{}},notification:new EventEmitter(),version:()=> '123.0.0.0'} as unknown as BrowserProfileOwner;
   const batch=(peer:DiscoveredPeer):ObservationBatch=>({loaded:1,unsupported:0,evidenceId:'synthetic-activity',events:[{
     accountId:'account_001',channel:'DIRECT_MESSAGE',platformEventId:peer===a?'6301':'6302',actorId:peer.uid!,actorName:peer.title,text:'synthetic full text',
     occurredAt:new Date(origin+1000).toISOString(),videoId:null,commentId:null,conversationId:peer.conversationId,direction:'INCOMING',kind:'DM',evidenceId:'synthetic-activity'}],

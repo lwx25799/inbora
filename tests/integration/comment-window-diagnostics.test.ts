@@ -57,7 +57,7 @@ test('the current normal root-list response reaches the same collector success s
   store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify({phase:'comments'}));
   const mapping=observedMapping('http://127.0.0.1:1'),frame={},page=new EventEmitter() as EventEmitter&{url:()=>string;mainFrame:()=>unknown};
   page.url=()=>mapping.works[0]!.url;page.mainFrame=()=>frame;
-  const owner={notification:page,actor:new AccountActor(),version:()=> '1.2.3.4'} as unknown as BrowserProfileOwner;
+  const owner={notification:Object.assign(page,{bringToFront:async()=>{}}),actor:new AccountActor(),version:()=> '1.2.3.4'} as unknown as BrowserProfileOwner;
   const event=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',platformEventId:'21',videoId:'10',commentId:'21',conversationId:null,
     actorId:'200',occurredAt:new Date(now-10*60_000).toISOString()});
   const comments=vi.spyOn(ObservedReader.prototype,'comments').mockImplementation(async()=>{
@@ -69,11 +69,12 @@ test('the current normal root-list response reaches the same collector success s
   });
   const advance=vi.spyOn(ObservedReader.prototype,'advanceComments').mockResolvedValue({top:0,height:100,viewport:100,atEnd:true});
   const collector=new InboxCollector(owner,mapping,data,root,'headless');
+  const passiveRequestListeners=page.listenerCount('request');
   try{
     await collector.collect('works',new AbortController().signal);
     const raw=await readFile(join(root,'evidence','work-comment-window-latest.json'),'utf8'),report=JSON.parse(raw);
     expect(report.windows[0]).toMatchObject({eventCount:1,responseSummary:{count:2,total:100,hasMore:true,cursor:2,cursorAdvances:true,ownCount:1,fresh30m:2,newestNonOwnAgeMs:600000}});
-    expect(raw).not.toMatch(/PRIVATE_|"21"|"22"|http:|aweme_id/u);expect(page.listenerCount('request')).toBe(0);
+    expect(raw).not.toMatch(/PRIVATE_|"21"|"22"|http:|aweme_id/u);expect(page.listenerCount('request')-passiveRequestListeners).toBe(0);
     expect(store.budgets().map(b=>b.used)).toEqual([0,0]);expect(store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});
-  }finally{collector.dispose();comments.mockRestore();advance.mockRestore();store.close();}
+  }finally{collector.dispose();expect(page.listenerCount('request')).toBe(0);comments.mockRestore();advance.mockRestore();store.close();}
 });

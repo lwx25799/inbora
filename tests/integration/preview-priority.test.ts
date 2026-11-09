@@ -1,5 +1,6 @@
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
+import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
 import {ClientService} from '../../src/app/service.js';
 import {BrowserService} from '../../src/app/browser-service.js';
@@ -42,7 +43,7 @@ test.each([true,false])('fixed read diagnostic keeps its report inside a regular
   const data=new AutomationStore(store);store.bindAccount('100');
   data.configureCollection({ownId:'100',comments:false,inbox:true,commentIntervalMs:30000,dmIntervalMs:15000});
   if(junction)await symlink(other,join(root,'evidence'),'junction');
-  const mapping=observedMapping('http://127.0.0.1:12345'),owner={notification:{on(){},off(){}}} as unknown as BrowserProfileOwner;
+  const mapping=observedMapping('http://127.0.0.1:12345'),owner={notification:new EventEmitter()} as unknown as BrowserProfileOwner;
   const collector=new InboxCollector(owner,mapping,data,root,'headless');
   const reader={diagnostic:async()=>({source:'dm',messageSamples:[]})} as unknown as ObservedReader;
   try{

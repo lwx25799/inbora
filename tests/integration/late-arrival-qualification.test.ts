@@ -1,5 +1,6 @@
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
+import {EventEmitter} from 'node:events';
 import {eventBinding,targetKey} from '../../src/core/contracts.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
 import {migrateAutomation} from '../../src/storage/automation-migration.js';
@@ -30,7 +31,7 @@ async function setup(){
 
 test('the real collector persistence path promotes two fresh exact observations and keeps legacy observe unchanged',async()=>{
   const f=await setup(),mapping=observedMapping('http://127.0.0.1:1');mapping.self={uid:'own-1',secUid:'own-sec'};
-  const owner={notification:{on(){},off(){}},version:()=> '1.2.3.4'} as unknown as BrowserProfileOwner;
+  const owner={notification:new EventEmitter(),version:()=> '1.2.3.4'} as unknown as BrowserProfileOwner;
   const collector=new InboxCollector(owner,mapping,f.data,f.root,'headless');
   const persist=collector as unknown as {persist(source:'works',scope:string,batch:ObservationBatch,signal:AbortSignal):Promise<void>};
   const batch:ObservationBatch={events:[f.event],evidenceId:'synthetic',loaded:1,unsupported:0,

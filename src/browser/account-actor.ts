@@ -1,12 +1,17 @@
+import {runtimePerformance} from '../observability/runtime-performance.js';
+
 /** All page mutations and the entire send/receipt sequence share one queue. */
 export class AccountActor {
   private interactive: (() => Promise<void>)[] = [];
   private background: (() => Promise<void>)[] = [];
   private draining = false;
   private interactiveTurns = 0;
+  get idle():boolean {return !this.draining&&!this.interactive.length&&!this.background.length;}
   run<T>(operation: () => Promise<T>, priority: "interactive" | "background" = "interactive"): Promise<T> {
+    const waited=runtimePerformance.start('QUEUE_WAIT');
     const result = new Promise<T>((resolve, reject) => {
       this[priority].push(async () => {
+        waited();
         try { resolve(await operation()); } catch (error) { reject(error); }
       });
     });

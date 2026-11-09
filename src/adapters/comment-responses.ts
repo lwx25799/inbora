@@ -3,6 +3,8 @@ import {z} from 'zod';
 import {nativeCommentReplyPath,type CommentReplyMapping} from '../config/site-mapping.js';
 import {eventBinding,type InboundEvent} from '../core/contracts.js';
 import type {CommentResponseStats} from './comment-readback-diagnostics.js';
+import {readNormalJsonResponse} from './normal-response-reader.js';
+import {runtimePerformance} from '../observability/runtime-performance.js';
 
 const id=z.string().regex(/^[1-9]\d{0,63}$/);
 const nativeReply=z.object({cid:id,aweme_id:id,reply_id:id,reply_to_reply_id:z.union([id,z.literal('0')]).optional(),text:z.string().max(4000),status:z.number().int(),
@@ -58,9 +60,9 @@ export class CommentResponses{
     this.requests.delete(request);
     this.active++;
     try{
-      const length=Number(response.headers()['content-length']);if(Number.isFinite(length)&&length>1_000_000){if(!token.clock)this.stage('SIZE');return;}
-      const raw=await response.text();if(raw.length>1_000_000){if(!token.clock)this.stage('SIZE');return;}
-      const body:unknown=JSON.parse(raw),e=this.event;
+      const read=await readNormalJsonResponse(response,1_000_000);
+      if(!read.ok){if(!token.clock)this.stage(read.reason==='HTTP'||read.reason==='SERVICE_WORKER'||read.reason==='SIZE'?read.reason:'JSON');return;}
+      const body=read.value,e=this.event;
       if(!e||token.epoch!==this.epoch){if(!token.clock)this.stage('STALE');return;}
       const work=this.mapping.observation.works.find(w=>w.id===e.videoId);
       if(!work||this.page.url().split('?')[0]!==work.url.split('?')[0]){if(!token.clock)this.stage('TARGET');return;}
@@ -71,12 +73,15 @@ export class CommentResponses{
         if(Math.floor(server/1000)*1000===header&&lag>=0&&lag<=5000)this.clock={sampledAt:at,lagMs:lag};
         return;
       }
-      const result=batch.safeParse(body);if(!result.success){this.stage('SCHEMA');return;}
-      if(token.sequence!==this.sequence){this.stage('STALE');return;}
-      const rows=result.data.comments;
-      if(new Set(rows.map(r=>r.cid)).size!==rows.length){this.stage('DUPLICATE');return;}
-      if(rows.some(r=>r.aweme_id!==e.videoId||r.reply_id!==(e.rootCommentId??e.commentId))){this.stage('ROOT');return;}
-      this.rows=rows;this.stats.accepted=Math.min(10_000,this.stats.accepted+1);this.stage('ACCEPTED');
+      const endCheck=runtimePerformance.start('CONTENT_CHECK','COMMENT_NOTIFICATION');let verified=false;
+      try {
+        const result=batch.safeParse(body);if(!result.success){this.stage('SCHEMA');return;}
+        if(token.sequence!==this.sequence){this.stage('STALE');return;}
+        const rows=result.data.comments;
+        if(new Set(rows.map(r=>r.cid)).size!==rows.length){this.stage('DUPLICATE');return;}
+        if(rows.some(r=>r.aweme_id!==e.videoId||r.reply_id!==(e.rootCommentId??e.commentId))){this.stage('ROOT');return;}
+        this.rows=rows;this.stats.accepted=Math.min(10_000,this.stats.accepted+1);this.stage('ACCEPTED');verified=true;
+      }finally {endCheck(verified?'SUCCEEDED':'FAILED');}
     }catch{if(!token.clock)this.stage('JSON');}
     finally{this.active--;}
   }

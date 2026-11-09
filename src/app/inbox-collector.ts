@@ -1,3 +1,4 @@
+import {runtimePerformance} from '../observability/runtime-performance.js';
 import { join } from "node:path";
 import { randomUUID } from 'node:crypto';
 import { lstat,mkdir,rename,unlink,writeFile } from 'node:fs/promises';
@@ -119,6 +120,8 @@ export class InboxCollector {
     }
   }
   private async persist(source:CollectionSource,scope:string,batch:ObservationBatch,signal:AbortSignal,exactPeer?:DiscoveredPeer,window?:CommentWindowRead):Promise<void> {
+    const end=runtimePerformance.start('PERSIST',source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION');
+    try {
     this.check(source,signal);
     const display=()=>digest(batch.events.filter(event=>event.observationIssue==='DM_CONTENT_UNVERIFIED').map(event=>[
       event.platformEventId,new MessageShareStore(this.root).read(event,this.mapping.self.uid),new MessagePreviewStore(this.root).list(event,this.mapping.self.uid)]));
@@ -153,6 +156,7 @@ export class InboxCollector {
       await recordCommentWindow(this.root,scope,batch,this.data.now(),this.data.state().startedAt,
         {mappedWork:this.mapping.works.some(item=>item.id===workId),includedWork:work?.state==='INCLUDED',historicalWork:work?.state==='HISTORICAL',ownId:this.mapping.self.uid},window);
     }
+    }catch(error){end(signal.aborted?'CANCELLED':'FAILED');throw error;}finally{end();}
   }
   private async dmStage<T>(stage:'LIST'|'THREAD'|'ADVANCE',read:()=>Promise<T>):Promise<T> {
     try{return await read();}catch(error){

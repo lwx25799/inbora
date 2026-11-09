@@ -1,6 +1,7 @@
 import type {Frame,Page,Request,Response} from 'playwright';
 import {z} from 'zod';
 import type {ObservationMapping} from '../config/site-mapping.js';
+import {readNormalJsonResponse} from './normal-response-reader.js';
 
 const count=z.number().int().nonnegative(),number=count.nullable();
 export const commentResponseSummarySchema=z.object({count,total:number,hasMore:z.boolean().nullable(),requestedCursor:number,cursor:number,cursorAdvances:z.boolean().nullable(),
@@ -35,9 +36,10 @@ export class CommentListDiagnostics {
   };
   private async capture(response:Response):Promise<void>{
     const token=this.tokens.get(response.request());if(!token)return;this.tokens.delete(response.request());
-    if(response.status()!==200||response.fromServiceWorker()||this.pending.size>=4||Number(response.headers()['content-length'])>2*1024*1024)return;
-    const bytes=await response.body();if(bytes.length>2*1024*1024||!this.current()||token.epoch!==this.epoch||token.sequence!==this.sequence)return;
-    const parsed=envelope.safeParse(JSON.parse(bytes.toString('utf8')));if(!parsed.success)return;
+    if(response.status()!==200||response.fromServiceWorker()||this.pending.size>=4)return;
+    const read=await readNormalJsonResponse(response,2*1024*1024);
+    if(!read.ok||!this.current()||token.epoch!==this.epoch||token.sequence!==this.sequence)return;
+    const parsed=envelope.safeParse(read.value);if(!parsed.success)return;
     const rows=parsed.data.comments,now=this.now(),past:number[]=[],nonOwn:number[]=[];let afterOrigin=0,fresh30m=0,older30m=0,unknownTime=0,futureTime=0,ownCount=0,metadataMissing=0;
     for(const raw of rows){
       const row=raw&&typeof raw==='object'?raw as Record<string,unknown>:{},user=row.user&&typeof row.user==='object'?row.user as Record<string,unknown>:{},own=user.uid===this.mapping.self.uid;

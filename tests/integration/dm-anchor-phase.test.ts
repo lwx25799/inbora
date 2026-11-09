@@ -1,5 +1,6 @@
 import { expect, test, vi } from 'vitest';
 import { join } from 'node:path';
+import { EventEmitter } from 'node:events';
 import type { BrowserProfileOwner } from '../../src/browser/profile-owner.js';
 import { AccountActor } from '../../src/browser/account-actor.js';
 import { InboxCollector } from '../../src/app/inbox-collector.js';
@@ -50,7 +51,7 @@ test('a changed-height MAX probe keeps its physical phase and scans the gap befo
   const list = vi.spyOn(ObservedReader.prototype, 'conversations').mockResolvedValue({
     events: [], evidenceId: 'synthetic-anchor-list', unsupported: 0, loaded: 1, peers: [peer],
   });
-  const owner = { notification: { on() {}, off() {} }, dm: {}, actor: new AccountActor(),
+  const owner = { notification: new EventEmitter(), dm: {bringToFront:async()=>{}}, actor: new AccountActor(),
     version: () => '1.0.0.0' } as unknown as BrowserProfileOwner;
   const collector = new InboxCollector(owner, observedMapping('http://127.0.0.1:1234'), data, root, 'headless');
   const progress = () => JSON.parse((store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'")

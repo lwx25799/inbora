@@ -1,5 +1,6 @@
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
+import {EventEmitter} from 'node:events';
 import {readFile,readdir} from 'node:fs/promises';
 import {InboxCollector} from '../../src/app/inbox-collector.js';
 import {AutomationStore} from '../../src/storage/automation-store.js';
@@ -15,7 +16,7 @@ test('fixed diagnostics distinguish new phases and codes, suppress exact repeats
   await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
   const data=new AutomationStore(store);data.initialize(Date.now()-1000);store.bindAccount('100');
   data.configureCollection({ownId:'100',comments:true,inbox:true,commentIntervalMs:30000,dmIntervalMs:15000});
-  const owner={notification:{on(){},off(){}}} as unknown as BrowserProfileOwner;
+  const owner={notification:new EventEmitter()} as unknown as BrowserProfileOwner;
   const collector=new InboxCollector(owner,observedMapping('http://127.0.0.1:12345'),data,root,'headless');
   let captures=0;const reader={diagnostic:async()=>{captures++;return {source:'dm',messageSamples:[],conversationSamples:[]};}} as unknown as ObservedReader;
   const diagnose=(source:'dm'|'works',code:string,phase:'LIST'|'THREAD'|'ADVANCE'|'HINT')=>(collector as unknown as {
@@ -50,7 +51,7 @@ test('fixed diagnostics distinguish exact peers without logging their identity a
   await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
   const data=new AutomationStore(store);data.initialize(Date.now()-1000);store.bindAccount('100');
   data.configureCollection({ownId:'100',comments:true,inbox:true,commentIntervalMs:30000,dmIntervalMs:15000});
-  const owner={notification:{on(){},off(){}}} as unknown as BrowserProfileOwner;
+  const owner={notification:new EventEmitter()} as unknown as BrowserProfileOwner;
   const collector=new InboxCollector(owner,observedMapping('http://127.0.0.1:12345'),data,root,'headless');
   let captures=0;const reader={diagnostic:async()=>{captures++;return {source:'dm',windowRows:captures};}} as unknown as ObservedReader;
   const diagnose=(id:string|undefined,code='OBSERVATION_DM_CONTENT_DOM_NOT_READY',phase='THREAD')=>(collector as unknown as {
