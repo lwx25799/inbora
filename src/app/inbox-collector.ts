@@ -8,13 +8,14 @@ import { digest, requireSafe } from "../core/contracts.js";
 import { recordEvidence } from "../observability/evidence.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type { CollectionSource } from "./collection-scheduler.js";
-import { collectionStops } from "./collection-scheduler.js";
+import { collectionStops, DeferredObjectRead } from "./collection-scheduler.js";
 import { Blocked } from "../core/contracts.js";
 
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
   pending: z.array(z.object({aweme_id:z.string(),create_time:z.number().nullable().optional(),author:z.object({uid:z.string(),sec_uid:z.string()})})).default([])});
 const dmCursorSchema=z.object({deferred:z.array(z.object({id:z.string().min(1),until:z.number().int().nonnegative(),code:z.string()})).default([])});
+const objectRetryMs=120_000;
 
 /** Only this backend extends observed targets from the explicitly enabled own-account collection scope. */
 export class InboxCollector {
@@ -78,11 +79,13 @@ export class InboxCollector {
     if(!visible.length)return;
     const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
-    cursor.deferred=cursor.deferred.filter(item=>item.until>this.data.now());
     const candidates=this.data.store.db.prepare(`SELECT * FROM discovered_conversations WHERE own_id=? AND id IN (${visible.map(()=>'?').join(',')}) ORDER BY last_read,first_seen,id`).all(this.mapping.self.uid,...visible) as {
-      id:string;uid:string|null;sec_uid:string;title:string;
+      id:string;uid:string|null;sec_uid:string;title:string;last_read:number;
     }[];
-    const deferred=new Set(cursor.deferred.map(item=>item.id));
+    // Retain failed attempts after cooldown: an old unreadable row must not regain priority over never-attempted peers.
+    const attempts=new Map(cursor.deferred.map(item=>[item.id,item.until-objectRetryMs]));
+    candidates.sort((a,b)=>Math.max(a.last_read,attempts.get(a.id)??0)-Math.max(b.last_read,attempts.get(b.id)??0));
+    const deferred=new Set(cursor.deferred.filter(item=>item.until>this.data.now()).map(item=>item.id));
     const next=candidates.find(candidate=>!deferred.has(candidate.id));
     if(!next){await this.dmStage('ADVANCE',()=>reader.conversations('next'));return;}
     const peer:DiscoveredPeer={uid:next.uid,secUid:next.sec_uid,conversationId:next.id,title:next.title};
@@ -92,11 +95,13 @@ export class InboxCollector {
       const code=error instanceof Blocked?error.code:'DM_THREAD_READ_FAILED';
       if(!collectionStops.has(code)&&!signal.aborted){
         this.check('dm',signal);
-        cursor.deferred.push({id:next.id,until:this.data.now()+120_000,code});
+        cursor.deferred=cursor.deferred.filter(item=>item.id!==next.id);
+        cursor.deferred.push({id:next.id,until:this.data.now()+objectRetryMs,code});
         this.data.store.db.transaction(()=>{
           this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
           this.data.store.audit('DM_READ_DEFERRED',digest(next.id),{threadReadFailed:true});
         }).immediate();
+        throw new DeferredObjectRead(code);
       }
       throw error;
     }
@@ -107,6 +112,7 @@ export class InboxCollector {
       this.data.store.db.prepare('UPDATE discovered_conversations SET uid=? WHERE id=?').run(native.uid,next.id);
     }
     this.data.store.db.prepare('UPDATE discovered_conversations SET last_read=? WHERE id=?').run(this.data.now(),next.id);
+    cursor.deferred=cursor.deferred.filter(item=>item.id!==next.id);
     this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
     this.check('dm',signal);
     await this.dmStage('ADVANCE',()=>reader.conversations('next'));
@@ -146,7 +152,8 @@ export class InboxCollector {
             this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
             this.data.store.audit('WORK_READ_DEFERRED',digest(work.id));
             this.data.store.db.prepare(`INSERT INTO work_collection_progress VALUES(?,0,0,0,?,?,?) ON CONFLICT(work_id)
-              DO UPDATE SET last_error=excluded.last_error,next_at=excluded.next_at`).run(work.id,this.data.now(),code,this.data.now()+120_000);
+              DO UPDATE SET last_error=excluded.last_error,next_at=excluded.next_at`).run(work.id,0,code,this.data.now()+objectRetryMs);
+            throw new DeferredObjectRead(code);
           }
           throw error;
         }

@@ -35,16 +35,16 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
         if(style.visibility==='hidden'||style.visibility==='collapse'||style.display==='none'||Number(style.opacity)===0)return false;}
       return true;
     },
-    one(root: Document | Element, selector: string): Element {
+    one(root: Document | Element, selector: string,stage='OBSERVATION'): Element {
       const found = root.querySelectorAll(selector);
-      dom.check(found.length > 0,'OBSERVATION_DOM_NOT_READY');
-      dom.check(found.length === 1,'OBSERVATION_DOM_NOT_UNIQUE');
-      dom.check(dom.visible(found[0]!),'OBSERVATION_DOM_NOT_READY'); return found[0]!;
+      dom.check(found.length > 0,`${stage}_DOM_NOT_READY`);
+      dom.check(found.length === 1,`${stage}_DOM_NOT_UNIQUE`);
+      dom.check(dom.visible(found[0]!),`${stage}_DOM_NOT_READY`); return found[0]!;
     },
-    ownedOne(root:Element,selector:string,requireVisible=true):Element{
+    ownedOne(root:Element,selector:string,requireVisible=true,stage='OBSERVATION'):Element{
       const found=Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root);
-      dom.check(found.length>0,'OBSERVATION_DOM_NOT_READY');dom.check(found.length===1,'OBSERVATION_DOM_NOT_UNIQUE');
-      dom.check(!requireVisible||dom.visible(found[0]!),'OBSERVATION_DOM_NOT_READY');return found[0]!;
+      dom.check(found.length>0,`${stage}_DOM_NOT_READY`);dom.check(found.length===1,`${stage}_DOM_NOT_UNIQUE`);
+      dom.check(!requireVisible||dom.visible(found[0]!),`${stage}_DOM_NOT_READY`);return found[0]!;
     },
     react(element: Element, prefix: string): unknown {
       const keys = Object.getOwnPropertyNames(element).filter(key => key.startsWith(prefix));
@@ -128,7 +128,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   };
   dom.check(location.origin === m.origin && !/验证码|安全验证/.test(document.title), 'OBSERVATION_PAGE_BLOCKED');
   dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_PAGE_BLOCKED');
-  const avatar = dom.one(document,s.selfAvatar), own = dom.fiberProps(avatar,s.selfFiberDepth);
+  const avatar = dom.one(document,s.selfAvatar,'OBSERVATION_ACCOUNT_AVATAR'), own = dom.fiberProps(avatar,s.selfFiberDepth);
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
   const events: InboundEvent[] = []; let unsupported = 0, loaded = 0;
   const bindings: NonNullable<ObservationBatch['bindings']> = [];
@@ -259,13 +259,13 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   } else {
     const work = m.works[index]; dom.check(work && location.href.split('?')[0] === work.url.split('?')[0], 'OBSERVATION_WORK_CHANGED');
       const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);
-      dom.check(lists.length>0,'OBSERVATION_DOM_NOT_READY');dom.check(lists.length===1,'OBSERVATION_DOM_NOT_UNIQUE');
+      dom.check(lists.length>0,'OBSERVATION_COMMENT_LIST_DOM_NOT_READY');dom.check(lists.length===1,'OBSERVATION_COMMENT_LIST_DOM_NOT_UNIQUE');
       const list=lists[0]!,rows = Array.from(list.querySelectorAll(s.commentRows)).filter(row=>!input.allCommentAuthors||
         row.getBoundingClientRect().bottom>Math.max(0,list.getBoundingClientRect().top)&&row.getBoundingClientRect().top<Math.min(innerHeight,list.getBoundingClientRect().bottom)); loaded = rows.length;
     dom.check(rows.length <= 100,'OBSERVATION_WINDOW_TOO_LARGE');
     const visibleRoots=rows.filter(row=>dom.visible(row)&&!row.parentElement?.closest(s.commentRows));
     const empty=s.commentEmpty?Array.from(list.querySelectorAll(s.commentEmpty)).filter(dom.visible):[];
-    dom.check(visibleRoots.length>0||empty.length===1,'OBSERVATION_DOM_NOT_READY');
+    dom.check(visibleRoots.length>0||empty.length===1,'OBSERVATION_COMMENT_ROOTS_DOM_NOT_READY');
     for (const row of rows) {
       if (!dom.visible(row) || row.parentElement?.closest(s.commentRows)) continue;
       const authors = Array.from(row.querySelectorAll(s.commentAuthor)).filter(n=>n.closest(s.commentRows)===row&&dom.visible(n));
@@ -283,9 +283,9 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       const peer = discoveredPeer??knownPeer;
       if (!peer) continue;
       dom.check(dom.data(author,'uid') === peer.uid && dom.data(author,'secUid') === peer.secUid,'OBSERVATION_COMMENT_AUTHOR_CONFLICT');
-      const id = dom.id(dom.data(comment,'cid')), tooltip = dom.ownedOne(row,s.commentTooltip,false);
+      const id = dom.id(dom.data(comment,'cid')), tooltip = dom.ownedOne(row,s.commentTooltip,false,'OBSERVATION_COMMENT_TOOLTIP');
       dom.check(id && tooltip.id === `tooltip_${id}`,'OBSERVATION_COMMENT_ID_CONFLICT');
-      const body=dom.ownedOne(row,s.commentText),rendered=dom.commentText(body,row,s.commentRows,m.environment==='fixture');
+      const body=dom.ownedOne(row,s.commentText,true,'OBSERVATION_COMMENT_TEXT'),rendered=dom.commentText(body,row,s.commentRows,m.environment==='fixture');
       const native=dom.data(comment,'text'),verified=rendered!==null&&rendered.length>0&&rendered===native;
       const text=typeof native==='string'&&native.length>0&&native.length<=10_000?native:rendered||'[非文本评论，待核对]';
       if(!verified)unsupported++;
@@ -316,7 +316,7 @@ export class ObservedReader {
   private async ready(channel: CaptureInput['channel'],index: number,options:CaptureOptions={}): Promise<ObservationBatch> {
     const deadline=Date.now()+5000;
     for(;;)try{return await this.capture(channel,index,options);}catch(error){
-      if(!(error instanceof Error)||!/(?:OBSERVATION_(?:DOM|METADATA)_NOT_READY|RENDERED_BINDING_UNAVAILABLE)/.test(error.message)||Date.now()>=deadline)throw error;
+      if(!(error instanceof Error)||!/(?:OBSERVATION_(?:[A-Z]+_)*(?:DOM|METADATA)_NOT_READY|RENDERED_BINDING_UNAVAILABLE)/.test(error.message)||Date.now()>=deadline)throw error;
       await new Promise(resolve=>setTimeout(resolve,50));
     }
   }
@@ -358,7 +358,11 @@ export class ObservedReader {
       if(found.rowIndex!==null) {
         // Virtualized rows may change between tasks; the selection task rechecks native identity.
         await this.ready('row',index,{...options,rowIndex:found.rowIndex,select:true});
-        await chat.waitFor({state:'visible'});return this.ready('dm',index,options);
+        try{await chat.waitFor({state:'visible'});}catch(error){
+          if(error instanceof Error&&error.name==='TimeoutError')requireSafe(false,'OBSERVATION_DM_CHAT_NOT_READY');
+          throw error;
+        }
+        return this.ready('dm',index,options);
       }
       if(!found.hasList)break;
       await new Promise(resolve=>setTimeout(resolve,150));

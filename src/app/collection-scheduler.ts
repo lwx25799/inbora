@@ -2,6 +2,8 @@ import { Blocked, requireSafe } from "../core/contracts.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 
 export type CollectionSource = "works" | "dm";
+/** An object-specific failure was persisted; the channel can serve a different object next turn. */
+export class DeferredObjectRead extends Blocked {}
 export const collectionStops = new Set([
   "OBSERVATION_PAGE_BLOCKED", "OBSERVATION_ACCOUNT_CHANGED", "ACCOUNT_CHANGED", "BROWSER_CLOSED",
   "PLATFORM_STOP", "CHALLENGE_REQUIRED", "LOGIN_REQUIRED", "ACCOUNT_NOT_VERIFIED", "UNEXPECTED_ORIGIN",
@@ -55,6 +57,7 @@ export class CollectionScheduler {
     const interval = next.source === "works" ? collection.commentIntervalMs : collection.dmIntervalMs;
     const task = Promise.resolve().then(async () => {
       let error: string | null = null;
+      let objectDeferred=false;
       try {
         const current = this.persistence.state();
         requireSafe(!this.closed && !abort.signal.aborted && !current.emergencyStopped && current.collection &&
@@ -64,11 +67,12 @@ export class CollectionScheduler {
         requireSafe(!abort.signal.aborted, "COLLECTION_CANCELLED");
       } catch (cause) {
         error = cause instanceof Blocked ? cause.code : "COLLECTION_FAILED_PRIVATE_DIAGNOSTICS";
+        objectDeferred=cause instanceof DeferredObjectRead;
       }
       const now = this.persistence.now();
       if (error) {
         const old = this.persistence.store.db.prepare("SELECT failures FROM collection_progress WHERE source=?").get(next.source) as {failures: number};
-        const delay = Math.min(Math.max(interval, 600_000), interval * 2 ** Math.min(old.failures + 1, 10));
+        const delay = objectDeferred?interval:Math.min(Math.max(interval, 600_000), interval * 2 ** Math.min(old.failures + 1, 10));
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_error=?,failures=failures+1,elapsed_ms=? WHERE source=?")
           .run(now + delay, error, Math.max(0, now - started), next.source);
         if (collectionStops.has(error)) this.persistence.stop(true);

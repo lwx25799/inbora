@@ -112,3 +112,17 @@ test('unsupported images and nested bodies cannot manufacture exact comment text
     expect(JSON.stringify(batch)).not.toContain('nested private body');
   }finally{await owner.close();await server.close();}
 });
+
+test.each(['body','tooltip','self','list','roots'] as const)('missing comment %s is diagnosed without leaking its selector or private content',async missing=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp('comment-read-stage-'),'profile'),true);
+  try{
+    await comments(owner.notification,server.origin,[{html:'fixture text',text:'fixture text'}]);
+    if(missing==='roots')await owner.notification.locator('#comment-list').evaluate(node=>(node as HTMLElement).style.minHeight='24px');
+    const selector={body:'.body',tooltip:'.tooltip',self:'#self',list:'#comment-list',roots:'.comment'}[missing];
+    await owner.notification.locator(selector).evaluate(node=>node.remove());
+    const expected={body:'OBSERVATION_COMMENT_TEXT_DOM_NOT_READY',tooltip:'OBSERVATION_COMMENT_TOOLTIP_DOM_NOT_READY',self:'OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_READY',
+      list:'OBSERVATION_COMMENT_LIST_DOM_NOT_READY',roots:'OBSERVATION_COMMENT_ROOTS_DOM_NOT_READY'}[missing];
+    await expect(owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture',allCommentAuthors:true}))
+      .rejects.toThrow(expected);
+  }finally{await owner.close();await server.close();}
+});

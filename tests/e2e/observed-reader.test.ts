@@ -248,9 +248,9 @@ test('only an explicitly mapped empty comment state permits a successful empty w
     expect(batch.loaded).toBe(0);expect(batch.events).toEqual([]);
     const unmapped=config(server.origin);unmapped.selectors.commentEmpty=null;
     await expect(owner.notification.evaluate(captureObserved,{mapping:unmapped,channel:'comments' as const,index:0,evidenceId:'fixture'}))
-      .rejects.toThrow('OBSERVATION_DOM_NOT_READY');
+      .rejects.toThrow('OBSERVATION_COMMENT_ROOTS_DOM_NOT_READY');
     await owner.notification.locator('#empty-comments').evaluate(node=>node.remove());
     await expect(owner.notification.evaluate(captureObserved,{mapping:config(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture'}))
-      .rejects.toThrow('OBSERVATION_DOM_NOT_READY');
+      .rejects.toThrow('OBSERVATION_COMMENT_ROOTS_DOM_NOT_READY');
   }finally{await owner.close();await server.close();}
 });

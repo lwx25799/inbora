@@ -60,5 +60,9 @@ try {
   assert.equal(unverified.events[0].observationIssue,'COMMENT_TEXT_UNVERIFIED');
   store.observe('COMMENT_NOTIFICATION','work:10',unverified.events,'100','fixture',new Date().toISOString(),Date.UTC(2026,0,1));
   assert.equal(store.events().at(-1).status,'MANUAL_REVIEW');
-  console.log(JSON.stringify({observedReaderSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:3,emojiVerified:true,unverifiedBodyPreserved:true,sends:0}));
+  await owner.notification.locator('.body').evaluate(node=>node.remove());
+  await assert.rejects(owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-missing-body'}),/OBSERVATION_COMMENT_TEXT_DOM_NOT_READY/);
+  await owner.notification.locator('#self').evaluate(node=>node.remove());
+  await assert.rejects(owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-missing-identity'}),/OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_READY/);
+  console.log(JSON.stringify({observedReaderSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:3,emojiVerified:true,unverifiedBodyPreserved:true,readStageCodes:true,sends:0}));
 } finally {store.close();await owner.close();await server.close();}

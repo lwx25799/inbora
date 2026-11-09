@@ -84,11 +84,11 @@ test('one unreadable conversation yields to another native peer across collector
     });
     const mapping=observedMapping(server.origin),signal=new AbortController().signal;
     collector=new InboxCollector(owner,mapping,data,root,'headless');
-    await expect(collector.collect('dm',signal)).rejects.toThrow('DM_THREAD_READ_FAILED');
+    await expect(collector.collect('dm',signal)).rejects.toThrow('OBSERVATION_DM_CHAT_NOT_READY');
     expect(store.db.prepare("SELECT detail_redacted FROM audit_events WHERE event_type='DM_READ_DEFERRED'").get())
       .toEqual({detail_redacted:'{"threadReadFailed":true}'});
     const saved=store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
-    expect(JSON.parse(saved.cursor_json)).toEqual({deferred:[{id:'a-unavailable',until:now+120_000,code:'DM_THREAD_READ_FAILED'}]});
+    expect(JSON.parse(saved.cursor_json)).toEqual({deferred:[{id:'a-unavailable',until:now+120_000,code:'OBSERVATION_DM_CHAT_NOT_READY'}]});
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='a-unavailable'").get()).toEqual({last_read:0});
     collector.dispose();collector=new InboxCollector(owner,mapping,new AutomationStore(store,()=>now),root,'headless');
     await collector.collect('dm',signal);
@@ -96,7 +96,7 @@ test('one unreadable conversation yields to another native peer across collector
     expect(store.events().every(e=>e.payload.conversationId==='conv-a'&&e.status==='AWAITING_DRAFT')).toBe(true);
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='a-unavailable'").get()).toEqual({last_read:0});
     now+=120_001;
-    await expect(collector.collect('dm',signal)).rejects.toThrow('DM_THREAD_READ_FAILED');
+    await expect(collector.collect('dm',signal)).rejects.toThrow('OBSERVATION_DM_CHAT_NOT_READY');
     expect(store.events()).toHaveLength(3);
     expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);
   }finally{collector?.dispose();store.close();await owner.close();await server.close();}
@@ -118,6 +118,59 @@ test.each(['OBSERVATION_ACCOUNT_CHANGED','OBSERVATION_PAGE_BLOCKED'])('DM failur
     expect(store.db.prepare("SELECT last_error,cursor_json FROM collection_progress WHERE source='dm'").get()).toEqual({last_error:code,cursor_json:'{}'});
     expect(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='DM_READ_DEFERRED'").get()).toEqual({n:0});
   }finally{read.mockRestore();await scheduler?.close();collector?.dispose();store.close();await owner.close();await server.close();}
+});
+
+test.each([4,10])('%s unreadable native conversations cannot starve a later readable peer through channel backoff',async unavailableCount=>{
+  const server=await fixtureServer(),root=privateTemp('dm-multiple-deferrals-'),owner=await BrowserProfileOwner.launch(join(root,'profile'),true),store=database();
+  let collector:InboxCollector|undefined,scheduler:CollectionScheduler|undefined,now=Date.now();
+  try{
+    await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
+    const data=new AutomationStore(store,()=>now);data.initialize(now-10_000);store.bindAccount('100');
+    data.configureCollection({ownId:'100',comments:false,inbox:true,commentIntervalMs:30_000,dmIntervalMs:15_000});
+    await mountObserved(owner,server.origin);owner.context.setDefaultTimeout(80);
+    await owner.dm.evaluate(unavailableCount=>{
+      const chat=document.querySelector('#chat') as HTMLElement,row=document.querySelector('.conversation')!;
+      document.querySelector('#back')!.addEventListener('click',()=>{chat.hidden=true;});row.addEventListener('click',()=>{chat.hidden=false;});
+      for(const message of document.querySelectorAll('.message'))
+        Object.getOwnPropertyDescriptor(message,'__reactProps$fixture')!.value.children.props.message.createdAt=new Date(Date.now()-1000);
+      for(let i=0;i<unavailableCount;i++){
+        const bad=document.createElement('div');bad.className='conversation';bad.innerHTML=`<span class="title">Unavailable ${i}</span>`;
+        Object.defineProperty(bad,'__reactFiber$fixture',{value:{return:{memoizedProps:{conversation:{id:`a-unavailable-${i}`,_toParticipantSecUserId:`unavailable-sec-${i}`}}}}});
+        document.querySelector('#dm-panel')!.prepend(bad);
+      }
+    },unavailableCount);
+    collector=new InboxCollector(owner,observedMapping(server.origin),data,root,'headless');
+    scheduler=new CollectionScheduler(data,(source,signal)=>collector!.collect(source,signal));
+    for(let turn=0;turn<unavailableCount+2;turn++){
+      await scheduler.tick();
+      now=(store.db.prepare("SELECT next_at FROM collection_progress WHERE source='dm'").get() as {next_at:number}).next_at;
+      if(turn===2){collector.dispose();collector=new InboxCollector(owner,observedMapping(server.origin),new AutomationStore(store,()=>now),root,'headless');}
+    }
+    expect(store.events()).toHaveLength(3);
+    expect(store.events().every(event=>event.payload.conversationId==='conv-a')).toBe(true);
+    expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id LIKE 'a-unavailable-%' AND last_read<>0").all()).toEqual([]);
+    const cursor=JSON.parse((store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string}).cursor_json);
+    expect(new Set(cursor.deferred.map((item:{id:string})=>item.id)).size).toBe(cursor.deferred.length);
+    expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);
+  }finally{await scheduler?.close();collector?.dispose();store.close();await owner.close();await server.close();}
+});
+
+test.each([false,true])('a deferred work never advances its successful read watermark (previous success: %s)',async priorSuccess=>{
+  const server=await fixtureServer(),root=privateTemp('work-failed-watermark-'),owner=await BrowserProfileOwner.launch(join(root,'profile'),true),store=database();
+  let collector:InboxCollector|undefined;
+  const read=vi.spyOn(ObservedReader.prototype,'comments').mockRejectedValueOnce(new Blocked('OBSERVATION_DOM_NOT_READY'));
+  try{
+    await migrateClient(store,join(root,'client.sqlite'));await migrateAutomation(store,join(root,'automation.sqlite'));
+    const now=Date.now(),data=new AutomationStore(store,()=>now);data.initialize(now-10_000);store.bindAccount('100');
+    data.configureCollection({ownId:'100',comments:true,inbox:false,commentIntervalMs:30_000,dmIntervalMs:15_000});
+    store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify({phase:'comments'}));
+    if(priorSuccess)store.db.prepare('INSERT INTO work_collection_progress VALUES(?,0,0,0,?,NULL,0)').run('10',now-50_000);
+    collector=new InboxCollector(owner,observedMapping(server.origin),data,root,'headless');
+    await expect(collector.collect('works',new AbortController().signal)).rejects.toThrow('OBSERVATION_DOM_NOT_READY');
+    expect(store.db.prepare("SELECT last_read,last_error,next_at FROM work_collection_progress WHERE work_id='10'").get())
+      .toEqual({last_read:priorSuccess?now-50_000:0,last_error:'OBSERVATION_DOM_NOT_READY',next_at:now+120_000});
+    expect(store.db.prepare('SELECT count(*) AS n FROM observations').get()).toEqual({n:0});
+  }finally{read.mockRestore();collector?.dispose();store.close();await owner.close();await server.close();}
 });
 
 test("own-profile normal GET and native links discover a post-start video without adding its ID to the mapping",async()=>{

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "vitest";
 import { join } from "node:path";
-import { CollectionScheduler, type CollectionSource } from "../../src/app/collection-scheduler.js";
+import { CollectionScheduler, DeferredObjectRead, type CollectionSource } from "../../src/app/collection-scheduler.js";
 import { AutomationStore } from "../../src/storage/automation-store.js";
 import { migrateAutomation } from "../../src/storage/automation-migration.js";
 import { migrateClient } from "../../src/storage/client-migration.js";
@@ -53,6 +53,14 @@ test("ordinary source failure backs off only that channel; global stop survives 
   const restarted = new CollectionScheduler(f.data, async source => {calls.push(source);});
   try { await restarted.tick(); expect(calls).toHaveLength(2); } finally { await restarted.close(); }
   f.data.stop(false); await f.scheduler.tick(); expect(calls).toHaveLength(3);
+});
+
+test.each([false,true])('only a persisted per-object deferral avoids whole-channel backoff (deferred: %s)',async deferred=>{
+  const f=await setup(async()=>{throw deferred?new DeferredObjectRead('OBSERVATION_DOM_NOT_READY'):new Blocked('OBSERVATION_DOM_NOT_READY');});
+  const before=f.data.now();await f.scheduler.tick();
+  expect(f.store.db.prepare("SELECT next_at,last_success,last_error,failures FROM collection_progress WHERE source='works'").get())
+    .toEqual({next_at:before+(deferred?30_000:60_000),last_success:null,last_error:'OBSERVATION_DOM_NOT_READY',failures:1});
+  expect(f.data.state().emergencyStopped).toBe(false);
 });
 test("identity/platform validation blocks subsequent collection and records a safe enumerated cause", async () => {
   const calls: CollectionSource[] = [], f = await setup(async source => {calls.push(source); throw new Blocked("OBSERVATION_ACCOUNT_CHANGED");});
