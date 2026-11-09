@@ -44,6 +44,8 @@ test('saved policy budgets remain visible and an empty selected scope cannot be 
     expect(store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:1});
     expect(store.db.prepare('SELECT status FROM send_intents').get()).toEqual({status:'UNCERTAIN'});
     store.db.prepare('INSERT INTO verification_results VALUES(?,?,?,?,?)').run('synthetic-read-only-proof',intent,1,'synthetic-complete-proof',Date.now());
+    // Direct fixture SQL bypasses backend notifications; focus performs the ordinary read-only catch-up.
+    await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
     await expect.poll(()=>page.getByText('1 条私信发送结果仍不明确',{exact:false}).count(),{timeout:3000}).toBe(0);
     expect(store.db.prepare('SELECT status FROM send_intents').get()).toEqual({status:'UNCERTAIN'});
   }finally{await browser.close();await server.close();await service.close();store.close();}

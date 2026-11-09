@@ -134,6 +134,9 @@ test.each([
     let holdSave = false;
     const controlTrace: { command: string; paused: boolean; eventId?:string|undefined; generation?: number; isMine?: boolean }[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
+    service.events.on('update',event=>{void page.evaluate(event=>{
+      (window as unknown as {fixtureEmit?:(event:unknown)=>void}).fixtureEmit?.(event);
+    },event).catch(()=>{});});
     try {
       await page.exposeFunction(
         "fixtureInvoke",
@@ -163,10 +166,21 @@ test.each([
         },
       );
       await page.addInitScript(() => {
+        const callbacks=new Map<number,(event:unknown)=>void>(),listeners=new Map<number,{event:string;handler:number}>();let next=0;
+        const fixture=window as unknown as {fixtureEmit:(event:unknown)=>void;__TAURI_EVENT_PLUGIN_INTERNALS__:unknown};
+        fixture.fixtureEmit=payload=>{for(const [id,listener]of listeners)if(listener.event==='inbora_status_updated')
+          callbacks.get(listener.handler)?.({event:listener.event,id,payload});};
+        fixture.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:(_event:string,id:number)=>{
+          const listener=listeners.get(id);if(listener)callbacks.delete(listener.handler);listeners.delete(id);
+        }};
         (
           window as unknown as { __TAURI_INTERNALS__: unknown }
         ).__TAURI_INTERNALS__ = {
+          transformCallback:(callback:(event:unknown)=>void)=>{callbacks.set(++next,callback);return next;},
           invoke: async (command: string, args: unknown) => {
+            const eventArgs=args as {event:string;handler:number};
+            if(command==='plugin:event|listen'){const id=++next;listeners.set(id,eventArgs);return id;}
+            if(command==='plugin:event|unlisten')return;
             const result = await (
               window as unknown as {
                 fixtureInvoke: (c: string, a: unknown) => Promise<unknown>;

@@ -34,21 +34,21 @@ async function setup(memoryKey=false){
     return result;
   });
   await page.addInitScript(()=>{
-    const callbacks=new Map<number,(event:unknown)=>void>(),listeners=new Map<string,number>();let next=0;
+    const callbacks=new Map<number,(event:unknown)=>void>(),listeners=new Map<number,{event:string;handler:number}>();let next=0;
     const fixture=window as unknown as {__TAURI_INTERNALS__:unknown;__TAURI_EVENT_PLUGIN_INTERNALS__:unknown;fixtureEmit:()=>void;
       fixtureInvoke:(command:string,args:unknown)=>Promise<unknown>};
     fixture.__TAURI_INTERNALS__={
       transformCallback:(callback:(event:unknown)=>void)=>{callbacks.set(++next,callback);return next;},
       invoke:async(command:string,args:Record<string,unknown>)=>{
-        if(command==='plugin:event|listen'){listeners.set(args.event as string,args.handler as number);return args.handler;}
+        if(command==='plugin:event|listen'){const id=++next;listeners.set(id,{event:args.event as string,handler:args.handler as number});return id;}
         if(command==='plugin:event|unlisten')return;
         return fixture.fixtureInvoke(command,args);
       },
     };
-    fixture.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:(event:string,id:number)=>{listeners.delete(event);callbacks.delete(id);}};
+    fixture.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:(_event:string,id:number)=>{const listener=listeners.get(id);if(listener)callbacks.delete(listener.handler);listeners.delete(id);}};
     fixture.fixtureEmit=()=>{
-      const id=listeners.get('inbora_status_updated');if(id===undefined)return;
-      callbacks.get(id)!({event:'inbora_status_updated',id,payload:{event:'backend_restarted'}});
+      for(const [id,listener]of listeners)if(listener.event==='inbora_status_updated')
+        callbacks.get(listener.handler)?.({event:'inbora_status_updated',id,payload:{event:'backend_restarted'}});
     };
   });
   const address=server.httpServer!.address() as {port:number};await page.goto(`http://127.0.0.1:${address.port}`);

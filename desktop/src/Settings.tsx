@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { AutomationSettings } from './AutomationSettings';
 import { BrowserDraftRecovery } from './BrowserDraftRecovery';
+import {DiagnosticsPanel} from './DiagnosticsPanel';
 import { request, closeDesktop, reasons, capabilityNames, type Status } from './api';
 import { modes } from './presentation';
 
@@ -233,6 +234,7 @@ export function Settings({
           Token。
         </p>
       </div>
+      <DiagnosticsPanel/>
     </section>
   );
 }

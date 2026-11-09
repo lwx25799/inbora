@@ -4,6 +4,7 @@ import { ReplyDetail } from './ReplyDetail';
 import {InboxList} from './InboxList';
 import { modes, time, browserState } from './presentation';
 import { useDevelopmentReconnect } from './useDevelopmentReconnect';
+import {useWorkbenchRefresh,type AuditRow} from './useWorkbenchRefresh';
 import {
   request,
   restoreDesktop,
@@ -55,14 +56,7 @@ export function App() {
     status: string;
     reason: string | null;
   } | null>(null);
-  const [audit, setAudit] = useState<
-      {
-        time: string;
-        event_type: string;
-        entity_id: string;
-        detail_redacted: string;
-      }[]
-    >([]),
+  const [audit, setAudit] = useState<AuditRow[]>([]),
     [auditPage, setAuditPage] = useState(0);
   const selection = useRef(crypto.randomUUID()),
     selectedRef = useRef<string | null>(null),
@@ -85,6 +79,8 @@ export function App() {
     selectedRef,selection,detailRequest,latestEditor,dialogOpen,
     setStatus,setThread,setReview,setSend,setError,setNotice,
   });
+  useWorkbenchRefresh({connected,status,selected,channel,filter,pageNumber,page,auditPage,notice,sendStatus:send?.status,
+    readThread:alive=>refreshThread(undefined,alive),setStatus,setInbox,setAudit,setError});
   useEffect(() => {
     if(dialogOpen&&!dialogElement.current?.open)dialogElement.current?.showModal();
     if(!dialogOpen&&dialogElement.current?.open)dialogElement.current.close();
@@ -101,43 +97,6 @@ export function App() {
     }).catch(()=>{if(!ignore)setError('无法读取本地客户端信息，请重新连接。');});
     return()=>{ignore=true;};
   }, []);
-  useEffect(() => {
-    if (!connected) return;
-    let ignore = false;
-    const refresh = () =>
-      request<Status>({ command: "getStatus" })
-        .then((s) => {
-          if (!ignore) setStatus(s);
-        })
-        .catch((e) => {
-          if (!ignore) setError("内核连接中断：" + explain(e));
-        });
-    const id = setInterval(() => void refresh(), 1500);
-    return () => {
-      ignore = true;
-      clearInterval(id);
-    };
-  }, [connected]);
-  useEffect(() => {
-    if (!connected) return;
-    let ignore = false;
-    void request<Inbox>({
-      command: "getInbox",
-      channel,
-      status: filter,
-      page: pageNumber,
-    })
-      .then((i) => {
-        if (!ignore) setInbox(i);
-      })
-      .catch((e) => {
-        if (!ignore) setError(explain(e));
-      });
-    return () => {
-      ignore = true;
-    };
-  }, [connected, channel, filter, pageNumber, notice, send?.status,status?.sync.runId,status?.sync.running,
-    status?.sync.results.map(result=>result.state).join('|'),status?.automation?.inboxRevision]);
   useEffect(()=>{
     if(!thread?.intent||thread.replyStatus!=='REPLIED'||thread.event.payload.channel!=='DIRECT_MESSAGE'||dirty||sending.current)return;
     const next=inbox.items.find(item=>item.groupKey===thread.groupKey&&item.replyStatus==='WAITING'&&item.id!==selected);
@@ -187,20 +146,6 @@ export function App() {
     if(!devRecovery.restoring&&dialogOpen&&dirty&&thread&&!thread.ownership.isMine&&!thread.intent)
       void openDialog().catch(e=>setError(explain(e)));
   },[devRecovery.restoring,dialogOpen,dirty,thread?.ownership.isMine,thread?.ownership.generation,thread?.intent]);
-  useEffect(() => {
-    if (!connected || !selected) return;
-    const eventId = selected;
-    void refreshThread(eventId).catch(() => {});
-  }, [
-    connected,
-    selected,
-    status?.browser.state,
-    status?.paused,
-    status?.automation?.emergencyStopped,
-    status?.browser.version,
-    status?.capabilities.map((c) => c.state + ":" + c.reason).join("|"),
-    status?.automation?.inboxRevision,
-  ]);
   useEffect(() => {
     if (!connected || !thread?.ownership.isMine || !selected) return;
     const generation = thread.ownership.generation,
@@ -262,21 +207,6 @@ export function App() {
       clearInterval(id);
     };
   }, [send?.commandId, send?.status]);
-  useEffect(() => {
-    if (!connected || page !== "audit") return;
-    let ignore = false;
-    void request<{ items: typeof audit }>({
-      command: "getAudit",
-      page: auditPage,
-    })
-      .then((r) => {
-        if (!ignore) setAudit(r.items);
-      })
-      .catch((e) => setError(explain(e)));
-    return () => {
-      ignore = true;
-    };
-  }, [connected, page, auditPage, notice]);
 
   async function act(label: string, fn: () => Promise<void>) {
     setBusy(label);
@@ -290,12 +220,13 @@ export function App() {
       setBusy("");
     }
   }
-  async function refreshThread(eventId = selectedRef.current) {
+  async function refreshThread(eventId = selectedRef.current,alive:()=>boolean=()=>true) {
     if (eventId && eventId === selectedRef.current) {
       const requestId = ++detailRequest.current,
         selectionId = selection.current;
       const t = await request<Thread>({ command: "getThread", eventId });
       if (
+        alive()&&
         selectedRef.current === eventId &&
         selection.current === selectionId &&
         detailRequest.current === requestId
