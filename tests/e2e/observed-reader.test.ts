@@ -155,7 +155,8 @@ test('conversation discovery waits for native back transition before returning o
     expect(await owner.dm.locator('#chat').isVisible()).toBe(false);
     expect(found.peers).toHaveLength(1);
     const batch=await reader.dm(0,found.peers![0]);
-    expect(batch.events.map(e=>e.platformEventId)).toEqual(['1','2','3','4']);
+    expect(batch.events.map(e=>e.platformEventId)).toEqual(['1','2','3','4','5']);
+    expect(batch.events[4]).toMatchObject({platformEventId:'5',contentType:'IMAGE',observationIssue:'DM_CONTENT_UNVERIFIED'});
     await new Promise(r=>setTimeout(r,220));
     expect(await owner.dm.locator('#chat').isVisible()).toBe(true);
     expect(await owner.dm.evaluate(()=>({backs:(window as unknown as {backs:number}).backs,opens:(window as unknown as {opens:number}).opens}))).toEqual({backs:1,opens:1});
@@ -174,7 +175,7 @@ test('native-bound conversation title may settle after metadata without selectin
       row.addEventListener('click',()=>{(window as unknown as {opened:number}).opened++;(document.querySelector('#chat') as HTMLElement).hidden=false;});
       setTimeout(()=>title.textContent='Fixture peer',200);
     });
-    expect((await new ObservedReader(owner.dm,config(server.origin)).dm(0)).events).toHaveLength(4);
+    expect((await new ObservedReader(owner.dm,config(server.origin)).dm(0)).events).toHaveLength(5);
     expect(await owner.dm.evaluate(()=>(window as unknown as {opened:number}).opened)).toBe(1);
   }finally{await owner.close();await server.close();}
 });
@@ -186,7 +187,8 @@ test.each([false,true])('a virtualized permitted conversation is found beyond th
     const mapping=config(server.origin);
     Object.assign(mapping.selectors,{conversationList:'#conversation-list'});
     const batch=await owner.actor.run(()=>new ObservedReader(owner.dm,mapping).dm(0));
-    expect(batch.events.map(e=>e.platformEventId)).toEqual(['1','2','3','4']);
+    expect(batch.events.map(e=>e.platformEventId)).toEqual(['1','2','3','4','5']);
+    expect(batch.events[4]).toMatchObject({platformEventId:'5',contentType:'IMAGE',observationIssue:'DM_CONTENT_UNVERIFIED'});
     expect(await owner.dm.evaluate(()=>(window as unknown as {opened:number}).opened)).toBe(1);
     expect(await owner.dm.evaluate(()=>(window as unknown as {outsideOpened:number}).outsideOpened)).toBe(0);
     expect(await owner.dm.evaluate(()=>(window as unknown as {listScrolls:number}).listScrolls)).toBeGreaterThan(0);
@@ -224,18 +226,22 @@ test('account change during a list scroll cannot select a conversation',async()=
   }finally{await owner.close();await server.close();}
 });
 
-test('calibrated rendered reader preserves three server identities, excludes outgoing tasks and blocks partial data', async () => {
+test('calibrated rendered reader preserves text and media identities, excludes outgoing tasks and blocks partial data', async () => {
   const server = await fixtureServer(), owner = await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
   const store = database();
   try {
     await mount(owner,server.origin); const mapping = config(server.origin), reader = new ObservedReader(owner.dm,mapping);
     const batch = await owner.actor.run(()=>reader.dm(0));
-    expect(batch.events.map(e=>e.platformEventId)).toEqual(['1','2','3','4']);
+    expect(batch.events.map(e=>e.platformEventId)).toEqual(['1','2','3','4','5']);
     expect(batch.unsupported).toBe(1);
+    expect(batch.events[4]).toMatchObject({text:'[图片或表情消息，需人工查看]',contentType:'IMAGE',observationIssue:'DM_CONTENT_UNVERIFIED'});
     store.observe('DIRECT_MESSAGE','conv-a',[],'100','fixture');
     for(let n=0;n<5;n++) store.observe('DIRECT_MESSAGE','conv-a',batch.events,'100','fixture');
-    expect(store.events()).toHaveLength(3);
-    expect(store.events().every(e=>e.status==='AWAITING_DRAFT' && e.payload.discovery==='DIRECT_MESSAGE')).toBe(true);
+    expect(store.events()).toHaveLength(4);
+    expect(store.events().filter(e=>e.status==='AWAITING_DRAFT').map(e=>e.payload.platformEventId)).toEqual(['1','2','3']);
+    expect(store.events().find(e=>e.payload.platformEventId==='5')).toMatchObject({status:'MANUAL_REVIEW',payload:{contentType:'IMAGE',observationIssue:'DM_CONTENT_UNVERIFIED'}});
+    expect(store.events().every(e=>e.payload.discovery==='DIRECT_MESSAGE')).toBe(true);
+    expect(store.events().some(e=>e.payload.platformEventId==='4')).toBe(false);
     await owner.dm.locator('.message').first().evaluate(row=>{
       const p=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value;
       Object.defineProperty(p.children.props.message,'createdAt',{get(){ throw new Error('getter must never execute'); }});
@@ -278,13 +284,14 @@ test('same-title unpermitted conversation is blocked before opening, not just be
     expect(await owner.dm.evaluate(()=>(window as unknown as {opened:number}).opened)).toBe(0);
   } finally {await owner.close();await server.close();}
 });
-test('hidden message or text is excluded and conflicting conversation aliases fail closed',async()=>{
+test('hidden messages are excluded, missing visible content waits, and conflicting conversation aliases fail closed',async()=>{
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
   try {
     await mount(owner,server.origin);const reader=new ObservedReader(owner.dm,config(server.origin));
     await owner.dm.locator('.message').nth(0).evaluate(row=>(row as HTMLElement).hidden=true);
+    expect((await reader.dm(0)).events.map(e=>e.platformEventId)).toEqual(['2','3','4','5']);
     await owner.dm.locator('.message .text').nth(1).evaluate(text=>(text as HTMLElement).style.visibility='hidden');
-    expect((await reader.dm(0)).events.map(e=>e.platformEventId)).toEqual(['3','4']);
+    await expect(reader.dm(0)).rejects.toThrow('OBSERVATION_DM_CONTENT_DOM_NOT_READY');
     await owner.dm.locator('#header').evaluate(header=>{
       Object.getOwnPropertyDescriptor(header,'__reactProps$fixture')!.value.children.props.conversation.conversationId='different';
     });
@@ -307,7 +314,7 @@ test('a valid active chat remains readable when the covered conversation list is
   try {
     await mount(owner,server.origin);owner.dm.setDefaultTimeout(300);
     await owner.dm.locator('.conversation').evaluate(row=>(row as HTMLElement).hidden=true);
-    expect((await new ObservedReader(owner.dm,config(server.origin)).dm(0)).events).toHaveLength(4);
+    expect((await new ObservedReader(owner.dm,config(server.origin)).dm(0)).events).toHaveLength(5);
   } finally {await owner.close();await server.close();}
 });
 test('the full bounded visible window includes a twenty-first new inbound message',async()=>{
@@ -316,7 +323,7 @@ test('the full bounded visible window includes a twenty-first new inbound messag
   try {
     await mount(owner,server.origin);
     await owner.dm.evaluate(()=>{
-      for(let id=5;id<=21;id++){
+      for(let id=6;id<=21;id++){
         const box=document.createElement('div');box.className='box';
         const row=document.createElement('div');row.className='message';
         const text=document.createElement('span');text.className='text';text.textContent=`tail-${id}`;row.append(text);box.append(row);
@@ -328,9 +335,14 @@ test('the full bounded visible window includes a twenty-first new inbound messag
     const reader=new ObservedReader(owner.dm,config(server.origin));const batch=await reader.dm(0);
     expect(batch.events.map(e=>e.platformEventId)).toContain('21');
     expect(batch.events).toHaveLength(21);
+    expect(batch.events.find(event=>event.platformEventId==='5')).toMatchObject({contentType:'IMAGE',observationIssue:'DM_CONTENT_UNVERIFIED'});
     store.observe('DIRECT_MESSAGE','conv-a',[],'100','fixture');
     store.observe('DIRECT_MESSAGE','conv-a',batch.events,'100','fixture');
     expect(store.events()).toHaveLength(20);
+    expect(store.events().find(event=>event.payload.platformEventId==='5')?.status).toBe('MANUAL_REVIEW');
+    expect(store.events().filter(event=>event.payload.platformEventId!=='5').every(event=>event.status==='AWAITING_DRAFT')).toBe(true);
+    expect(store.events().some(event=>event.payload.platformEventId==='4')).toBe(false);
+    expect(store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
   } finally {store.close();await owner.close();await server.close();}
 });
 test('conversation identity changed in document mousedown cannot open an outside peer',async()=>{

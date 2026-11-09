@@ -27,9 +27,13 @@ try{
   });
   collector=new InboxCollector(owner,observedMapping(server.origin),data,dir,'headless');
   scheduler=new CollectionScheduler(data,(channel,signal)=>collector.collect(channel,signal));
-  await scheduler.tick();assert.equal(store.events().length,3);assert.ok(store.events().every(e=>e.status==='AWAITING_DRAFT'));
-  store.db.prepare('UPDATE collection_progress SET next_at=0').run();await scheduler.tick();assert.equal(store.events().length,3);
-  data.stop(true);store.db.prepare('UPDATE collection_progress SET next_at=0').run();await scheduler.tick();assert.equal(store.events().length,3);
+  await scheduler.tick();assert.equal(store.events().length,4);
+  assert.deepEqual(store.events().filter(e=>e.status==='AWAITING_DRAFT').map(e=>e.payload.platformEventId),['1','2','3']);
+  assert.equal(store.events().find(e=>e.payload.platformEventId==='5').status,'MANUAL_REVIEW');
+  assert.equal(store.events().find(e=>e.payload.platformEventId==='5').payload.observationIssue,'DM_CONTENT_UNVERIFIED');
+  assert.equal(store.events().some(e=>e.payload.platformEventId==='4'),false);
+  store.db.prepare('UPDATE collection_progress SET next_at=0').run();await scheduler.tick();assert.equal(store.events().length,4);
+  data.stop(true);store.db.prepare('UPDATE collection_progress SET next_at=0').run();await scheduler.tick();assert.equal(store.events().length,4);
   assert.equal(store.db.prepare('SELECT count(*) AS n FROM send_intents').get().n,0);assert.equal(store.db.prepare('SELECT count(*) AS n FROM model_calls').get().n,0);
-  console.log(JSON.stringify({automationSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:3,realModels:0,realSends:0}));
+  console.log(JSON.stringify({automationSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:4,mediaPreserved:true,realModels:0,realSends:0}));
 }finally{await scheduler?.close();collector?.dispose();store.close();await owner.close();await server.close();}

@@ -18,6 +18,7 @@ try {
   await mountObserved(owner,server.origin);
   // Cover the real opening path: the permitted row is selected before delayed header metadata mounts.
   await owner.dm.evaluate(()=>{
+    const media=document.querySelector('.message img');media.src='/PRIVATE-MEDIA-URL';media.alt='PRIVATE-MEDIA-LABEL';media.width=16;media.height=16;
     document.querySelector('#chat').hidden=true; window.opened=0;
     const panel=document.querySelector('#dm-panel'),row=document.querySelector('.conversation');
     panel.style.minHeight='24px';panel.hidden=true;row.remove();
@@ -33,17 +34,25 @@ try {
   });
   const config=validateObservationMapping(observedMapping(server.origin),false);
   const batch=await owner.actor.run(()=>new ObservedReader(owner.dm,config).dm(0));
-  assert.equal(batch.events.length,4);assert.equal(batch.unsupported,1);
+  assert.equal(batch.events.length,5);assert.equal(batch.unsupported,1);
+  assert.deepEqual(batch.events.map(event=>event.platformEventId),['1','2','3','4','5']);
+  assert.equal(batch.events[4].text,'[图片或表情消息，需人工查看]');
+  assert.equal(batch.events[4].contentType,'IMAGE');assert.equal(batch.events[4].observationIssue,'DM_CONTENT_UNVERIFIED');
+  assert.ok(!JSON.stringify(batch).includes('PRIVATE-MEDIA-'));
   assert.equal(await owner.dm.evaluate(()=>window.opened),1);
   store.observe('DIRECT_MESSAGE','conv-a',[],'100','fixture');
   for(let n=0;n<5;n++)store.observe('DIRECT_MESSAGE','conv-a',batch.events,'100','fixture');
-  assert.equal(store.events().length,3);assert.ok(store.events().every(e=>e.status==='AWAITING_DRAFT'));
+  assert.equal(store.events().length,4);
+  assert.deepEqual(store.events().filter(event=>event.status==='AWAITING_DRAFT').map(event=>event.payload.platformEventId),['1','2','3']);
+  assert.equal(store.events().find(event=>event.payload.platformEventId==='5').status,'MANUAL_REVIEW');
+  assert.ok(!store.events().some(event=>event.payload.platformEventId==='4'));
   assert.equal(store.db.prepare('SELECT count(*) AS n FROM send_intents').get().n,0);
   await mountObserved(owner,server.origin);
   await mountVirtualizedConversations(owner.dm,true);
   config.selectors.conversationList='#conversation-list';
   const scrolled=await owner.actor.run(()=>new ObservedReader(owner.dm,config).dm(0));
-  assert.deepEqual(scrolled.events.map(e=>e.platformEventId),['1','2','3','4']);
+  assert.deepEqual(scrolled.events.map(e=>e.platformEventId),['1','2','3','4','5']);
+  assert.equal(scrolled.events[4].contentType,'IMAGE');assert.equal(scrolled.events[4].observationIssue,'DM_CONTENT_UNVERIFIED');
   assert.equal(await owner.dm.evaluate(()=>window.opened),1);
   assert.equal(await owner.dm.evaluate(()=>window.outsideOpened),0);
   assert.ok(await owner.dm.evaluate(()=>window.listScrolls>0));
@@ -82,5 +91,5 @@ try {
   await assert.rejects(owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-missing-body'}),/OBSERVATION_COMMENT_TEXT_DOM_NOT_READY/);
   await owner.notification.locator('#self').evaluate(node=>node.remove());
   await assert.rejects(owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-missing-identity'}),/OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_READY/);
-  console.log(JSON.stringify({observedReaderSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:3,emojiVerified:true,unverifiedBodyPreserved:true,readStageCodes:true,sends:0}));
+  console.log(JSON.stringify({observedReaderSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:4,dmMediaPreserved:true,emojiVerified:true,unverifiedBodyPreserved:true,readStageCodes:true,sends:0}));
 } finally {store.close();await owner.close();await server.close();}

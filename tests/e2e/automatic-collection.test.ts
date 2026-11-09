@@ -14,6 +14,16 @@ import { database, privateTemp } from "../helpers.js";
 import { fixtureServer } from "../fixtures/site.js";
 import { mountObserved, mountDmReply, observedMapping } from "../fixtures/observed-site.js";
 
+function expectFixtureInbox(store:ReturnType<typeof database>,conversationId='conv-a',actorId='200'):void{
+  const events=store.events();expect(events).toHaveLength(4);
+  expect(events.filter(event=>event.status==='AWAITING_DRAFT').map(event=>event.payload.platformEventId)).toEqual(['1','2','3']);
+  expect(events.find(event=>event.payload.platformEventId==='5')).toMatchObject({status:'MANUAL_REVIEW',payload:{
+    contentType:'IMAGE',observationIssue:'DM_CONTENT_UNVERIFIED',text:'[图片或表情消息，需人工查看]'}});
+  expect(events.every(event=>event.payload.actorId===actorId&&event.payload.conversationId===conversationId)).toBe(true);
+  expect(events.some(event=>event.payload.platformEventId==='4')).toBe(false);
+  expect(new Set(events.map(event=>event.payload.platformEventId)).size).toBe(4);
+}
+
 test("unknown native peer is discovered and collected by the background timer without AI or manual sync", async () => {
   const server=await fixtureServer(),root=privateTemp('auto-dm-'),owner=await BrowserProfileOwner.launch(join(root,'profile'),true),store=database();
   let scheduler:CollectionScheduler|undefined,collector:InboxCollector|undefined;
@@ -42,12 +52,12 @@ test("unknown native peer is discovered and collected by the background timer wi
     collector=new InboxCollector(owner,observedMapping(server.origin),data,root,'headless');
     scheduler=new CollectionScheduler(data,(source,signal)=>collector!.collect(source,signal));
     scheduler.start();
-    await expect.poll(()=>store.events().length,{timeout:10_000}).toBe(3);
-    expect(store.events().every(e=>e.status==='AWAITING_DRAFT'&&e.payload.actorId==='300'&&e.payload.conversationId==='new-conversation')).toBe(true);
+    await expect.poll(()=>store.events().length,{timeout:10_000}).toBe(4);
+    expectFixtureInbox(store,'new-conversation','300');
     expect(store.db.prepare('SELECT uid,sec_uid FROM discovered_conversations').get()).toEqual({uid:'300',sec_uid:'new-sec'});
     expect(store.db.prepare('SELECT count(*) AS n FROM collection_targets').get()).toEqual({n:1});
     store.db.prepare('UPDATE collection_progress SET next_at=0').run();await scheduler.tick();
-    expect(store.events()).toHaveLength(3);
+    expectFixtureInbox(store,'new-conversation','300');
     expect(store.db.prepare('SELECT used FROM budgets').all()).toEqual([{used:0},{used:0}]);
   } finally {await scheduler?.close();collector?.dispose();store.close();await owner.close();await server.close();}
 });
@@ -81,8 +91,7 @@ test('a failed native return after successful DM collection retains its read wat
     collector=new InboxCollector(owner,observedMapping(server.origin),data,root,'headless');
     const signal=new AbortController().signal;
     await expect(collector.collect('dm',signal)).rejects.toMatchObject({code});
-    expect(store.events()).toHaveLength(3);
-    expect(store.events().every(event=>event.status==='AWAITING_DRAFT'&&event.payload.conversationId==='conv-a')).toBe(true);
+    expectFixtureInbox(store);
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='conv-a'").get()).toEqual({last_read:now});
     const diagnostics=()=>readdir(join(root,'evidence')).then(names=>names.filter(name=>name.startsWith('collection-read-')));
     expect(await diagnostics()).toHaveLength(1);
@@ -138,12 +147,11 @@ test('one unreadable conversation yields to another native peer across collector
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='a-unavailable'").get()).toEqual({last_read:0});
     collector.dispose();collector=new InboxCollector(owner,mapping,new AutomationStore(store,()=>now),root,'headless');
     await collector.collect('dm',signal);
-    expect(store.events()).toHaveLength(3);
-    expect(store.events().every(e=>e.payload.conversationId==='conv-a'&&e.status==='AWAITING_DRAFT')).toBe(true);
+    expectFixtureInbox(store);
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='a-unavailable'").get()).toEqual({last_read:0});
     now+=120_001;
     await expect(collector.collect('dm',signal)).rejects.toThrow('OBSERVATION_DM_CHAT_NOT_READY');
-    expect(store.events()).toHaveLength(3);
+    expectFixtureInbox(store);
     expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);
   }finally{collector?.dispose();store.close();await owner.close();await server.close();}
 });
@@ -192,8 +200,7 @@ test.each([4,10])('%s unreadable native conversations cannot starve a later read
       now=(store.db.prepare("SELECT next_at FROM collection_progress WHERE source='dm'").get() as {next_at:number}).next_at;
       if(turn===2){collector.dispose();collector=new InboxCollector(owner,observedMapping(server.origin),new AutomationStore(store,()=>now),root,'headless');}
     }
-    expect(store.events()).toHaveLength(3);
-    expect(store.events().every(event=>event.payload.conversationId==='conv-a')).toBe(true);
+    expectFixtureInbox(store);
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id LIKE 'a-unavailable-%' AND last_read<>0").all()).toEqual([]);
     const cursor=JSON.parse((store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string}).cursor_json);
     expect(new Set(cursor.deferred.map((item:{id:string})=>item.id)).size).toBe(cursor.deferred.length);

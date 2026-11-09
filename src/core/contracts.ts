@@ -25,8 +25,12 @@ export const eventSchema = z.object({
   kind: z.enum(['COMMENT', 'REPLY', 'DM', 'LIKE', 'FOLLOW', 'SYSTEM', 'UNKNOWN']),
   evidenceId: z.string().min(1),
   discovery: z.enum(['NOTIFICATION', 'ALLOWED_WORK', 'DIRECT_MESSAGE']).optional(),
-  observationIssue: z.literal('COMMENT_TEXT_UNVERIFIED').optional(),
-});
+  observationIssue: z.enum(['COMMENT_TEXT_UNVERIFIED', 'DM_CONTENT_UNVERIFIED']).optional(),
+  contentType: z.enum(['IMAGE', 'VIDEO', 'AUDIO', 'MIXED']).optional(),
+}).refine(event=>!event.contentType||event.channel==='DIRECT_MESSAGE'&&event.observationIssue==='DM_CONTENT_UNVERIFIED',
+  {message:'DM_MEDIA_NEEDS_UNVERIFIED_CONTENT',path:['contentType']})
+  .refine(event=>event.observationIssue!=='DM_CONTENT_UNVERIFIED'||event.channel==='DIRECT_MESSAGE',
+    {message:'DM_CONTENT_REQUIRES_DIRECT_MESSAGE',path:['observationIssue']});
 export type InboundEvent = z.infer<typeof eventSchema>;
 export function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -40,10 +44,11 @@ export function eventBinding(e: InboundEvent): string {
     e.videoId, e.commentId, e.conversationId, e.direction, e.kind];
   // Keep all pre-existing event bindings byte-for-byte compatible.
   if(e.observationIssue)fields.push(e.observationIssue);
+  if(e.contentType)fields.push(e.contentType);
   return digest(fields);
 }
 export function isStrong(e: InboundEvent): boolean {
-  return Boolean(!e.observationIssue && e.platformEventId && e.actorId && (e.channel === 'DIRECT_MESSAGE'
+  return Boolean(!e.observationIssue && !e.contentType && e.platformEventId && e.actorId && (e.channel === 'DIRECT_MESSAGE'
     ? e.conversationId : e.videoId && e.commentId));
 }
 export function isEligible(e: InboundEvent, ownId: string): boolean {

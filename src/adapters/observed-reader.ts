@@ -349,15 +349,26 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       for (let node: Element | null = row; node && box!.contains(node); node = node.parentElement)
         if (node.classList.contains(s.fromMeClass)) fromMe = true;
       dom.check(fromMe === (sender === m.self.uid),'OBSERVATION_DIRECTION_CONFLICT');
-      const texts = row.querySelectorAll(s.messageText);
-      if (texts.length !== 1 || texts[0]!.querySelector('img,video,audio')) { unsupported++; continue; }
-      if(!dom.visible(texts[0]!))continue;
-      const text = texts[0]!.textContent ?? '', parsed = dom.data(message,'_parsedContent');
-      dom.check(text.length > 0 && text === dom.data(parsed,'text'),'OBSERVATION_MESSAGE_TEXT_CONFLICT');
+      const texts=Array.from(row.querySelectorAll(s.messageText)).filter(node=>node.closest(s.messages)===row);
+      const media=Array.from(row.querySelectorAll('img,video,audio')).filter(node=>node.closest(s.messages)===row&&dom.visible(node));
+      let text:string,contentType:InboundEvent['contentType'];
+      if(media.length) {
+        const types=new Set(media.map(node=>node.tagName));
+        contentType=texts.some(node=>dom.visible(node)&&(node.textContent??'').length>0)||types.size>1?'MIXED':
+          types.has('VIDEO')?'VIDEO':types.has('AUDIO')?'AUDIO':'IMAGE';
+        text=contentType==='IMAGE'?'[图片或表情消息，需人工查看]':contentType==='VIDEO'?'[视频消息，需人工查看]':
+          contentType==='AUDIO'?'[音频消息，需人工查看]':'[含媒体的消息，需人工查看]';
+        unsupported++;
+      }else {
+        dom.check(texts.length===1&&dom.visible(texts[0]!)&&(texts[0]!.textContent??'').length>0,'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
+        text=texts[0]!.textContent??'';
+        const parsed=dom.data(message,'_parsedContent');
+        dom.check(text===dom.data(parsed,'text'),'OBSERVATION_MESSAGE_TEXT_CONFLICT');
+      }
       events.push({ accountId:'account_001',channel:'DIRECT_MESSAGE',platformEventId:dom.id(dom.data(message,'serverId')),
         actorId:sender as string,actorName:fromMe ? null : peer!.title,text,occurredAt:dom.time(dom.data(message,'createdAt'),false),
         videoId:null,commentId:null,conversationId:peer!.conversationId,direction:fromMe?'OUTGOING':'INCOMING',kind:'DM',
-        evidenceId,discovery:'DIRECT_MESSAGE' });
+        evidenceId,discovery:'DIRECT_MESSAGE',...(contentType?{contentType,observationIssue:'DM_CONTENT_UNVERIFIED' as const}:{}) });
     }
   } else {
     const work = m.works[index]; dom.check(work && location.href.split('?')[0] === work.url.split('?')[0], 'OBSERVATION_WORK_CHANGED');

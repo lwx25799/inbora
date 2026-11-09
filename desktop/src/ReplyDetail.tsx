@@ -157,6 +157,7 @@ export function ReplyDetail({
                         : "原父评论"}
                     </h3>
                     <p>{thread.event.payload.text}</p>
+                    {thread.event.payload.observationIssue&&<p className="hint">{reasons[thread.event.payload.observationIssue]??thread.event.payload.observationIssue}</p>}
                     <small>{time(thread.event.payload.occurredAt)}</small>
                   </section>
                   <details className="history">

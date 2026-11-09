@@ -119,8 +119,9 @@ export class EventStore {
           if (prior.binding !== eventBinding(comparable) || !isStrong(e) && !e.observationIssue) {
             // A source collision or changed original cannot inherit an approval.
             const previous=this.event(prior.id).payload;
-            const qualityOnly=previous.observationIssue!==comparable.observationIssue&&
-              eventBinding({...previous,observationIssue:undefined})===eventBinding({...comparable,observationIssue:undefined});
+            const qualityOnly=(previous.observationIssue!==comparable.observationIssue||previous.contentType!==comparable.contentType)&&
+              eventBinding({...previous,observationIssue:undefined,contentType:undefined})===
+                eventBinding({...comparable,observationIssue:undefined,contentType:undefined});
             if(prior.status!=='BASELINE'||!qualityOnly)
               this.db.prepare("UPDATE inbound_events SET status='MANUAL_REVIEW' WHERE id=? AND status NOT IN ('CONFIRMED','UNCERTAIN','INTENT_RECORDED')").run(prior.id);
             if(!qualityOnly||!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(prior.id))
@@ -159,11 +160,15 @@ export class EventStore {
     return { id: row.id, payload: eventSchema.parse(JSON.parse(row.payload)), binding: row.binding, status: row.status };
   }
   assertModelObservation(event:InboundEvent):void {
-    const unresolved=this.db.prepare(`SELECT e.id FROM inbound_events e WHERE e.account_id=? AND e.channel=? AND e.target_key=?
-      AND (json_extract(e.payload,'$.observationIssue') IS NOT NULL OR EXISTS
-        (SELECT 1 FROM source_collisions c WHERE c.event_id=e.id AND json_extract(c.payload,'$.observationIssue') IS NOT NULL)) LIMIT 1`)
-      .get(event.accountId,event.channel,targetKey(event));
-    requireSafe(!event.observationIssue&&!unresolved,'COMMENT_TEXT_UNVERIFIED');
+    const dm=event.channel==='DIRECT_MESSAGE';
+    // DM quality belongs to one native message; callers separately validate every bounded history item.
+    const scope=dm?'e.source_key=?':'e.target_key=?';
+    const unresolved=this.db.prepare(`SELECT e.id FROM inbound_events e WHERE e.account_id=? AND e.channel=? AND ${scope}
+      AND (json_extract(e.payload,'$.observationIssue') IS NOT NULL OR json_extract(e.payload,'$.contentType') IS NOT NULL OR EXISTS
+        (SELECT 1 FROM source_collisions c WHERE c.event_id=e.id AND
+          (json_extract(c.payload,'$.observationIssue') IS NOT NULL OR json_extract(c.payload,'$.contentType') IS NOT NULL))) LIMIT 1`)
+      .get(event.accountId,event.channel,dm?event.platformEventId:targetKey(event));
+    requireSafe(!event.observationIssue&&!event.contentType&&!unresolved,dm?'DM_CONTENT_UNVERIFIED':'COMMENT_TEXT_UNVERIFIED');
   }
   events(): StoredEvent[] {
     return (this.db.prepare('SELECT id FROM inbound_events ORDER BY rowid').all() as { id: string }[]).map(r => this.event(r.id));
