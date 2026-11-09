@@ -33,6 +33,7 @@ import { VerificationScheduler } from "./verification-scheduler.js";
 import type { Grant, ReplyPolicy } from "./automation-contracts.js";
 import { CredentialStore } from "./credentials.js";
 import {recoverPolicyDraft} from './policy-draft-recovery.js';
+import {readCommentThreadContext,commentThreadModelHistory} from '../storage/comment-thread-context.js';
 
 export function clientError(error: unknown): string {
   return error instanceof Blocked
@@ -643,12 +644,13 @@ export class ClientService {
     if(await recoverPolicyDraft(this.store,this.authority,this.automation,this.humanReplies,grant)){
       this.inboxRevision++;this.emit('inbox_updated');return;
     }
-    const readable=this.store.db.prepare(`SELECT event_id FROM automation_jobs WHERE state='REVIEW' AND reason IN ('DM_CONTENT_UNVERIFIED','OBSERVATION_DM_CONTENT_DOM_NOT_READY') AND draft_version=0
+    const readable=this.store.db.prepare(`SELECT event_id FROM automation_jobs WHERE state='REVIEW' AND reason IN ('DM_CONTENT_UNVERIFIED','OBSERVATION_DM_CONTENT_DOM_NOT_READY','COMMENT_ROOT_CONTEXT_REQUIRED','COMMENT_THREAD_CONTEXT_UNVERIFIED') AND draft_version=0
       AND NOT EXISTS(SELECT 1 FROM grant_reservations r WHERE r.kind='MODEL' AND r.job_key=automation_jobs.event_id)
       AND NOT EXISTS(SELECT 1 FROM audit_events a WHERE a.event_type='AUTO_QUALIFICATION_RESUMED' AND a.entity_id=automation_jobs.event_id)
       AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=automation_jobs.event_id)`).all() as {event_id:string}[];
     for(const pending of readable)try{
       const event=this.store.event(pending.event_id);this.store.assertModelObservation(event.payload);
+      if(event.payload.kind==='REPLY')commentThreadModelHistory(readCommentThreadContext(this.store,event.payload),event.payload);
       if(this.automation.policyMatches(grant,event))this.store.db.transaction(()=>{
         this.store.audit('AUTO_QUALIFICATION_RESUMED',event.id);this.store.db.prepare('DELETE FROM automation_jobs WHERE event_id=?').run(event.id);
       }).immediate();

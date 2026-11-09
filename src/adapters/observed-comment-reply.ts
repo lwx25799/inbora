@@ -6,13 +6,14 @@ import {digest,eventBinding,isStrong,requireSafe,targetKey,validText,
 import {ObservedReader} from './observed-reader.js';
 import {CommentResponses,type NativeCommentReply} from './comment-responses.js';
 import {SubmissionResponse} from './submission-response.js';
+import type {CommentProofCounts,CommentReadbackDiagnostic} from './comment-readback-diagnostics.js';
 
-interface Input{mapping:CommentReplyMapping;event:InboundEvent;action:'open'|'expand'|'snapshot'|'fill'|'finish'|'arm'|'proofs'|'refresh'|'diagnostic';text:string|null;
+interface Input{mapping:CommentReplyMapping;event:InboundEvent;action:'open'|'expand'|'snapshot'|'fill'|'finish'|'arm'|'proofs'|'refresh'|'diagnostic'|'locateRoot';text:string|null;
   token:string|null;before:{context:unknown[];editorText:string}|null;shape:string|null;receipts?:NativeCommentReply[]}
 export interface CommentQualification {nested:boolean;stage:'EXPAND'|'OPEN'|'SNAPSHOT';verified:boolean;code:string|null;
   composerCount:number;metadataReady:boolean;level:0|1|2|'OTHER'|'MISSING';cidMatches:boolean;rootMatches:boolean;workMatches:boolean;rowOwned:boolean}
 type ComposerQualification=Pick<CommentQualification,'composerCount'|'metadataReady'|'level'|'cidMatches'|'rootMatches'|'workMatches'|'rowOwned'>;
-interface Frame{context:unknown[];proofs:SendProof[];ids:string[];editorText:string;shape:string;qualification?:ComposerQualification}
+interface Frame{context:unknown[];proofs:SendProof[];ids:string[];editorText:string;shape:string;qualification?:ComposerQualification;readbackCounts?:CommentProofCounts;rootCount?:number}
 
 /** Fixed, bounded rendered paths. No calls to website handlers, getters or private endpoints. */
 export function captureCommentReply(input:Input):Frame{
@@ -84,7 +85,7 @@ export function captureCommentReply(input:Input):Frame{
       };
       return traversal.walk(content);
     },
-    root():{root:Element;thread:Element;context:unknown[];proofs:SendProof[];ids:string[]}{
+    root():{root:Element;thread:Element;context:unknown[];proofs:SendProof[];ids:string[];readbackCounts?:CommentProofCounts}{
       const work=o.works.find(w=>w.id===e.videoId),peer=[...o.peers,...o.commentAuthors??[]].find(p=>p.uid===e.actorId);
       const nested=e.kind==='REPLY',rootId=nested?e.rootCommentId:e.commentId;
       dom.check(work&&peer&&e.channel==='COMMENT_NOTIFICATION'&&(e.kind==='COMMENT'||nested&&rootId&&rootId!==e.commentId&&e.replyToCommentId===e.commentId)&&e.direction==='INCOMING','COMMENT_REPLY_SCOPE_REQUIRED');
@@ -104,7 +105,7 @@ export function captureCommentReply(input:Input):Frame{
         dom.data(dom.data(p,'awemeInfo'),'awemeId')===e.videoId&&dom.data(dom.data(p,'userInfo'),'uid')===o.self.uid,'COMMENT_REPLY_ORIGINAL_CHANGED');
       const targetRows=nested?Array.from(root.querySelectorAll(s.commentRows)).filter(row=>row.parentElement?.closest(s.commentRows)===root&&dom.visible(row)&&
         dom.data(dom.data(dom.props(row,s.commentFiberDepth),'commentInfo'),'cid')===e.commentId):[root];
-      if(nested&&input.action==='expand'&&targetRows.length===0)return{root,thread:root,context:[],proofs:[],ids:[]};
+      if(nested&&(input.action==='expand'||input.action==='locateRoot')&&targetRows.length===0)return{root,thread:root,context:[],proofs:[],ids:[]};
       dom.check(targetRows.length===1,'COMMENT_REPLY_ORIGINAL_CHANGED');const target=targetRows[0]!,targetProps=dom.props(target,s.commentFiberDepth),original=dom.data(targetProps,'commentInfo');
       const author=dom.data(original,'user'),texts=dom.owned(target,s.commentText).filter(n=>dom.commentText(n,target,s.commentRows,o.environment==='fixture')===e.text),
         tooltips=dom.owned(target,s.commentTooltip).filter(n=>n.id===`tooltip_${e.commentId}`),links=dom.owned(target,s.commentAuthor).filter(n=>{
@@ -131,6 +132,9 @@ export function captureCommentReply(input:Input):Frame{
       }
       const children=Array.from(root.querySelectorAll(s.commentRows)).filter(n=>n.parentElement?.closest(s.commentRows)===root&&dom.visible(n));
       dom.check(children.length<=100,'COMMENT_REPLY_WINDOW_TOO_LARGE');
+      const readbackCounts:CommentProofCounts={visibleChildren:children.length,strongChildren:0,ownChildren:0,receiptCandidates:0,uniqueReceipt:0,
+        serverRoot:0,serverChild:0,serverAuthor:0,serverText:0,serverTime:0,serverConfirmed:0,domStatusConfirmed:0,tooltipBound:0,
+        nativeConsistent:0,bodyMatches:0,authorMatches:0,notFlagged:0,proofs:0};
       const childIds=new Set<string>();
       for(const child of children){
         const childProps=dom.props(child,s.commentFiberDepth),native=dom.data(childProps,'commentInfo'),nativeUser=dom.data(native,'user');
@@ -140,37 +144,51 @@ export function captureCommentReply(input:Input):Frame{
           dom.data(childProps,'level')===2&&dom.data(dom.data(childProps,'awemeInfo'),'awemeId')===e.videoId&&
           (dom.data(childProps,'levelOneCid')===undefined||dom.data(childProps,'levelOneCid')===rootId);
         if(input.action!=='proofs'&&input.action!=='refresh')dom.check(strong,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
+        if(strong)readbackCounts.strongChildren++;
         if(typeof id!=='string')continue;
         dom.check(!childIds.has(id),'COMMENT_REPLY_ID_COLLISION');childIds.add(id);
         if(!seen.has(id)){seen.add(id);ids.push(id);}
         context.push(['visible',id,text,parent,uid,sec,at,status??null]);
         if(!strong||uid!==o.self.uid||sec!==o.self.secUid)continue;
+        readbackCounts.ownChildren++;
         const responses=(input.receipts??[]).filter(r=>r.cid===id);
         const server=responses.length===1?responses[0]:null;
+        readbackCounts.receiptCandidates+=responses.length;if(server){readbackCounts.uniqueReceipt++;
+          if(server.aweme_id===e.videoId&&server.reply_id===rootId)readbackCounts.serverRoot++;
+          if(nested?server.reply_to_reply_id===e.commentId:server.reply_to_reply_id===undefined||server.reply_to_reply_id==='0')readbackCounts.serverChild++;
+          if(server.user.uid===uid&&server.user.sec_uid===sec)readbackCounts.serverAuthor++;
+          if(server.text===text)readbackCounts.serverText++;if(dom.time(server.create_time)===at)readbackCounts.serverTime++;
+          if(server.status===m.confirmedStatus)readbackCounts.serverConfirmed++;
+        }
         const serverMatches=server&&server.aweme_id===e.videoId&&server.reply_id===rootId&&server.text===text&&
           server.user.uid===uid&&server.user.sec_uid===sec&&dom.time(server.create_time)===at;
         if(server&&(!serverMatches||server.status!==m.confirmedStatus))continue;
         if(nested&&(!serverMatches||server.reply_to_reply_id!==e.commentId))continue;
         if(!nested&&server?.reply_to_reply_id!==undefined&&server.reply_to_reply_id!=='0')continue;
         if(status!==undefined&&status!==m.confirmedStatus||status===undefined&&!(serverMatches&&server.status===m.confirmedStatus))continue;
+        readbackCounts.domStatusConfirmed++;
         const tooltip=Array.from(root.querySelectorAll(s.commentTooltip)).filter(n=>n.id===`tooltip_${id}`);
         if(tooltip.length!==1)continue;
         if(tooltip[0]!.closest(s.commentRows)!==child)continue;
+        readbackCounts.tooltipBound++;
         const prior=(replies as unknown[]).filter(r=>dom.data(r,'cid')===id);
         if(prior.length){const r=prior[0],u=dom.data(r,'user');if(dom.data(r,'text')!==text||dom.data(r,'replyId')!==parent||
           dom.data(u,'uid')!==uid||dom.data(u,'secUid')!==sec||dom.time(dom.data(r,'createTime'))!==at||
           dom.data(r,'status')!==undefined&&dom.data(r,'status')!==m.confirmedStatus)continue;}
+        readbackCounts.nativeConsistent++;
         const bodies=dom.owned(child,s.commentText).filter(dom.visible),authors=dom.owned(child,s.commentAuthor).filter(n=>{
           if(!dom.visible(n))return false;if(!nested)return true;const url=new URL(n.getAttribute('href')??'',location.origin);
           return url.origin===o.origin&&url.pathname===`/user/${o.self.secUid}`;});
         const authorUrl=authors.length===1?new URL(authors[0]!.getAttribute('href')??'',location.origin):null;
         const flagged=Array.from(child.querySelectorAll(`${m.pending},${m.failed}`)).some(dom.visible)||child.matches(`${m.pending},${m.failed}`);
-        if(bodies.length===1&&dom.commentText(bodies[0]!,child,s.commentRows,o.environment==='fixture')===text&&authorUrl?.origin===o.origin&&!authorUrl.username&&!authorUrl.password&&
-          authorUrl.pathname===`/user/${o.self.secUid}`&&!flagged)
+        const bodyMatches=bodies.length===1&&dom.commentText(bodies[0]!,child,s.commentRows,o.environment==='fixture')===text,
+          authorMatches=authorUrl?.origin===o.origin&&!authorUrl.username&&!authorUrl.password&&authorUrl.pathname===`/user/${o.self.secUid}`;
+        if(bodyMatches)readbackCounts.bodyMatches++;if(authorMatches)readbackCounts.authorMatches++;if(!flagged)readbackCounts.notFlagged++;
+        if(bodyMatches&&authorMatches&&!flagged)
           proofs.push({id:id as string,ownId:o.self.uid,targetKey:`comment:${e.videoId}:${e.commentId}`,text:text as string,pending:false,sentAt:at as string});
       }
       dom.check(typeof total==='number'&&total>=ids.length,'COMMENT_REPLY_CONTEXT_UNVERIFIED');
-      return{root:target,thread:root,context,proofs,ids};
+      readbackCounts.proofs=proofs.length;return{root:target,thread:root,context,proofs,ids,readbackCounts};
     },
     editorText(editor:Element):string{
       dom.check(editor instanceof HTMLElement&&editor.isContentEditable&&!editor.querySelector('img,video,audio,input,[contenteditable]'),'COMMENT_REPLY_EDITOR_UNSUPPORTED');
@@ -211,7 +229,8 @@ export function captureCommentReply(input:Input):Frame{
         button.closest(m.composerScope)===scope&&!button.contains(editor),'COMMENT_REPLY_COMPOSER_CHANGED');
       return{...state,editor:editor as HTMLElement,button:button as HTMLElement,editorText:dom.editorText(editor),shape:editor.innerHTML};
     },
-    frame(state:Frame):Frame{return{context:state.context,proofs:state.proofs,ids:state.ids,editorText:state.editorText,shape:state.shape};},
+    frame(state:Frame):Frame{return{context:state.context,proofs:state.proofs,ids:state.ids,editorText:state.editorText,shape:state.shape,
+      ...(state.readbackCounts?{readbackCounts:state.readbackCounts}:{})};},
   };
   if(input.action==='diagnostic'){
     const state=dom.root(),scopes=Array.from(document.querySelectorAll(m.composerScope)).filter(dom.visible);
@@ -223,6 +242,31 @@ export function captureCommentReply(input:Input):Frame{
       report.workMatches=dom.data(dom.data(props,'awemeInfo'),'awemeId')===e.videoId;report.rowOwned=scope.closest(s.commentRows)===state.root;
     }
     return{context:[],proofs:[],ids:[],editorText:'',shape:'',qualification:report};
+  }
+  if(input.action==='locateRoot'){
+    const work=o.works.find(w=>w.id===e.videoId),rootId=e.kind==='REPLY'?e.rootCommentId:e.commentId;
+    dom.check(work&&location.origin===o.origin&&location.href.split('?')[0]===work.url.split('?')[0],'COMMENT_REPLY_SCOPE_REQUIRED');
+    dom.check(!/验证码|安全验证|访问受限/.test(document.title)&&![m.blockers,o.securityBlockers].some(selector=>Array.from(document.querySelectorAll(selector)).some(dom.visible)),'COMMENT_REPLY_PAGE_BLOCKED');
+    const own=dom.props(dom.one(document,s.selfAvatar),s.selfFiberDepth);
+    dom.check(dom.data(own,'uid')===o.self.uid&&dom.data(own,'secUid')===o.self.secUid,'COMMENT_REPLY_ACCOUNT_CHANGED');
+    const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);dom.check(lists.length===1,'COMMENT_REPLY_LIST_NOT_UNIQUE');
+    const rows=Array.from(lists[0]!.querySelectorAll(s.commentRows));dom.check(rows.length<=100,'COMMENT_REPLY_WINDOW_TOO_LARGE');
+    const roots=rows.filter(row=>!row.parentElement?.closest(s.commentRows)&&dom.visible(row)&&dom.data(dom.data(dom.props(row,s.commentFiberDepth),'commentInfo'),'cid')===rootId);
+    dom.check(roots.length<=1,'COMMENT_REPLY_ROOT_NOT_UNIQUE');
+    if(!roots.length)return{context:[],proofs:[],ids:[],editorText:'',shape:'',rootCount:0};
+    const state=dom.root(),box=state.root.getBoundingClientRect();let top=0,bottom=innerHeight;
+    for(let ancestor=state.root.parentElement,depth=0;ancestor&&depth<=16;ancestor=ancestor.parentElement,depth++){
+      if(['auto','scroll','hidden','clip'].includes(getComputedStyle(ancestor).overflowY)){const clip=ancestor.getBoundingClientRect();top=Math.max(top,clip.top);bottom=Math.min(bottom,clip.bottom);}
+    }
+    if(box.bottom<=top||box.top>=bottom){
+      for(const editor of document.querySelectorAll('[contenteditable="true"],textarea,input')){
+        if(!dom.visible(editor)||editor instanceof HTMLInputElement&&!['text','search','email','url','tel','password'].includes(editor.type))continue;
+        const value=editor instanceof HTMLInputElement||editor instanceof HTMLTextAreaElement?editor.value:editor.textContent??'';
+        dom.check(value===''&&!editor.querySelector('img,video,audio,iframe,object,[data-slate-void="true"],[data-attachment]'),'COMMENT_REPLY_EXISTING_DRAFT');
+      }
+      state.root.scrollIntoView({block:'center',behavior:'instant'});dom.check(dom.root().root===state.root,'COMMENT_REPLY_ORIGINAL_CHANGED');
+    }
+    return{context:[],proofs:[],ids:[],editorText:'',shape:'',rootCount:1};
   }
   if(input.action==='proofs'){const state=dom.root();return dom.frame({...state,editorText:'',shape:''});}
   if(input.action==='expand'){
@@ -326,25 +370,52 @@ export class ObservedCommentReply implements ReplyAdapter{
   private readonly responses:CommentResponses;
   private readonly submission:SubmissionResponse|null;
   private pendingEvent:InboundEvent|null=null;
+  private readingBack=false;
   constructor(readonly page:Page,readonly mapping:CommentReplyMapping,private readonly timeoutMs=5000,
-    private readonly options:{onQualification?:(report:CommentQualification)=>void}={}){this.responses=new CommentResponses(page,mapping);
+    private readonly options:{signal?:AbortSignal;readonlySignal?:AbortSignal;onQualification?:(report:CommentQualification)=>void;onReadbackDiagnostic?:(report:CommentReadbackDiagnostic)=>void}={}){this.responses=new CommentResponses(page,mapping);
     this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;}
   dispose():void{this.responses.dispose();this.submission?.dispose();}
+  private report(report:Omit<CommentReadbackDiagnostic,'responses'|'submissionEnabled'>):void {
+    try{this.options.onReadbackDiagnostic?.({...report,submissionEnabled:!!this.submission,responses:this.responses.diagnostics()});}catch{/* Diagnostics cannot change a receipt. */}
+  }
   private async frame(event:InboundEvent,action:Input['action']='snapshot',text:string|null=null,token:string|null=null,
     before:Input['before']=null,shape:string|null=null):Promise<Frame>{
-    try{return await this.page.evaluate(captureCommentReply,{mapping:this.mapping,event,action,text,token,before,shape,receipts:this.responses.snapshot(event)});}
+    const signal=this.readingBack?this.options.readonlySignal:this.options.signal;
+    requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');
+    try{const value=await this.page.evaluate(captureCommentReply,{mapping:this.mapping,event,action,text,token,before,shape,receipts:this.responses.snapshot(event)});
+      requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');return value;}
     catch(error){const code=error instanceof Error?error.message.match(/COMMENT_REPLY_[A-Z_]+/)?.[0]:null;if(code)requireSafe(false,code);throw error;}
   }
   private snapshot(event:InboundEvent,state:Frame):TargetSnapshot{return{accountId:event.accountId,ownId:this.mapping.observation.self.uid,
     targetKey:targetKey(event),eventBinding:eventBinding(event),composerKey:targetKey(event),contextDigest:digest(state.context),mappingDigest:digest(this.mapping)};}
+  private async locateRoot(event:InboundEvent,index:number):Promise<void>{
+    const requested=this.readingBack?this.options.readonlySignal:this.options.signal;
+    const deadline=Date.now()+30_000,timeout=AbortSignal.timeout(30_000),signal=requested?AbortSignal.any([requested,timeout]):timeout;
+    const reader=new ObservedReader(this.page,this.mapping.observation,undefined,signal);
+    const check=()=>{requireSafe(!requested?.aborted,'COMMENT_REPLY_CANCELLED');requireSafe(!signal.aborted&&Date.now()<deadline,'COMMENT_REPLY_LOCATE_TIMEOUT');};
+    const found=async()=>{check();const count=(await this.frame(event,'locateRoot')).rootCount;check();return count===1;};
+    check();
+    if(this.page.url().split('?')[0]!==this.mapping.observation.works[index]!.url.split('?')[0])
+      await reader.comments(index,true,0,{holdScroll:true,stay:false});
+    let top=0,previous:string|null=null,stalls=0;
+    for(;;){
+      if(await found())return;
+      check();requireSafe(stalls<2,'COMMENT_REPLY_ROOT_NOT_FOUND');
+      await reader.comments(index,true,top,{holdScroll:true,stay:true});
+      if(await found())return;
+      const scroll=await reader.advanceComments(index),signature=digest(scroll);top=scroll.top;
+      stalls=signature===previous?stalls+1:0;previous=signature;
+      await new Promise(resolve=>setTimeout(resolve,150));
+    }
+  }
   async inspect(event:InboundEvent):Promise<TargetSnapshot>{
+    this.readingBack=false;
     let stage:CommentQualification['stage']='EXPAND',verified=false,code:string|null=null;
     try{
     this.responses.watch(event);
     this.token=null;const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);
     requireSafe(isStrong(event)&&index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
-    if(this.page.url().split('?')[0]!==this.mapping.observation.works[index]!.url.split('?')[0])
-      await new ObservedReader(this.page,this.mapping.observation).comments(index);
+    await this.locateRoot(event,index);
     await this.frame(event,'expand');
     stage='OPEN';await this.frame(event,'open');stage='SNAPSHOT';const deadline=Date.now()+5000;let frame:Frame;
     for(;;)try{frame=await this.frame(event);break;}catch(error){
@@ -410,12 +481,15 @@ export class ObservedCommentReply implements ReplyAdapter{
   }
   async baseline(event:InboundEvent):Promise<string[]>{return(await this.frame(event)).ids;}
   async verifyExisting(event:InboundEvent,text:string,notBefore:string):Promise<SendProof|null>{
+    this.readingBack=true;
+    requireSafe(!this.options.readonlySignal?.aborted,'COMMENT_REPLY_CANCELLED');
     requireSafe(isStrong(event)&&Number.isFinite(Date.parse(notBefore)),'COMMENT_REPLY_SCOPE_REQUIRED');
     const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
     this.responses.watch(event);
-    await new ObservedReader(this.page,this.mapping.observation).comments(index);
+    await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).comments(index);
+    await this.locateRoot(event,index);
     await this.frame(event,'expand');
-    return this.poll(event,text,[],notBefore);
+    return this.poll(event,text,[],notBefore,undefined,'VERIFY_EXISTING');
   }
   async clickOnce(notBefore?:string):Promise<void>{const token=this.token;this.token=null;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
     if(this.submission){requireSafe(notBefore&&this.pendingEvent&&this.prepared,'COMMENT_REPLY_INTENT_REQUIRED');
@@ -432,9 +506,13 @@ export class ObservedCommentReply implements ReplyAdapter{
     requireSafe(accepted,'COMMENT_REPLY_CLICK_BLOCKED');
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
+    this.readingBack=true;
     if(this.submission){
       const deadline=Date.now()+this.timeoutMs;let ack=this.submission.current();
       while(!ack&&Date.now()<deadline){await new Promise(resolve=>setTimeout(resolve,25));ack=this.submission.current();}
+      const ackReport=this.submission.diagnostics();
+      this.report({stage:'ACK',reason:!ack?'NO_ACK':before.includes(ack.id)?'OLD_ACK':'VERIFIED',requestCount:ackReport.requestCount,
+        acknowledged:ackReport.acknowledged,submissionFailure:ackReport.failure});
       if(!ack||before.includes(ack.id))return null;
       requireSafe(this.submission.expectRefresh(ack),'COMMENT_REPLY_ACK_REVOKED');
       await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15_000}),this.frame(event,'refresh')]);
@@ -452,7 +530,8 @@ export class ObservedCommentReply implements ReplyAdapter{
   }
   private async refreshComments(event:InboundEvent):Promise<void>{
     try{
-      await new ObservedReader(this.page,this.mapping.observation).guard();
+      const signal=this.readingBack?this.options.readonlySignal:this.options.signal;
+      requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');await new ObservedReader(this.page,this.mapping.observation,undefined,signal).guard();
       const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
       const s=this.mapping.observation.selectors,list=this.page.locator(s.commentList).filter({visible:true});
       if(!await list.count())await this.page.locator(s.commentEntry).click();
@@ -463,19 +542,29 @@ export class ObservedCommentReply implements ReplyAdapter{
         requireSafe(Date.now()<deadline,'COMMENT_REPLY_REFRESH_NOT_READY');
         await new Promise(resolve=>setTimeout(resolve,50));
       }
-      await this.frame(event,'expand');
+      await this.locateRoot(event,index);await this.frame(event,'expand');
     }catch(error){
       if(error instanceof Error&&error.name==='TimeoutError')requireSafe(false,'COMMENT_REPLY_REFRESH_NOT_READY');
       throw error;
     }
   }
-  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string):Promise<SendProof|null>{
-    const deadline=Date.now()+this.timeoutMs;let previous:string|null=null;
-    do{const matches=(await this.frame(event,'proofs')).proofs.filter(p=>!before.includes(p.id)&&p.text===text&&
-      (ackId?p.id===ackId:Date.parse(p.sentAt)>Date.parse(notBefore))&&Date.parse(p.sentAt)<=Date.now());
-      requireSafe(matches.length<=1,'COMMENT_REPLY_PROOF_AMBIGUOUS');const proof=matches[0];if(proof&&digest(proof)===previous)return proof;
-      previous=proof?digest(proof):null;await new Promise(resolve=>setTimeout(resolve,75));
-    }while(Date.now()<deadline);return null;
+  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string,stage:'POLL'|'VERIFY_EXISTING'='POLL'):Promise<SendProof|null>{
+    const deadline=Date.now()+this.timeoutMs;let previous:string|null=null,dom:CommentProofCounts|undefined;
+    const poll={snapshots:0,rawProofs:0,newProofs:0,sameText:0,afterBoundary:0,notFuture:0,ackMatches:0,eligibleProofs:0,stableSnapshots:0};
+    try{
+      do{const frame=await this.frame(event,'proofs');dom=frame.readbackCounts;poll.snapshots++;poll.rawProofs=frame.proofs.length;
+        const fresh=frame.proofs.filter(p=>!before.includes(p.id)),same=fresh.filter(p=>p.text===text);
+        poll.newProofs=fresh.length;poll.sameText=same.length;poll.afterBoundary=same.filter(p=>Date.parse(p.sentAt)>Date.parse(notBefore)).length;
+        poll.notFuture=same.filter(p=>Date.parse(p.sentAt)<=Date.now()).length;poll.ackMatches=ackId?same.filter(p=>p.id===ackId).length:0;
+        const matches=same.filter(p=>(ackId?p.id===ackId:Date.parse(p.sentAt)>Date.parse(notBefore))&&Date.parse(p.sentAt)<=Date.now());
+        poll.eligibleProofs=matches.length;requireSafe(matches.length<=1,'COMMENT_REPLY_PROOF_AMBIGUOUS');const proof=matches[0];
+        poll.stableSnapshots=proof?(digest(proof)===previous?2:1):0;
+        if(proof&&poll.stableSnapshots===2){this.report({stage,reason:'VERIFIED',...(dom?{dom}:{}),poll});return proof;}
+        previous=proof?digest(proof):null;await new Promise(resolve=>setTimeout(resolve,75));
+      }while(Date.now()<deadline);
+      this.report({stage,reason:!poll.rawProofs?'EMPTY':!poll.eligibleProofs?'FILTERED':'UNSTABLE',...(dom?{dom}:{}),poll});return null;
+    }catch(error){const guardCode=error instanceof Error?/COMMENT_REPLY_[A-Z_]+/.exec(error.message)?.[0]:undefined;
+      this.report({stage,reason:'GUARD_ERROR',...(guardCode?{guardCode}:{}),...(dom?{dom}:{}),poll});throw error;}
   }
 }
 type Gate={token:string;submit:()=>boolean;remove:()=>void};

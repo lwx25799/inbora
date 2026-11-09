@@ -8,6 +8,7 @@ import {
 } from "../core/contracts.js";
 import type { EventStore } from "../storage/store.js";
 import { prompt, sensitive } from "./draft-service.js";
+import {readCommentThreadContext,commentThreadModelHistory} from '../storage/comment-thread-context.js';
 import type { AiSettings } from "../app/contracts.js";
 
 const responseSchema = z.object({
@@ -49,6 +50,7 @@ export class DeepSeekProvider {
       "REAL_MODEL_AUTHORIZATION_REQUIRED",
     );
     requireSafe(!/[\r\n]/u.test(key), "INVALID_MODEL_KEY");
+    if(event.channel==='COMMENT_NOTIFICATION'&&event.kind==='REPLY')history=commentThreadModelHistory(readCommentThreadContext(store,event),event);
     requireSafe(
       !sensitive(event) &&
         !history.some(sensitive) &&
@@ -60,6 +62,7 @@ export class DeepSeekProvider {
         }),
       "SENSITIVE_MANUAL_HANDLING",
     );
+    const context=prompt(event,history);
     const id = randomUUID();
     store.db
       .transaction(() => {
@@ -74,7 +77,6 @@ export class DeepSeekProvider {
       .immediate();
     const started = Date.now();
     try {
-      const context = prompt(event, history);
       const response = await this.transport(
         "https://api.deepseek.com/chat/completions",
         {

@@ -21,11 +21,14 @@ import {dmActivitySchema,readDmActivity} from './dm-activity.js';
 import {previewRetryFields,preparePreviewRetry,finishPreviewNormalTurn} from './preview-retry.js';
 import {commentThreadsSchema,collectCommentThread} from './comment-thread-collection.js';
 import {qualifyLateArrivals} from './late-arrival-qualification.js';
+import {recordCommentWindow,type CommentWindowRead} from '../observability/comment-window-diagnostics.js';
+import {CommentListDiagnostics} from '../adapters/comment-list-diagnostics.js';
 
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
   pending: z.array(z.object({aweme_id:z.string(),create_time:z.number().nullable().optional(),author:z.object({uid:z.string(),sec_uid:z.string()})})).default([]),
-  commentThreads:commentThreadsSchema,threadBurst:z.number().int().nonnegative().default(0)});
+  commentThreads:commentThreadsSchema,threadBurst:z.number().int().nonnegative().default(0),
+  headPending:z.array(z.string()).default([]),pendingRootPages:z.array(z.string()).default([])});
 const dmSweepSchema=z.object({peer:z.object({uid:z.string().nullable(),secUid:z.string(),conversationId:z.string(),title:z.string()}),
   phase:z.enum(['MIN','MAX','PROBE_MIN','PROBE_MAX']),top:z.number().finite(),height:z.number().nonnegative(),signature:z.string(),
   edge:z.number().int().nonnegative(),legHasNew:z.boolean(),minimumOld:z.boolean().default(false),
@@ -59,8 +62,10 @@ export class InboxCollector {
   }
   async collect(source:CollectionSource,signal:AbortSignal):Promise<void> {
     this.check(source,signal);
-    // One object/page turn, never a whole catalog or inbox inside the account lock.
+    // Known root backlog may use its existing two-window quantum; never drain a catalog or inbox inside the lock.
     await this.owner.actor.run(async()=>{
+      this.check(source,signal);
+      await (source==='works'?this.owner.notification:this.owner.dm).bringToFront();
       this.check(source,signal);
       if(source==='dm'){
         if(preparePreviewRetry(this.data,this.root,!this.priority&&!this.priorityNeedsNormal,id=>this.prioritize(this.mapping.self.uid,id)))this.priorityNeedsNormal=true;
@@ -68,7 +73,10 @@ export class InboxCollector {
         else{try{await this.dm(signal);}finally{
           if(!signal.aborted&&!this.disposed){this.priorityNeedsNormal=false;finishPreviewNormalTurn(this.data);}
         }}
-      }else await this.works(signal);
+      }else if(await this.works(signal)){
+        this.check(source,signal);
+        await this.works(signal);
+      }
     },'background');
   }
   prioritize(ownId:string,conversationId:string):boolean {
@@ -110,7 +118,7 @@ export class InboxCollector {
       throw new DeferredObjectRead(code);
     }
   }
-  private async persist(source:CollectionSource,scope:string,batch:ObservationBatch,signal:AbortSignal,exactPeer?:DiscoveredPeer):Promise<void> {
+  private async persist(source:CollectionSource,scope:string,batch:ObservationBatch,signal:AbortSignal,exactPeer?:DiscoveredPeer,window?:CommentWindowRead):Promise<void> {
     this.check(source,signal);
     const display=()=>digest(batch.events.filter(event=>event.observationIssue==='DM_CONTENT_UNVERIFIED').map(event=>[
       event.platformEventId,new MessageShareStore(this.root).read(event,this.mapping.self.uid),new MessagePreviewStore(this.root).list(event,this.mapping.self.uid)]));
@@ -140,6 +148,11 @@ export class InboxCollector {
       if(displayChanged)this.data.store.audit('MESSAGE_DISPLAY_CHANGED',digest(['account_001','dm:'+scope]));
     }).immediate();
     requireSafe(!batch.incomplete||!!dmWindowCoverage(batch,this.data.state().startedAt),'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
+    if(source==='works'){
+      const workId=scope.slice('work:'.length),work=this.data.store.db.prepare('SELECT state FROM discovered_works WHERE id=? AND own_id=?').get(workId,this.mapping.self.uid) as {state:string}|undefined;
+      await recordCommentWindow(this.root,scope,batch,this.data.now(),this.data.state().startedAt,
+        {mappedWork:this.mapping.works.some(item=>item.id===workId),includedWork:work?.state==='INCLUDED',historicalWork:work?.state==='HISTORICAL',ownId:this.mapping.self.uid},window);
+    }
   }
   private async dmStage<T>(stage:'LIST'|'THREAD'|'ADVANCE',read:()=>Promise<T>):Promise<T> {
     try{return await read();}catch(error){
@@ -383,7 +396,8 @@ export class InboxCollector {
     this.check('dm',signal);
     await this.advanceDm(reader,signal);
   }
-  private async works(signal:AbortSignal):Promise<void> {
+  private async works(signal:AbortSignal):Promise<boolean> {
+    let continueRoots=false;
     const row=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='works'").get() as {cursor_json:string};
     const cursor=worksCursorSchema.parse(JSON.parse(row.cursor_json));
     if(cursor.phase==='discovery') {
@@ -398,7 +412,7 @@ export class InboxCollector {
       const registered=this.data.store.db.prepare("SELECT id,url FROM discovered_works WHERE own_id=? AND state='INCLUDED' ORDER BY published_at,id").all(this.mapping.self.uid) as {id:string;url:string}[];
       const works=Array.from(new Map([...this.mapping.works,...registered].map(w=>[w.id,w])).values());
       const work=works[cursor.workIndex];
-      let done=true;
+      let done=true,yieldedWork=false;
       if(work) {
         const mapping={...this.mapping,works:[work]};
         const progress=this.data.store.db.prepare('SELECT scroll_top,last_height,end_observations,next_at,last_read FROM work_collection_progress WHERE work_id=?').get(work.id) as {
@@ -407,25 +421,48 @@ export class InboxCollector {
         if(progress&&progress.next_at>this.data.now()){
           cursor.threadBurst=0;
           cursor.workIndex++;if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
-          this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));return;
+          this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));return false;
         }
+        const headRead=cursor.headPending.includes(work.id)&&(progress?.scroll_top??0)>0;
+        const responses=new CommentListDiagnostics(this.owner.notification,mapping,work,()=>this.data.now(),this.data.state().startedAt);
+        const window:CommentWindowRead={headRead,requestedOffset:headRead?0:progress?.scroll_top??0};
+        const notePages=(more:boolean|null|undefined)=>{
+          if(more===true&&!cursor.pendingRootPages.includes(work.id))cursor.pendingRootPages.push(work.id);
+          if(more===false)cursor.pendingRootPages=cursor.pendingRootPages.filter(id=>id!==work.id);
+          if(typeof more==='boolean')this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
+        };
         let batch:ObservationBatch|undefined,threadsPending=false,persisted=false;
         const reader=new ObservedReader(this.owner.notification,mapping,undefined,signal);
         try{
-          batch=await reader.comments(0,true,progress?.scroll_top??0,{holdScroll:true,stay:cursor.commentThreads.some(item=>item.workId===work.id&&!item.done&&item.retryAt<=this.data.now())});
+        try{
+          batch=await reader.comments(0,true,headRead?0:progress?.scroll_top??0,{holdScroll:true,
+            stay:!headRead&&cursor.commentThreads.some(item=>item.workId===work.id&&!item.done&&item.retryAt<=this.data.now()),
+            onRestoreWindow:async part=>{window.responseSummary=await responses.summary(signal);notePages(window.responseSummary?.hasMore);
+              await this.persist('works',`work:${work.id}`,part,signal,undefined,window);}});
+          window.responseSummary=await responses.summary(signal);notePages(window.responseSummary?.hasMore);
+          if(batch.commentRestoreIncomplete&&!(batch.commentRestoreStableEnd&&window.responseSummary?.hasMore===false)){
+            this.check('works',signal);cursor.threadBurst=0;cursor.workIndex++;
+            if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
+            if(!cursor.headPending.includes(work.id))cursor.headPending.push(work.id);
+            this.data.store.db.prepare(`UPDATE work_collection_progress SET last_error='OBSERVATION_COMMENT_RESTORE_LIMIT' WHERE work_id=?`).run(work.id);
+            this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));return false;
+          }
+          const more=window.responseSummary?.hasMore;
+          notePages(more);
+          if(more===true)await this.diagnose(reader,'works','COMMENT_LIST_HAS_MORE',signal,undefined,'LIST');
           const initial=batch;
           threadsPending=await collectCommentThread(reader,work.id,batch,cursor.commentThreads,this.data.now(),async part=>{
             const ids=new Set(part.events.map(event=>event.platformEventId));
             await this.persist('works',`work:${work.id}`,{...part,events:[...initial.events.filter(event=>!ids.has(event.platformEventId)),...part.events],
-              bindings:[...initial.bindings??[],...part.bindings??[]]},signal);persisted=true;
+              bindings:[...initial.bindings??[],...part.bindings??[]]},signal,undefined,window);persisted=true;
           });
-          if(!persisted){await this.persist('works',`work:${work.id}`,batch,signal);persisted=true;}
+          if(!persisted){await this.persist('works',`work:${work.id}`,batch,signal,undefined,window);persisted=true;}
         }
         catch(error){
           const code=error instanceof Blocked?error.code:'WORK_READ_FAILED_PRIVATE_DIAGNOSTICS';
           if(!collectionStops.has(code)&&code!=='BROWSER_CLOSED'&&!signal.aborted){
-            if(batch&&!persisted)await this.persist('works',`work:${work.id}`,batch,signal);
-            const next=batch&&/^OBSERVATION_COMMENT_(THREAD|EXPAND)_/.test(code)?await reader.advanceComments(0):undefined;
+            if(batch&&!persisted)await this.persist('works',`work:${work.id}`,batch,signal,undefined,window);
+            const next=!headRead&&batch&&/^OBSERVATION_COMMENT_(THREAD|EXPAND)_/.test(code)?await reader.advanceComments(0):undefined;
             cursor.workIndex++;
             cursor.threadBurst=0;
             if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
@@ -439,23 +476,48 @@ export class InboxCollector {
           }
           throw error;
         }
-        const incomplete=cursor.commentThreads.some(item=>item.workId===work.id&&!item.done);
-        const yieldWork=threadsPending&&++cursor.threadBurst>=2;
-        if(!threadsPending||yieldWork)cursor.threadBurst=0;
-        if(yieldWork){cursor.workIndex++;if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}}
+        if(headRead){
+          // This priority read cannot overwrite the independent unfinished tail checkpoint or its successful watermark.
+          cursor.headPending=cursor.headPending.filter(id=>id!==work.id);cursor.threadBurst=0;
+          cursor.workIndex++;if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
+          this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));return false;
+        }
+        const threadIncomplete=cursor.commentThreads.some(item=>item.workId===work.id&&!item.done);
+        // Ordinary root windows and expanded child windows share the same persistent work quantum.
+        const yieldWork=++cursor.threadBurst>=2;
+        yieldedWork=yieldWork;
+        if(yieldWork){
+          cursor.threadBurst=0;
+          if(!cursor.headPending.includes(work.id))cursor.headPending.push(work.id);
+          cursor.workIndex++;if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
+        }
         // Checkpoint the unfinished root and rotation before an advance can fail, cancel or close the browser.
         this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
+        const hadRootPages=cursor.pendingRootPages.includes(work.id);
         const scroll=threadsPending&&!yieldWork?batch.scroll!:await reader.advanceComments(0);
-        const end=!threadsPending&&scroll.atEnd&&(progress?.last_height??scroll.height)===scroll.height?(progress?.end_observations??0)+1:0;
+        let changedResponse=false;
+        if(!threadsPending||yieldWork){
+          // Keep the listener through normal scrolling and its bounded native render/network turn.
+          await new Promise(resolve=>setTimeout(resolve,150));this.check('works',signal);
+          const afterScroll=await responses.summary(signal);changedResponse=!!afterScroll&&afterScroll!==window.responseSummary;
+          notePages(afterScroll?.hasMore);
+          if(afterScroll?.hasMore===true)await this.diagnose(reader,'works','COMMENT_LIST_HAS_MORE',signal,undefined,'LIST');
+        }
+        const rootPagesPending=cursor.pendingRootPages.includes(work.id),incomplete=threadIncomplete||rootPagesPending||changedResponse;
+        const end=!threadsPending&&!rootPagesPending&&!changedResponse&&scroll.atEnd&&(progress?.last_height??scroll.height)===scroll.height?(progress?.end_observations??0)+1:0;
         done=end>=2;
+        continueRoots=!yieldWork&&(hadRootPages||rootPagesPending);
+        if(done){cursor.threadBurst=0;cursor.headPending=cursor.headPending.filter(id=>id!==work.id);}
         this.data.store.db.prepare(`INSERT INTO work_collection_progress VALUES(?,?,?,?,?,?,0) ON CONFLICT(work_id)
           DO UPDATE SET scroll_top=excluded.scroll_top,last_height=excluded.last_height,end_observations=excluded.end_observations,last_read=excluded.last_read,last_error=excluded.last_error,next_at=0`)
-          .run(work.id,done?0:scroll.top,scroll.height,done?0:end,incomplete?progress?.last_read??0:this.data.now(),incomplete?'OBSERVATION_COMMENT_THREAD_INCOMPLETE':null);
+          .run(work.id,done?0:scroll.top,scroll.height,done?0:end,incomplete?progress?.last_read??0:this.data.now(),threadIncomplete?'OBSERVATION_COMMENT_THREAD_INCOMPLETE':null);
+        }finally{responses.dispose();}
       }
-      if(done)cursor.workIndex++;
+      if(done&&!yieldedWork)cursor.workIndex++;
       if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
     }
     this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
+    return continueRoots;
   }
   dispose():void {this.disposed=true;this.priority=undefined;this.discovery.dispose();}
 }

@@ -1,5 +1,26 @@
 # 来源与许可
 
+## 2026-11-10：按用户要求追加核对评论增量候选
+
+- MIT [`Yht20927/douyin-cli`](https://github.com/Yht20927/douyin-cli/tree/4073159bea585de6d33a4747a475669440737932)，固定`4073159bea585de6d33a4747a475669440737932`：读`lib/commands/get.js:26–76,107–119,150–194`、`lib/memory/comments.js:77–95`和`scripts/douyin.user.js:1083–1089`，核对其LICENSE。采用原生cid去重、原评论与子评论分别分页、每批持久保存的结论。它的`--new`在同批出现较旧评论时提前停止，并不证明后页没有晚到新评论；当前混排场景不照搬该提前结束。油猴bridge直接接口及其并行请求不引入现有客户端；既有单账号队列、正常网页读取及意图账本继续使用。
+- [`NanmiCoder/MediaCrawler`](https://github.com/NanmiCoder/MediaCrawler/tree/306ab4ca26c0e44fb87ede0e40e98748752815a6)，固定`306ab4ca26c0e44fb87ede0e40e98748752815a6`：读`media_platform/douyin/client.py:248–275,277–334`及LICENSE，一级和子评论各自使用cursor/has_more循环；仅作结构对照，不直接复制。其许可证为NON-COMMERCIAL LEARNING LICENSE 1.1，且直接请求与签名组织不属于本项目当前网页收取实现。
+- [`hycarbon-b/crawl-douyin`](https://github.com/hycarbon-b/crawl-douyin/tree/cdde8d7bfec3b018454705240fa0df6550ece6db)，固定`cdde8d7bfec3b018454705240fa0df6550ece6db`：读`reply_comment.js:61–103`，按固定评论容器滚动800像素、固定等1500ms，最多10次；仓库树未发现明确LICENSE，代码不复制。它不提供本机第7层容器、渲染帧或跨导航持久恢复的证明。
+- MIT [`pcmxiao/dsh-douyin-bridge`](https://github.com/pcmxiao/dsh-douyin-bridge/tree/6e4bb7fb312ca980f500ce5eff9a714c2c78b560)，固定`6e4bb7fb312ca980f500ce5eff9a714c2c78b560`：读`lib/bridge.mjs:682–706,717–785`、`lib/state.mjs:139–174`与`lib/comment.mjs:417–478`及LICENSE/NOTICE。采用持久去重和首次基线的组织原则，保留本项目原生ID与全号持久起点；不采用仅显示名/方向/前80字指纹（会合并不同原生同文消息）、最多20条窗口、off连收取都停或超时后仍在运行的Promise.race组织。该候选评论读取只返回当前DOM索引/摘要，不提供本机所需的cid/时间/分页/根子定位证明，不能直接代替现有准确评论定位。
+
+上述具体源码和索引只保留于忽略的`.local/upstream-review/comments-20261110`，没有运行候选、安装依赖或把真实账号/Profile交给候选。采用结论落实到本轮持久未完分页、逐窗保存和混排回归；实机闭合单列，不把候选自述当本机已通过。
+
+## 2026-11-10：主评论分页与原生滚动恢复
+
+实施前复用已核对MIT watch固定`177810c1f1858b529e78531f837ac9677fb9f9a9`，复读`tools/work-comments.mjs:110–119`对`has_more/cursor`与当前批条数分别处理的源码。采用“当前可见批不等于读取结束”的判断，不复制其私有接口请求、签名或并发请求器。本项目只监听正常网页GET的有界计数，仍由准确作品的原生滚动推进；最近可滚动祖先、持久未完页及公平两窗为独立实现。实际第7层与未完分页诊断、新红绿和源码tsx/构建Node序列化结果分别记录，不将上游可用声明冒充本机通过。
+
+有界渲染等待实施前另读Apache-2.0 Playwright固定`cfe490d941f992655948eee8fd4fd94e1c4234bf`的[`packages/injected/src/injectedScript.ts:653–696`](https://github.com/microsoft/playwright/blob/cfe490d941f992655948eee8fd4fd94e1c4234bf/packages/injected/src/injectedScript.ts#L653-L696)，其稳定检查在原生动画帧中读几何；并核对[HTML渲染更新阶段](https://html.spec.whatwg.org/multipage/webappapis.html#update-the-rendering)。采用按真实渲染帧让步的原则，独立实现限时等待，不复制上游轮询器或将两帧等同平台数据已完整。纯capture合成对照中，原150ms及追加500ms仍未收到末端滚动事件，正常两帧后才收到；无头双Page两帧耗时5.5/1026.2/1756.6ms，激活同一Page后16.9/28.4/19.9ms，两者visibility均visible。因此保留原无头两Page，仅在原账号队列激活对应Page，并采用最多5秒、受整体30秒约束的实际帧资格等待。原地赋值取消事件的假设经单差对照否定，不用它解释实机故障。
+
+## 2026-11-09：会话回复投影与根评论上下文
+
+复读MIT Chatwoot固定`625d5964e3cb3f1d917b43c3b8332219e525a4b8`的会话actions与消息状态分离，以及MIT DSH固定`7989640e340f0fd79e2de9874880d5197546e755`的`chat-message.mjs:36–62`。独立修正只读会话投影：按可信批准、意图及最新确认结果覆盖准确派发前观察，历史未知保留其账本/门禁，不能永远推翻后来已回复的会话；原生我方观察不单独充当送达证据。
+
+根上下文实施前核对MIT watch固定`177810c1f1858b529e78531f837ac9677fb9f9a9`的`tools/work-comments.mjs:175–243`，采用根/子身份、原生链与时序区别。复用既有SQLite入站及确认意图/补证/显式重试记录，无新迁移；根固定保留、同账号/作品/根隔离、旧未知不冒充我方已发送。模型从根开始且保有限后续上下文，界面分页不改变发送目标；缺根在付费预占前阻断。未复制私有接口、猜造缺失父级或未保存的我方历史。
+
 ## 2026-11-09：晚到强入站的后台资格
 
 复读上述MIT watch固定`177810c1f1858b529e78531f837ac9677fb9f9a9`的`tools/work-comments.mjs:144–203`与`tools/comment-api.mjs:207–210`，采用按独立原生子ID发现隐藏回复的结论，不复制私有请求。本项目独立复用已有observations与audit：准确启用收取范围内、严格晚于运行起点及不可变scope基线的强事件，两次不同证据且相隔至少1秒的稳定绑定读取后，才将无碰撞/草稿/意图/自动任务的晚到记录转待处理。普通PoC水位分类及历史不变；新资格不包含模型或发送批准，后续仍走新鲜目标检查、当前策略与唯一协调器。无新依赖或迁移。

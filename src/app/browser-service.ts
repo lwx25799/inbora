@@ -3,6 +3,7 @@ import { BrowserProfileOwner } from "../browser/profile-owner.js";
 import { ObservedReader } from "../adapters/observed-reader.js";
 import { ObservedDmReply } from "../adapters/observed-dm-reply.js";
 import { ObservedCommentReply } from "../adapters/observed-comment-reply.js";
+import {commentReadbackAudit} from '../adapters/comment-readback-diagnostics.js';
 import { DomAdapter } from "../adapters/dom-adapter.js";
 import {
   loadObservationMapping,
@@ -291,7 +292,10 @@ export class BrowserService {
               expanded as NonNullable<
                 Awaited<ReturnType<typeof loadCommentReplyMapping>>
               >,
-              undefined,{onQualification:({stage,code,level,...counts})=>{
+              undefined,{...(signal?{signal}:{}),...(options.readonlySignal?{readonlySignal:options.readonlySignal}:{}),onReadbackDiagnostic:report=>{
+                const {stage,reason,responseStage,submissionFailure,guardFailure,counts}=commentReadbackAudit(report);
+                store?.audit(`COMMENT_READBACK_${stage}_${reason}_GET_${responseStage}_ACK_${submissionFailure}_GUARD_${guardFailure}`,digest(['comment',e.videoId,e.commentId]),counts);
+              },onQualification:({stage,code,level,...counts})=>{
                 const safeCode=code&&/^COMMENT_REPLY_[A-Z_]+$/u.test(code)?code:'COMPLETE';
                 store?.audit(`COMMENT_NESTED_${stage}_${safeCode}`,digest(['comment',e.videoId,e.commentId]),{
                   ...counts,level:typeof level==='number'?level:level==='OTHER'?-1:-2});

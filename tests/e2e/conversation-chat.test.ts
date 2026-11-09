@@ -12,7 +12,7 @@ import {candidate,database,pending,privateTemp,snapshot} from '../helpers.js';
 import type {Thread} from '../../desktop/src/api.js';
 
 const editor=(page:Page)=>page.getByRole('textbox',{name:'人工回复草稿'});
-async function setup(viewport={width:1240,height:800},weakMedia=false){
+async function setup(viewport={width:1240,height:800},weakMedia=false,nested=false){
   const root=privateTemp('conversation-chat-'),store=database();
   for(let i=0;i<34;i++)pending(store,candidate({platformEventId:`chat-a-${i}`,conversationId:'conversation-a',actorName:'合成同名联系人',
     text:weakMedia&&i===33?'[图片或表情消息，需人工查看]':`会话A消息${String(i).padStart(2,'0')}`,occurredAt:new Date(Date.UTC(2026,10,4,1,0,i)).toISOString(),
@@ -21,6 +21,20 @@ async function setup(viewport={width:1240,height:800},weakMedia=false){
   const b=pending(store,candidate({platformEventId:'chat-b',conversationId:'conversation-b',actorName:'合成同名联系人',text:'会话B独立消息',occurredAt:'2026-11-04T01:01:00Z'}));
   const comment=pending(store,candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',platformEventId:'chat-comment',
     videoId:'fixture-work',commentId:'fixture-parent',conversationId:null,actorName:'合成评论作者',text:'评论父消息不可丢失'}));
+  let nestedId:string|undefined;
+  if(nested){
+    const rootComment=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',videoId:'1001',commentId:'1101',platformEventId:'1101',
+      conversationId:null,text:'从最初根评论开始的合成问题',actorName:'根评论作者',occurredAt:'2026-11-04T01:03:00Z'});
+    const rootId=pending(store,rootComment),draft=store.saveDraft(rootId,'我方针对根评论的已确认回复','mock');
+    store.approve(draft.id,snapshot(rootComment),draft.version,draft.text);
+    const intent=store.recordIntent(draft.id,snapshot(rootComment),false);store.receipt(intent,'CONFIRMED','synthetic-only');
+    for(let index=0;index<33;index++){
+      const id=String(1200+index);pending(store,{...rootComment,kind:'REPLY',platformEventId:id,commentId:id,rootCommentId:'1101',replyToCommentId:id,
+        text:`较早同串回复${String(index).padStart(2,'0')}`,occurredAt:new Date(Date.UTC(2026,10,4,1,4,index)).toISOString()});
+    }
+    nestedId=pending(store,{...rootComment,kind:'REPLY',platformEventId:'1102',commentId:'1102',rootCommentId:'1101',replyToCommentId:'1102',
+      text:'这条楼中楼需要前面的上下文',occurredAt:'2026-11-04T01:05:00Z'});
+  }
   await migrateClient(store,join(root,'client-backup.sqlite'));
   await migrateAutomation(store,join(root,'automation-backup.sqlite'));
   new ChatMessageStore(store).observe([candidate({direction:'OUTGOING',actorId:'own-1',conversationId:'conversation-a',
@@ -32,7 +46,7 @@ async function setup(viewport={width:1240,height:800},weakMedia=false){
   const preview=await page.evaluate(()=>{const canvas=document.createElement('canvas');canvas.width=96;canvas.height=64;
     const ctx=canvas.getContext('2d')!;ctx.fillStyle='#e8c269';ctx.fillRect(0,0,96,64);ctx.fillStyle='#226248';ctx.font='24px sans-serif';ctx.fillText('合成',22,42);return canvas.toDataURL('image/png');});
   const calls:Record<string,unknown>[]=[],errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));
-  let hold:string|undefined,release:(()=>void)|undefined,entered=false,intentFor:string|undefined,timeline:Thread['timeline'],olderTimeline:Thread['timeline'];
+  let hold:string|undefined,release:(()=>void)|undefined,entered=false,intentFor:string|undefined,timeline:Thread['timeline'],olderTimeline:Thread['timeline'],conversationStatus:Thread['conversationReplyStatus'];
   await page.exposeFunction('fixtureInvoke',async(command:string,args:{body?:Record<string,unknown>})=>{
     if(command==='desktop_info')return {runtime:root,version:'synthetic-chat'};
     if(command!=='client_request')throw new Error('UNEXPECTED_NATIVE_COMMAND');
@@ -48,6 +62,7 @@ async function setup(viewport={width:1240,height:800},weakMedia=false){
       capabilities:['DIRECT_MESSAGE','COMMENT_NOTIFICATION'].map(channel=>({channel,state:'SEND_AVAILABLE',reason:'',evidence:'synthetic-only'}))};
     if(body.command==='getThread'||body.command==='openHumanDialog'){
       const thread=result as Thread;
+      if(conversationStatus)thread.conversationReplyStatus=conversationStatus;
       if(thread.timeline?.items.some(item=>item.eventId===a))thread.timeline.items=thread.timeline.items.map(item=>item.eventId===a?{...item,attachments:[{previewId:'fixture-preview',kind:'IMAGE',label:'合成图片',state:'READY'}]}:item);
       if(intentFor===body.eventId)thread.intent={id:'fixture-unknown-intent',status:'UNCERTAIN'};
       thread.capability={state:'SEND_AVAILABLE',reason:'',evidence:'synthetic-only'};if(!weakMedia)thread.strong=true;
@@ -57,13 +72,53 @@ async function setup(viewport={width:1240,height:800},weakMedia=false){
   });
   await page.addInitScript(()=>{const fixture=window as unknown as {__TAURI_INTERNALS__:unknown;fixtureInvoke:(command:string,args:unknown)=>Promise<unknown>};fixture.__TAURI_INTERNALS__={invoke:(command:string,args:unknown)=>fixture.fixtureInvoke(command,args)};});
   await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
-  return {root,store,page,a,b,comment,calls,errors,service,token,preview,
+  return {root,store,page,a,b,comment,nestedId,calls,errors,service,token,preview,
+    conversationStatus:(value:NonNullable<Thread['conversationReplyStatus']>)=>{conversationStatus=value;},
     timeline:(value:NonNullable<Thread['timeline']>,older?:NonNullable<Thread['timeline']>)=>{timeline=value;olderTimeline=older;},
     hold:(command:string)=>{hold=command;entered=false;},held:()=>entered,release:()=>{release?.();release=undefined;},
     close:async()=>{release?.();await page.screenshot({path:join(root,'last-state.png')}).catch(()=>{});
       await writeFile(join(root,'ui-trace.json'),JSON.stringify({calls,errors,text:await page.locator('body').innerText().catch(()=> '')},null,2));
       await browser.close();await server.close();await service.close();store.close();}};
 }
+
+test.each([{width:900,height:640},{width:1240,height:800}])('nested comment context starts at the first root at $width x $height',async viewport=>{
+  const f=await setup(viewport,false,true);try{
+    await f.page.locator('.task').filter({hasText:'这条楼中楼需要前面的上下文'}).click();
+    const context=f.page.getByRole('region',{name:'评论完整上下文'}).first();await context.getByText('从最初根评论开始的合成问题',{exact:true}).waitFor();
+    expect(await context.locator('article').first().innerText()).toContain('一级根评论');
+    expect(await context.getByText('我方针对根评论的已确认回复',{exact:true}).count()).toBe(1);
+    expect(await context.getByText('这条楼中楼需要前面的上下文',{exact:true}).count()).toBe(1);
+    await context.getByRole('button',{name:'加载较早回复',exact:true}).click();
+    await context.getByText('较早同串回复00',{exact:true}).waitFor();
+    expect(await context.locator('article').first().innerText()).toContain('一级根评论');
+    await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+    const dialog=f.page.getByRole('dialog',{name:'人工回复对话框'});await dialog.waitFor();
+    expect(await dialog.locator('article').first().innerText()).toContain('一级根评论');
+    expect((await f.service.dispatch(f.token,{command:'getThread',eventId:f.nestedId!}) as Thread).event.payload.commentId).toBe('1102');
+    await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
+    await f.page.getByRole('button',{name:'下一页',exact:true}).click();
+    await f.page.locator('.task').filter({hasText:'较早同串回复00'}).click();
+    const olderTarget=f.page.getByRole('region',{name:'评论完整上下文'}).first();
+    await olderTarget.getByText('较早同串回复00',{exact:true}).waitFor();
+    expect(await olderTarget.locator('article').first().innerText()).toContain('一级根评论');
+    expect(await olderTarget.getByText('较早同串回复00',{exact:true}).count()).toBe(1);
+    expect(await f.page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    expect(f.calls.some(call=>call.command==='sendHumanReply'||call.command==='generateSuggestion')).toBe(false);
+  }finally{await f.close();}
+});
+
+test('the DM heading uses the authoritative conversation status while retaining the selected event status',async()=>{
+  const f=await setup();try{
+    f.conversationStatus('REPLIED');
+    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();
+    await editor(f.page).waitFor();
+    expect(await f.page.locator('.chat-heading .badge').textContent()).toBe('已回复');
+    expect((await f.service.dispatch(f.token,{command:'getThread',eventId:f.a}) as Thread).replyStatus).toBe('WAITING');
+    f.conversationStatus('WAITING');await f.page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+    await expect.poll(()=>f.page.locator('.chat-heading .badge').textContent()).toBe('等待回复');
+    expect(f.calls.some(call=>call.command==='sendHumanReply'||call.command==='generateSuggestion')).toBe(false);
+  }finally{await f.close();}
+});
 
 test.each([{width:900,height:640},{width:1240,height:800}])('DM conversation streams and its inline composer are usable at $width x $height',async viewport=>{
   const f=await setup(viewport);try{

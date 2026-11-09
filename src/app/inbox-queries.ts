@@ -1,4 +1,4 @@
-import {digest,requireSafe,targetKey,type StoredEvent} from '../core/contracts.js';
+import {digest,isManualMediaCandidate,isStrong,requireSafe,targetKey,type StoredEvent} from '../core/contracts.js';
 import type {EventStore} from '../storage/store.js';
 import type {ClientCommand} from './contracts.js';
 import {MessagePreviewStore,type MessagePreviewAttachment} from '../storage/message-previews.js';
@@ -32,6 +32,56 @@ export function inboxGroupKey(event:StoredEvent):string {
 export class InboxQueries {
   constructor(readonly store:EventStore,readonly root:string,readonly replyStatus:(id:string,status:string)=>ReplyStatus){}
 
+  conversationReplyStatus(event:StoredEvent):ReplyStatus {
+    if(event.payload.channel!=='DIRECT_MESSAGE')return this.replyStatus(event.id,event.status);
+    const all=this.store.events(),order=new Map(all.map((item,index)=>[item.id,index])),key=inboxGroupKey(event),
+      members=all.filter(item=>item.status!=='BASELINE'&&inboxGroupKey(item)===key);
+    return members.length?this.group(members,order).replyStatus:this.replyStatus(event.id,event.status);
+  }
+
+  private group(members:StoredEvent[],order:Map<string,number>){
+    const time=(event:StoredEvent)=>Date.parse(event.payload.occurredAt??'')||0;members.sort((a,b)=>time(a)-time(b));
+    const latest=members.at(-1)!,replies:{event:StoredEvent;at:number;ownId:string}[]=[];let repliedAt=-Infinity;
+    if(latest.payload.channel==='DIRECT_MESSAGE')for(const event of members){
+      if(this.replyStatus(event.id,event.status)!=='REPLIED')continue;
+      const intent=this.store.db.prepare('SELECT attempt_started_at,target_digest,text_digest,draft_id FROM send_intents WHERE event_id=?').get(event.id) as {
+        attempt_started_at:string;target_digest:string;text_digest:string;draft_id:string}|undefined;
+      if(!intent)continue;const draft=this.store.draft(intent.draft_id),approval=draft.approval,at=Date.parse(intent.attempt_started_at);
+      if(approval&&approval.snapshot.eventBinding===event.binding&&digest(approval.snapshot)===intent.target_digest&&
+        digest(draft.text)===intent.text_digest&&Number.isFinite(at)){
+        repliedAt=Math.max(repliedAt,at);replies.push({event,at,ownId:approval.snapshot.ownId});
+      }
+    }
+    const waiting=members.filter(event=>{
+      if(this.replyStatus(event.id,event.status)!=='WAITING')return false;
+      const laterObserved=(order.get(event.id)??0)>(order.get(latest.id)??0);
+      if(event.payload.channel==='DIRECT_MESSAGE'&&Number.isFinite(repliedAt)){
+        const receivedAt=time(event),precision=event.payload.occurredAtPrecisionMs??1;
+        const scope=this.store.db.prepare('SELECT scope FROM inbound_events WHERE id=?').get(event.id) as {scope:string};
+        const observed=this.store.db.prepare('SELECT observed_at FROM observations WHERE channel=? AND scope=? AND evidence_ref=? ORDER BY rowid LIMIT 1')
+          .get(event.payload.channel,scope.scope,event.payload.evidenceId) as {observed_at:string}|undefined;
+        const firstObserved=Date.parse(observed?.observed_at??'');
+        let coverageAt=isStrong(event.payload)?repliedAt:-Infinity;
+        if(isManualMediaCandidate(event.payload)&&/^[1-9]\d{0,63}$/.test(event.payload.platformEventId!)){
+          const own=this.store.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(event.payload.accountId) as {own_id:string}|undefined;
+          for(const reply of replies)if(reply.ownId===own?.own_id&&event.payload.actorId!==reply.ownId&&
+            reply.event.payload.accountId===event.payload.accountId&&reply.event.payload.conversationId===event.payload.conversationId&&
+            reply.event.payload.actorId===event.payload.actorId)coverageAt=Math.max(coverageAt,reply.at);
+        }
+        const covered=receivedAt>0&&receivedAt+precision<=coverageAt&&Number.isFinite(firstObserved)&&firstObserved<coverageAt&&
+          !this.store.db.prepare('SELECT id FROM source_collisions WHERE event_id=? LIMIT 1').get(event.id);
+        if(covered)return false;
+        const intent=this.store.db.prepare('SELECT attempt_started_at FROM send_intents WHERE event_id=?').get(event.id) as {attempt_started_at:string}|undefined;
+        // A historical unknown remains frozen on its own event; it cannot undo a later confirmed conversation reply.
+        if(!laterObserved&&event.id!==latest.id&&time(event)<time(latest)&&this.replyStatus(latest.id,latest.status)==='REPLIED'&&
+          intent&&Date.parse(intent.attempt_started_at)<repliedAt)return false;
+      }
+      return event.id===latest.id||event.status==='UNCERTAIN'||event.status==='INTENT_RECORDED'||event.status==='CONFIRMED'||
+        !!this.store.db.prepare('SELECT id FROM source_collisions WHERE event_id=? LIMIT 1').get(event.id)||laterObserved;
+    });
+    return {selected:waiting.at(-1)??latest,latest,members,replyStatus:waiting.length?'WAITING' as const:'REPLIED' as const};
+  }
+
   inbox(c:Extract<ClientCommand,{command:'getInbox'}>){
     const groups=new Map<string,StoredEvent[]>();
     const all=this.store.events(),order=new Map(all.map((event,index)=>[event.id,index]));
@@ -41,13 +91,7 @@ export class InboxQueries {
     }
     const time=(event:StoredEvent)=>Date.parse(event.payload.occurredAt??'')||0;
     const rows=[...groups.entries()].map(([groupKey,members])=>{
-      members.sort((a,b)=>time(a)-time(b));
-      const latest=members.at(-1)!,waiting=members.filter(e=>this.replyStatus(e.id,e.status)==='WAITING'&&
-        (e.id===latest.id||e.status==='UNCERTAIN'||e.status==='INTENT_RECORDED'||e.status==='CONFIRMED'||
-          !!this.store.db.prepare('SELECT id FROM source_collisions WHERE event_id=? LIMIT 1').get(e.id)||
-          (order.get(e.id)??0)>(order.get(latest.id)??0)));
-      const selected=waiting.at(-1)??latest,replyStatus:ReplyStatus=waiting.length?'WAITING':'REPLIED';
-      return {selected,latest,members,groupKey,replyStatus};
+      return {...this.group(members,order),groupKey};
     }).filter(row=>c.status==='PENDING'?row.replyStatus==='WAITING':c.status==='CONFIRMED'?row.replyStatus==='REPLIED':
       c.status==='REVIEW'?row.members.some(e=>e.status==='MANUAL_REVIEW'):
         c.status==='UNCERTAIN'?row.members.some(e=>e.status==='UNCERTAIN'||e.status==='INTENT_RECORDED'):true)

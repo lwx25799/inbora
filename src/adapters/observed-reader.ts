@@ -3,16 +3,21 @@ import type { Page } from 'playwright';
 import type { ObservationMapping } from '../config/site-mapping.js';
 import { eventSchema, requireSafe, type InboundEvent } from '../core/contracts.js';
 import {captureCommentThread,type CommentThreadWindow} from './comment-thread-capture.js';
+import {recoverCommentOffset} from './comment-offset-recovery.js';
+import {waitForCommentRender} from './comment-render.js';
 
 export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string;activity?:string }
 interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'diagnostic' | 'dmScroll'; index: number;
   evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; commentStay?:boolean;
   commentRootId?:string;commentChildOffset?:number;conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number; collectionPartial?:boolean }
-type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'|'collectionPartial'|'navigationUrl'|'commentRootId'|'commentChildOffset'>;
+type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'|'collectionPartial'|'navigationUrl'|'commentRootId'|'commentChildOffset'|'commentOffset'|'commentStay'>;
+interface CommentScrollShape {depth:number;tag:string;overflowY:string;clientHeight:number;scrollHeight:number;scrollTop:number;visible:boolean;containsList:boolean}
 export interface CollectionReadDiagnostic {
   source:'dm'|'comments';containers:number;visibleContainers:number;rows:number;visibleRows:number;roots:number;windowRoots:number;
   viewportHeight:number;containerTop:number;containerBottom:number;scrollTop:number;chatVisible:boolean;
   chatInViewport:boolean;backVisible:boolean;backInViewport:boolean;
+  commentScroll?:{ancestors:CommentScrollShape[];document:CommentScrollShape|null;selectedDepth:number|null;documentFallback:boolean;truncated:boolean};
+  commentPagination?:{scanned:number;truncated:boolean;samples:{kind:'MORE_COMMENTS'|'LOAD_MORE'|'VIEW_ALL'|'NO_MORE'|'EMPTY';tag:string;top:number;bottom:number;visible:boolean;inViewport:boolean}[]};
   back?:{count:number;centerHit?:'SELF'|'DESCENDANT'|'OUTSIDE'|'NONE'|'OFFSCREEN';centerIndex?:number|null;
     nodes?:{index:number;parentIndex:number|null;tag:'DIV'|'BUTTON'|'SPAN'|'A'|'SVG'|'PATH'|'OTHER';visible:boolean;inViewport:boolean;width:number;height:number;
       props:'NONE'|'DATA'|'REJECTED';handlers:{onClick:boolean;onMouseDown:boolean;onPointerDown:boolean;onMouseUp:boolean}}[]};
@@ -37,6 +42,7 @@ export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; 
   dmViewport?:{top:number;height:number;viewport:number;minimum:number;maximum:number};
   commentThreads?:{id:string;total:number|null;expandable:boolean;mounted:number}[];
   commentThread?:CommentThreadWindow&{beforeTotal:number};
+  commentRestoreIncomplete?:true;commentRestoreStableEnd?:true;
   bindings?: {targetKey: string; uid: string; secUid: string; title: string; conversationId: string | null}[] }
 
 /** Fixed paths in the currently rendered, authorized components; never calls website functions or getters. */
@@ -339,7 +345,28 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       chatInViewport:!comments&&Array.from(document.querySelectorAll(s.chat)).some(probe.inViewport),
       backVisible:!comments&&Array.from(document.querySelectorAll(s.chatBack)).some(dom.visible),
       backInViewport:!comments&&Array.from(document.querySelectorAll(s.chatBack)).some(probe.inViewport),samples:roots.slice(0,6).map(probe.sample)};
-    if(comments){const children=rows.filter(row=>!!row.parentElement?.closest(s.commentRows)&&dom.visible(row));
+    if(comments){
+      const scrollProbe={shape(node:Element,depth:number):CommentScrollShape {
+        const overflow=getComputedStyle(node).overflowY;
+        return {depth,tag:node.tagName,overflowY:['visible','hidden','clip','scroll','auto','overlay'].includes(overflow)?overflow:'OTHER',
+          clientHeight:probe.number(node.clientHeight),scrollHeight:probe.number(node.scrollHeight),scrollTop:probe.number(node.scrollTop),
+          visible:dom.visible(node),containsList:!!container&&node.contains(container)};
+      }};
+      const ancestors:CommentScrollShape[]=[];let node=container??null;
+      for(let depth=0;node&&depth<=16;depth++,node=node.parentElement)ancestors.push(scrollProbe.shape(node,depth));
+      const selected=ancestors.find(item=>item.visible&&item.containsList&&['auto','scroll'].includes(item.overflowY)&&item.clientHeight>0&&item.scrollHeight>item.clientHeight);
+      diagnostic.commentScroll={ancestors,document:document.scrollingElement?scrollProbe.shape(document.scrollingElement,-1):null,
+        selectedDepth:selected?.depth??null,documentFallback:!selected,truncated:!!node};
+      const scope=container?Array.from({length:4}).reduce<Element>((parent)=>parent.parentElement??parent,container):null;
+      const candidates=scope?Array.from(scope.querySelectorAll('span,button,div,a')).slice(-500):[];
+      const kinds:Record<string,'MORE_COMMENTS'|'LOAD_MORE'|'VIEW_ALL'|'NO_MORE'|'EMPTY'>={'查看更多评论':'MORE_COMMENTS','查看更多':'MORE_COMMENTS','加载更多':'LOAD_MORE','查看全部':'VIEW_ALL','查看全部评论':'VIEW_ALL','没有更多':'NO_MORE','没有更多了':'NO_MORE','暂时没有更多评论':'NO_MORE','暂无评论':'EMPTY','暂无':'EMPTY'};
+      diagnostic.commentPagination={scanned:candidates.length,truncated:candidates.length===500,samples:[]};
+      for(const candidate of candidates){if(candidate.childElementCount||!dom.visible(candidate)||candidate.closest(s.commentRows))continue;
+        const kind=kinds[(candidate.textContent??'').trim()];if(!kind)continue;const rect=candidate.getBoundingClientRect();
+        diagnostic.commentPagination.samples.push({kind,tag:['SPAN','BUTTON','DIV','A'].includes(candidate.tagName)?candidate.tagName:'OTHER',
+          top:probe.number(rect.top),bottom:probe.number(rect.bottom),visible:true,inViewport:probe.inViewport(candidate)});
+        if(diagnostic.commentPagination.samples.length===12)break;}
+      const children=rows.filter(row=>!!row.parentElement?.closest(s.commentRows)&&dom.visible(row));
       diagnostic.commentChildren={rootRows:roots.length,childRows:children.length,samples:children.slice(0,6).map(row=>{
         const authors=Array.from(row.querySelectorAll(s.commentAuthor)).filter(n=>n.closest(s.commentRows)===row&&dom.visible(n));
         const profiles=authors.map(n=>n.getAttribute('href')).filter(Boolean),sample={ownedAuthors:authors.length,visibleProfiles:profiles.length,
@@ -381,7 +408,8 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     const work=m.works[index];dom.check(work&&location.href.split('?')[0]===work.url.split('?')[0],'OBSERVATION_WORK_CHANGED');
     const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);
     dom.check(lists.length===1,'OBSERVATION_COMMENT_LIST_DOM_NOT_UNIQUE');
-    dom.emptyEditors();lists[0]!.scrollIntoView({block:'start',inline:'nearest',behavior:'instant'});
+    dom.emptyEditors();const box=lists[0]!.getBoundingClientRect();
+    if(!input.commentOffset||box.top>=innerHeight||box.bottom<=0)lists[0]!.scrollIntoView({block:'start',inline:'nearest',behavior:'instant'});
     return {events,evidenceId,unsupported,loaded};
   }
   if(channel==='commentScroll') {
@@ -389,11 +417,13 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     dom.emptyEditors();
     const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);dom.check(lists.length===1,'OBSERVATION_DOM_NOT_UNIQUE');
     let list=lists[0]!,found=false;
-    for(let node:Element|null=list,depth=0;node&&depth<5;node=node.parentElement,depth++)if(/auto|scroll/.test(getComputedStyle(node).overflowY)&&node.scrollHeight>node.clientHeight){list=node;found=true;break;}
+    for(let node:Element|null=list,depth=0;node&&depth<=16;node=node.parentElement,depth++)if(dom.visible(node)&&node.contains(lists[0]!)&&
+      ['auto','scroll'].includes(getComputedStyle(node).overflowY)&&node.clientHeight>0&&node.scrollHeight>node.clientHeight){list=node;found=true;break;}
     if(!found)list=document.scrollingElement??list;
     dom.check(list.clientHeight>0,'OBSERVATION_DOM_NOT_READY');
     const before=list.scrollTop,maximum=Math.max(0,list.scrollHeight-list.clientHeight);
-    list.scrollTop=input.commentStay?before:input.commentOffset!==undefined?Math.min(maximum,input.commentOffset):Math.min(maximum,before+Math.max(1,Math.floor(list.clientHeight*0.8)));
+    const target=input.commentOffset!==undefined?Math.min(maximum,input.commentOffset):Math.min(maximum,before+Math.max(1,Math.floor(list.clientHeight*0.8)));
+    if(!input.commentStay&&target!==before)list.scrollTop=target;
     return {events,evidenceId,unsupported,loaded,scroll:{top:list.scrollTop,height:list.scrollHeight,viewport:list.clientHeight,atEnd:list.scrollTop>=maximum-1}};
   }
   if(channel==='conversations') {
@@ -736,9 +766,10 @@ export class ObservedReader {
     const after=await evaluate('inspect');return {...batch,commentThread:{...after,expanded:before.expanded,offset:positioned.offset,nextOffset:positioned.nextOffset,beforeTotal:before.initialTotal}};
   }
   async advanceComments(index:number):Promise<NonNullable<ObservationBatch['scroll']>> {
-    const batch=await this.capture('commentScroll',index);requireSafe(batch.scroll,'OBSERVATION_COMMENT_SCROLL_UNAVAILABLE');return batch.scroll;
+    await this.capture('commentScroll',index);await waitForCommentRender(this.page,this.signal);
+    const batch=await this.capture('commentScroll',index,{commentStay:true});requireSafe(batch.scroll,'OBSERVATION_COMMENT_SCROLL_UNAVAILABLE');return batch.scroll;
   }
-  async comments(index: number, allCommentAuthors=false, offset=0,collection?:{holdScroll:boolean;stay:boolean}): Promise<ObservationBatch> {
+  async comments(index: number, allCommentAuthors=false, offset=0,collection?:{holdScroll:boolean;stay:boolean;onRestoreWindow?:(batch:ObservationBatch)=>Promise<void>}): Promise<ObservationBatch> {
     const work = this.mapping.works[index]; requireSafe(work,'OBSERVATION_WORK_REQUIRED');
     if(allCommentAuthors){if(offset===0&&!collection?.stay||this.page.url().split('?')[0]!==work.url)await this.navigate(work.url);}
     else await this.page.goto(work.url,{waitUntil:'domcontentloaded'});
@@ -747,7 +778,7 @@ export class ObservedReader {
       await this.page.locator(this.mapping.selectors.commentEntry).click();
     await this.page.waitForFunction(selector=>Array.from(document.querySelectorAll(selector)).filter(n=>n.getClientRects().length).length===1,
       this.mapping.selectors.commentList);
-    if(allCommentAuthors&&offset===0)await this.capture('commentReveal',index);
+    if(allCommentAuthors)await this.capture('commentReveal',index,{commentOffset:offset});
     try {
       await this.page.waitForFunction(({rows,empty})=>{
         const visible={check(node:Element):boolean{const r=node.getBoundingClientRect(),style=getComputedStyle(node);
@@ -756,13 +787,10 @@ export class ObservedReader {
           Boolean(empty&&Array.from(document.querySelectorAll(empty)).some(visible.check));
       },{rows:this.mapping.selectors.commentRows,empty:this.mapping.selectors.commentEmpty},{timeout:15000});
     }catch{requireSafe(false,'OBSERVATION_COMMENTS_NOT_READY');}
-    if(allCommentAuthors&&offset>0) {
-      const input:CaptureInput={mapping:this.mapping,channel:'commentScroll',index,evidenceId:randomUUID(),commentOffset:offset};
-      await this.page.evaluate(captureObserved,input);
-      // Native scroll handlers can remount the virtual rows on later rendering frames.
-      await new Promise(resolve=>setTimeout(resolve,150));
-    }
-    const batch=await this.ready('comments',index,{allCommentAuthors});
+    const read=()=>this.ready('comments',index,{allCommentAuthors});
+    const batch=allCommentAuthors&&offset>0?await recoverCommentOffset(this.page,offset,
+      top=>this.capture('commentScroll',index,top===undefined?{commentStay:true}:{commentOffset:top}),
+      read,collection?.onRestoreWindow,this.signal):await read();
     if(allCommentAuthors) {
       const input:CaptureInput={mapping:this.mapping,channel:'commentScroll',index,evidenceId:randomUUID(),...(collection?{commentStay:collection.holdScroll}:{})};
       const next=await this.page.evaluate(captureObserved,input);if(next.scroll)batch.scroll=next.scroll;

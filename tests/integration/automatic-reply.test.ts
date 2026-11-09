@@ -39,6 +39,24 @@ async function setup(wait:()=>Promise<void>=async()=>{}){
   await service.dispatch(token,{command:'setMode',mode:'LIMITED_AUTO'});
   return{store,service,browser,token,dm,comment,models:()=>models,close:async()=>{await service.close();store.close();}};
 }
+test('a missing nested root resumes automatically only after context arrives, without a paid retry',async()=>{
+  const f=await setup();try{
+    await f.service.dispatch(f.token,{command:'setReplyPolicy',policy:{...policy,channels:['COMMENT_NOTIFICATION'],workIds:['10']},confirmed:true});
+    const child=candidate({channel:'COMMENT_NOTIFICATION',kind:'REPLY',platformEventId:'22',videoId:'10',commentId:'22',
+      rootCommentId:'11',replyToCommentId:'22',conversationId:null,text:'the later child question',occurredAt:'2026-11-04T01:01:00Z'});
+    const id=pending(f.store,child);await f.service.runAutomaticReply();await f.service.runAutomaticReply();
+    expect(f.models()).toBe(0);expect(f.browser.clicks).toBe(0);expect(f.store.budget('MODEL').used).toBe(0);
+    expect(f.store.db.prepare('SELECT state,reason FROM automation_jobs WHERE event_id=?').get(id))
+      .toEqual({state:'REVIEW',reason:'COMMENT_ROOT_CONTEXT_REQUIRED'});
+    expect(f.store.db.prepare("SELECT count(*) n FROM audit_events WHERE event_type='AUTO_QUALIFICATION_RESUMED'").get()).toEqual({n:0});
+    f.store.observe('COMMENT_NOTIFICATION','notifications',[{...child,platformEventId:'11',commentId:'11',kind:'COMMENT',rootCommentId:undefined,
+      replyToCommentId:undefined,text:'the original root question',occurredAt:'2026-11-04T00:58:00Z'}],'own-1','root-arrived');
+    await f.service.runAutomaticReply();expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(1);
+    expect(f.store.event(id).status).toBe('CONFIRMED');expect(f.store.budget('MODEL').used).toBe(1);
+    expect(f.store.db.prepare("SELECT count(*) n FROM audit_events WHERE event_type='AUTO_QUALIFICATION_RESUMED'").get()).toEqual({n:1});
+  }finally{await f.close();}
+});
+
 test('both channels automatically generate, backend approve, single submit and confirm within one persistent policy',async()=>{
   const f=await setup();try{
     await f.service.runAutomaticReply();await f.service.runAutomaticReply();await f.service.runAutomaticReply();

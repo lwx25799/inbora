@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { z } from 'zod';
+import {readCommentThreadContext} from './comment-thread-context.js';
 import {
   digest, dmClockToleranceMs, eventBinding, eventSchema, isEligible, isStrong, requireSafe, targetKey, validText,
   validManualMediaProof,
@@ -429,6 +430,11 @@ export class EventStore {
     }).immediate();
   }
   history(e: InboundEvent): InboundEvent[] {
+    if(e.channel==='COMMENT_NOTIFICATION'&&e.kind==='REPLY'){
+      const context=readCommentThreadContext(this,e),recent=context.items.filter(item=>!item.isRoot&&
+        !(item.direction==='INCOMING'&&item.payload.commentId===e.commentId)).slice(-6);
+      return [...(context.root?[context.root.payload]:[]),...recent.map(item=>item.payload)];
+    }
     const incoming = this.events().filter(item => targetKey(item.payload) === targetKey(e) && item.payload.channel === e.channel)
       .map(item => item.payload).filter((item): item is InboundEvent & { occurredAt: string } => item.occurredAt !== null);
     const outgoing = this.db.prepare(`SELECT e.payload,d.text,i.id,r.verified_at FROM send_intents i

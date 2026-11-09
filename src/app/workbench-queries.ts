@@ -7,6 +7,7 @@ import type { AiSettings, InboxSync, ClientCommand } from './contracts.js';
 import type { CollectionScheduler } from './collection-scheduler.js';
 import {InboxQueries,inboxGroupKey} from './inbox-queries.js';
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
+import {readCommentThreadContext,commentThreadPage} from '../storage/comment-thread-context.js';
 
 interface ViewState {
   settings: AiSettings;
@@ -56,9 +57,11 @@ export class WorkbenchQueries {
     return {
       event: e,
       groupKey:inboxGroupKey(e),
-      timeline:new InboxQueries(this.store,this.browser.root,(id,status)=>this.replyStatus(id,status)).timeline(e,timelineBefore),
+      timeline:new InboxQueries(this.store,this.browser.root,(id,status)=>this.replyStatus(id,status)).timeline(e,e.payload.kind==='REPLY'?undefined:timelineBefore),
       draft,
       history: this.store.history(e.payload),
+      ...(e.payload.channel==='COMMENT_NOTIFICATION'&&e.payload.kind==='REPLY'?{
+        commentContext:commentThreadPage(readCommentThreadContext(this.store,e.payload),timelineBefore)}:{}),
       ownership: { ...owner, isMine: owner.operator_id === op.id },
       contextVersion: this.authority.contextVersion(e),
       capability: this.authority.capability(e.payload.channel, identity),
@@ -74,6 +77,7 @@ export class WorkbenchQueries {
       strong: isStrong(e.payload),
       humanReplyEligibility:humanReplyEligibility(this.store,e),
       replyStatus:this.replyStatus(e.id,e.status),
+      conversationReplyStatus:new InboxQueries(this.store,this.browser.root,(id,status)=>this.replyStatus(id,status)).conversationReplyStatus(e),
       paused,
       frozen,
       intent,

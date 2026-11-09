@@ -81,6 +81,8 @@ export interface Thread {
   groupKey?:string;
   timeline?:{items:TimelineItem[];pageSize:number;hasMore:boolean;before:string|null;projectionRevision?:string};
   replyStatus: 'WAITING'|'REPLIED';
+  conversationReplyStatus?: 'WAITING'|'REPLIED';
+  commentContext?: ReturnType<typeof import('../../src/storage/comment-thread-context.js').commentThreadPage>;
   controlledTrial: boolean;
   workUrl: string | null;
   event: StoredEvent;
@@ -190,6 +192,8 @@ export const reasons: Record<string, string> = {
   OBSERVATION_COMMENT_TOOLTIP_DOM_NOT_UNIQUE:'评论原生编号组件不唯一，已停止当前作品读取',
   COMMENT_TEXT_UNVERIFIED:'评论正文尚未完整核验，已保留待核对；完成核验前不会调用模型或发送',
   COMMENT_PARENT_UNVERIFIED:'评论所属层级尚未完整核验，消息已保留；后台完成核验前不会自动回复',
+  COMMENT_ROOT_CONTEXT_REQUIRED:'一级根评论尚未完整收取，后台补齐后再生成回复',
+  COMMENT_THREAD_CONTEXT_UNVERIFIED:'评论对话中的上下文尚未完整核验，后台正在补齐',
   DM_CONTENT_UNVERIFIED:'内容仅供人工查看，AI不会自动处理',
   HUMAN_MEDIA_TEXT_REQUIRED:'请直接输入人工回复，此消息不能使用已有的非人工草稿',
   HUMAN_MEDIA_APPROVAL_REQUIRED:'本次人工回复的后台核验已失效，草稿已保留',
@@ -236,6 +240,12 @@ export const reasons: Record<string, string> = {
   CONFIRMATION_EXPIRED: "确认已超过 60 秒，请重新检查目标和全文",
   COMMENT_REPLY_REFRESH_NOT_READY: "原评论刷新后尚未就绪，草稿已保留",
   COMMENT_REPLY_LIST_NOT_UNIQUE: "出现多个可见评论列表，无法确定回复位置，未继续发送",
+  COMMENT_REPLY_ROOT_NOT_FOUND: "本轮未找到这条评论，回复已保存，尚未发送",
+  COMMENT_REPLY_ROOT_NOT_UNIQUE: "无法唯一定位原评论，回复已保存，尚未发送",
+  COMMENT_REPLY_LOCATE_TIMEOUT: "本轮定位评论耗时较长，回复已保存，尚未发送",
+  COMMENT_REPLY_CANCELLED: "发送准备已停止，已有回复保留",
+  OBSERVATION_COMMENT_RESTORE_LIMIT: "本轮较后面的评论尚未收完，后台已保留进度",
+  OBSERVATION_COMMENT_RENDER_NOT_READY: "网页评论尚未完成显示，后台已保留收取进度",
 };
 export function explain(error: unknown): string {
   const text = typeof error === "string" ? error : String(error);
