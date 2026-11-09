@@ -185,6 +185,7 @@ export function ReplyDetail({
                     <details className="identity"><summary>会话与作品信息</summary><p>本人：{status.account?.identity} · 对方：{thread.event.payload.actorId}<br/>
                       {thread.event.payload.channel==='DIRECT_MESSAGE'?'会话：'+thread.event.payload.conversationId:'作品：'+thread.event.payload.videoId+' · 父评论：'+thread.event.payload.commentId}</p></details>
                     <blockquote>{thread.event.payload.text}</blockquote>
+                    {thread.event.payload.observationIssue&&<p className="hint">{reasons[thread.event.payload.observationIssue]??thread.event.payload.observationIssue}</p>}
                     <details><summary>上下文 · {thread.history.length} 条</summary>{thread.history.map((h,i)=><p key={i}>{h.direction==='OUTGOING'?'我方：':'对方：'}{h.text}</p>)}</details>
                     <p className="hint">{thread.ownership.isMine?saving?'正在保存':dirty?'正在自动保存':'修改已保存':'此回复暂时只读'}</p>
                     {(error||notice||busy)&&<p role={error?'alert':'status'} className={error?'error':'hint'}>{error||busy||notice}</p>}
