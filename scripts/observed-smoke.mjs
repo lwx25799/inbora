@@ -82,6 +82,15 @@ try {
   const backDiagnostic=(await new ObservedReader(owner.dm,config).diagnostic('dm')).back;
   assert.equal(backDiagnostic.count,1);assert.equal(backDiagnostic.nodes[0].tag,'BUTTON');
   assert.ok(!JSON.stringify(backDiagnostic).includes('fixture'));
+  await owner.dm.evaluate(()=>{
+    const back=document.createElement('div');back.id='back';back.style.cssText='position:fixed;left:12px;top:40px;width:32px;height:32px';
+    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('width','32');svg.setAttribute('height','32');
+    back.append(svg);document.querySelector('#back').replaceWith(back);window.svgBackClicks=0;
+    svg.addEventListener('click',()=>{window.svgBackClicks++;document.querySelector('#chat').hidden=true;});
+  });
+  await new ObservedReader(owner.dm,observedMapping(server.origin)).conversations();
+  assert.equal(await owner.dm.evaluate(()=>window.svgBackClicks),1);
+  assert.equal(await owner.dm.locator('#chat').isVisible(),false);
   await owner.notification.locator('.body img').evaluate(node=>node.removeAttribute('alt'));
   const unverified=await owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-review'});
   assert.equal(unverified.events[0].observationIssue,'COMMENT_TEXT_UNVERIFIED');

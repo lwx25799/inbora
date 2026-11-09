@@ -198,10 +198,18 @@ fn start_backend(app: &tauri::App) -> Result<Desktop, Box<dyn std::error::Error>
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     );
-    let mut command = Command::new(resources.join("node.exe"));
+    let mut command = if cfg!(debug_assertions) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let node = std::env::var_os("INBORA_DEV_NODE").ok_or("DEV_NODE_REQUIRED")?;
+        let mut dev = Command::new(node);
+        dev.arg(root.join("scripts/dev-sidecar.mjs")).current_dir(root);
+        dev
+    } else {
+        let mut packaged = Command::new(resources.join("node.exe"));
+        packaged.arg(resources.join("dist/app/sidecar.js")).current_dir(&resources);
+        packaged
+    };
     command
-        .arg(resources.join("dist/app/sidecar.js"))
-        .current_dir(&resources)
         .env("INBORA_PIPE_NONCE", &secret)
         .env_remove("NODE_OPTIONS")
         .env_remove("NODE_PATH")

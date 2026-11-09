@@ -213,8 +213,15 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   }
   if(channel==='back') {
     dom.emptyEditors();
-    const back=dom.one(document,s.chatBack);
-    dom.check(back instanceof HTMLElement,'OBSERVATION_DOM_NOT_READY');(back as HTMLElement).click();
+    const chat=dom.one(document,s.chat),back=dom.one(document,s.chatBack);
+    dom.check(chat.contains(back),'OBSERVATION_CONVERSATION_CHANGED');
+    const r=back.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
+    dom.check(x>=0&&x<innerWidth&&y>=0&&y<innerHeight,'OBSERVATION_BACK_NOT_INTERACTABLE');
+    const hit=document.elementFromPoint(x,y);
+    dom.check(hit&&back.contains(hit)&&dom.visible(hit),'OBSERVATION_BACK_NOT_INTERACTABLE');
+    if(hit instanceof HTMLElement)hit.click();
+    else {dom.check(hit instanceof SVGElement,'OBSERVATION_BACK_NOT_INTERACTABLE');
+      hit!.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}));}
     return {events,evidenceId,unsupported,loaded};
   }
   if(channel==='commentReveal') {

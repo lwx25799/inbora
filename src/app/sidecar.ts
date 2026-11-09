@@ -38,11 +38,14 @@ let service: ClientService | undefined,
   store: EventStore | undefined;
 let connecting = false,
   closing = false;
+let connectionSettled: Promise<void> | undefined;
 const active = new Set<Promise<void>>();
 const output = (value: unknown) =>
   process.stdout.write(JSON.stringify(value) + "\n");
 async function connect(raw: unknown): Promise<unknown> {
   const c = connectSchema.parse(raw);
+  requireSafe(!closing, 'CLIENT_CLOSING');
+  requireSafe(!connecting, 'CONNECTION_IN_PROGRESS');
   if (service) {
     requireSafe(
       !c.initialize && runtimeRoot(c.runtime) === service.browser.root,
@@ -63,21 +66,30 @@ async function connect(raw: unknown): Promise<unknown> {
       ...((await service.dispatch(token, { command: "getStatus" })) as object),
     };
   }
-  requireSafe(!connecting, "CONNECTION_IN_PROGRESS");
   connecting = true;
+  let settle!: () => void;
+  connectionSettled = new Promise<void>(resolve => { settle = resolve; });
   try {
     const root = runtimeRoot(c.runtime);
     lock = await OwnerLock.acquire(root, c.initialize);
-    if (c.initialize) await initRuntime(root);
+    requireSafe(!closing, 'CLIENT_CLOSING');
+    if (c.initialize) {
+      await initRuntime(root);
+      requireSafe(!closing, 'CLIENT_CLOSING');
+    }
     await loadRuntime(root);
+    requireSafe(!closing, 'CLIENT_CLOSING');
     store = new EventStore(join(root, "poc.sqlite"), c.initialize);
     await migrateClient(
       store,
       join(root, "backups", `client-v2-${randomUUID()}.sqlite`),
     );
+    requireSafe(!closing, 'CLIENT_CLOSING');
     await migrateAutomation(store,join(root,'backups',`automation-before-${randomUUID()}.sqlite`));
+    requireSafe(!closing, 'CLIENT_CLOSING');
     service = new ClientService(store, new BrowserService(root), undefined, Date.now, firstRunAt);
     await service.loadSettings();
+    requireSafe(!closing, 'CLIENT_CLOSING');
     token = service.authority.issueSession();
     service.events.on("update", (event) => output({ protocol: 1, event }));
     service.startOnline();
@@ -87,6 +99,7 @@ async function connect(raw: unknown): Promise<unknown> {
       ...((await service.dispatch(token, { command: "getStatus" })) as object),
     };
   } catch (error) {
+    await service?.close();
     service = undefined;
     store?.close();
     store = undefined;
@@ -97,11 +110,16 @@ async function connect(raw: unknown): Promise<unknown> {
     throw error;
   } finally {
     connecting = false;
+    settle();
+    connectionSettled = undefined;
   }
 }
 async function close(): Promise<void> {
   if (closing) return;
   closing = true;
+  // A connection can still create/load its service; let its cancellation cleanup finish first.
+  // Other active requests remain cancellable by service.close(), so do not drain all requests here.
+  await connectionSettled;
   await service?.close();
   await Promise.allSettled([...active]);
   store?.close();

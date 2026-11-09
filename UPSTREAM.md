@@ -1,5 +1,13 @@
 # 来源与许可
 
+## 2026-11-09：开发模式重载及私信返回控件修复
+
+先读取本机固定副本`.local/upstream-review/dev-reload-20261109`的具体源码与许可：tsx 4.23.15固定提交`ca66105a17a2a4c6503fe3a12b5b9ec408286011`的`src/cli/run.ts`、`src/cli/watch/index.ts`及MIT许可；Tauri固定提交`993038c49185307dfc895ab7657d77ca0d5ed7c7`的`crates/tauri-cli/src/dev.rs`，文件声明MIT/Apache-2.0；Tauri文档固定提交`4bfa8a6162db1478aa10c3205f20ef0f25fa2e3b`的开发章节及MIT许可。采用Tauri已有devUrl、前端开发服务器和Rust变更重编译路线，不新增依赖。前端改动热更新或自动刷新，Node源码改动只重载后台，不为小修升版、重打安装包或要求退出当前客户端。
+
+tsx的run继承stdin，watch又将stdin data作为手动重启触发；watch重启先发SIGTERM，默认5秒后SIGKILL，等待退出期间再次触发也会强杀。它不能直接承载本项目的JSON业务管道或在途意图收尾。本项目只使用现有tsx加载器，独立实现开发专用监督进程：新请求在重载期间立即拒绝，不排队；关闭旧stdin后等待旧Sidecar安全退出且退出码为0，才创建新代际。仅重连之前成功连接的规范运行目录，不重放Key、保存、模型或发送命令；旧代际输出不回送，已就绪异常退出不盲目循环。未ready的新子进程尚不能接受运行目录，语法错误修正后允许恢复，不继承上代持有者身份；此点由已连接场景实际红绿及异常退出负例补强。默认内存Key随后台退出丢失，持续授权、累计预算、持久意图及未知记录仍在原库保留。EOF与初始化竞争、重载中再次保存、草稿保留及不重放分别有定向回归；实际原生开发QA的进程/权威版本、CSS更新及正常退出证明另见验收表。
+
+另复读MIT DSH固定提交`7989640e340f0fd79e2de9874880d5197546e755`的`chat-browser.mjs:1023–1028`及许可：上游使用具体backBtn的Playwright click，本项目不直接复制选择器或调用网页处理器。0.3.5实机无正文诊断已证明：映射返回DIV自身无onClick，中心命中的子SVG有onClick，旧wrapper.click后聊天未隐藏。源码据此在原账号、来源、唯一聊天/返回控件及空编辑器门禁内，只向未遮挡的中心命中元素提交一次click；HTML用click，SVG派发一次冒泡MouseEvent，保留原隐藏等待，无第二次点击回退。新增合成回归和源码tsx/构建Node冒烟通过，尚未在真实账号加载该修复，不将它写成私信已恢复。
+
 ## 2026-11-07：单会话失败让步与评论续读渲染
 
 修复前复读MIT LockyBee/dsh-douyin-agent固定提交`7989640e340f0fd79e2de9874880d5197546e755`的`autonomous-watch.mjs:125-154`持久运行/停止、`chat-browser.mjs:303-337`身份绑定及`:854-896`有界列表读取。上游没有可直接移植到本项目SQLite会话调度的失败退避合同，因此独立复用已有`collection_progress.cursor_json`保存单会话120秒退避，不新增表/框架或模型重试；`last_read`仅成功后更新，账号/平台阻断继续透传全局门禁。许可已在本机候选副本复核，不复制上游宿主或放宽原生身份。
@@ -301,7 +309,7 @@ inbora独立使用`DeferredObjectRead`表示已成功持久化的对象退避：
 
 旧55f3047的两窗口补收回归实际只收到104/105而漏102/103；恢复旧窗及显示名变化另有独立红测，修复后通过。评论视口用例在有效夹具上以ROOTS_DOM_NOT_READY先红后绿，网页人稿仍拒绝滚动并保留。源码tsx与构建Node分别执行新增滚动/进入视口冒烟。合成通过不代表现有0.3.3进程已加载这些源码修复。
 
-同提交`chat-browser.mjs:1023–1028`的返回动作选择更具体backBtn并使用Playwright click；本项目历史实机A/B切换亦走locator click，而新后台走映射wrapper的DOM click。当前实机证据仅证明后者点击后聊天未隐藏，未证明子控件/事件归属，不猜改选择器或派发事件。独立补充唯一已映射返回控件的有界无正文诊断：最多12节点、固定标签/中心命中枚举/尺寸/事件函数存在布尔，仅own data descriptor，accessor及多props拒绝，不执行处理器或getter。先取得归属证据再选择修复；源码及编译Node均执行该诊断冒烟。[上游返回实现](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/chat-browser.mjs#L1023-L1028)
+同提交`chat-browser.mjs:1023–1028`的返回动作选择更具体backBtn并使用Playwright click；本项目历史实机A/B切换亦走locator click，而新后台走映射wrapper的DOM click。加入诊断时的实机证据仅证明后者点击后聊天未隐藏，尚无子控件/事件归属证明，因此当时未猜改选择器或派发事件。独立补充唯一已映射返回控件的有界无正文诊断：最多12节点、固定标签/中心命中枚举/尺寸/事件函数存在布尔，仅own data descriptor，accessor及多props拒绝，不执行处理器或getter。源码及编译Node均执行该诊断冒烟；后续0.3.5取得归属证据及修复取舍见本文顶部本轮记录。[上游返回实现](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/chat-browser.mjs#L1023-L1028)
 
 ## 2026-11-09：持续入站下的会话轮转与原生ID续查
 

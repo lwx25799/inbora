@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Settings } from './Settings';
 import { ReplyDetail } from './ReplyDetail';
 import { modes, time } from './presentation';
+import { useDevelopmentReconnect } from './useDevelopmentReconnect';
 import {
   request,
   desktopInfo,
@@ -76,6 +77,10 @@ export function App() {
     !!thread && (text !== (thread.draft?.text ?? "") || suggestionId !== null);
   const latestEditor = useRef({ eventId: selected, text, suggestionId });
   latestEditor.current = { eventId: selected, text, suggestionId };
+  const devRecovery=useDevelopmentReconnect({
+    selectedRef,selection,detailRequest,latestEditor,dialogOpen,
+    setStatus,setThread,setReview,setSend,setError,setNotice,
+  });
   useEffect(() => {
     if(dialogOpen&&!dialogElement.current?.open)dialogElement.current?.showModal();
     if(!dialogOpen&&dialogElement.current?.open)dialogElement.current.close();
@@ -160,10 +165,10 @@ export function App() {
     };
   }, [connected, selected]);
   useEffect(()=>{
-    if(!dialogOpen||!dirty||!thread?.ownership.isMine||saving||sending.current)return;
+    if(devRecovery.blockAutosave||!dialogOpen||!dirty||!thread?.ownership.isMine||saving||sending.current)return;
     const id=setTimeout(()=>{void saveDraft().catch(e=>setError(explain(e)));},500);
     return()=>clearTimeout(id);
-  },[dialogOpen,dirty,text,suggestionId,thread?.ownership.isMine,thread?.draft?.version,saving]);
+  },[devRecovery.blockAutosave,dialogOpen,dirty,text,suggestionId,thread?.ownership.isMine,thread?.draft?.version,saving]);
   useEffect(() => {
     if (!connected || !selected) return;
     const eventId = selected;
@@ -354,6 +359,7 @@ export function App() {
   }
   function sendDisabled() {
     if (!thread || !status) return "请选择一条任务";
+    if (devRecovery.restoring) return "开发内核正在恢复连接，人稿已保留";
     if (thread.intent)
       return thread.replyStatus === 'REPLIED'
         ? "这条消息已回复"
@@ -486,7 +492,7 @@ export function App() {
     );
   const block = sendDisabled(),
     readOnly =
-      !!thread?.intent ||
+      devRecovery.restoring || !!thread?.intent ||
       (!!thread && !thread.ownership.isMine) ||
       status.mode === "OBSERVE";
   return (
