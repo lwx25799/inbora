@@ -228,8 +228,10 @@ test('work discovery requires exact work, author, tooltip ID and visible text', 
     expect(batch.events).toHaveLength(1);
     expect(batch.events[0]).toMatchObject({platformEventId:'50',videoId:'10',commentId:'50',actorId:'200',discovery:'ALLOWED_WORK'});
     await owner.notification.locator('.body').evaluate(e=>e.textContent='changed visible text');
-    await expect(owner.notification.evaluate(captureObserved,
-      {mapping:config(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture'})).rejects.toThrow('OBSERVATION_COMMENT_TEXT_CONFLICT');
+    const changed=await owner.notification.evaluate(captureObserved,
+      {mapping:config(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture'});
+    expect(changed.events[0]).toMatchObject({text:'one comment',observationIssue:'COMMENT_TEXT_UNVERIFIED'});
+    expect(changed.unsupported).toBe(1);
     const outside=config(server.origin);outside.works[0]!.url='https://example.com/video/10';
     expect(()=>validateObservationMapping(outside,false)).toThrow('UNSAFE_OBSERVATION_URL');
   } finally {await owner.close();await server.close();}

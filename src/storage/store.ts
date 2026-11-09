@@ -115,11 +115,16 @@ export class EventStore {
           if (prior) comparable = {...e,platformEventId:this.event(prior.id).payload.platformEventId};
         }
         if (prior) {
-          if (!isStrong(e)) weakOccurrences.set(key, { eventId: prior.id, count: (weakOccurrences.get(key)?.count ?? 0) + 1 });
-          if (prior.binding !== eventBinding(comparable) || !isStrong(e)) {
+          if (!isStrong(e) && !e.observationIssue) weakOccurrences.set(key, { eventId: prior.id, count: (weakOccurrences.get(key)?.count ?? 0) + 1 });
+          if (prior.binding !== eventBinding(comparable) || !isStrong(e) && !e.observationIssue) {
             // A source collision or changed original cannot inherit an approval.
-            this.db.prepare("UPDATE inbound_events SET status='MANUAL_REVIEW' WHERE id=? AND status NOT IN ('CONFIRMED','UNCERTAIN','INTENT_RECORDED')").run(prior.id);
-            this.db.prepare("UPDATE reply_drafts SET status='DRAFT',approval=NULL,approved_at=NULL WHERE event_id=?").run(prior.id);
+            const previous=this.event(prior.id).payload;
+            const qualityOnly=previous.observationIssue!==comparable.observationIssue&&
+              eventBinding({...previous,observationIssue:undefined})===eventBinding({...comparable,observationIssue:undefined});
+            if(prior.status!=='BASELINE'||!qualityOnly)
+              this.db.prepare("UPDATE inbound_events SET status='MANUAL_REVIEW' WHERE id=? AND status NOT IN ('CONFIRMED','UNCERTAIN','INTENT_RECORDED')").run(prior.id);
+            if(!qualityOnly||!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(prior.id))
+              this.db.prepare("UPDATE reply_drafts SET status='DRAFT',approval=NULL,approved_at=NULL WHERE event_id=?").run(prior.id);
             this.db.prepare('INSERT OR IGNORE INTO source_collisions VALUES (?,?,?,?,?)')
               .run(randomUUID(),prior.id,binding,JSON.stringify(e),evidenceRef);
             const grants=this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_AUTHORIZED' AND json_extract(detail_redacted,'$.eventId')=?")
@@ -132,7 +137,8 @@ export class EventStore {
         const id = randomUUID();
         const time = absoluteTime(e.occurredAt);
         const overlapsBoundary = time !== null && time <= initialBoundary && time + (e.occurredAtPrecisionMs ?? 1) > initialBoundary;
-        const status = !isStrong(e) || time === null ? 'MANUAL_REVIEW' : !priorWatermark && firstBoundary === undefined ? 'BASELINE' :
+        const status = e.observationIssue && time !== null && time < initialBoundary && !overlapsBoundary ? 'BASELINE' :
+          !isStrong(e) || time === null ? 'MANUAL_REVIEW' : !priorWatermark && firstBoundary === undefined ? 'BASELINE' :
           time > (priorWatermark?.highWater ?? initialBoundary) ? 'AWAITING_DRAFT' : time < initialBoundary && !overlapsBoundary ? 'BASELINE' : 'MANUAL_REVIEW';
         this.db.prepare('INSERT INTO inbound_events VALUES (?,?,?,?,?,?,?,?,?)')
           .run(id, e.accountId, channel, key, scope, targetKey(e), binding, JSON.stringify(e), status);
@@ -151,6 +157,13 @@ export class EventStore {
     const row = this.db.prepare('SELECT id,payload,binding,status FROM inbound_events WHERE id=?').get(id) as EventRow | undefined;
     requireSafe(row, 'EVENT_NOT_FOUND');
     return { id: row.id, payload: eventSchema.parse(JSON.parse(row.payload)), binding: row.binding, status: row.status };
+  }
+  assertModelObservation(event:InboundEvent):void {
+    const unresolved=this.db.prepare(`SELECT e.id FROM inbound_events e WHERE e.account_id=? AND e.channel=? AND e.target_key=?
+      AND (json_extract(e.payload,'$.observationIssue') IS NOT NULL OR EXISTS
+        (SELECT 1 FROM source_collisions c WHERE c.event_id=e.id AND json_extract(c.payload,'$.observationIssue') IS NOT NULL)) LIMIT 1`)
+      .get(event.accountId,event.channel,targetKey(event));
+    requireSafe(!event.observationIssue&&!unresolved,'COMMENT_TEXT_UNVERIFIED');
   }
   events(): StoredEvent[] {
     return (this.db.prepare('SELECT id FROM inbound_events ORDER BY rowid').all() as { id: string }[]).map(r => this.event(r.id));

@@ -574,6 +574,7 @@ export class ClientService {
           "MODEL_PAUSED",
         );
         const e = this.store.event(c.eventId);
+        this.store.assertModelObservation(e.payload);
         requireSafe(
           [
             "AWAITING_DRAFT",

@@ -25,6 +25,7 @@ export const eventSchema = z.object({
   kind: z.enum(['COMMENT', 'REPLY', 'DM', 'LIKE', 'FOLLOW', 'SYSTEM', 'UNKNOWN']),
   evidenceId: z.string().min(1),
   discovery: z.enum(['NOTIFICATION', 'ALLOWED_WORK', 'DIRECT_MESSAGE']).optional(),
+  observationIssue: z.literal('COMMENT_TEXT_UNVERIFIED').optional(),
 });
 export type InboundEvent = z.infer<typeof eventSchema>;
 export function digest(value: unknown): string {
@@ -35,11 +36,14 @@ export function targetKey(e: InboundEvent): string {
     ? `dm:${e.conversationId ?? '?'}` : `comment:${e.videoId ?? '?'}:${e.commentId ?? '?'}`;
 }
 export function eventBinding(e: InboundEvent): string {
-  return digest([e.accountId, e.channel, e.platformEventId, e.actorId, e.text, e.occurredAt,
-    e.videoId, e.commentId, e.conversationId, e.direction, e.kind]);
+  const fields = [e.accountId, e.channel, e.platformEventId, e.actorId, e.text, e.occurredAt,
+    e.videoId, e.commentId, e.conversationId, e.direction, e.kind];
+  // Keep all pre-existing event bindings byte-for-byte compatible.
+  if(e.observationIssue)fields.push(e.observationIssue);
+  return digest(fields);
 }
 export function isStrong(e: InboundEvent): boolean {
-  return Boolean(e.platformEventId && e.actorId && (e.channel === 'DIRECT_MESSAGE'
+  return Boolean(!e.observationIssue && e.platformEventId && e.actorId && (e.channel === 'DIRECT_MESSAGE'
     ? e.conversationId : e.videoId && e.commentId));
 }
 export function isEligible(e: InboundEvent, ownId: string): boolean {

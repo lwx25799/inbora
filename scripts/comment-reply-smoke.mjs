@@ -103,5 +103,19 @@ try{
       await assert.rejects(new SendCoordinator(reconciledStore,owner.actor).send(d.id,reconciledAdapter,false));
     }finally{owner.notification.off('framenavigated',onNavigation);}
   }finally{reconciledAdapter.dispose();reconciledStore.close();}
-  console.log(JSON.stringify({nativeCommentReplySmoke:'PASS',runtime:source?'tsx-source':'compiled-node',fixtureClicks:3,freshSenderRefreshes:1,reconciledRefreshes:1,realSends:0,modelCalls:0}));
+  await mountCommentReply(owner,server.origin);
+  await owner.notification.evaluate(()=>{
+    const root=document.querySelector('#root-comment');
+    Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture').value.return.memoizedProps.commentInfo.text='root fixture input[赞]';
+    root.querySelector('.body').innerHTML='root fixture input<img width="16" height="16" src="/emoji.png" alt="[赞]">';
+  });
+  const emojiBatch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,evidenceId:'fixture-emoji'});
+  const emojiAdapter=new ObservedCommentReply(owner.notification,mapping);
+  try{
+    assert.equal((await emojiAdapter.inspect(emojiBatch.events[0])).targetKey,'comment:10:11');
+    await owner.notification.locator('.body img').evaluate(node=>node.setAttribute('alt','[哭]'));
+    await assert.rejects(emojiAdapter.inspect(emojiBatch.events[0]),/COMMENT_REPLY_ORIGINAL_CHANGED/);
+    assert.equal(await owner.notification.evaluate(()=>window.commentClicks),0);
+  }finally{emojiAdapter.dispose();}
+  console.log(JSON.stringify({nativeCommentReplySmoke:'PASS',runtime:source?'tsx-source':'compiled-node',fixtureClicks:3,freshSenderRefreshes:1,reconciledRefreshes:1,emojiOriginalGuard:true,realSends:0,modelCalls:0}));
 }finally{store.close();await owner.close();await server.close();}

@@ -59,6 +59,37 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       const children = dom.data(dom.react(element,'__reactProps$'),'children');
       return dom.data(Array.isArray(children) ? dom.data(children,'0') : children,'props');
     },
+    // Adapted from LockyBee readOwnedCommentText (MIT, fixed SHA in UPSTREAM).
+    // Kept inside each serialized capture so tsx and built Node need no module closure.
+    commentText(content:Element,row:Element,rowSelector:string,fixture:boolean):string|null {
+      let visited=0,images=0,length=0;
+      const tags=new Set(['SPAN','DIV','P','B','I','EM','STRONG','A','BR','IMG']);
+      const traversal={
+        append(value:string):string|null{length+=value.length;return length<=10_000?value:null;},
+        walk(node:Node):string|null{
+          if(++visited>180)return null;
+          if(node.nodeType===Node.TEXT_NODE)return traversal.append(node.nodeValue??'');
+          if(!(node instanceof Element)||node.closest(rowSelector)!==row||
+            node.closest('[data-e2e="im-dialog"]')||!tags.has(node.tagName))return null;
+          const style=getComputedStyle(node);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return '';
+          if(node.tagName==='BR')return traversal.append('\n');
+          if(node.tagName==='IMG'){
+            if(++images>8||node.childNodes.length||node.closest('a[href]'))return null;
+            const alt=node.getAttribute('alt'),source=node.getAttribute('src');
+            if(!alt||alt.length>32||/[\x00-\x1f\x7f]/.test(alt)||
+              !/(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[0-9#*]\uFE0F?\u20E3)/u.test(alt)&&!/^\[[^\[\]\r\n]{1,20}\]$/.test(alt)||!source)return null;
+            try{const url=new URL(source,location.origin);if(url.username||url.password||
+              url.protocol!=='https:'&&!(fixture&&url.origin===location.origin))return null;}catch{return null;}
+            return traversal.append(alt);
+          }
+          let value='';
+          for(const child of node.childNodes){const part=traversal.walk(child);if(part===null)return null;value+=part;}
+          return value;
+        },
+      };
+      return traversal.walk(content);
+    },
     id(value: unknown): string | null { return typeof value === 'string' && /^\d{1,64}$/.test(value) ? value : null; },
     conversationId(conversation: unknown): string {
       const first=dom.data(conversation,'conversationId'), second=dom.data(conversation,'id');
@@ -254,12 +285,15 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       dom.check(dom.data(author,'uid') === peer.uid && dom.data(author,'secUid') === peer.secUid,'OBSERVATION_COMMENT_AUTHOR_CONFLICT');
       const id = dom.id(dom.data(comment,'cid')), tooltip = dom.ownedOne(row,s.commentTooltip,false);
       dom.check(id && tooltip.id === `tooltip_${id}`,'OBSERVATION_COMMENT_ID_CONFLICT');
-      const text = dom.ownedOne(row,s.commentText).textContent ?? '';
-      dom.check(text.length > 0 && text === dom.data(comment,'text'),'OBSERVATION_COMMENT_TEXT_CONFLICT');
+      const body=dom.ownedOne(row,s.commentText),rendered=dom.commentText(body,row,s.commentRows,m.environment==='fixture');
+      const native=dom.data(comment,'text'),verified=rendered!==null&&rendered.length>0&&rendered===native;
+      const text=typeof native==='string'&&native.length>0&&native.length<=10_000?native:rendered||'[非文本评论，待核对]';
+      if(!verified)unsupported++;
       bindings.push({targetKey:`comment:${work!.id}:${id}`,uid:peer.uid,secUid:peer.secUid,title:peer.title,conversationId:null});
       events.push({ accountId:'account_001',channel:'COMMENT_NOTIFICATION',platformEventId:id,actorId:peer.uid,
         actorName:peer.title,text,occurredAt:dom.time(dom.data(comment,'createTime'),true),occurredAtPrecisionMs:1000,videoId:work!.id,commentId:id,
-        conversationId:null,direction:'INCOMING',kind:'COMMENT',evidenceId,discovery:'ALLOWED_WORK' });
+        conversationId:null,direction:'INCOMING',kind:'COMMENT',evidenceId,discovery:'ALLOWED_WORK',
+        ...(verified?{}:{observationIssue:'COMMENT_TEXT_UNVERIFIED' as const}) });
     }
   }
   dom.check(new Set(events.map(e=>e.platformEventId).filter(Boolean)).size === events.filter(e=>e.platformEventId).length,

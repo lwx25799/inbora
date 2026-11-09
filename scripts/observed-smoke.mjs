@@ -3,12 +3,12 @@ import { mkdir, mkdtemp } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fixtureServer } from '../tests/fixtures/site.ts';
-import { observedMapping, mountObserved, mountVirtualizedConversations } from '../tests/fixtures/observed-site.ts';
+import { observedMapping, mountObserved, mountVirtualizedConversations, mountCommentReply } from '../tests/fixtures/observed-site.ts';
 
 const source = process.argv[2] === 'source', root = source ? 'src' : 'dist';
 const moduleUrl = name => pathToFileURL(resolve(root,name.replace(/\.js$/,source?'.ts':'.js'))).href;
 const {BrowserProfileOwner} = await import(moduleUrl('browser/profile-owner.js'));
-const {ObservedReader} = await import(moduleUrl('adapters/observed-reader.js'));
+const {ObservedReader,captureObserved} = await import(moduleUrl('adapters/observed-reader.js'));
 const {validateObservationMapping} = await import(moduleUrl('config/site-mapping.js'));
 const {EventStore} = await import(moduleUrl('storage/store.js'));
 const base=resolve('.local/observed-smoke');await mkdir(base,{recursive:true});const dir=await mkdtemp(join(base,'run-'));
@@ -47,5 +47,18 @@ try {
   assert.equal(await owner.dm.evaluate(()=>window.opened),1);
   assert.equal(await owner.dm.evaluate(()=>window.outsideOpened),0);
   assert.ok(await owner.dm.evaluate(()=>window.listScrolls>0));
-  console.log(JSON.stringify({observedReaderSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:3,sends:0}));
+  await mountCommentReply(owner,server.origin);
+  await owner.notification.evaluate(()=>{
+    const root=document.querySelector('#root-comment');
+    Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture').value.return.memoizedProps.commentInfo.text='root fixture input[赞]';
+    root.querySelector('.body').innerHTML='root fixture input<img width="16" height="16" src="/emoji.png" alt="[赞]">';
+  });
+  const emoji=await owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-emoji'});
+  assert.equal(emoji.events[0].text,'root fixture input[赞]');assert.equal(emoji.events[0].observationIssue,undefined);
+  await owner.notification.locator('.body img').evaluate(node=>node.removeAttribute('alt'));
+  const unverified=await owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-review'});
+  assert.equal(unverified.events[0].observationIssue,'COMMENT_TEXT_UNVERIFIED');
+  store.observe('COMMENT_NOTIFICATION','work:10',unverified.events,'100','fixture',new Date().toISOString(),Date.UTC(2026,0,1));
+  assert.equal(store.events().at(-1).status,'MANUAL_REVIEW');
+  console.log(JSON.stringify({observedReaderSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:3,emojiVerified:true,unverifiedBodyPreserved:true,sends:0}));
 } finally {store.close();await owner.close();await server.close();}

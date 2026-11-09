@@ -50,6 +50,37 @@ export function captureCommentReply(input:Input):Frame{
     owned(root:Element,selector:string):Element[]{
       return Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root);
     },
+    // Adapted from LockyBee readOwnedCommentText (MIT, fixed SHA in UPSTREAM).
+    // Kept inside each serialized capture so tsx and built Node need no module closure.
+    commentText(content:Element,row:Element,rowSelector:string,fixture:boolean):string|null {
+      let visited=0,images=0,length=0;
+      const tags=new Set(['SPAN','DIV','P','B','I','EM','STRONG','A','BR','IMG']);
+      const traversal={
+        append(value:string):string|null{length+=value.length;return length<=10_000?value:null;},
+        walk(node:Node):string|null{
+          if(++visited>180)return null;
+          if(node.nodeType===Node.TEXT_NODE)return traversal.append(node.nodeValue??'');
+          if(!(node instanceof Element)||node.closest(rowSelector)!==row||
+            node.closest('[data-e2e="im-dialog"]')||!tags.has(node.tagName))return null;
+          const style=getComputedStyle(node);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return '';
+          if(node.tagName==='BR')return traversal.append('\n');
+          if(node.tagName==='IMG'){
+            if(++images>8||node.childNodes.length||node.closest('a[href]'))return null;
+            const alt=node.getAttribute('alt'),source=node.getAttribute('src');
+            if(!alt||alt.length>32||/[\x00-\x1f\x7f]/.test(alt)||
+              !/(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[0-9#*]\uFE0F?\u20E3)/u.test(alt)&&!/^\[[^\[\]\r\n]{1,20}\]$/.test(alt)||!source)return null;
+            try{const url=new URL(source,location.origin);if(url.username||url.password||
+              url.protocol!=='https:'&&!(fixture&&url.origin===location.origin))return null;}catch{return null;}
+            return traversal.append(alt);
+          }
+          let value='';
+          for(const child of node.childNodes){const part=traversal.walk(child);if(part===null)return null;value+=part;}
+          return value;
+        },
+      };
+      return traversal.walk(content);
+    },
     root():{root:Element;context:unknown[];proofs:SendProof[];ids:string[]}{
       const work=o.works.find(w=>w.id===e.videoId),peer=[...o.peers,...o.commentAuthors??[]].find(p=>p.uid===e.actorId);
       dom.check(work&&peer&&e.channel==='COMMENT_NOTIFICATION'&&e.kind==='COMMENT'&&e.direction==='INCOMING','COMMENT_REPLY_SCOPE_REQUIRED');
@@ -65,14 +96,14 @@ export function captureCommentReply(input:Input):Frame{
       const roots=rows.filter(n=>!n.parentElement?.closest(s.commentRows)&&dom.visible(n)&&
         dom.data(dom.data(dom.props(n,s.commentFiberDepth),'commentInfo'),'cid')===e.commentId);
       dom.check(roots.length===1,'COMMENT_REPLY_ROOT_NOT_UNIQUE');const root=roots[0]!,p=dom.props(root,s.commentFiberDepth),c=dom.data(p,'commentInfo');
-      const author=dom.data(c,'user'),texts=dom.owned(root,s.commentText).filter(n=>n.textContent===e.text),
+      const author=dom.data(c,'user'),texts=dom.owned(root,s.commentText).filter(n=>dom.commentText(n,root,s.commentRows,o.environment==='fixture')===e.text),
         tooltips=dom.owned(root,s.commentTooltip).filter(n=>n.id===`tooltip_${e.commentId}`),links=dom.owned(root,s.commentAuthor);
       const profile=links.length===1?new URL(links[0]!.getAttribute('href')??'',location.origin):null;
       dom.check(dom.data(p,'level')===m.rootLevel&&dom.data(c,'replyId')==='0'&&dom.data(c,'cid')===e.commentId&&
         dom.data(dom.data(p,'awemeInfo'),'awemeId')===e.videoId&&dom.data(dom.data(p,'userInfo'),'uid')===o.self.uid&&
         dom.data(author,'uid')===e.actorId&&dom.data(author,'secUid')===peer!.secUid&&
         profile?.origin===o.origin&&profile.pathname===`/user/${peer!.secUid}`&&
-        texts.length===1&&dom.visible(texts[0]!)&&texts[0]!.textContent===e.text&&dom.data(c,'text')===e.text&&
+        texts.length===1&&dom.visible(texts[0]!)&&dom.commentText(texts[0]!,root,s.commentRows,o.environment==='fixture')===e.text&&dom.data(c,'text')===e.text&&
         dom.time(dom.data(c,'createTime'))===e.occurredAt&&dom.data(c,'status')===m.confirmedStatus&&
         tooltips.length===1&&tooltips[0]!.id===`tooltip_${e.commentId}`,'COMMENT_REPLY_ORIGINAL_CHANGED');
       const replies=dom.data(c,'replyComment'),total=dom.data(c,'replyTotal');
@@ -118,7 +149,7 @@ export function captureCommentReply(input:Input):Frame{
         const bodies=dom.owned(child,s.commentText).filter(dom.visible),authors=dom.owned(child,s.commentAuthor).filter(dom.visible);
         const authorUrl=authors.length===1?new URL(authors[0]!.getAttribute('href')??'',location.origin):null;
         const flagged=Array.from(child.querySelectorAll(`${m.pending},${m.failed}`)).some(dom.visible)||child.matches(`${m.pending},${m.failed}`);
-        if(bodies.length===1&&bodies[0]!.textContent===text&&authorUrl?.origin===o.origin&&!authorUrl.username&&!authorUrl.password&&
+        if(bodies.length===1&&dom.commentText(bodies[0]!,child,s.commentRows,o.environment==='fixture')===text&&authorUrl?.origin===o.origin&&!authorUrl.username&&!authorUrl.password&&
           authorUrl.pathname===`/user/${o.self.secUid}`&&!flagged)
           proofs.push({id:id as string,ownId:o.self.uid,targetKey:`comment:${e.videoId}:${e.commentId}`,text:text as string,pending:false,sentAt:at as string});
       }

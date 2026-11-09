@@ -26,6 +26,22 @@ const good = {
   ],
   usage: { prompt_tokens: 18, completion_tokens: 7, total_tokens: 25 },
 };
+
+test.each(['event','stored','collision','context'])('unverified comment %s is rejected before reservation, MODEL budget and transport',async source=>{
+  const store=database();let calls=0,reservations=0;
+  try{
+    const clean=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',videoId:'v1',commentId:'c1'});
+    const issue={...clean,observationIssue:'COMMENT_TEXT_UNVERIFIED' as const};
+    if(source==='stored')pending(store,issue);
+    if(source==='collision'){pending(store,clean);store.observe(clean.channel,'notifications',[issue],'own-1','fixture');}
+    const provider=new DeepSeekProvider(async()=>{calls++;return new Response(JSON.stringify(good));});
+    await expect(provider.generate(store,source==='event'?issue:clean,source==='context'?[issue]:[],settings,'synthetic-contract-key',true,undefined,()=>{reservations++;}))
+      .rejects.toThrow('COMMENT_TEXT_UNVERIFIED');
+    expect(calls).toBe(0);expect(reservations).toBe(0);
+    expect(store.db.prepare('SELECT used FROM budgets WHERE kind=?').get('MODEL')).toEqual({used:0});
+    expect(store.db.prepare('SELECT count(*) AS n FROM model_calls').get()).toEqual({n:0});
+  }finally{store.close();}
+});
 test("schema3 old CLI draft path fails before model budget or request", async () => {
   const store = database();
   let calls = 0;

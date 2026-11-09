@@ -3,9 +3,27 @@ import { join } from "node:path";
 import { ClientService } from "../../src/app/service.js";
 import { BrowserService } from "../../src/app/browser-service.js";
 import { migrateClient } from "../../src/storage/client-migration.js";
-import { database, privateTemp, pending } from "../helpers.js";
+import { database, privateTemp, pending, candidate } from "../helpers.js";
 import { DeepSeekProvider } from "../../src/ai/deepseek.js";
 import { defaultSettings } from "../../src/app/contracts.js";
+
+test.each([false,true])('manual AI suggestion refuses an unverified comment before charging (later collision: %s)',async later=>{
+  const root=privateTemp('unverified-suggestion-'),store=database();await migrateClient(store,join(root,'backup.sqlite'));
+  let calls=0;
+  const provider=new DeepSeekProvider(async()=>{calls++;return new Response(JSON.stringify({model:'deepseek-flash',choices:[{index:0,finish_reason:'stop',message:{role:'assistant',content:'Fixture suggestion'}}],usage:{prompt_tokens:2,completion_tokens:3,total_tokens:5}}));});
+  const service=new ClientService(store,new BrowserService(root),provider);
+  try{
+    const clean=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',videoId:'v1',commentId:'c1'}),issue={...clean,observationIssue:'COMMENT_TEXT_UNVERIFIED' as const};
+    pending(store,later?clean:issue);const eventId=store.events()[0]!.id;
+    if(later)store.observe(clean.channel,'notifications',[issue],'own-1','fixture');
+    await service.loadSettings();const token=service.authority.issueSession();
+    await service.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-contract-key'});
+    await service.dispatch(token,{command:'setModelGrant',scope:{ownId:'own-1',channels:['COMMENT_NOTIFICATION'],model:'deepseek-flash',modelLimit:1,expiresAt:null},confirmed:true});
+    await expect(service.dispatch(token,{command:'generateSuggestion',eventId,draftVersion:0})).rejects.toThrow('COMMENT_TEXT_UNVERIFIED');
+    expect(calls).toBe(0);expect(store.db.prepare("SELECT used FROM budgets WHERE kind='MODEL'").get()).toEqual({used:0});
+    expect(store.db.prepare('SELECT count(*) AS n FROM grant_reservations').get()).toEqual({n:0});
+  }finally{await service.close();store.close();}
+});
 
 test("scope consent survives service restart and ordinary settings saves preserve Key and grant usage",async()=>{
   const root=privateTemp('automation-service-'),store=database();

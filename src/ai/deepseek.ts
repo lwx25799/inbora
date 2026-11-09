@@ -63,6 +63,8 @@ export class DeepSeekProvider {
     const id = randomUUID();
     store.db
       .transaction(() => {
+        store.assertModelObservation(event);
+        for(const item of history)store.assertModelObservation(item);
         reserve?.();
         store.consumeBudget("MODEL");
         store.db

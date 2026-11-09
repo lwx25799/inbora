@@ -4,6 +4,46 @@ import { writeFileSync } from 'node:fs';
 import { EventStore } from '../../src/storage/store.js';
 import { approved, candidate, database, privateTemp, snapshot } from '../helpers.js';
 
+test.each([false,true])('historical baseline survives a quality-only change (initially unverified: %s)',initiallyUnverified=>{
+  const s=database();
+  try{
+    const old=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',videoId:'v1',commentId:'c1',occurredAt:'2026-11-02T00:00:00Z'});
+    const start=Date.parse('2026-11-03T00:00:00Z');
+    s.observe(old.channel,'work:v1',[{...old,...initiallyUnverified?{observationIssue:'COMMENT_TEXT_UNVERIFIED' as const}:{}}],'own-1','fixture',new Date(start+1000).toISOString(),start);
+    expect(s.events()[0]!.status).toBe('BASELINE');
+    s.observe(old.channel,'work:v1',[{...old,...initiallyUnverified?{}:{observationIssue:'COMMENT_TEXT_UNVERIFIED' as const}}],'own-1','fixture',new Date(start+2000).toISOString(),start);
+    expect(s.events()).toHaveLength(1);expect(s.events()[0]!.status).toBe('BASELINE');
+  }finally{s.close();}
+});
+
+test.each(['INTENT_RECORDED','CONFIRMED','UNCERTAIN'] as const)('quality-only evidence preserves existing %s intent, receipt and approved revision',state=>{
+  const s=database();
+  try{
+    const e=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',videoId:'v1',commentId:'c1'}),draftId=approved(s,e);
+    const intent=s.recordIntent(draftId,snapshot(e),false);
+    if(state!=='INTENT_RECORDED')s.receipt(intent,state,'fixture-receipt');
+    const before={draft:s.draft(draftId),intents:s.db.prepare('SELECT * FROM send_intents').all(),receipts:s.db.prepare('SELECT * FROM delivery_receipts').all()};
+    s.observe(e.channel,'notifications',[{...e,observationIssue:'COMMENT_TEXT_UNVERIFIED'}],'own-1','fixture');
+    expect(s.events()[0]!.status).toBe(state);
+    expect({draft:s.draft(draftId),intents:s.db.prepare('SELECT * FROM send_intents').all(),receipts:s.db.prepare('SELECT * FROM delivery_receipts').all()}).toEqual(before);
+  }finally{s.close();}
+});
+
+test('a later unverified comment body revokes prior approval without creating another task or consuming budget',()=>{
+  const s=database();
+  try{
+    const e=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',videoId:'v1',commentId:'c1'});
+    const id=approved(s,e),draft=s.draft(id);
+    s.observe(e.channel,'notifications',[{...e,observationIssue:'COMMENT_TEXT_UNVERIFIED'}],'own-1','fixture');
+    expect(s.events()).toHaveLength(1);
+    expect(s.events()[0]!.status).toBe('MANUAL_REVIEW');
+    expect(s.draft(id)).toMatchObject({status:'DRAFT',approval:null});
+    expect(()=>s.approve(id,snapshot(e),draft.version,draft.text)).toThrow('NOT_AWAITING_APPROVAL');
+    expect(s.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
+    expect(s.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);
+  }finally{s.close();}
+});
+
 test('baseline, five observations, duplicate text next date and independent channel/conversation cursors', () => {
   const s = database();
   try {

@@ -258,3 +258,17 @@ WebView2调试环境变量在本机提升权限宿主未生效后，核对已安
 来源：[Playwright固定提交的args文档](https://github.com/microsoft/playwright/blob/cfe490d941f992655948eee8fd4fd94e1c4234bf/docs/src/api/params.md#browser-option-args)、[Chromium静音开关说明](https://chromium.googlesource.com/chromium/src/+/ea1b3b85f6f7d729e484568979294afc1b1249a4/media/base/media_switches.cc)。仅使用公开启动参数，没有复制Chromium源代码；Chromium源文件标注BSD许可，DSH与Playwright许可如上。
 
 验证只检查本项目专属Profile进程，不读取其他浏览器资料；不为读取命令行而追加enable-automation或改动浏览器身份。原生有头启动缺少静音参数已由本机进程探针复现，修复后对源码/编译、有头/无头和关闭重启逐项复验。
+
+## 2026-11-09：评论表情正文、单行隔离与付费门禁
+
+用户提供已加载评论区截图并要求查开源方案后，先保留私有截图，使用合成页面复现IMG表情、纯表情、BR与单行冲突阻断整页读取；未把截图当作已取得网页DOM字段。修改前联网重新核对三个仓库HEAD并下载固定版本的具体源码/许可；文件SHA256索引只留`.local/upstream-review/collection-20261109/index.json`。
+
+| 候选及固定SHA | 具体实现与许可 | 采用结论 |
+| --- | --- | --- |
+| LockyBee/dsh-douyin-agent `7989640e340f0fd79e2de9874880d5197546e755`，仍为当前HEAD | MIT；`comment-browser.mjs:344–375`的`readOwnedCommentText`按owned正文遍历文本、BR及IMG alt，限制节点/图片/协议；`tests/comment-browser.test.mjs:405–489`覆盖表情、缺alt、隐藏、嵌套、换行、确认与旧编号 | 适配该小段至两份序列化捕获函数，保留MIT许可于`third_party/LockyBee-dsh-douyin-agent-MIT.txt`。不trim空白，将长度上限与现有入站10000字符合同一致，fixture仅允许同源HTTP资源；真实页面仍要求HTTPS且无URL凭据。收取和发送前均与原生全文逐字比较，不借metadata补造DOM全文或成功收据。[源码](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/comment-browser.mjs#L344-L375)、[测试](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/tests/comment-browser.test.mjs#L405-L489) |
+| miqian-nomad/dsh-douyin-watch `d1a14e3fc8d7a18089d412ae3479365974c069df`，本轮当前HEAD | MIT；`tools/work-comments.mjs:65–130`直接jget本人作品和评论接口；`tools/im-send.mjs:408–454`派发Enter并有点击事件链回退 | 只读比较，不复制接口/提交路线。它不能直接证明本机owned正文/准确父评论和单次点击合同。[收取源码](https://github.com/miqian-nomad/dsh-douyin-watch/blob/d1a14e3fc8d7a18089d412ae3479365974c069df/tools/work-comments.mjs#L65-L130) |
+| JMY2003/a-skill-to-do-anything-in-douyin `d5211b3d687ddab0d5efc32b915a636aba764423`，当前HEAD未变 | `scripts/douyin_web.mjs:502–518`读取innerText/textContent/aria；固定提交根LICENSE返回404，未核准可复制许可 | 只读研究，不复制。没有提供表情全文与原生元数据双向核对、单行隔离或持久质量门禁。[源码](https://github.com/JMY2003/a-skill-to-do-anything-in-douyin/blob/d5211b3d687ddab0d5efc32b915a636aba764423/scripts/douyin_web.mjs#L502-L518) |
+
+inbora独立增加`COMMENT_TEXT_UNVERIFIED`质量标记：对不齐的行保留入站及待核对状态，不能成为强事件，不中断同页其它评论；可靠旧历史仍为BASELINE。未带标记的既有eventBinding保持完全一致，质量变化只追加证据，不改写已存意图、收据或其批准修订。人工AI入口及DeepSeek预算事务同时检查原记录/冲突证据和上下文，未核验正文在策略预占、累计MODEL扣费和请求前拒绝。
+
+六项新浏览器回归已在隔离的旧HEAD `98db895` 实跑全红，再在修复上通过；审查补出的旧基线两个方向、未核验正文付费入口/上下文及既有意图修订保留也先红后绿。源码tsx冒烟实际抓到新增局部箭头的`__name`闭包问题，改成捕获函数内方法后源码与构建路径分别验证。真实GUI由用户手工测试；这些结果不等于当前真实采集恢复或新策略闭环已验收。
