@@ -64,7 +64,8 @@ export const commandSchema = z.discriminatedUnion("command", [
       page: z.number().int().min(0).max(100000),
     })
     .strict(),
-  z.object({ command: z.literal("getThread"), ...event }).strict(),
+  z.object({ command: z.literal("getThread"), ...event,timelineBefore:z.string().min(1).max(300).optional() }).strict(),
+  z.object({command:z.literal('getMessagePreview'),...event,previewId:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),
   z.object({ command: z.literal("openTarget"), ...event }).strict(),
   z
     .object({

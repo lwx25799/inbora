@@ -39,6 +39,16 @@ CREATE TABLE verification_results (id TEXT PRIMARY KEY, intent_id TEXT NOT NULL 
 CREATE TABLE automation_schema (version INTEGER PRIMARY KEY CHECK(version=1));
 INSERT INTO automation_schema VALUES(1);`;
 
+const chatSql=`CREATE TABLE chat_messages(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,own_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,native_id TEXT NOT NULL,native_id_digest TEXT NOT NULL,binding TEXT NOT NULL,payload TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,historical INTEGER NOT NULL,conflicted INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(account_id,conversation_id,native_id));
+CREATE INDEX chat_messages_conversation ON chat_messages(account_id,conversation_id);
+CREATE TABLE chat_delivery_links(intent_id TEXT PRIMARY KEY,native_id_digest TEXT NOT NULL);
+ALTER TABLE automation_schema RENAME TO automation_schema_previous;
+CREATE TABLE automation_schema(version INTEGER PRIMARY KEY CHECK(version=2));
+INSERT INTO automation_schema VALUES(2);DROP TABLE automation_schema_previous;`;
+
 function inventory(db: Database.Database, names: string[]): string {
   return digest(names.map(name => [name, db.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}" ORDER BY rowid`).all()]));
 }
@@ -46,12 +56,17 @@ function inventory(db: Database.Database, names: string[]): string {
 /** Additive extension of schema3; backup and restore are checked before the owner database changes. */
 export async function migrateAutomation(store: EventStore, backupFile: string): Promise<boolean> {
   requireSafe(store.db.pragma("user_version", { simple: true }) === 3, "CLIENT_MIGRATION_REQUIRED");
-  if (store.db.prepare("SELECT name FROM sqlite_master WHERE name='automation_schema'").get()) {
-    requireSafe(!!store.db.prepare("SELECT version FROM automation_schema WHERE version=1").get(), "AUTOMATION_SCHEMA_UNSUPPORTED");
-    return false;
+  const hasSchema=!!store.db.prepare("SELECT name FROM sqlite_master WHERE name='automation_schema'").get();
+  const versions=hasSchema?
+    store.db.prepare('SELECT version FROM automation_schema').all() as {version:number}[]:[];
+  requireSafe(!hasSchema||versions.length===1&&[1,2].includes(versions[0]!.version),'AUTOMATION_SCHEMA_UNSUPPORTED');
+  if(versions[0]?.version===2){
+    requireSafe((store.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name IN ('chat_messages','chat_delivery_links') AND type='table'").get() as {n:number}).n===2,
+      'AUTOMATION_SCHEMA_UNSUPPORTED');return false;
   }
+  const upgradeSql=(versions.length?'':sql)+chatSql;
   const names = (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {name: string}[]).map(x => x.name);
-  const before = inventory(store.db, names);
+  const before = inventory(store.db, names),preserved=names.filter(name=>name!=='automation_schema'),preservedBefore=inventory(store.db,preserved);
   await mkdir(dirname(backupFile), { recursive: true });
   await store.db.backup(backupFile);
   const trialFile = `${backupFile}.trial`;
@@ -64,12 +79,13 @@ export async function migrateAutomation(store: EventStore, backupFile: string): 
     const trial = new Database(trialFile);
     try {
       trial.pragma("foreign_keys = ON");
-      trial.transaction(() => trial.exec(sql)).immediate();
-      requireSafe(trial.pragma("quick_check", {simple: true}) === "ok" && inventory(trial, names) === before, "MIGRATION_TRIAL_FAILED");
+      trial.transaction(() => trial.exec(upgradeSql)).immediate();
+      requireSafe(trial.pragma("quick_check", {simple: true}) === "ok" && inventory(trial, preserved) === preservedBefore&&
+        (trial.prepare('SELECT version FROM automation_schema').get() as {version:number}).version===2, "MIGRATION_TRIAL_FAILED");
     } finally { trial.close(); }
     requireSafe(inventory(store.db, names) === before, "DATABASE_CHANGED_DURING_MIGRATION");
-    store.db.transaction(() => store.db.exec(sql)).immediate();
-    store.audit("AUTOMATION_SCHEMA_UPGRADED", "automation-1");
+    store.db.transaction(() => store.db.exec(upgradeSql)).immediate();
+    store.audit("AUTOMATION_SCHEMA_UPGRADED", "automation-2");
     return true;
   } finally { await rm(trialFile, {force: true}); }
 }

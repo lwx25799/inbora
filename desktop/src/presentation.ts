@@ -10,3 +10,11 @@ export const modes = {
   AI_ASSISTED: "AI 辅助回复",
   LIMITED_AUTO: "规则自动回复",
 };
+export function browserState(state:string,stopped=false){
+  if(state==='CLOSED')return stopped?'已关闭（已急停）':'正在自动连接';
+  if(state==='STARTING')return '正在启动';
+  if(state==='OPEN_LAST_READ_VERIFIED')return '已连接';
+  if(state==='OPEN_IDENTITY_UNVERIFIED')return '已打开';
+  if(state==='BROWSER_START_FAILED')return '启动未完成，后台重试中';
+  return '正在更新连接状态';
+}

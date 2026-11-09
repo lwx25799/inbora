@@ -1,5 +1,13 @@
 # 来源与许可
 
+## 2026-11-09：原生会话聊天与本机图片预览
+
+实施前复读非enterprise MIT Expat的Chatwoot固定提交`625d5964e3cb3f1d917b43c3b8332219e525a4b8`：`app/javascript/dashboard/store/modules/conversations/actions.js:235–279`按conversation/native ID增量去重及排序，`app/models/attachment.rb:38–40,62–68,115–124`按账号/消息绑定附件和有界缩略信息。另复读MIT DSH固定提交`7989640e340f0fd79e2de9874880d5197546e755`的`chat-browser.mjs:303–337,411–425,461–467`，采用准确原生会话身份、正文owned媒体、加载完成及最多4图的结论。不复制Vue/Rails/宿主、外链媒体请求、乐观发送或吞错处理，不新增依赖。
+
+本项目在SQLite全量原生分组后分页，消息流独立于AI上下文；正常窗口观察的我方消息仅作展示，不建入站任务或发送收据。schema2是schema3的附加扩展，真实库一致私有副本已试升级/恢复，原业务表和预算保留。已确认回复与观察我方消息仅按准确native ID关联去重，同文不同ID不合并；后续只读补证保存准确ID摘要，原未知/收据不改。会话投影版本在反证或原生关联变化时撤销旧页面缓存，不保留过时“已回复”气泡。
+
+图片预览使用现有Playwright 1.64.1的Page.screenshot clip/scale选项；不采用会自动滚动的元素截图，不fetch媒体URL、不改DOM/用canvas规避跨源。准确本人/会话/消息ID/发送者/时间、可见正文图像和源指纹在截图前后核验；源仅在页面内散列。私有PNG以消息绑定的opaque ID经READ接口读取，前端不访问Profile或任意文件。复用运行目录保留期（默认14天），最多500清单/80MiB，每消息4图、单图512×512/160KiB。窄遮挡漏收及正常背景/可点击包装误拒均先红后绿，源码tsx和构建Node分别实际执行13条预览断言；实际平台媒体仍须另列差异证据，合成图不冒称实机图片已显示。
+
 ## 2026-11-09：开发模式重载及私信返回控件修复
 
 先读取本机固定副本`.local/upstream-review/dev-reload-20261109`的具体源码与许可：tsx 4.23.15固定提交`ca66105a17a2a4c6503fe3a12b5b9ec408286011`的`src/cli/run.ts`、`src/cli/watch/index.ts`及MIT许可；Tauri固定提交`993038c49185307dfc895ab7657d77ca0d5ed7c7`的`crates/tauri-cli/src/dev.rs`，文件声明MIT/Apache-2.0；Tauri文档固定提交`4bfa8a6162db1478aa10c3205f20ef0f25fa2e3b`的开发章节及MIT许可。采用Tauri已有devUrl、前端开发服务器和Rust变更重编译路线，不新增依赖。前端改动热更新或自动刷新，Node源码改动只重载后台，不为小修升版、重打安装包或要求退出当前客户端。

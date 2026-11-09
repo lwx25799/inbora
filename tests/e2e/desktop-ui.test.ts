@@ -76,7 +76,7 @@ test.each([
         syncCalls.push(source);if(holdSyncRead)await new Promise<void>(resolve=>{releaseSyncRead=resolve;});
         if(source==='works')pending(store,candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',conversationId:null,
           platformEventId:'ui-synced-comment',videoId:'ui-sync-work',commentId:'ui-sync-parent',actorName:'同步新增评论',text:'评论读取完成后可立即查看的合成任务',occurredAt:'2026-11-04T01:00:10Z'}));
-        if(source==='dm')pending(store,candidate({platformEventId:'ui-synced-event',actorName:'同步新增任务',text:'同步后应自动出现的合成任务',occurredAt:'2026-11-04T01:00:10Z'}));
+        if(source==='dm')pending(store,candidate({platformEventId:'ui-synced-event',conversationId:'ui-synced-conversation',actorName:'同步新增任务',text:'同步后应自动出现的合成任务',occurredAt:'2026-11-04T01:00:10Z'}));
       }
       override async adapter(e: InboundEvent) {
         let text = "";
@@ -127,11 +127,12 @@ test.each([
       headless: true,
     });
     const page = await browser.newPage({ viewport });
+    page.setDefaultTimeout(5000);
     const errors: string[] = [];
     let releaseSave: (() => void) | undefined;
     let saveEntered: (() => void) | undefined;
     let holdSave = false;
-    const controlTrace: { command: string; paused: boolean; generation?: number; isMine?: boolean }[] = [];
+    const controlTrace: { command: string; paused: boolean; eventId?:string|undefined; generation?: number; isMine?: boolean }[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
     try {
       await page.exposeFunction(
@@ -156,7 +157,7 @@ test.each([
             body.command === "connect" ? { command: "getStatus" } : body,
           );
           const ownership = (result as { ownership?: { generation: number; isMine: boolean } }).ownership;
-          controlTrace.push({ command: body.command, paused: service.authority.paused(),
+          controlTrace.push({ command: body.command, eventId:body.eventId, paused: service.authority.paused(),
             ...(ownership ? { generation: ownership.generation, isMine: ownership.isMine } : {}) });
           return result;
         },
@@ -209,9 +210,8 @@ test.each([
       await page.getByRole('button',{name:/同步新增任务/}).waitFor();
       expect(syncCalls).toEqual(['works','dm']);expect(clicks).toBe(0);
       await page.getByRole("button", { name: /合成私信作者/ }).click();
-      await page.getByRole('button',{name:'打开人工回复',exact:true}).click();
-      const dialog=page.getByRole('dialog',{name:'人工回复对话框'}),editor=dialog.getByRole('textbox',{name:'人工回复草稿'});
-      await dialog.waitFor();
+      const dialog=page.getByRole('dialog',{name:'人工回复对话框'}),editor=page.getByRole('textbox',{name:'人工回复草稿'});
+      await editor.waitFor();
       expect(await dialog.getByRole('button',{name:'人工接管',exact:true}).count()).toBe(0);
       expect(await dialog.getByRole('button',{name:'保存草稿',exact:true}).count()).toBe(0);
       holdSave=true;
@@ -224,9 +224,8 @@ test.each([
       await expect.poll(()=>service.authority.paused()).toBe(true);
       await expect.poll(()=>editor.getAttribute('readonly'),{timeout:5000}).not.toBe(null);
       expect(await editor.inputValue()).toBe('保存期间继续输入的新文字');
-      await dialog.getByRole('button',{name:'继续写回复',exact:true}).click();
+      await page.getByRole('button',{name:'继续写回复',exact:true}).click();
       await editor.fill('暂停期间保留的完整人稿');
-      await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
       await expect.poll(()=>service.authority.draftFor(dm)?.text).toBe('暂停期间保留的完整人稿');
       await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
       await page.getByText('故障处理',{exact:true}).click();
@@ -242,17 +241,22 @@ test.each([
       expect(await editor.inputValue()).toBe(legacyDraft.text);
       await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
       await page.getByRole('button',{name:/合成私信作者/}).click();
-      await page.getByRole('button',{name:'打开人工回复',exact:true}).click();
       await expect.poll(()=>editor.inputValue()).toBe('暂停期间保留的完整人稿');
       await editor.fill('人工单击绑定最新全文，无需模型。');
-      await dialog.getByRole('button',{name:'发送',exact:true}).click();
+      await page.getByRole('button',{name:'发送',exact:true}).click();
       await service.drain();await expect.poll(()=>store.event(dm).status).toBe('CONFIRMED');
-      await expect.poll(()=>dialog.locator('.send-state').textContent()).toContain('已回复');
+      await expect.poll(()=>page.locator('.send-state').textContent()).toContain('已回复');
       expect(clicks).toBe(1);
+      const followup=pending(store,candidate({platformEventId:'ui-dm-after-confirmed',actorName:'合成私信作者',
+        text:'已经回复后同会话新增入站',occurredAt:'2026-11-04T01:00:20Z'}));
+      await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+      await expect.poll(()=>controlTrace.filter(item=>item.command==='openHumanDialog').at(-1)?.isMine).toBe(true);
+      await expect.poll(()=>page.getByRole('textbox',{name:'人工回复草稿'}).inputValue()).toBe('');
+      expect(controlTrace.filter(item=>item.command==='openHumanDialog').at(-1)?.eventId).toBe(followup);
+      expect(service.authority.draftFor(followup)).toBeNull();expect(store.event(dm).status).toBe('CONFIRMED');expect(clicks).toBe(1);
       expect(await page.getByRole('region',{name:'逐条发送确认'}).count()).toBe(0);
       const output=resolve('.local/desktop-ui');await mkdir(output,{recursive:true});
       await page.screenshot({path:join(output,`dialog-${viewport.width}x${viewport.height}.png`)});
-      await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
       await page.getByRole('button',{name:/合成评论作者/}).click();
       await page.getByRole('heading',{name:'合成评论作者',exact:true}).waitFor();
       const targetInfo=page.locator('section.detail > details.identity');

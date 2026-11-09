@@ -292,7 +292,11 @@ export class EventStore {
     this.db.transaction(() => {
       const intent = this.db.prepare('SELECT * FROM send_intents WHERE id=?').get(intentId) as Intent | undefined;
       requireSafe(intent && ['INTENT_RECORDED', 'UNCERTAIN'].includes(intent.status), 'INTENT_NOT_REVIEWABLE');
-      if(result==='CONFIRMED')this.submissionProof(intentId,proof);
+      if(result==='CONFIRMED'){
+        this.submissionProof(intentId,proof);
+        if(proof?.id&&this.db.prepare("SELECT name FROM sqlite_master WHERE name='chat_delivery_links'").get())
+          this.db.prepare('INSERT INTO chat_delivery_links VALUES(?,?) ON CONFLICT(intent_id) DO NOTHING').run(intentId,digest(proof.id));
+      }
       this.db.prepare('INSERT INTO delivery_receipts VALUES (?,?,?,?,?)')
         .run(randomUUID(), intentId, result, proofRef, new Date().toISOString());
       this.db.prepare('UPDATE send_intents SET status=? WHERE id=?').run(result, intentId);

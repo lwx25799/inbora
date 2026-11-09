@@ -5,6 +5,7 @@ import type { WorkbenchAuthority } from './authority.js';
 import type { BrowserService } from './browser-service.js';
 import type { AiSettings, InboxSync, ClientCommand } from './contracts.js';
 import type { CollectionScheduler } from './collection-scheduler.js';
+import {InboxQueries,inboxGroupKey} from './inbox-queries.js';
 
 interface ViewState {
   settings: AiSettings;
@@ -28,7 +29,7 @@ export class WorkbenchQueries {
     return latest?latest.verified===1?'REPLIED':'WAITING':status==='CONFIRMED'?'REPLIED':'WAITING';
   }
 
-  thread(token: string, eventId: string, automation: AutomationStore | null) {
+  thread(token: string, eventId: string, automation: AutomationStore | null,timelineBefore?:string) {
     const op = this.authority.operator(token),
       e = this.store.event(eventId),
       draft = this.authority.draftFor(eventId);
@@ -57,6 +58,8 @@ export class WorkbenchQueries {
       .get(targetKey(e.payload));
     return {
       event: e,
+      groupKey:inboxGroupKey(e),
+      timeline:new InboxQueries(this.store,this.browser.root,(id,status)=>this.replyStatus(id,status)).timeline(e,timelineBefore),
       draft,
       history: this.store.history(e.payload),
       ownership: { ...owner, isMine: owner.operator_id === op.id },
@@ -145,43 +148,6 @@ export class WorkbenchQueries {
   }
 
   inbox(c: Extract<ClientCommand, {command:'getInbox'}>) {
-    const filter =
-      c.status === "PENDING"
-        ? null
-        : c.status === "REVIEW"
-          ? ["MANUAL_REVIEW"]
-          : c.status === "UNCERTAIN"
-            ? ["UNCERTAIN", "INTENT_RECORDED"]
-            : c.status === "CONFIRMED"
-              ? ["CONFIRMED"]
-              : null;
-    const events = this.store
-      .events()
-      .filter(
-        (e) =>
-          e.status !== "BASELINE" &&
-          (c.channel === "ALL" || e.payload.channel === c.channel) &&
-          (c.status==='PENDING'?this.replyStatus(e.id,e.status)==='WAITING':c.status==='CONFIRMED'?this.replyStatus(e.id,e.status)==='REPLIED':!filter||filter.includes(e.status)),
-      )
-      .reverse();
-    return {
-      total: events.length,
-      page: c.page,
-      pageSize: 20,
-      items: events.slice(c.page * 20, c.page * 20 + 20).map((e) => ({
-        id: e.id,
-        status: e.status,
-        replyStatus:this.replyStatus(e.id,e.status),
-        channel: e.payload.channel,
-        author: e.payload.actorName,
-        preview: e.payload.text,
-        time: e.payload.occurredAt,
-        source:
-          e.payload.discovery ??
-          (e.payload.channel === "DIRECT_MESSAGE"
-            ? "DIRECT_MESSAGE"
-            : "NOTIFICATION"),
-      })),
-    };
+    return new InboxQueries(this.store,this.browser.root,(id,status)=>this.replyStatus(id,status)).inbox(c);
   }
 }

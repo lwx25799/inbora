@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Settings } from './Settings';
 import { ReplyDetail } from './ReplyDetail';
-import { modes, time } from './presentation';
+import {InboxList} from './InboxList';
+import { modes, time, browserState } from './presentation';
 import { useDevelopmentReconnect } from './useDevelopmentReconnect';
 import {
   request,
@@ -73,6 +74,8 @@ export function App() {
     connected = !!status;
   const [dialogOpen,setDialogOpen]=useState(false),[saving,setSaving]=useState(false);
   const saveTask=useRef<Promise<unknown>|null>(null),dialogElement=useRef<HTMLDialogElement|null>(null);
+  const navigation=useRef(0);
+  const localDraftVersions=useRef(new Map<string,number>());
   const dirty =
     !!thread && (text !== (thread.draft?.text ?? "") || suggestionId !== null);
   const latestEditor = useRef({ eventId: selected, text, suggestionId });
@@ -134,6 +137,11 @@ export function App() {
     };
   }, [connected, channel, filter, pageNumber, notice, send?.status,status?.sync.runId,status?.sync.running,
     status?.sync.results.map(result=>result.state).join('|'),status?.automation?.inboxRevision]);
+  useEffect(()=>{
+    if(!thread?.intent||thread.replyStatus!=='REPLIED'||thread.event.payload.channel!=='DIRECT_MESSAGE'||dirty||sending.current)return;
+    const next=inbox.items.find(item=>item.groupKey===thread.groupKey&&item.replyStatus==='WAITING'&&item.id!==selected);
+    if(next)choose(next.resumeEventId??next.id);
+  },[inbox.items,thread?.intent,thread?.replyStatus,dirty,selected]);
   useEffect(() => {
     if (!connected || !selected) return;
     let ignore = false;
@@ -146,8 +154,19 @@ export function App() {
     selection.current = selectionId;
     setDialogOpen(false);
     void request({ command: "selectTarget", eventId: selected, selectionId })
-      .then(() => {
-        if (!ignore) return refreshThread(selected);
+      .then(async () => {
+        if(ignore)return;
+        const requestId=++detailRequest.current;
+        const detail=await request<Thread>({command:'getThread',eventId:selected});
+        if(!ignore&&selectedRef.current===selected&&selection.current===selectionId&&detailRequest.current===requestId){
+          detailRequest.current++;setThread(detail);editorLoaded.current=true;
+          const saved=buffers.current.get(selected);setText(saved?.text??detail.draft?.text??'');setSuggestionId(saved?.suggestionId??null);
+        }
+        if(ignore||!detail||detail.event.payload.channel!=='DIRECT_MESSAGE')return;
+        setDialogOpen(true);
+        if(detail.intent)return;
+        const claimed=await request<Thread>({command:'openHumanDialog',eventId:selected,selectionId});
+        if(!ignore&&selectedRef.current===selected&&selection.current===selectionId){detailRequest.current++;setThread(claimed);}
       })
       .catch((e) => {
         if (!ignore) setError(explain(e));
@@ -158,10 +177,10 @@ export function App() {
     };
   }, [connected, selected]);
   useEffect(()=>{
-    if(devRecovery.blockAutosave||!dialogOpen||!dirty||!thread?.ownership.isMine||saving||sending.current)return;
+    if(devRecovery.blockAutosave||!dialogOpen||!dirty||!thread?.ownership.isMine||thread.intent||saving||sending.current)return;
     const id=setTimeout(()=>{void saveDraft().catch(e=>setError(explain(e)));},500);
     return()=>clearTimeout(id);
-  },[devRecovery.blockAutosave,dialogOpen,dirty,text,suggestionId,thread?.ownership.isMine,thread?.draft?.version,saving]);
+  },[devRecovery.blockAutosave,dialogOpen,dirty,text,suggestionId,thread?.ownership.isMine,thread?.draft?.version,thread?.intent,saving]);
   useEffect(() => {
     if (!connected || !selected) return;
     const eventId = selected;
@@ -293,12 +312,25 @@ export function App() {
   }
   function choose(id: string) {
     if (selected === id) return;
+    const version=++navigation.current;
     if (thread && dirty)
       buffers.current.set(thread.event.id, {
         text,
         version: thread.draft?.version ?? 0,
         suggestionId,
       });
+    const leaving=thread&&dirty&&thread.event.payload.channel==='DIRECT_MESSAGE'&&thread.ownership.isMine&&!thread.intent;
+    if(leaving){
+      void (async()=>{
+        do{await saveDraft();}while(latestEditor.current.eventId===thread.event.id&&latestEditor.current.text!==thread.draft?.text&&
+          (await request<Thread>({command:'getThread',eventId:thread.event.id})).draft?.text!==latestEditor.current.text);
+        if(navigation.current===version)select(id);
+      })().catch(error=>setError(explain(error)));
+      return;
+    }
+    select(id);
+  }
+  function select(id:string){
     setReview(null);
     detailRequest.current++;
     selectedRef.current = id;
@@ -310,20 +342,22 @@ export function App() {
     if(saveTask.current){await saveTask.current;return;}
     if (!thread) return;
     const eventId = thread.event.id,
-      submittedText = text,
-      submittedSuggestion = suggestionId;
+      submittedText = latestEditor.current.text,
+      submittedSuggestion = latestEditor.current.suggestionId;
+    if(latestEditor.current.eventId!==eventId)return;
     setSaving(true);
     const task=request<NonNullable<Thread["draft"]>>({
       command: "saveDraft",
       eventId: thread.event.id,
       generation: thread.ownership.generation,
-      expectedVersion: thread.draft?.version ?? 0,
-      text,
-      suggestionId,
+      expectedVersion: Math.max(thread.draft?.version??0,localDraftVersions.current.get(eventId)??0),
+      text:submittedText,
+      suggestionId:submittedSuggestion,
     });
     saveTask.current=task;
     let saved:NonNullable<Thread['draft']>;
     try{saved=await task;}finally{saveTask.current=null;setSaving(false);}
+    localDraftVersions.current.set(eventId,saved.version);
     const buffered = buffers.current.get(eventId);
     if (buffered) {
       if (
@@ -530,13 +564,7 @@ export function App() {
           </p>
           <small>
             浏览器：
-            {status.browser.state === "CLOSED"
-              ? "正在自动连接"
-              : status.browser.state === "OPEN_LAST_READ_VERIFIED"
-                ? "已连接"
-                : status.browser.state === "STARTING"
-                  ? "正在启动"
-                  : "等待登录或自动连接"}
+            {browserState(status.browser.state,status.automation?.emergencyStopped)}
           </small>
           <small>
             {status.browser.mode === "headed" ? "有头 Edge" : "无头 Edge"}{" "}
@@ -652,92 +680,9 @@ export function App() {
           </section>
         ) : (
           <div className="inbox-layout">
-            <section className="inbox-list">
-              <div className="filters">
-                <div className="segments" aria-label="通道筛选">
-                  {(
-                    ["ALL", "COMMENT_NOTIFICATION", "DIRECT_MESSAGE"] as const
-                  ).map((c) => (
-                    <button
-                      key={c}
-                      className={c === channel ? "active" : ""}
-                      onClick={() => {
-                        setChannel(c);
-                        setPageNumber(0);
-                      }}
-                    >
-                      {c === "ALL"
-                        ? "全部"
-                        : c === "DIRECT_MESSAGE"
-                          ? "私信"
-                          : "评论"}
-                    </button>
-                  ))}
-                </div>
-                <select
-                  aria-label="任务状态"
-                  value={filter}
-                  onChange={(e) => {
-                    setFilter(e.target.value as typeof filter);
-                    setPageNumber(0);
-                  }}
-                >
-                  <option value="PENDING">等待回复</option>
-                  <option value="CONFIRMED">已回复</option>
-                </select>
-                <small>{inbox.total} 条任务</small>
-              </div>
-              <div className="task-list scroll">
-                {inbox.items.map((i) => (
-                  <button
-                    key={i.id}
-                    className={"task " + (selected === i.id ? "selected" : "")}
-                    aria-pressed={selected === i.id}
-                    onClick={() => choose(i.id)}
-                  >
-                    <div>
-                      <strong>{i.author || "当前联系人"}</strong>
-                      <span
-                        className={
-                          "badge " +
-                          (["UNCERTAIN", "MANUAL_REVIEW"].includes(i.status)
-                            ? "warn"
-                            : "")
-                        }
-                      >
-                        {i.replyStatus==='REPLIED'?'已回复':'等待回复'}
-                      </span>
-                    </div>
-                    <p>{i.preview}</p>
-                    <small>
-                      {i.channel === "DIRECT_MESSAGE" ? "私信" : "评论"} ·{" "}
-                      {time(i.time)}
-                    </small>
-                  </button>
-                ))}
-                {!inbox.items.length && (
-                  <div className="empty">
-                    <strong>当前没有这类待办</strong>
-                    <p>后台会按已启用范围自动收取，也可以立即同步或更换筛选。</p>
-                  </div>
-                )}
-              </div>
-              <div className="pager">
-                <button
-                  disabled={pageNumber === 0}
-                  onClick={() => setPageNumber((n) => n - 1)}
-                >
-                  上一页
-                </button>
-                <span>{pageNumber + 1}</span>
-                <button
-                  disabled={(pageNumber + 1) * 20 >= inbox.total}
-                  onClick={() => setPageNumber((n) => n + 1)}
-                >
-                  下一页
-                </button>
-              </div>
-            </section>
+            <InboxList inbox={inbox} selected={selected} selectedGroup={thread?.event.id===selected?thread.groupKey:undefined}
+              channel={channel} setChannel={setChannel} filter={filter} setFilter={setFilter}
+              pageNumber={pageNumber} setPageNumber={setPageNumber} choose={choose}/>
             <ReplyDetail
               detailElement={detailElement}
               dialogElement={dialogElement}

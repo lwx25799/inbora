@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { Blocked, requireSafe } from "../core/contracts.js";
+import { Blocked, requireSafe,targetKey } from "../core/contracts.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import { collectionStops } from "./collection-scheduler.js";
 
@@ -12,7 +12,7 @@ export class VerificationScheduler {
   private closed=false;
   private activeDeadline=0;
   constructor(readonly data:AutomationStore,
-    private readonly verify:(eventId:string,signal:AbortSignal)=>Promise<{verified:boolean;evidenceId:string}>,
+    private readonly verify:(eventId:string,signal:AbortSignal)=>Promise<{verified:boolean;evidenceId:string;nativeIdDigest?:string}>,
     private readonly updated:()=>void=()=>{},
   ) {}
   enqueue(eventId:string):void {
@@ -50,10 +50,24 @@ export class VerificationScheduler {
         const result=await this.verify(job.event_id,abort.signal);
         requireSafe(!abort.signal.aborted,'VERIFICATION_CANCELLED');
         this.data.store.db.transaction(()=>{
-          this.data.store.db.prepare('INSERT INTO verification_results VALUES(?,?,?,?,?)').run(randomUUID(),job.intent_id,Number(result.verified),result.evidenceId,this.data.now());
+          const current=this.data.store.db.prepare('SELECT event_id,attempt_started_at,target_digest,target_key FROM send_intents WHERE id=?').get(job.intent_id) as {
+            event_id:string;attempt_started_at:string;target_digest:string;target_key:string;
+          }|undefined;
+          const event=this.data.store.event(job.event_id);
+          requireSafe(current&&current.event_id===job.event_id&&current.attempt_started_at===job.boundary&&current.target_digest===job.target_digest&&
+            current.target_key===targetKey(event.payload),'VERIFICATION_BINDING_CHANGED');
+          let verified=result.verified,conflict=false;
+          if(verified&&result.nativeIdDigest!==undefined&&event.payload.channel==='DIRECT_MESSAGE'){
+            requireSafe(/^[a-f0-9]{64}$/u.test(result.nativeIdDigest),'VERIFICATION_BINDING_CHANGED');
+            const prior=this.data.store.db.prepare('SELECT native_id_digest FROM chat_delivery_links WHERE intent_id=?').get(job.intent_id) as {native_id_digest:string}|undefined;
+            conflict=!!prior&&prior.native_id_digest!==result.nativeIdDigest;verified=!conflict;
+            if(!conflict)this.data.store.db.prepare('INSERT INTO chat_delivery_links VALUES(?,?) ON CONFLICT(intent_id) DO NOTHING').run(job.intent_id,result.nativeIdDigest);
+          }
+          this.data.store.db.prepare('INSERT INTO verification_results VALUES(?,?,?,?,?)').run(randomUUID(),job.intent_id,Number(verified),result.evidenceId,this.data.now());
           this.data.store.db.prepare("UPDATE verification_jobs SET state=?,next_at=?,last_error=? WHERE intent_id=?")
-            .run(result.verified?'VERIFIED':job.attempts+1>=2?'REVIEW':'PENDING',this.data.now()+10_000,result.verified?null:'NO_COMPLETE_PROOF',job.intent_id);
-          this.data.store.audit(result.verified?'FOLLOWUP_DELIVERY_VERIFIED':'FOLLOWUP_PROOF_INCOMPLETE',job.intent_id);
+            .run(verified?'VERIFIED':conflict||job.attempts+1>=2?'REVIEW':'PENDING',this.data.now()+10_000,
+              verified?null:conflict?'VERIFICATION_NATIVE_ID_CONFLICT':'NO_COMPLETE_PROOF',job.intent_id);
+          this.data.store.audit(verified?'FOLLOWUP_DELIVERY_VERIFIED':'FOLLOWUP_PROOF_INCOMPLETE',job.intent_id);
         }).immediate();
       }catch(cause){
         const error=cause instanceof Blocked?cause.code:'VERIFICATION_FAILED_PRIVATE_DIAGNOSTICS';

@@ -11,6 +11,8 @@ import type {
   InboundEvent,
 } from "../../src/core/contracts.js";
 import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../src/app/automation-contracts.js';
+import type { TimelineItem } from '../../src/app/inbox-queries.js';
+export type { TimelineItem };
 
 export type { SendParams, AiSettings };
 export interface Status {
@@ -63,9 +65,17 @@ export interface Inbox {
     preview: string;
     time: string | null;
     source: string;
+    groupKey?:string;
+    latestEventId?:string;
+    messageCount?:number;
+    resumeEventId?:string|null;
+    previewEventId?:string;
+    attachments?:TimelineItem['attachments'];
   }[];
 }
 export interface Thread {
+  groupKey?:string;
+  timeline?:{items:TimelineItem[];pageSize:number;hasMore:boolean;before:string|null;projectionRevision?:string};
   replyStatus: 'WAITING'|'REPLIED';
   controlledTrial: boolean;
   workUrl: string | null;

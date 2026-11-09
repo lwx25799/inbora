@@ -368,7 +368,7 @@ export class BrowserService {
     store: EventStore,
     eventId: string,
     options:{signal?:AbortSignal;background?:boolean}={},
-  ): Promise<{ verified: boolean; evidenceId: string }> {
+  ): Promise<{ verified: boolean; evidenceId: string; nativeIdDigest?:string }> {
     requireSafe(!options.signal?.aborted,'COLLECTION_CANCELLED');
     const event = store.event(eventId),
       draft = store.db
@@ -418,7 +418,7 @@ export class BrowserService {
         diagnostics: ["CLIENT_READ_ONLY_RECHECK", "ORIGINAL_RECEIPTS_RETAINED"],
         proofDigest: proof ? digest(proof) : null,
       });
-      return { verified: !!proof, evidenceId };
+      return { verified: !!proof, evidenceId,...(proof?{nativeIdDigest:digest(proof.id)}:{}) };
     } finally {
       handle.dispose();
     }

@@ -20,6 +20,8 @@ import {
   humanReplySchema,
 } from "./contracts.js";
 import { WorkbenchQueries } from "./workbench-queries.js";
+import {MessagePreviewStore} from '../storage/message-previews.js';
+import {ChatMessageStore} from '../storage/chat-messages.js';
 import { WorkbenchAuthority } from "./authority.js";
 import { BrowserService } from "./browser-service.js";
 import { DeepSeekProvider } from "../ai/deepseek.js";
@@ -311,12 +313,18 @@ export class ClientService {
         return this.status(token);
       case "getThread":
         return {
-          ...this.thread(token, c.eventId),
+          ...this.queries.thread(token,c.eventId,this.automation,c.timelineBefore),
           workUrl: await this.browser.workUrl(
             this.store.event(c.eventId).payload,
             this.store,
           ),
         };
+      case 'getMessagePreview': {
+        const observed=new ChatMessageStore(this.store).get(c.eventId),event=observed??this.store.event(c.eventId),own=this.store.db.prepare('SELECT own_id FROM accounts WHERE id=?')
+          .get(event.payload.accountId) as {own_id:string}|undefined;
+        requireSafe(own,'MESSAGE_PREVIEW_UNAVAILABLE');
+        return new MessagePreviewStore(this.browser.root).read(event.payload,own.own_id,c.previewId);
+      }
       case "openTarget": {
         this.authority.operator(token, "CONTROL");
         const event = this.store.event(c.eventId),

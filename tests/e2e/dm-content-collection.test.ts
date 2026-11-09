@@ -32,7 +32,7 @@ async function setup(){
     close:async()=>{collector.dispose();store.close();await owner.close();await server.close();}};
 }
 
-// Fixed MIT DSH 7989640 chat-browser.mjs:411-425/505-525 retains media as metadata-only.
+// Fixed MIT DSH 7989640 chat-browser.mjs:411-425/505-525 identifies owned rendered media.
 // These DOM nodes are synthetic: no remote media, OCR, transcription or guessed platform subtype fields.
 test('native DM media enters the inbox with an explicit unverified type while old history remains baseline across restart',async()=>{
   const f=await setup();
@@ -87,7 +87,9 @@ test('native DM media enters the inbox with an explicit unverified type while ol
     f.rebuild();await f.collector.collect('dm',f.signal);await f.collector.collect('dm',f.signal);
     expect(f.store.events().map(event=>({id:event.id,binding:event.binding,status:event.status,payload:event.payload}))).toEqual(identities);
     expect(f.store.db.prepare('SELECT count(*) AS n FROM source_collisions').get()).toEqual({n:0});
-    expect(await f.owner.dm.evaluate(()=>(window as unknown as {mediaAttributeReads:number}).mediaAttributeReads)).toBe(0);f.noExternal();
+    // Local display may inspect owned IMG attributes; task text and provider context retain no media URL or label.
+    expect(await f.owner.dm.evaluate(()=>(window as unknown as {mediaAttributeReads:number}).mediaAttributeReads)).toBeGreaterThan(0);
+    expect(JSON.stringify(batch)).not.toContain('private-');expect(JSON.stringify(f.store.events())).not.toContain('private-');f.noExternal();
   }finally{await f.close();}
 });
 

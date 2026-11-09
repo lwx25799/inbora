@@ -67,7 +67,6 @@ test('a development backend restart reclaims the same dialog without replaying o
   const f=await setup(true);
   try{
     await f.page.getByRole('button',{name:/开发目标A/}).click();
-    await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();
     await editor(f.page).fill('重启前继续输入的人稿');
     const before=f.trace.filter(item=>item.command==='openHumanDialog').at(-1)!;
     const beforeGeneration=(f.store.db.prepare("SELECT generation FROM thread_ownership WHERE target_key='dm:conversation-a'").get() as {generation:number}).generation;
@@ -102,7 +101,7 @@ test('late recovery for A cannot replace B selection or its next saved human tex
     await f.page.getByText('目标B原始入站',{exact:true}).first().waitFor();
     f.release();await f.page.getByText('开发内核已恢复；人稿保留，未重放模型、保存或发送',{exact:true}).first().waitFor();
     expect(await f.page.locator('.task[aria-pressed="true"]').innerText()).toContain('开发目标B');
-    await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();await editor(f.page).fill('只属于B的人工输入');
+    await editor(f.page).fill('只属于B的人工输入');
     await f.page.getByText('修改已保存',{exact:true}).waitFor();
     expect(f.trace.filter(item=>item.command==='selectTarget').at(-1)?.eventId).toBe(f.b);
     expect(f.trace.filter(item=>item.command==='saveDraft').at(-1)).toMatchObject({eventId:f.b,text:'只属于B的人工输入'});

@@ -12,6 +12,8 @@ import type { AutomationStore } from "../storage/automation-store.js";
 import type { CollectionSource } from "./collection-scheduler.js";
 import { collectionStops, DeferredObjectRead } from "./collection-scheduler.js";
 import { Blocked } from "../core/contracts.js";
+import { saveMessagePreviews } from '../adapters/message-preview.js';
+import {ChatMessageStore} from '../storage/chat-messages.js';
 
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
@@ -51,6 +53,8 @@ export class InboxCollector {
   }
   private async persist(source:CollectionSource,scope:string,batch:ObservationBatch,signal:AbortSignal):Promise<void> {
     this.check(source,signal);
+    if(source==='dm')await saveMessagePreviews(this.owner.dm,this.mapping,batch,this.root,signal);
+    this.check(source,signal);
     const evidence=await recordEvidence(join(this.root,'evidence'),{
       caseId:source==='dm'?'D01':'N01',browserVersion:this.owner.version(),mode:this.mode,taskId:null,action:'OBSERVE',
       result:'UNVERIFIED',source:this.mapping.environment==='fixture'?'LOCAL_FIXTURE':'AUTOMATED_REAL',
@@ -68,6 +72,7 @@ export class InboxCollector {
       }
       this.data.store.observe(source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION',scope,batch.events.map(e=>({...e,evidenceId:evidence})),
         this.mapping.self.uid,evidence,new Date(this.data.now()).toISOString(),this.data.state().startedAt);
+      if(source==='dm')new ChatMessageStore(this.data.store).observe(batch.events,this.mapping.self.uid,this.data.state().startedAt,this.data.now());
     }).immediate();
   }
   private async dmStage<T>(stage:'LIST'|'THREAD'|'ADVANCE',read:()=>Promise<T>):Promise<T> {
