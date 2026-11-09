@@ -5,8 +5,8 @@ import { eventSchema, requireSafe, type InboundEvent } from '../core/contracts.j
 
 export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string }
 interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'diagnostic' | 'dmScroll'; index: number;
-  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number }
-type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'>;
+  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number; collectionPartial?:boolean }
+type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'|'collectionPartial'>;
 export interface CollectionReadDiagnostic {
   source:'dm'|'comments';containers:number;visibleContainers:number;rows:number;visibleRows:number;roots:number;windowRoots:number;
   viewportHeight:number;containerTop:number;containerBottom:number;scrollTop:number;chatVisible:boolean;
@@ -19,11 +19,12 @@ export interface CollectionReadDiagnostic {
   conversationSamples?:{titleCount:number;titleVisible:boolean;titleNonEmpty:boolean;nativeConversationPresent:boolean;securePeerPresent:boolean;metadataReadable:boolean}[];
   messageSamples?:{windowIndex:number;contentMissing:boolean;nativeIdPresent:boolean;conversationMatches:boolean;senderKnown:boolean;
     nativeKind:number|null;nativeStatus:number|null;timeValid:boolean;parsedPresent:boolean;parsedRejected:boolean;parsedTruncated:boolean;
+    nativeShare?:{aweType:number|null;awemeType:number|null;slides:boolean|null;itemIdPresent:boolean;route:'VIDEO'|'NOTE'|'UNAVAILABLE'};
     textNodes:number;visibleTextNodes:number;nonEmptyTextNodes:number;visibleMediaNodes:number;visibleCardNodes:number;parsedFields:{key:string;type:'string'|'number'|'boolean'|'object'|'array'|'null'|'undefined'|'accessor'|'other';
       digitId:boolean;urlKind:'NONE'|'DOUYIN_VIDEO'|'DOUYIN_NOTE'|'HTTP_OTHER'|'DATA'|'BLOB'|'OTHER'}[]}[];
   samples:{visible:boolean;inWindow:boolean;hasBox:boolean;displayContents:boolean;top:number;bottom:number;width:number;height:number;bodies:number;visibleBodies:number}[];
 }
-export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; unsupported: number; loaded: number;
+export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; unsupported: number; loaded: number; incomplete?:'CONTENT_NOT_READY';
   conversation?: { rowIndex: number | null; hasList: boolean };
   peers?: DiscoveredPeer[];
   scroll?:{top:number;height:number;viewport:number;atEnd:boolean};
@@ -117,6 +118,14 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       dom.check(first===undefined || second===undefined || first===second,'OBSERVATION_CONVERSATION_ID_CONFLICT');
       return (first ?? second) as string;
     },
+    listConversation(conversation:unknown,peer?:DiscoveredPeer):string|null {
+      const first=dom.data(conversation,'conversationId'),second=dom.data(conversation,'id');
+      if(first===undefined&&second===undefined){
+        dom.check(!peer||dom.data(conversation,'_toParticipantSecUserId')!==peer.secUid,'OBSERVATION_METADATA_NOT_READY');
+        return null;
+      }
+      return dom.conversationId(conversation);
+    },
     rowIdentity(row: Element, peer: DiscoveredPeer): void {
       dom.check(row.isConnected && dom.visible(row),'OBSERVATION_ROW_UNAVAILABLE');
       const conversation=dom.data(dom.fiberProps(row,s.conversationFiberDepth),'conversation');
@@ -168,12 +177,19 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
         media=Array.from(row.querySelectorAll('img,video,audio')).filter(node=>node.closest(s.messages)===row&&dom.visible(node));
       return {texts,media,missing:!media.length&&!(texts.length===1&&dom.visible(texts[0]!)&&(texts[0]!.textContent??'').length>0)};
     },
+    dmPeerUid(rows:Element[],peer:DiscoveredPeer):string|null {
+      const senders=new Set(rows.map(row=>dom.data(dom.data(dom.childProps(row),'message'),'sender')).filter(sender=>sender!==m.self.uid));
+      dom.check(senders.size<=1,'OBSERVATION_SENDER_UNVERIFIED');
+      const discovered=Array.from(senders)[0],uid=peer.uid??dom.id(discovered);
+      if(peer.uid&&discovered!==undefined)dom.check(discovered===peer.uid,'OBSERVATION_SENDER_UNVERIFIED');
+      return uid;
+    },
   };
   dom.check(location.origin === m.origin && !/验证码|安全验证/.test(document.title), 'OBSERVATION_PAGE_BLOCKED');
   dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_PAGE_BLOCKED');
   const avatar = dom.one(document,s.selfAvatar,'OBSERVATION_ACCOUNT_AVATAR'), own = dom.fiberProps(avatar,s.selfFiberDepth);
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
-  const events: InboundEvent[] = []; let unsupported = 0, loaded = 0;
+  const events: InboundEvent[] = []; let unsupported = 0, loaded = 0,incomplete=false;
   const bindings: NonNullable<ObservationBatch['bindings']> = [];
   let dmViewport:ObservationBatch['dmViewport'];
   if (channel === 'identity') return { events,evidenceId,unsupported,loaded };
@@ -237,6 +253,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
             return {shareStage:'CONVERSATION_UNVERIFIED',messageSamples:[]};
         }catch{return {shareStage:'HEADER_NOT_READY',messageSamples:[]};}
         const frame=dom.dmFrame(chat,true,true);dom.check(frame.rows.length<=100,'OBSERVATION_WINDOW_TOO_LARGE');
+        const peerUid=dom.dmPeerUid(frame.rows,peer);
         const window=frame.rows.map((row,windowIndex)=>({row,windowIndex,content:dom.dmContent(row)}));
         const contentMissingRows=window.filter(item=>item.content.missing).length;
         const messageSamples=window.sort((a,b)=>Number(b.content.missing)-Number(a.content.missing)||a.windowIndex-b.windowIndex).slice(0,6).map(({row,windowIndex,content})=>{
@@ -247,7 +264,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
             const native=dom.data(dom.childProps(row),'message'),sender=dom.data(native,'sender');
             sample.nativeIdPresent=!!dom.id(dom.data(native,'serverId'));
             sample.conversationMatches=dom.data(native,'conversationId')===peer!.conversationId;
-            sample.senderKnown=sender===m.self.uid||peer!.uid!==null&&sender===peer!.uid;
+            sample.senderKnown=sender===m.self.uid||peerUid!==null&&sender===peerUid;
             if(!sample.nativeIdPresent||!sample.conversationMatches||!sample.senderKnown)return sample;
             const {texts,media}=content;
             sample.textNodes=texts.length;sample.visibleTextNodes=texts.filter(dom.visible).length;
@@ -263,6 +280,14 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
             try{parsed=dom.data(native,'_parsedContent');}catch{sample.parsedRejected=true;return sample;}
             if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))return sample;
             sample.parsedPresent=true;const keys=Object.getOwnPropertyNames(parsed);sample.parsedTruncated=keys.length>32;
+            if(sample.nativeKind===8||sample.nativeKind===77){
+              const awe=dom.data(parsed,'aweType'),aweme=dom.data(parsed,'awemeType'),slides=dom.data(parsed,'is_slides'),item=dom.data(parsed,'itemId');
+              const aweValid=typeof awe==='number'&&Number.isSafeInteger(awe)&&awe>=0&&awe<=1000,
+                awemeValid=typeof aweme==='number'&&Number.isSafeInteger(aweme)&&aweme>=0&&aweme<=1000,
+                itemIdPresent=typeof item==='string'&&/^[1-9]\d{0,63}$/u.test(item);
+              sample.nativeShare={aweType:aweValid?awe:null,awemeType:awemeValid?aweme:null,slides:typeof slides==='boolean'?slides:null,itemIdPresent,
+                route:itemIdPresent&&(aweme===undefined||awemeValid)?slides===true?'NOTE':(slides===undefined||slides===false)&&(aweme===0||aweme===55)?'VIDEO':'UNAVAILABLE':'UNAVAILABLE'};
+            }
             for(const name of keys.slice(0,32)){
               const field=Object.getOwnPropertyDescriptor(parsed,name),data=field&&Object.hasOwn(field,'value'),value=data?field.value:undefined;
               const type=!data?'accessor':value===null?'null':Array.isArray(value)?'array':
@@ -357,7 +382,8 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     const peers:DiscoveredPeer[]=[];
     for(const row of rows) {
       const native=dom.data(dom.fiberProps(row,s.conversationFiberDepth),'conversation');
-      const id=dom.conversationId(native),secure=dom.data(native,'_toParticipantSecUserId');
+      const id=dom.listConversation(native),secure=dom.data(native,'_toParticipantSecUserId');
+      if(id===null){unsupported++;continue;}
       // A direct conversation must expose a stable peer secure ID; groups/unsupported rows remain unselected.
       if(typeof secure!=='string'||!secure||secure.length>300||secure===m.self.secUid){unsupported++;continue;}
       const title=dom.one(row,s.conversationTitle).textContent?.trim();
@@ -379,7 +405,9 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       if(!panel.contains(row)||!dom.visible(row)||(list&&!list.contains(row)))continue;
       loaded++;dom.check(loaded<=100,'OBSERVATION_WINDOW_TOO_LARGE');
       const native=dom.data(dom.fiberProps(row,s.conversationFiberDepth),'conversation');
-      if(dom.conversationId(native)===peer!.conversationId && dom.data(native,'_toParticipantSecUserId')===peer!.secUid)matches.push(n);
+      const nativeId=dom.listConversation(native,peer);
+      if(nativeId===null){unsupported++;continue;}
+      if(nativeId===peer!.conversationId && dom.data(native,'_toParticipantSecUserId')===peer!.secUid)matches.push(n);
     }
     dom.check(loaded>0,'OBSERVATION_DOM_NOT_READY');
     dom.check(matches.length<=1,'OBSERVATION_CONVERSATION_NOT_UNIQUE');
@@ -433,10 +461,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     dom.check(rows.length <= 100,'OBSERVATION_WINDOW_TOO_LARGE');
     // Unknown direct peers are bound by the same native conversation and the unique non-self message sender.
     // Do not derive a UID from a nickname or invent one from a local fingerprint.
-    const senders=new Set(rows.map(row=>dom.data(dom.data(dom.childProps(row),'message'),'sender')).filter(sender=>sender!==m.self.uid));
-    dom.check(senders.size<=1,'OBSERVATION_SENDER_UNVERIFIED');
-    const discovered=Array.from(senders)[0],peerUid=peer!.uid??dom.id(discovered);
-    if(peer!.uid&&discovered!==undefined)dom.check(discovered===peer!.uid,'OBSERVATION_SENDER_UNVERIFIED');
+    const peerUid=dom.dmPeerUid(rows,peer!);
     if(peerUid)bindings.push({targetKey:`dm:${id}`,uid:peerUid,secUid:peer!.secUid,title:peer!.title,conversationId:id});
     for (const row of rows) {
       const message = dom.data(dom.childProps(row),'message');
@@ -449,6 +474,15 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       dom.check(fromMe === (sender === m.self.uid),'OBSERVATION_DIRECTION_CONFLICT');
       const {texts,media,missing}=dom.dmContent(row);
       let text:string,contentType:InboundEvent['contentType'];
+      let nativeShare=false;
+      if(!media.length&&texts.length===0&&dom.data(message,'type')===8){
+        const parsed=dom.data(message,'_parsedContent'),itemId=dom.data(parsed,'itemId'),kind=dom.data(parsed,'awemeType'),slides=dom.data(parsed,'is_slides');
+        const serverId=dom.data(message,'serverId');
+        const knownKind=kind===undefined||typeof kind==='number'&&Number.isSafeInteger(kind)&&kind>=0&&kind<=1000;
+        const route=knownKind&&(slides===undefined||typeof slides==='boolean')&&(slides===true||kind===68||kind===0||kind===55);
+        nativeShare=typeof itemId==='string'&&/^[1-9]\d{0,63}$/u.test(itemId)&&route&&
+          typeof serverId==='string'&&/^[1-9]\d{0,63}$/u.test(serverId)&&!!dom.time(dom.data(message,'createdAt'),false);
+      }
       if(media.length) {
         const types=new Set(media.map(node=>node.tagName));
         contentType=texts.some(node=>dom.visible(node)&&(node.textContent??'').length>0)||types.size>1?'MIXED':
@@ -456,7 +490,14 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
         text=contentType==='IMAGE'?'[图片或表情消息，需人工查看]':contentType==='VIDEO'?'[视频消息，需人工查看]':
           contentType==='AUDIO'?'[音频消息，需人工查看]':'[含媒体的消息，需人工查看]';
         unsupported++;
+      }else if(nativeShare){
+        // Keep the existing thumbnail event binding; the work reference is private display metadata, never full text.
+        contentType='IMAGE';text='[图片或表情消息，需人工查看]';unsupported++;
       }else {
+        if(missing&&input.collectionPartial&&input.peer){
+          dom.check(!!dom.id(dom.data(message,'serverId'))&&!!dom.time(dom.data(message,'createdAt'),false),'OBSERVATION_METADATA_NOT_READY');
+          incomplete=true;unsupported++;continue;
+        }
         dom.check(!missing,'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
         text=texts[0]!.textContent??'';
         const parsed=dom.data(message,'_parsedContent');
@@ -509,7 +550,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   }
   dom.check(new Set(events.map(e=>e.platformEventId).filter(Boolean)).size === events.filter(e=>e.platformEventId).length,
     'OBSERVATION_MESSAGE_ID_COLLISION');
-  return { events,evidenceId,unsupported,loaded,bindings,...(dmViewport?{dmViewport}:{}) };
+  return { events,evidenceId,unsupported,loaded,bindings,...(dmViewport?{dmViewport}:{}),...(incomplete?{incomplete:'CONTENT_NOT_READY' as const}:{}) };
 }
 
 /** AccountActor owns the entire call, including opening and switching the permitted chat. */
@@ -541,10 +582,10 @@ export class ObservedReader {
     const batch=await this.capture('diagnostic',index,{diagnosticSource:source,...(peer?{peer}:{})});
     requireSafe(batch.diagnostic,'OBSERVATION_DIAGNOSTIC_UNAVAILABLE');return batch.diagnostic;
   }
-  async dmWindow(peer:DiscoveredPeer,top?:number):Promise<ObservationBatch> {
-    await this.dm(0,peer);
+  async dmWindow(peer:DiscoveredPeer,top?:number,collectionPartial=false):Promise<ObservationBatch> {
+    await this.dm(0,peer,collectionPartial);
     if(top!==undefined)await this.scrollDm(peer,top);
-    return this.ready('dm',0,{peer,dmWindow:true});
+    return this.ready('dm',0,{peer,dmWindow:true,collectionPartial});
   }
   async scrollDm(peer:DiscoveredPeer,top:number):Promise<void> {
     await this.capture('dmScroll',0,{peer,dmTop:top});
@@ -566,9 +607,9 @@ export class ObservedReader {
     },{selector:this.mapping.selectors.selfAvatar,depth:this.mapping.selectors.selfFiberDepth},{timeout:15000});
     await this.capture('identity',0);
   }
-  async dm(index: number, discoveredPeer?: DiscoveredPeer): Promise<ObservationBatch> {
+  async dm(index: number, discoveredPeer?: DiscoveredPeer,collectionPartial=false): Promise<ObservationBatch> {
     const s = this.mapping.selectors, peer = discoveredPeer??this.mapping.peers[index]; requireSafe(peer,'OBSERVATION_PEER_REQUIRED');
-    const options:CaptureOptions=discoveredPeer?{peer:discoveredPeer}:{};
+    const options:CaptureOptions=discoveredPeer?{peer:discoveredPeer,collectionPartial}:{};
     await this.guard();
     if (!await this.page.locator(s.dmPanel).isVisible()) await this.transition('OBSERVATION_DM_ENTRY_DOM_NOT_READY',()=>this.page.locator(s.dmEntry).click());
     await this.transition('OBSERVATION_DM_PANEL_DOM_NOT_READY',()=>this.page.locator(s.dmPanel).waitFor({state:'visible'}));

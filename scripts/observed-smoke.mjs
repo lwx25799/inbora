@@ -101,6 +101,20 @@ try {
   assert.equal(missingDiagnostic.contentMissingRows,1);assert.equal(missingDiagnostic.messageSamples[0].windowIndex,0);
   assert.equal(missingDiagnostic.messageSamples[0].contentMissing,true);assert.equal(missingDiagnostic.messageSamples[0].nativeKind,800);
   assert.equal(missingDiagnostic.messageSamples[0].nativeStatus,0);
+  await owner.dm.evaluate(()=>{
+    const native=Object.getOwnPropertyDescriptor(document.querySelector('.message'),'__reactProps$fixture').value.children.props.message;
+    native.type=8;Object.assign(Object.getPrototypeOf(native)._parsedContent,{aweType:800,awemeType:55,itemId:'1234567890123456789'});
+  });
+  const uncalibratedPeer={...config.peers[0],uid:null};
+  const nativeDiagnostic=await new ObservedReader(owner.dm,config).diagnostic('dm',0,uncalibratedPeer);
+  assert.equal(nativeDiagnostic.messageSamples[0].senderKnown,true);
+  assert.deepEqual(nativeDiagnostic.messageSamples[0].nativeShare,{aweType:800,awemeType:55,slides:null,itemIdPresent:true,route:'VIDEO'});
+  assert.ok(!JSON.stringify(nativeDiagnostic).includes('1234567890123456789'));
+  await owner.dm.evaluate(()=>{Object.getOwnPropertyDescriptor(document.querySelector('.message'),'__reactProps$fixture').value.children.props.message.type=77;});
+  const kind77Diagnostic=await new ObservedReader(owner.dm,config).diagnostic('dm',0,uncalibratedPeer);
+  assert.equal(kind77Diagnostic.messageSamples[0].nativeKind,77);assert.deepEqual(kind77Diagnostic.messageSamples[0].nativeShare,nativeDiagnostic.messageSamples[0].nativeShare);
+  await assert.rejects(owner.dm.evaluate(captureObserved,{mapping:config,channel:'dm',index:0,evidenceId:'fixture-kind77-gap',peer:uncalibratedPeer,dmWindow:true}),/OBSERVATION_DM_CONTENT_DOM_NOT_READY/);
+  await owner.dm.evaluate(()=>{Object.getOwnPropertyDescriptor(document.querySelector('.message'),'__reactProps$fixture').value.children.props.message.type=800;});
   await assert.rejects(owner.dm.evaluate(captureObserved,{mapping:config,channel:'dm',index:0,evidenceId:'fixture-window-gap',peer:config.peers[0],dmWindow:true}),/OBSERVATION_DM_CONTENT_DOM_NOT_READY/);
   await new ObservedReader(owner.dm,config).scrollDm(config.peers[0],windowed.dmViewport.maximum);
   const backDiagnostic=dmDiagnostic.back;

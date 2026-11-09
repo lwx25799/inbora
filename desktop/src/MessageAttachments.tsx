@@ -9,7 +9,7 @@ export const isMediaPlaceholder=(text:string,contentType?:TimelineItem['contentT
 export function MessageAttachments({message}:{message:Pick<TimelineItem,'eventId'|'attachments'>}){
   const [images,setImages]=useState<Record<string,string>>({});
   const [failed,setFailed]=useState<Record<string,boolean>>({});
-  const attachments=message.attachments??[],identity=attachments.map(item=>item.previewId).join(':');
+  const attachments=message.attachments??[],identity=JSON.stringify(attachments.map(item=>[item.previewId,item.state,item.reason]));
   useEffect(()=>{
     let cancelled=false;setImages({});setFailed({});
     for(const attachment of attachments.slice(0,4)){

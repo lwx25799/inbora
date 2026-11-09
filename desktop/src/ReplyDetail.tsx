@@ -30,9 +30,9 @@ export function ReplyDetail(props:ReplyViewProps) {
           <dt>原事件</dt><dd>{thread.event.payload.platformEventId??'未取得'}</dd>
         </dl>
       </details>
-      <button disabled={!!busy} onClick={()=>void act('打开准确原对象',async()=>{
+      {status.browser.mode==='headed'&&!status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('打开准确原对象',async()=>{
         await request({command:'openTarget',eventId:thread.event.id});setNotice('已在专属浏览器中定位，未填写或发送');
-      })}>在专属浏览器查看原对象</button>
+      })}>在专属浏览器查看原对象</button>}
       <section className="original">
         <h3>原父评论</h3><p>{thread.event.payload.text}</p>
         {thread.event.payload.observationIssue&&<p className="hint">{reasons[thread.event.payload.observationIssue]??thread.event.payload.observationIssue}</p>}

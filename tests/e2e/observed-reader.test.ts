@@ -233,6 +233,64 @@ test('DM diagnostic rejects invalid native state values and never invokes state 
   }finally{await owner.close();await server.close();}
 });
 
+test('DM diagnostic uses the same unique native sender proof for an uncalibrated peer and exposes bounded share types',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(()=>{
+      const native=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message;
+      native.type=8;native.serverStatus=0;Object.assign(native._parsedContent,{itemId:'1234567890123456789',aweType:800,awemeType:55});
+    });
+    const mapping=config(server.origin),peer={...mapping.peers[0]!,conversationId:mapping.peers[0]!.conversationId!,uid:null},reader=new ObservedReader(owner.dm,mapping);
+    const report=await reader.diagnostic('dm',0,peer);
+    expect(report.messageSamples![0]).toMatchObject({senderKnown:true,nativeKind:8,nativeStatus:0,timeValid:true,
+      nativeShare:{aweType:800,awemeType:55,slides:null,itemIdPresent:true,route:'VIDEO'}});
+    const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'fixture-unknown-peer',peer,dmWindow:true};
+    const batch=await owner.dm.evaluate(captureObserved,input);
+    expect(batch.bindings![0]!.uid).toBe('200');
+    for(const secret of ['1234567890123456789','conv-a','peer-sec','controlled-1'])expect(JSON.stringify(report)).not.toContain(secret);
+    for(const data of [{awemeType:68,is_slides:true,route:'NOTE'},{awemeType:55,is_slides:'false',route:'UNAVAILABLE'}]){
+      await owner.dm.evaluate(data=>Object.assign(Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message._parsedContent,data),data);
+      expect((await reader.diagnostic('dm',0,peer)).messageSamples![0]!.nativeShare).toMatchObject({route:data.route});
+    }
+  }finally{await owner.close();await server.close();}
+});
+
+test('DM kind77 diagnostic measures existing share fields without promoting a missing-content row',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(()=>{
+      const row=document.querySelector('.message') as HTMLElement,native=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
+      row.style.minHeight='24px';row.replaceChildren();native.type=77;native.serverStatus=0;
+      native._parsedContent={aweType:800,awemeType:68,is_slides:true,itemId:'1234567890123456789',image_count:3,index:0};
+    });
+    const mapping=config(server.origin),peer={...mapping.peers[0]!,conversationId:mapping.peers[0]!.conversationId!,uid:null};
+    const report=await new ObservedReader(owner.dm,mapping).diagnostic('dm',0,peer);
+    expect(report.messageSamples![0]).toMatchObject({nativeKind:77,contentMissing:true,senderKnown:true,
+      nativeShare:{aweType:800,awemeType:68,slides:true,itemIdPresent:true,route:'NOTE'}});
+    const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'fixture-kind77-measurement',peer,dmWindow:true};
+    await expect(owner.dm.evaluate(captureObserved,input)).rejects.toThrow('OBSERVATION_DM_CONTENT_DOM_NOT_READY');
+    for(const secret of ['1234567890123456789','conv-a','peer-sec'])expect(JSON.stringify(report)).not.toContain(secret);
+  }finally{await owner.close();await server.close();}
+});
+
+test.each(['MULTIPLE','KNOWN_CONFLICT','GETTER'] as const)('DM diagnostic and business reject the same unproven native sender (%s)',async fault=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(fault=>{
+      const state=window as unknown as {senderGetterCalls:number};state.senderGetterCalls=0;
+      const native=Object.getOwnPropertyDescriptor(document.querySelectorAll('.message')[1]!,'__reactProps$fixture')!.value.children.props.message;
+      if(fault==='MULTIPLE')native.sender='999';
+      if(fault==='GETTER')Object.defineProperty(native,'sender',{get(){state.senderGetterCalls++;throw Error('PRIVATE_SENDER_GETTER');}});
+    },fault);
+    const mapping=config(server.origin),peer={...mapping.peers[0]!,conversationId:mapping.peers[0]!.conversationId!,uid:fault==='KNOWN_CONFLICT'?'999':null};
+    const code=fault==='GETTER'?'RENDERED_ACCESSOR_UNSUPPORTED':'OBSERVATION_SENDER_UNVERIFIED';
+    await expect(new ObservedReader(owner.dm,mapping).diagnostic('dm',0,peer)).rejects.toThrow(code);
+    const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'fixture-sender-conflict',peer,dmWindow:true};
+    await expect(owner.dm.evaluate(captureObserved,input)).rejects.toThrow(code);
+    expect(await owner.dm.evaluate(()=>(window as unknown as {senderGetterCalls:number}).senderGetterCalls)).toBe(0);
+  }finally{await owner.close();await server.close();}
+});
+
 test('bounded back diagnostics distinguish a child control, occlusion and offscreen geometry without leaking content or invoking handlers',async()=>{
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
   try{

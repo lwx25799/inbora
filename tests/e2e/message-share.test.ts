@@ -113,7 +113,8 @@ test('bounded native kind and share-info diagnostics contain enums and field sha
   }finally{await f.close();}
 });
 
-test.each([{awemeType:0,isSlides:false,route:'video'},{awemeType:68,isSlides:true,route:'note'}])(
+test.each([{awemeType:0,isSlides:false,route:'video'},{awemeType:68,isSlides:true,route:'note'},
+  {awemeType:68,isSlides:false,route:'note'},{awemeType:68,isSlides:undefined,route:'note'}])(
   'the exact observed native div card shows a $route link without treating the distinct aweType as an alias',async({awemeType,isSlides,route})=>{
     const f=await setup([]);
     try{

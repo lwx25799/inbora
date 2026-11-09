@@ -28,12 +28,14 @@ test('unavailable message previews show one neutral status while ready images an
     {kind:'IMAGE',state:'UNAVAILABLE',previewId:null,label:null,reason:'MESSAGE_PREVIEW_OBSCURED'},
     {kind:'IMAGE',state:'UNAVAILABLE',previewId:null,label:'图片预览暂不可用',reason:'MESSAGE_PREVIEW_NOT_AVAILABLE'},
   ];
+  let previewReady=true;
   const attachments=(eventId:string):MessagePreviewAttachment[]=>eventId===ids[0]
-    ?[{kind:'IMAGE',state:'READY',previewId:'synthetic-ready',label:'合成可用图片'}]:unavailable;
+    ?[{kind:'IMAGE',state:previewReady?'READY':'UNAVAILABLE',previewId:'synthetic-ready',label:'合成可用图片'}]:unavailable;
   await page.exposeFunction('fixtureInvoke',async(command:string,args:{body?:Record<string,unknown>})=>{
     if(command==='desktop_info')return {runtime:root,version:'synthetic-attachments'};
     if(command!=='client_request')throw new Error('UNEXPECTED_NATIVE_COMMAND');
     const body=args.body!;calls.push(String(body.command));
+    if(body.command==='connect')return service.dispatch(token,{command:'getStatus'});
     if(body.command==='getMessagePreview')return {previewId:body.previewId,mime:'image/png',dataUrl:preview,width:16,height:16};
     const result=await service.dispatch(token,body);
     if(body.command==='getInbox')return {...result as object,items:(result as {items:Record<string,unknown>[]}).items.map(item=>({
@@ -65,5 +67,12 @@ test('unavailable message previews show one neutral status while ready images an
     }
     expect(calls.filter(command=>['sendHumanReply','generateSuggestion','openTarget'].includes(command))).toEqual([]);
     expect(errors).toEqual([]);await page.screenshot({path:join(root,'neutral-preview.png')});
+    const reads=calls.filter(command=>command==='getMessagePreview').length;
+    previewReady=false;await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+    await expect.poll(()=>messages.nth(0).getByRole('img').count()).toBe(0);
+    previewReady=true;await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+    await expect.poll(()=>calls.filter(command=>command==='getMessagePreview').length).toBe(reads+1);
+    await messages.nth(0).getByRole('img',{name:'合成可用图片'}).waitFor();
+    expect(await page.getByRole('button',{name:'在专属浏览器查看原对象',exact:true}).count()).toBe(0);
   }finally{await browser.close();await server.close();await service.close();store.close();}
 });

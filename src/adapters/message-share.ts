@@ -101,9 +101,11 @@ export function inspectMessageShare(input:ShareInput):ShareInspection {
   // F2 f6be8c0 (Apache-2.0), douyin/dl.py:22-38 records 0/55 as video; this does not require is_slides to be present.
   // Keep the explicit slideshow route and invalid metadata distinct. aweType remains a separate IM field.
   const invalidSlides=slides!==undefined&&typeof slides!=='boolean';
-  const route=slides===true?'note':!invalidSlides&&(awemeType===0||awemeType===55)?'video':null;
-  if(candidates.size===0&&cardMarkers===1&&nativeItemId&&route)candidate={kind:'DOUYIN_WORK',url:'https://www.douyin.com/'+route+'/'+nativeItemId,workId:nativeItemId};
+  const route=!invalidSlides&&(slides===true||awemeType===68)?'note':!invalidSlides&&(awemeType===0||awemeType===55)?'video':null;
+  const nativeShare=dom.data(native,'type')===8&&!!nativeItemId&&/^[1-9]\d{0,63}$/u.test(nativeItemId)&&
+    typeof event.platformEventId==='string'&&/^[1-9]\d{0,63}$/u.test(event.platformEventId)&&(secondType===undefined||awemeType!==null)&&!!route;
+  if(candidates.size===0&&(cardMarkers===1||nativeShare)&&nativeItemId&&route)candidate={kind:'DOUYIN_WORK',url:'https://www.douyin.com/'+route+'/'+nativeItemId,workId:nativeItemId};
   const nativeItemIdConflict=!!nativeItemId&&!!candidate&&nativeItemId!==candidate.workId;
-  return {share:nativeItemIdConflict?null:candidate,detected:cardMarkers>0||candidates.size>0,
+  return {share:nativeItemIdConflict?null:candidate,detected:cardMarkers>0||candidates.size>0||nativeShare,
     diagnostic:{anchors:anchors.length,cardMarkers,nativeItemIdPresent:!!nativeItemId,nativeItemIdConflict,nativeKinds,shareInfo,urlKinds,parsedFields:fields}};
 }

@@ -165,7 +165,9 @@ export class InboxQueries {
       FROM audit_events i JOIN inbound_events e ON e.id=json_extract(i.detail_redacted,'$.eventId')
       LEFT JOIN audit_events r ON r.entity_id=i.id AND r.event_type='MANUAL_RETRY_RECEIPT' WHERE ${where}
       AND i.event_type='MANUAL_RETRY_INTENT' ORDER BY i.id,r.rowid`).all(...args);
-    return digest([inboxGroupKey(event),intents,receipts,verifications,observed,links,nativeProofs,retries]);
+    const display=this.store.db.prepare("SELECT id FROM audit_events WHERE event_type='MESSAGE_DISPLAY_CHANGED' AND entity_id=? ORDER BY rowid DESC LIMIT 1")
+      .get(digest([e.accountId,targetKey(e)]));
+    return digest([inboxGroupKey(event),intents,receipts,verifications,observed,links,nativeProofs,retries,display??null]);
   }
 
   private cursor(group:string,before?:string):TimelineCursor|null {

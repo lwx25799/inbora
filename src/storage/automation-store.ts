@@ -92,7 +92,7 @@ export class AutomationStore {
   }
   policyMatches(grant: Grant<ReplyPolicy>, e: StoredEvent, status: 'NEW'|'DRAFT'='NEW'): boolean {
     const active = this.active("AUTO_REPLY");
-    if (active?.version !== grant.version || this.state().emergencyStopped || !isStrong(e.payload) ||
+    if (active?.version !== grant.version || this.state().emergencyStopped || !isStrong(e.payload) ||this.store.dmContentIncomplete(e.payload)||
       !(status==='NEW'?['AWAITING_DRAFT']:['AWAITING_APPROVAL','APPROVED']).includes(e.status)) return false;
     const p = active.scope as ReplyPolicy;
     this.requireAccount(p.ownId);

@@ -107,6 +107,14 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       // An otherwise empty Slate editor contains a zero-width sentinel, not a user draft.
       return /^[\u200B\uFEFF]*$/.test(raw)?'':value;
     },
+    nativeShare(parsed:unknown,nativeKind:unknown):unknown[]|null{
+      if(nativeKind!==8)return null;
+      const itemId=dom.data(parsed,'itemId'),kind=dom.data(parsed,'awemeType'),slides=dom.data(parsed,'is_slides');
+      if(typeof itemId!=='string'||!/^[1-9]\d{0,63}$/u.test(itemId)||
+        kind!==undefined&&(!Number.isSafeInteger(kind)||(kind as number)<0||(kind as number)>1000)||
+        slides!==undefined&&typeof slides!=='boolean'||slides!==true&&kind!==0&&kind!==55&&kind!==68)return null;
+      return ['SHARED_WORK',itemId,kind??null,slides??null];
+    },
     media(row:Element,parsed:unknown,exactOriginal:boolean):{contentType:MediaObservation['contentType'];witness:unknown[]} {
       const nodes=dom.ownedMedia(row,'img,video,audio'),cards=dom.ownedMedia(row,'[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]');
       dom.check(nodes.length<=8&&cards.length<=1&&(nodes.length>0||cards.length===1),'NATIVE_REPLY_MEDIA_NOT_READY');
@@ -196,7 +204,9 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
         if(input.action!=='proofs')dom.check(nativeId&&sentAt,'NATIVE_REPLY_WINDOW_UNVERIFIED');
         const visibleMedia=manualMedia&&Array.from(row.querySelectorAll('img,video,audio,[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]'))
           .some(node=>node.closest(s.messages)===row&&dom.visible(node));
-        const media=visibleMedia?dom.media(row,parsed,nativeId===expected.platformEventId):null;
+        const nativeShare=manualMedia&&texts.length===0?dom.nativeShare(parsed,type):null;
+        const media=nativeShare?{contentType:'IMAGE' as const,witness:[nativeShare]}:
+          visibleMedia?dom.media(row,parsed,nativeId===expected.platformEventId):null;
         context.push([nativeId,sender,media?['DM_MEDIA',media.contentType,media.witness]:body,sentAt,type,status,pending,failed]);
         if(body!==null&&nativeId&&sentAt&&!outgoing&&type===m.textMessageType&&!pending&&!failed&&status===m.confirmedServerStatus) {
           const current={...expected,platformEventId:nativeId,actorId:sender as string,text:body,occurredAt:sentAt};

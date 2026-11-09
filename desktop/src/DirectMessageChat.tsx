@@ -60,7 +60,7 @@ export function DirectMessageChat(props:ReplyViewProps & {thread:Thread}){
       <span className="badge">{thread.replyStatus==='REPLIED'?'已回复':'等待回复'}</span>
       <details className="chat-information"><summary>会话信息</summary>
         <p>本人：{status.account?.identity??'已绑定账号'}<br/>对方：{thread.event.payload.actorId??'身份待核对'}<br/>会话：{thread.event.payload.conversationId}</p>
-        <button disabled={!!busy} onClick={()=>void act('打开准确会话',async()=>{await request({command:'openTarget',eventId:thread.event.id});setNotice('已在专属浏览器中定位，未填写或发送');})}>在专属浏览器查看原对象</button>
+        {status.browser.mode==='headed'&&!status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('打开准确会话',async()=>{await request({command:'openTarget',eventId:thread.event.id});setNotice('已在专属浏览器中定位，未填写或发送');})}>在专属浏览器查看原对象</button>}
       </details>
     </header>
     <div ref={scroll} className="chat-messages scroll" role="log" aria-label="私信消息流" aria-live="polite"

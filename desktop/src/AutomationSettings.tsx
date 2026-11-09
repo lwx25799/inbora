@@ -12,11 +12,12 @@ export function AutomationSettings({status,busy,act,update}:{status:Status;busy:
   const [future,setFuture]=useState(saved?.futureOwnWorks??false),[entireInbox,setEntireInbox]=useState(saved?.entireInbox??false);
   const [contains,setContains]=useState(saved?.containsAny.join(', ')??''),[excludes,setExcludes]=useState(saved?.excludesAny.join(', ')??'');
   const [instructions,setInstructions]=useState(saved?.instructions??status.settings.rules);
-  const [modelLimit,setModelLimit]=useState(1),[sendLimit,setSendLimit]=useState(1),[startHour,setStartHour]=useState(saved?.startHour??0),[endHour,setEndHour]=useState(saved?.endHour??24);
+  const [modelLimit,setModelLimit]=useState(saved?.modelLimit??1),[sendLimit,setSendLimit]=useState(saved?.sendLimit??1),[startHour,setStartHour]=useState(saved?.startHour??0),[endHour,setEndHour]=useState(saved?.endHour??24);
   const [consent,setConsent]=useState(false);
   const ownId=status.account?.identity??'';
   const list=(s:string)=>s.split(/[,，\n]/u).map(s=>s.trim()).filter(Boolean);
   const channels:ReplyPolicy['channels']=[...(commentReply?['COMMENT_NOTIFICATION' as const]:[]),...(dmReply?['DIRECT_MESSAGE' as const]:[])];
+  const targetsValid=(!commentReply||future||list(workIds).length>0)&&(!dmReply||entireInbox||list(conversations).length>0);
   return <div className="settings-section">
     <h2>后台收取与持续授权</h2>
     <p>绑定本人账号：<code>{ownId||'等待账号核验'}</code></p>
@@ -50,7 +51,8 @@ export function AutomationSettings({status,busy,act,update}:{status:Status;busy:
     <div className="policy-fields"><label>每日开始小时（北京时间）<input type="number" min="0" max="23" value={startHour} onChange={e=>setStartHour(Number(e.target.value))}/></label>
       <label>每日结束小时<input type="number" min="1" max="24" value={endHour} onChange={e=>setEndHour(Number(e.target.value))}/></label></div>
     <p className="hint">一次启用即允许范围内模型调用与发送，并恢复普通发送暂停。人工接管、历史基线、我方消息、未知冻结和范围外任务均不自动外发；全局急停须先显式恢复。失败的模型调用不自动重试。</p>
-    <div className="row"><button className="primary" disabled={!consent||!ownId||!channels.length||!instructions.trim()||!!busy} onClick={()=>void act('启用规则自动回复',async()=>{
+    {!targetsValid&&<p className="hint">请为每个已选通道填写作品或会话 ID，或选择对应的新视频／收件箱覆盖范围；空范围不会自动回复。</p>}
+    <div className="row"><button className="primary" disabled={!consent||!ownId||!channels.length||!targetsValid||!instructions.trim()||!!busy} onClick={()=>void act('启用规则自动回复',async()=>{
       const policy:ReplyPolicy={ownId,channels,model:status.settings.model,modelLimit,sendLimit,expiresAt:null,workIds:list(workIds),futureOwnWorks:future,conversationIds:list(conversations),entireInbox,containsAny:list(contains),excludesAny:list(excludes),instructions,startHour,endHour};
       update(await request<Status>({command:'enableReplyPolicy',policy,confirmed:true}));setConsent(false);
     })}>按此范围启用规则自动回复</button>

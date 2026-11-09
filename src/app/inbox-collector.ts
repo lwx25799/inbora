@@ -14,6 +14,8 @@ import { collectionStops, DeferredObjectRead } from "./collection-scheduler.js";
 import { Blocked } from "../core/contracts.js";
 import { saveMessagePreviews } from '../adapters/message-preview.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
+import {MessageShareStore} from '../storage/message-shares.js';
+import {MessagePreviewStore} from '../storage/message-previews.js';
 
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
@@ -83,7 +85,7 @@ export class InboxCollector {
     let top:number|undefined,canRestore=false,restoring=false;
     try{
       top=(await reader.conversations()).scroll?.top;canRestore=true;this.check('dm',signal);
-      const messages=await reader.dmWindow(peer);this.check('dm',signal);
+      const messages=await reader.dmWindow(peer,undefined,true);this.check('dm',signal);
       await this.persist('dm',id,messages,signal,peer);
       this.check('dm',signal);restoring=true;await reader.conversations(undefined,top);
     }catch(error){
@@ -100,7 +102,11 @@ export class InboxCollector {
   }
   private async persist(source:CollectionSource,scope:string,batch:ObservationBatch,signal:AbortSignal,exactPeer?:DiscoveredPeer):Promise<void> {
     this.check(source,signal);
+    const display=()=>digest(batch.events.filter(event=>event.observationIssue==='DM_CONTENT_UNVERIFIED').map(event=>[
+      event.platformEventId,new MessageShareStore(this.root).read(event,this.mapping.self.uid),new MessagePreviewStore(this.root).list(event,this.mapping.self.uid)]));
+    const beforeDisplay=source==='dm'?display():null;
     if(source==='dm')await saveMessagePreviews(this.owner.dm,this.mapping,batch,this.root,signal,exactPeer);
+    const displayChanged=source==='dm'&&beforeDisplay!==display();
     this.check(source,signal);
     const evidence=await recordEvidence(join(this.root,'evidence'),{
       caseId:source==='dm'?'D01':'N01',browserVersion:this.owner.version(),mode:this.mode,taskId:null,action:'OBSERVE',
@@ -120,7 +126,9 @@ export class InboxCollector {
       this.data.store.observe(source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION',scope,batch.events.map(e=>({...e,evidenceId:evidence})),
         this.mapping.self.uid,evidence,new Date(this.data.now()).toISOString(),this.data.state().startedAt);
       if(source==='dm')new ChatMessageStore(this.data.store).observe(batch.events,this.mapping.self.uid,this.data.state().startedAt,this.data.now());
+      if(displayChanged)this.data.store.audit('MESSAGE_DISPLAY_CHANGED',digest(['account_001','dm:'+scope]));
     }).immediate();
+    requireSafe(!batch.incomplete,'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
   }
   private async dmStage<T>(stage:'LIST'|'THREAD'|'ADVANCE',read:()=>Promise<T>):Promise<T> {
     try{return await read();}catch(error){
@@ -129,7 +137,7 @@ export class InboxCollector {
     }
   }
   private async diagnose(reader:ObservedReader,source:CollectionSource,code:string,signal:AbortSignal,peer?:DiscoveredPeer,phase:DiagnosticPhase='THREAD'):Promise<void> {
-    const key=`${source}:${phase}:${code}`;
+    const key=`${source}:${phase}:${code}${peer?.conversationId?':'+digest(peer.conversationId):''}`;
     if(this.diagnosed.has(key)||Array.from(this.diagnosed).filter(item=>item.startsWith(source+':')).length>=6||
       !['LIST','THREAD','ADVANCE','HINT'].includes(phase)||!/^[A-Z][A-Z0-9_]{1,100}$/.test(code))return;
     this.diagnosed.add(key);
@@ -237,7 +245,7 @@ export class InboxCollector {
       this.check('dm',signal);
       // Sticky or nonvirtual lists can expose the same IDs at many offsets: restore geometry before accepting the ID proof.
       if(!aligned.dmViewport||Math.abs(aligned.dmViewport.top-top)>1) {
-        aligned=await reader.dmWindow(peer,top);
+        aligned=await reader.dmWindow(peer,top,true);
         await this.persist('dm',peer.conversationId,aligned,signal,peer);
       }
       const score=aligned.events.filter(event=>event.platformEventId!==null&&anchor.ids.includes(event.platformEventId)).length;
@@ -251,7 +259,7 @@ export class InboxCollector {
     const top=active.phase==='PROBE_MIN'?viewport.minimum:active.phase==='PROBE_MAX'?viewport.maximum:
       Math.max(viewport.minimum,Math.min(viewport.maximum,viewport.top+(active.phase==='MIN'?-step:step)));
     this.check('dm',signal);
-    return reader.dmWindow(peer,top);
+    return reader.dmWindow(peer,top,true);
   }
   private async dm(signal:AbortSignal):Promise<void> {
     const reader=new ObservedReader(this.owner.dm,this.mapping);
@@ -278,7 +286,7 @@ export class InboxCollector {
     const visited=()=>{cursor.recent=cursor.recent.filter(id=>id!==peer!.conversationId);cursor.recent.push(peer!.conversationId);};
     let nextSweep:DmSweep|undefined;
     try{
-      let messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer));
+      let messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer,undefined,true));
       this.check('dm',signal);
       // A changed virtual height invalidates a raw offset. Rescan both ends from the current window instead.
       let prior=active&&messages.dmViewport?.height===active.height?active:undefined;
@@ -287,7 +295,7 @@ export class InboxCollector {
         prior=messages.dmViewport?.height===active.height?active:{...active,edge:0,signature:'',minimumOld:false};
       } else if(prior&&Math.abs(messages.dmViewport!.top-prior.top)>1) {
         const top=prior.top;
-        messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer,top));
+        messages=await this.dmStage('THREAD',()=>reader.dmWindow(peer,top,true));
         if(messages.dmViewport?.height!==prior.height)prior=undefined;
       }
       await this.persist('dm',peer.conversationId,messages,signal,peer);

@@ -158,6 +158,7 @@ export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
 export const reasons: Record<string, string> = {
+  POLICY_TARGETS_REQUIRED:'请为每个已选通道选择作品或会话范围，已保存策略和额度保持不变',
   LOGIN_RECOVERY_IN_PROGRESS:'正在等待本人登录或处理验证码，完成后自动恢复无头运行',
   BROWSER_HAS_HUMAN_INPUT:'专属网页中还有未提交输入，已保留，请处理后再切换浏览器',
   PREPARING:'正在后台准备与核验',
