@@ -47,6 +47,7 @@ export function DiagnosticsPanel(){
       <h3>模型调用累计</h3>
       <p>共 {usage.requests} 次 · 已知用量 {usage.knownUsageRequests} 次 · 用量未知 {usage.unknownUsageRequests} 次</p>
       <p>已知输入 {usage.inputTokens} / 输出 {usage.outputTokens} Token</p>
+      <p className="hint">费用：未知；不依据缺失用量或未经核对的单价推算。</p>
       <p>平均耗时 {duration(usage.averageElapsedMs)} · P95 {duration(usage.p95ElapsedMs)} · 已记录耗时 {usage.elapsedSamples} 次</p>
       {snapshot.model.groups.length>0&&<div style={{overflowX:'auto'}}><table aria-label="模型与状态累计">
         <thead><tr><th>模型</th><th>状态</th><th>次数</th><th>用量未知</th><th>已知输入 / 输出 Token</th><th>平均 / P95</th></tr></thead>

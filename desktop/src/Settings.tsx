@@ -13,6 +13,7 @@ export function Settings({
   update,
   stop,
   toggleAuto,
+  pendingAutoReply,
 }: {
   status: Status;
   runtime: string;
@@ -21,15 +22,16 @@ export function Settings({
   update: (s: Status) => void;
   stop:()=>void;
   toggleAuto:(enabled:boolean)=>Promise<void>;
+  pendingAutoReply:boolean|null;
 }) {
   const [settings, setSettings] = useState(status.settings),
     [key, setKey] = useState("");
   return (
     <section className="settings scroll">
       <div className="settings-section"><h2>自动回复</h2>
-        <label className="check"><input type="checkbox" role="switch" aria-label="设置中的自动回复" disabled={!!busy||!status.automation?.replyPolicy}
-          checked={status.configuredMode==='LIMITED_AUTO'&&!!status.automation?.replyPolicy} onChange={e=>void act('更新自动回复',()=>toggleAuto(e.target.checked))}/>
-          自动回复：{status.configuredMode==='LIMITED_AUTO'&&status.automation?.replyPolicy?'开':'关'}</label>
+        <label className="check"><input type="checkbox" role="switch" aria-label="设置中的自动回复" disabled={pendingAutoReply!==null||!!busy||!status.automation?.replyPolicy}
+          checked={pendingAutoReply??(status.configuredMode==='LIMITED_AUTO'&&!!status.automation?.replyPolicy)} onChange={e=>{const enabled=e.target.checked;void act('更新自动回复',()=>toggleAuto(enabled));}}/>
+          {pendingAutoReply!==null?pendingAutoReply?'正在开启自动回复…':'正在关闭自动回复…':`自动回复：${status.configuredMode==='LIMITED_AUTO'&&status.automation?.replyPolicy?'开':'关'}`}</label>
         <p className="hint">统一控制已保存策略范围，无需逐个会话交接。查看消息不暂停自动回复；正在编辑和已保存的人稿保留。关闭后收取继续。</p>
       </div>
       {status.automation&&<AutomationSettings status={status} busy={busy} act={act} update={update}/>}

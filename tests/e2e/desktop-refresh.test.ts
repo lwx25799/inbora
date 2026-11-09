@@ -20,11 +20,12 @@ async function setup(clock=false){
   const server=await createServer({configFile:resolve('desktop/vite.config.ts'),server:{port:0,strictPort:false},logLevel:'error'});
   await server.listen();const browser=await chromium.launch({channel:'msedge',headless:true}),page=await browser.newPage();
   const trace:{command:string;eventId?:string}[]=[],errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));
-  let hold:string|undefined,entered=false,release:(()=>void)|undefined;
+  let hold:string|undefined,holdFailure=false,entered=false,release:(()=>void)|undefined;
   await page.exposeFunction('fixtureInvoke',async(command:string,args:{body:Record<string,unknown>})=>{
     if(command==='desktop_info')return {runtime:root,version:'synthetic-refresh'};
     if(command!=='client_request')throw Error('UNEXPECTED_FIXTURE_COMMAND');
     const body=args.body as {command:string;eventId?:string};trace.push(body);
+    if(body.command===hold&&holdFailure){hold=undefined;entered=true;await new Promise<void>(resolve=>{release=resolve;});throw Error('AUTO_POLICY_REQUIRED');}
     const result=await service.dispatch(token,body);
     if(body.command===hold){hold=undefined;entered=true;await new Promise<void>(resolve=>{release=resolve;});}
     return result;
@@ -48,8 +49,8 @@ async function setup(clock=false){
   const emit=(event='inbox_updated',count=1)=>page.evaluate(({event,count})=>{
     for(let n=0;n<count;n++)(window as unknown as {fixtureEmit:(name:string)=>void}).fixtureEmit(event);
   },{event,count});
-  return {page,store,service,trace,errors,a,b,add,emit,
-    hold:(command:string)=>{hold=command;entered=false;},held:()=>entered,release:()=>{release?.();release=undefined;},
+  return {page,store,service,token,trace,errors,a,b,add,emit,
+    hold:(command:string,fail=false)=>{hold=command;holdFailure=fail;entered=false;},held:()=>entered,release:()=>{release?.();release=undefined;},
     close:async()=>{release?.();await browser.close();await server.close();await service.close();store.close();}};
 }
 const editor=(page:Awaited<ReturnType<typeof setup>>['page'])=>page.getByRole('textbox',{name:'人工回复草稿'});
@@ -105,5 +106,43 @@ test('a slow background status cannot revert a newer user control response',asyn
     const mode=f.page.getByRole('combobox',{name:'工作模式',exact:true});await mode.selectOption('OBSERVE');
     await expect.poll(()=>mode.inputValue()).toBe('OBSERVE');f.release();await f.page.waitForTimeout(300);
     expect(await mode.inputValue()).toBe('OBSERVE');expect(f.service.authority.mode()).toBe('OBSERVE');expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
+
+test('an automatic reply switch keeps the clicked state while its backend response is delayed',async()=>{
+  const f=await setup();try{
+    await f.service.dispatch(f.token,{command:'setReplyPolicy',confirmed:true,policy:{ownId:'own-1',channels:['DIRECT_MESSAGE'],model:'deepseek-flash',
+      modelLimit:1,sendLimit:1,expiresAt:null,workIds:[],futureOwnWorks:false,conversationIds:[],entireInbox:true,
+      containsAny:['never-match'],excludesAny:[],instructions:'Synthetic only',startHour:0,endHour:24}});
+    await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:true});await f.emit('status_updated');
+    await expect.poll(()=>f.page.getByRole('switch',{name:'自动回复',exact:true}).isChecked()).toBe(true);
+    await f.page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    const toggle=f.page.getByRole('switch',{name:'设置中的自动回复',exact:true});
+    f.hold('setAutomaticReply');await toggle.uncheck();await expect.poll(f.held).toBe(true);
+    expect(await toggle.isChecked()).toBe(false);expect(await toggle.isDisabled()).toBe(true);
+    expect(await f.page.getByRole('switch',{name:'自动回复',exact:true}).isChecked()).toBe(false);
+    expect(await f.page.getByRole('switch',{name:'自动回复',exact:true}).isDisabled()).toBe(true);
+    expect(await f.page.getByText('正在关闭自动回复…',{exact:false}).count()).toBe(2);
+    f.release();await expect.poll(()=>toggle.isDisabled()).toBe(false);expect(await toggle.isChecked()).toBe(false);
+    expect(f.service.authority.mode()).toBe('MANUAL');expect(f.trace.filter(call=>call.command==='setAutomaticReply').length).toBe(1);
+    expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
+
+test('a rejected automatic reply change restores both controls and preserves the exact human draft',async()=>{
+  const f=await setup();try{
+    await f.service.dispatch(f.token,{command:'setReplyPolicy',confirmed:true,policy:{ownId:'own-1',channels:['DIRECT_MESSAGE'],model:'deepseek-flash',
+      modelLimit:1,sendLimit:1,expiresAt:null,workIds:[],futureOwnWorks:false,conversationIds:[],entireInbox:true,
+      containsAny:['never-match'],excludesAny:[],instructions:'Synthetic only',startHour:0,endHour:24}});await f.emit('status_updated');
+    await f.page.getByRole('button',{name:/刷新目标A/}).click();await editor(f.page).fill('开关失败仍保留的准确人稿');
+    const toggle=f.page.getByRole('switch',{name:'自动回复',exact:true});await expect.poll(()=>toggle.isDisabled()).toBe(false);
+    f.hold('setAutomaticReply',true);await toggle.check();await expect.poll(f.held).toBe(true);
+    expect(await toggle.isChecked()).toBe(true);expect(await toggle.isDisabled()).toBe(true);
+    await f.page.getByText('正在开启自动回复…',{exact:false}).waitFor();expect(await editor(f.page).inputValue()).toBe('开关失败仍保留的准确人稿');
+    f.release();await expect.poll(()=>toggle.isDisabled()).toBe(false);expect(await toggle.isChecked()).toBe(false);
+    expect(f.service.authority.mode()).toBe('MANUAL');expect(await editor(f.page).inputValue()).toBe('开关失败仍保留的准确人稿');
+    expect(f.service.authority.draftFor(f.a)?.text).toBe('开关失败仍保留的准确人稿');
+    expect(f.trace.filter(call=>call.command==='setAutomaticReply').length).toBe(1);
+    expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });

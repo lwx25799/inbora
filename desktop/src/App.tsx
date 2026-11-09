@@ -67,6 +67,7 @@ export function App() {
   const sending = useRef(false),
     connected = !!status;
   const [dialogOpen,setDialogOpen]=useState(false),[saving,setSaving]=useState(false);
+  const [pendingAutoReply,setPendingAutoReply]=useState<boolean|null>(null),autoReplyUpdating=useRef(false);
   const saveTask=useRef<Promise<unknown>|null>(null),dialogElement=useRef<HTMLDialogElement|null>(null);
   const navigation=useRef(0);
   const opening=useRef<{id:string;selectionId:string;task:Promise<void>}|null>(null);
@@ -356,10 +357,14 @@ export function App() {
     return "";
   }
   async function toggleAuto(enabled:boolean){
-    await saveTask.current;
-    if(dirty&&thread?.ownership.isMine&&!thread.intent)await saveDraft();
-    setStatus(await request<Status>({command:'setAutomaticReply',enabled}));
-    await refreshThread();
+    if(autoReplyUpdating.current)return;
+    autoReplyUpdating.current=true;setPendingAutoReply(enabled);
+    try{
+      await saveTask.current;
+      if(dirty&&thread?.ownership.isMine&&!thread.intent)await saveDraft();
+      setStatus(await request<Status>({command:'setAutomaticReply',enabled}));
+      await refreshThread();
+    }finally{autoReplyUpdating.current=false;setPendingAutoReply(null);}
   }
   async function navigatePage(next:typeof page){
     if(page==='inbox'&&next!=='inbox'&&thread?.ownership.isMine&&!thread.intent)await closeDialog();
@@ -551,9 +556,9 @@ export function App() {
             </span>
           </div>
           <div className="toolbar">
-            <label className="check"><input type="checkbox" role="switch" aria-label="自动回复" checked={status.configuredMode==='LIMITED_AUTO'&&!!status.automation?.replyPolicy}
-              disabled={!!busy||!status.automation?.replyPolicy} onChange={e=>{const enabled=e.target.checked;void act('更新自动回复',()=>toggleAuto(enabled));}}/>
-              自动回复：{status.configuredMode==='LIMITED_AUTO'&&status.automation?.replyPolicy?'开':'关'}</label>
+            <label className="check"><input type="checkbox" role="switch" aria-label="自动回复" checked={pendingAutoReply??(status.configuredMode==='LIMITED_AUTO'&&!!status.automation?.replyPolicy)}
+              disabled={pendingAutoReply!==null||!!busy||!status.automation?.replyPolicy} onChange={e=>{const enabled=e.target.checked;void act('更新自动回复',()=>toggleAuto(enabled));}}/>
+              {pendingAutoReply!==null?pendingAutoReply?'正在开启自动回复…':'正在关闭自动回复…':`自动回复：${status.configuredMode==='LIMITED_AUTO'&&status.automation?.replyPolicy?'开':'关'}`}</label>
             {!status.automation?.replyPolicy&&<button onClick={()=>setPage('settings')}>设置自动回复</button>}
             <button
               disabled={!!busy||status.sync.running}
@@ -589,6 +594,7 @@ export function App() {
             act={act}
             update={setStatus}
             toggleAuto={toggleAuto}
+            pendingAutoReply={pendingAutoReply}
             stop={()=>void emergencyStop().catch(e=>setError(explain(e)))}
           />
         ) : page === "audit" ? (
