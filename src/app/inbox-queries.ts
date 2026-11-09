@@ -1,9 +1,11 @@
-import {digest,isManualMediaCandidate,isStrong,requireSafe,targetKey,type StoredEvent} from '../core/contracts.js';
+import {digest,requireSafe,targetKey,type StoredEvent} from '../core/contracts.js';
 import type {EventStore} from '../storage/store.js';
 import type {ClientCommand} from './contracts.js';
 import {MessagePreviewStore,type MessagePreviewAttachment} from '../storage/message-previews.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
 import {MessageShareStore,type MessageShare} from '../storage/message-shares.js';
+import {InboxProjection,inboxGroupKey} from './inbox-projection.js';
+export {inboxGroupKey} from './inbox-projection.js';
 
 type ReplyStatus='WAITING'|'REPLIED';
 export interface TimelineItem {
@@ -22,110 +24,46 @@ export interface TimelineItem {
 interface TimelineCursor {group:string;at:number;order:string}
 interface MessageRow {id:string;event_id:string;text:string;occurred_at:string|null;at:number;historical:number}
 const pageSize=30;
-export function inboxGroupKey(event:StoredEvent):string {
-  const e=event.payload;
-  return digest(e.channel==='DIRECT_MESSAGE'&&e.conversationId?[e.accountId,e.channel,e.conversationId]:
-    [e.accountId,e.channel,e.videoId,e.commentId,event.id]);
-}
-
 /** Product projections only. Grouping never changes an event's approval, draft or intent. */
 export class InboxQueries {
   constructor(readonly store:EventStore,readonly root:string,readonly replyStatus:(id:string,status:string)=>ReplyStatus){}
 
   conversationReplyStatus(event:StoredEvent):ReplyStatus {
     if(event.payload.channel!=='DIRECT_MESSAGE')return this.replyStatus(event.id,event.status);
-    const all=this.store.events(),order=new Map(all.map((item,index)=>[item.id,index])),key=inboxGroupKey(event),
-      members=all.filter(item=>item.status!=='BASELINE'&&inboxGroupKey(item)===key);
-    return members.length?this.group(members,order).replyStatus:this.replyStatus(event.id,event.status);
-  }
-
-  private group(members:StoredEvent[],order:Map<string,number>){
-    const time=(event:StoredEvent)=>Date.parse(event.payload.occurredAt??'')||0;members.sort((a,b)=>time(a)-time(b));
-    const latest=members.at(-1)!,replies:{event:StoredEvent;at:number;ownId:string}[]=[];let repliedAt=-Infinity;
-    if(latest.payload.channel==='DIRECT_MESSAGE')for(const event of members){
-      if(this.replyStatus(event.id,event.status)!=='REPLIED')continue;
-      const intent=this.store.db.prepare('SELECT attempt_started_at,target_digest,text_digest,draft_id FROM send_intents WHERE event_id=?').get(event.id) as {
-        attempt_started_at:string;target_digest:string;text_digest:string;draft_id:string}|undefined;
-      if(!intent)continue;const draft=this.store.draft(intent.draft_id),approval=draft.approval,at=Date.parse(intent.attempt_started_at);
-      if(approval&&approval.snapshot.eventBinding===event.binding&&digest(approval.snapshot)===intent.target_digest&&
-        digest(draft.text)===intent.text_digest&&Number.isFinite(at)){
-        repliedAt=Math.max(repliedAt,at);replies.push({event,at,ownId:approval.snapshot.ownId});
-      }
-    }
-    const waiting=members.filter(event=>{
-      if(this.replyStatus(event.id,event.status)!=='WAITING')return false;
-      const laterObserved=(order.get(event.id)??0)>(order.get(latest.id)??0);
-      if(event.payload.channel==='DIRECT_MESSAGE'&&Number.isFinite(repliedAt)){
-        const receivedAt=time(event),precision=event.payload.occurredAtPrecisionMs??1;
-        const scope=this.store.db.prepare('SELECT scope FROM inbound_events WHERE id=?').get(event.id) as {scope:string};
-        const observed=this.store.db.prepare('SELECT observed_at FROM observations WHERE channel=? AND scope=? AND evidence_ref=? ORDER BY rowid LIMIT 1')
-          .get(event.payload.channel,scope.scope,event.payload.evidenceId) as {observed_at:string}|undefined;
-        const firstObserved=Date.parse(observed?.observed_at??'');
-        let coverageAt=isStrong(event.payload)?repliedAt:-Infinity;
-        if(isManualMediaCandidate(event.payload)&&/^[1-9]\d{0,63}$/.test(event.payload.platformEventId!)){
-          const own=this.store.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(event.payload.accountId) as {own_id:string}|undefined;
-          for(const reply of replies)if(reply.ownId===own?.own_id&&event.payload.actorId!==reply.ownId&&
-            reply.event.payload.accountId===event.payload.accountId&&reply.event.payload.conversationId===event.payload.conversationId&&
-            reply.event.payload.actorId===event.payload.actorId)coverageAt=Math.max(coverageAt,reply.at);
-        }
-        const covered=receivedAt>0&&receivedAt+precision<=coverageAt&&Number.isFinite(firstObserved)&&firstObserved<coverageAt&&
-          !this.store.db.prepare('SELECT id FROM source_collisions WHERE event_id=? LIMIT 1').get(event.id);
-        if(covered)return false;
-        const intent=this.store.db.prepare('SELECT attempt_started_at FROM send_intents WHERE event_id=?').get(event.id) as {attempt_started_at:string}|undefined;
-        // A historical unknown remains frozen on its own event; it cannot undo a later confirmed conversation reply.
-        if(!laterObserved&&event.id!==latest.id&&time(event)<time(latest)&&this.replyStatus(latest.id,latest.status)==='REPLIED'&&
-          intent&&Date.parse(intent.attempt_started_at)<repliedAt)return false;
-      }
-      return event.id===latest.id||event.status==='UNCERTAIN'||event.status==='INTENT_RECORDED'||event.status==='CONFIRMED'||
-        !!this.store.db.prepare('SELECT id FROM source_collisions WHERE event_id=? LIMIT 1').get(event.id)||laterObserved;
-    });
-    return {selected:waiting.at(-1)??latest,latest,members,replyStatus:waiting.length?'WAITING' as const:'REPLIED' as const};
+    return this.store.db.transaction(()=>{
+      const projection=new InboxProjection(this.store,event.payload.channel,{key:targetKey(event.payload),accountId:event.payload.accountId,
+        ...(!event.payload.conversationId?{eventId:event.id}:{})});
+      const key=inboxGroupKey(event),members=projection.events.filter(item=>inboxGroupKey(item)===key);
+      return members.length?projection.group(members).replyStatus:this.replyStatus(event.id,event.status);
+    })();
   }
 
   inbox(c:Extract<ClientCommand,{command:'getInbox'}>){
-    const groups=new Map<string,StoredEvent[]>();
-    const all=this.store.events(),order=new Map(all.map((event,index)=>[event.id,index]));
-    for(const event of all){
-      if(event.status==='BASELINE'||c.channel!=='ALL'&&event.payload.channel!==c.channel)continue;
+    return this.store.db.transaction(()=>this.readInbox(c))();
+  }
+  private readInbox(c:Extract<ClientCommand,{command:'getInbox'}>){
+    const projection=new InboxProjection(this.store,c.channel),groups=new Map<string,StoredEvent[]>();
+    for(const event of projection.events){
       const key=inboxGroupKey(event),members=groups.get(key)??[];members.push(event);groups.set(key,members);
     }
     const time=(event:StoredEvent)=>Date.parse(event.payload.occurredAt??'')||0;
-    const rows=[...groups.entries()].map(([groupKey,members])=>{
-      return {...this.group(members,order),groupKey};
-    }).filter(row=>c.status==='PENDING'?row.replyStatus==='WAITING':c.status==='CONFIRMED'?row.replyStatus==='REPLIED':
-      c.status==='REVIEW'?row.members.some(e=>e.status==='MANUAL_REVIEW'):
-        c.status==='UNCERTAIN'?row.members.some(e=>e.status==='UNCERTAIN'||e.status==='INTENT_RECORDED'):true)
-      .sort((a,b)=>time(b.latest)-time(a.latest)||(order.get(b.latest.id)??0)-(order.get(a.latest.id)??0));
-    const own=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
-    const previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
+    const rows=[...groups.entries()].map(([groupKey,members])=>({...projection.group(members),groupKey}))
+      .filter(row=>c.status==='PENDING'?row.replyStatus==='WAITING':c.status==='CONFIRMED'?row.replyStatus==='REPLIED':
+        c.status==='REVIEW'?row.members.some(e=>e.status==='MANUAL_REVIEW'):
+          c.status==='UNCERTAIN'?row.members.some(e=>e.status==='UNCERTAIN'||e.status==='INTENT_RECORDED'):true)
+      .sort((a,b)=>time(b.latest)-time(a.latest)||(projection.order.get(b.latest.id)??0)-(projection.order.get(a.latest.id)??0));
+    const own=projection.own.get('account_001'),previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
     return {total:rows.length,page:c.page,pageSize:20,items:rows.slice(c.page*20,c.page*20+20).map(row=>{
-      const share=own?shares.read(row.latest.payload,own.own_id):null;
+      const share=own?shares.read(row.latest.payload,own):null;
       return {
-      id:row.selected.id,status:row.selected.status,replyStatus:row.replyStatus,channel:row.latest.payload.channel,
-      author:row.latest.payload.actorName,preview:row.latest.payload.text,time:row.latest.payload.occurredAt,
-      source:row.latest.payload.discovery??(row.latest.payload.channel==='DIRECT_MESSAGE'?'DIRECT_MESSAGE':'NOTIFICATION'),
-      groupKey:row.groupKey,latestEventId:row.latest.id,messageCount:row.members.length,
-      resumeEventId:this.resumeEvent(row.members,row.replyStatus),previewEventId:row.latest.id,
-      attachments:!share&&own?previews.list(row.latest.payload,own.own_id):[],...(share?{share}:{}),
-    };})};
-  }
-
-  private resumeEvent(members:StoredEvent[],status:ReplyStatus):string|null {
-    if(status!=='WAITING'||members[0]?.payload.channel!=='DIRECT_MESSAGE')return null;
-    let confirmedAt=-Infinity;
-    for(const event of members){
-      if(this.replyStatus(event.id,event.status)!=='REPLIED')continue;
-      const intent=this.store.db.prepare('SELECT attempt_started_at FROM send_intents WHERE event_id=?').get(event.id) as {attempt_started_at:string}|undefined;
-      // A trusted reply is ordered by its durable dispatch boundary, not a later readback attempt.
-      const at=Date.parse(intent?.attempt_started_at??'');confirmedAt=Math.max(confirmedAt,Number.isFinite(at)?at:Infinity);
-    }
-    const drafts=members.flatMap(event=>{
-      const draft=this.store.db.prepare(`SELECT d.event_id,d.text,d.rowid,COALESCE(r.saved_at,0) AS saved_at FROM reply_drafts d
-        LEFT JOIN draft_revisions r ON r.draft_id=d.id AND r.version=d.version WHERE d.event_id=? AND d.status IN ('DRAFT','APPROVED')
-        AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=d.event_id)`).get(event.id) as {event_id:string;text:string;rowid:number;saved_at:number}|undefined;
-      return draft&&draft.text.trim()&&draft.saved_at>confirmedAt?[draft]:[];
-    }).sort((a,b)=>b.saved_at-a.saved_at||b.rowid-a.rowid);
-    return drafts[0]?.event_id??null;
+        id:row.selected.id,status:row.selected.status,replyStatus:row.replyStatus,channel:row.latest.payload.channel,
+        author:row.latest.payload.actorName,preview:row.latest.payload.text,time:row.latest.payload.occurredAt,
+        source:row.latest.payload.discovery??(row.latest.payload.channel==='DIRECT_MESSAGE'?'DIRECT_MESSAGE':'NOTIFICATION'),
+        groupKey:row.groupKey,latestEventId:row.latest.id,messageCount:row.members.length,
+        resumeEventId:projection.resumeEvent(row.members,row.replyStatus),previewEventId:row.latest.id,
+        attachments:!share&&own?previews.list(row.latest.payload,own):[],...(share?{share}:{}),
+      };
+    })};
   }
 
   timeline(event:StoredEvent,before?:string){

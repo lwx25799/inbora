@@ -10,7 +10,10 @@ import {
   type Channel, type Draft, type InboundEvent, type StoredEvent, type TargetSnapshot,type SendProof,
 } from '../core/contracts.js';
 
-interface EventRow { id: string; payload: string; binding: string; status: StoredEvent['status'] }
+export interface EventRow { id: string; payload: string; binding: string; status: StoredEvent['status'] }
+export function decodeEventRow(row:EventRow):StoredEvent {
+  return {id:row.id,payload:eventSchema.parse(JSON.parse(row.payload)),binding:row.binding,status:row.status};
+}
 interface DraftRow { id: string; event_id: string; text: string; model: string; version: number;
   status: Draft['status']; approval: string | null }
 export interface Intent { id: string; event_id: string; target_key: string; status: string }
@@ -159,7 +162,7 @@ export class EventStore {
   event(id: string): StoredEvent {
     const row = this.db.prepare('SELECT id,payload,binding,status FROM inbound_events WHERE id=?').get(id) as EventRow | undefined;
     requireSafe(row, 'EVENT_NOT_FOUND');
-    return { id: row.id, payload: eventSchema.parse(JSON.parse(row.payload)), binding: row.binding, status: row.status };
+    return decodeEventRow(row);
   }
   assertModelObservation(event:InboundEvent):void {
     const dm=event.channel==='DIRECT_MESSAGE';
@@ -173,7 +176,19 @@ export class EventStore {
     requireSafe(!event.observationIssue&&!event.contentType&&!unresolved,dm?'DM_CONTENT_UNVERIFIED':'COMMENT_TEXT_UNVERIFIED');
   }
   events(): StoredEvent[] {
-    return (this.db.prepare('SELECT id FROM inbound_events ORDER BY rowid').all() as { id: string }[]).map(r => this.event(r.id));
+    return (this.db.prepare('SELECT id,payload,binding,status FROM inbound_events ORDER BY rowid').all() as EventRow[]).map(decodeEventRow);
+  }
+  firstAutomaticCandidate(channels:Channel[],matches:(event:StoredEvent)=>boolean):StoredEvent|undefined {
+    const statement=this.db.prepare(`SELECT e.id,e.payload,e.binding,e.status FROM inbound_events e
+      WHERE e.status='AWAITING_DRAFT' AND e.channel IN (${channels.map(()=>'?').join(',')})
+      AND NOT EXISTS(SELECT 1 FROM automation_jobs j WHERE j.event_id=e.id)
+      AND NOT EXISTS(SELECT 1 FROM reply_drafts d WHERE d.event_id=e.id)
+      AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id) ORDER BY e.rowid`);
+    // A for-of return closes the SQLite iterator before its caller writes a job or starts I/O.
+    for(const row of statement.iterate(...channels) as IterableIterator<EventRow>){
+      const event=decodeEventRow(row);if(matches(event))return event;
+    }
+    return undefined;
   }
   draft(id: string): Draft {
     const row = this.db.prepare('SELECT * FROM reply_drafts WHERE id=?').get(id) as DraftRow | undefined;
@@ -435,7 +450,8 @@ export class EventStore {
         !(item.direction==='INCOMING'&&item.payload.commentId===e.commentId)).slice(-6);
       return [...(context.root?[context.root.payload]:[]),...recent.map(item=>item.payload)];
     }
-    const incoming = this.events().filter(item => targetKey(item.payload) === targetKey(e) && item.payload.channel === e.channel)
+    const incoming = (this.db.prepare('SELECT id,payload,binding,status FROM inbound_events WHERE account_id=? AND channel=? AND target_key=? ORDER BY rowid')
+      .all(e.accountId,e.channel,targetKey(e)) as EventRow[]).map(decodeEventRow).filter(item => targetKey(item.payload) === targetKey(e))
       .map(item => item.payload).filter((item): item is InboundEvent & { occurredAt: string } => item.occurredAt !== null);
     const outgoing = this.db.prepare(`SELECT e.payload,d.text,i.id,r.verified_at FROM send_intents i
       JOIN inbound_events e ON e.id=i.event_id JOIN reply_drafts d ON d.id=i.draft_id

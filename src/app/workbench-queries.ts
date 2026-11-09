@@ -93,9 +93,14 @@ export class WorkbenchQueries {
     const { automation } = state;
     const op = this.authority.operator(token);
     const configuredMode=this.authority.mode();
-    const anySendAvailable=(['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as Channel[]).some(channel=>
+    const needsSendCapability=['MANUAL','AI_ASSISTED'].includes(configuredMode);
+    const anySendAvailable=!needsSendCapability||( ['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as Channel[]).some(channel=>
       this.authority.capability(channel,this.browser.identity(channel)).state==='SEND_AVAILABLE')||
-      this.store.events().some(event=>{const draft=this.authority.draftFor(event.id);return draft&&this.authority.trialAvailable(event.id,draft.id,draft.version,draft.text,this.browser.identity(event.payload.channel));});
+      (this.store.db.prepare(`SELECT t.event_id,d.id,d.version,d.text,e.channel FROM controlled_trials t
+        JOIN reply_drafts d ON d.event_id=t.event_id JOIN inbound_events e ON e.id=t.event_id
+        WHERE t.used=0 AND t.expires_at>? AND t.draft_id=d.id AND t.draft_version=d.version`).all(this.authority.now()) as
+        {event_id:string;id:string;version:number;text:string;channel:Channel}[]).some(row=>
+          this.authority.trialAvailable(row.event_id,row.id,row.version,row.text,this.browser.identity(row.channel)));
     const effectiveMode=['MANUAL','AI_ASSISTED'].includes(configuredMode)&&!anySendAvailable?'DRAFT_ONLY':configuredMode;
     const account = this.store.db
       .prepare("SELECT own_id FROM accounts WHERE id=?")
