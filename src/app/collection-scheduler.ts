@@ -20,6 +20,7 @@ export class CollectionScheduler {
   private closed = false;
   private last: CollectionSource = "dm";
   private fatal: string | null = null;
+  private suspended=false;
   constructor(readonly persistence: AutomationStore,
     private readonly collect: (source: CollectionSource, signal: AbortSignal) => Promise<void>,
     private readonly updated: () => void = () => {},
@@ -38,12 +39,13 @@ export class CollectionScheduler {
     }
   }
   cancel(): void { this.abort?.abort(); }
+  suspend(value:boolean):void {this.suspended=value;if(value)this.cancel();}
   status() {
     return {running: !!this.running, source: this.running ? this.last : null, fatal:this.fatal,
       channels: this.persistence.store.db.prepare("SELECT * FROM collection_progress ORDER BY source").all()};
   }
   async tick(): Promise<void> {
-    if (this.closed || this.running) return;
+    if (this.closed || this.running || this.suspended) return;
     const {collection, emergencyStopped} = this.persistence.state();
     if (!collection || emergencyStopped) return;
     const progress = this.persistence.store.db.prepare("SELECT source,next_at FROM collection_progress").all() as {source: CollectionSource; next_at: number}[];

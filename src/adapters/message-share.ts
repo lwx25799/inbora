@@ -98,9 +98,10 @@ export function inspectMessageShare(input:ShareInput):ShareInspection {
     }
   }
   let candidate=candidates.size===1?[...candidates.values()][0]!:null;
-  // Product evidence confirms native awemeType=0 and is_slides=false for video cards. aweType is a distinct IM field.
-  // The explicit slideshow flag selects the existing public note route; do not infer it from a guessed integer type.
-  const route=nativeKinds.isSlides===true?'note':nativeKinds.isSlides===false&&awemeType===0?'video':null;
+  // F2 f6be8c0 (Apache-2.0), douyin/dl.py:22-38 records 0/55 as video; this does not require is_slides to be present.
+  // Keep the explicit slideshow route and invalid metadata distinct. aweType remains a separate IM field.
+  const invalidSlides=slides!==undefined&&typeof slides!=='boolean';
+  const route=slides===true?'note':!invalidSlides&&(awemeType===0||awemeType===55)?'video':null;
   if(candidates.size===0&&cardMarkers===1&&nativeItemId&&route)candidate={kind:'DOUYIN_WORK',url:'https://www.douyin.com/'+route+'/'+nativeItemId,workId:nativeItemId};
   const nativeItemIdConflict=!!nativeItemId&&!!candidate&&nativeItemId!==candidate.workId;
   return {share:nativeItemIdConflict?null:candidate,detected:cardMarkers>0||candidates.size>0,

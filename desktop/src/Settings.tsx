@@ -55,24 +55,27 @@ export function Settings({
             已选择{modes[status.configuredMode]}；正在自动连接账号，连接后即可继续。
           </p>
         )}
-        <p className="hint">单账号在应用运行期间持续连接，正常重启自动恢复。登录和验证码在专属浏览器窗口中完成。</p>
+        <p className="hint">日常收取与回复均使用无头浏览器，正常重启自动恢复。仅需登录或验证码时打开可见窗口，核对本人登录后自动恢复无头运行。</p>
         <div className="row">
           <button
             disabled={!!busy}
             onClick={() =>
-              void act("启动浏览器", async () =>
+              void act("处理登录或验证码", async () =>
                 update(
                   await request<Status>({
                     command: "browser",
                     open: true,
                     mode: 'headed',
+                    loginRecovery:true,
                   }),
                 ),
               )
             }
           >
-            打开专属浏览器
+            登录或处理验证码
           </button>
+          {status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('恢复无头运行',async()=>update(
+            await request<Status>({command:'browser',open:true,mode:'headless'})))}>返回无头运行</button>}
         </div>
         <details className="fault-controls"><summary>故障处理</summary>
           <p className="hint">仅在需要停止全部后台操作时使用。急停会停止收取、模型和发送；已提交消息不会撤回或重复发送。</p>

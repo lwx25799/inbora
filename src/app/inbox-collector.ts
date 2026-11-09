@@ -28,11 +28,12 @@ const dmCursorSchema=z.object({deferred:z.array(z.object({id:z.string().min(1),u
 type DmCursor=z.infer<typeof dmCursorSchema>;
 type DmSweep=z.infer<typeof dmSweepSchema>;
 const objectRetryMs=120_000;
+type DiagnosticPhase='LIST'|'THREAD'|'ADVANCE'|'HINT';
 
 /** Only this backend extends observed targets from the explicitly enabled own-account collection scope. */
 export class InboxCollector {
   private discovery: OwnWorksDiscovery;
-  private diagnosed=new Set<CollectionSource>();
+  private diagnosed=new Set<string>();
   private priority:string|undefined;
   private lastPriority:{id:string;at:number}|undefined;
   private priorityNeedsNormal=false;
@@ -92,7 +93,7 @@ export class InboxCollector {
       // Preserve the complete normal rotation/checkpoints; only the failed object's existing cooldown changes.
       cursor.deferred=cursor.deferred.filter(item=>item.id!==id);cursor.deferred.push({id,until:this.data.now()+objectRetryMs,code});
       this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
-      await this.diagnose(reader,'dm',code,signal,peer);
+      await this.diagnose(reader,'dm',code,signal,peer,'HINT');
       if(canRestore&&!restoring)try{await reader.conversations(undefined,top);}catch{/* No second return click if restoration itself failed. */}
       throw new DeferredObjectRead(code);
     }
@@ -127,9 +128,11 @@ export class InboxCollector {
       throw new Blocked(`DM_${stage}_READ_FAILED`);
     }
   }
-  private async diagnose(reader:ObservedReader,source:CollectionSource,code:string,signal:AbortSignal,peer?:DiscoveredPeer):Promise<void> {
-    if(this.diagnosed.has(source)||!/^[A-Z][A-Z0-9_]{1,100}$/.test(code))return;
-    this.diagnosed.add(source);
+  private async diagnose(reader:ObservedReader,source:CollectionSource,code:string,signal:AbortSignal,peer?:DiscoveredPeer,phase:DiagnosticPhase='THREAD'):Promise<void> {
+    const key=`${source}:${phase}:${code}`;
+    if(this.diagnosed.has(key)||Array.from(this.diagnosed).filter(item=>item.startsWith(source+':')).length>=6||
+      !['LIST','THREAD','ADVANCE','HINT'].includes(phase)||!/^[A-Z][A-Z0-9_]{1,100}$/.test(code))return;
+    this.diagnosed.add(key);
     try{
       this.check(source,signal);
       const report=await reader.diagnostic(source==='works'?'comments':'dm',0,peer);this.check(source,signal);
@@ -139,7 +142,7 @@ export class InboxCollector {
       try{const file=await lstat(destination);requireSafe(file.isFile()&&!file.isSymbolicLink(),'DIAGNOSTIC_PATH_UNAVAILABLE');}
       catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
       try{
-        await writeFile(temporary,JSON.stringify({version:1,observedAt:new Date(this.data.now()).toISOString(),code,report}),{flag:'wx',mode:0o600});
+        await writeFile(temporary,JSON.stringify({version:1,observedAt:new Date(this.data.now()).toISOString(),phase,code,report}),{flag:'wx',mode:0o600});
         this.check(source,signal);await rename(temporary,destination);
       }finally{await unlink(temporary).catch(()=>{});}
       this.data.store.audit('COLLECTION_READ_DIAGNOSTIC',digest(id),{dm:source==='dm'});
@@ -148,7 +151,7 @@ export class InboxCollector {
   private async advanceDm(reader:ObservedReader,signal:AbortSignal):Promise<void> {
     try{await this.dmStage('ADVANCE',()=>reader.conversations('next'));}catch(error){
       const code=error instanceof Blocked?error.code:'DM_ADVANCE_READ_FAILED';
-      if(!collectionStops.has(code)&&code!=='BROWSER_CLOSED'&&!signal.aborted)await this.diagnose(reader,'dm',code,signal);
+      if(!collectionStops.has(code)&&code!=='BROWSER_CLOSED'&&!signal.aborted)await this.diagnose(reader,'dm',code,signal,undefined,'ADVANCE');
       throw error;
     }
   }
@@ -156,7 +159,7 @@ export class InboxCollector {
     let batch:ObservationBatch;
     try{batch=await this.dmStage('LIST',()=>reader.conversations());}catch(error){
       const code=error instanceof Blocked?error.code:'DM_LIST_READ_FAILED';
-      if(!collectionStops.has(code)&&code!=='BROWSER_CLOSED'&&!signal.aborted)await this.diagnose(reader,'dm',code,signal);
+      if(!collectionStops.has(code)&&code!=='BROWSER_CLOSED'&&!signal.aborted)await this.diagnose(reader,'dm',code,signal,undefined,'LIST');
       throw error;
     }
     this.check('dm',signal);
@@ -310,7 +313,7 @@ export class InboxCollector {
           this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='dm'").run(JSON.stringify(cursor));
           this.data.store.audit('DM_READ_DEFERRED',digest(peer.conversationId),{threadReadFailed:true});
         }).immediate();
-        await this.diagnose(reader,'dm',code,signal,peer);
+        await this.diagnose(reader,'dm',code,signal,peer,'THREAD');
         throw new DeferredObjectRead(code);
       }
       throw error;
@@ -366,7 +369,7 @@ export class InboxCollector {
             this.data.store.audit('WORK_READ_DEFERRED',digest(work.id));
             this.data.store.db.prepare(`INSERT INTO work_collection_progress VALUES(?,0,0,0,?,?,?) ON CONFLICT(work_id)
               DO UPDATE SET last_error=excluded.last_error,next_at=excluded.next_at`).run(work.id,0,code,this.data.now()+objectRetryMs);
-            await this.diagnose(reader,'works',code,signal);
+            await this.diagnose(reader,'works',code,signal,undefined,'THREAD');
             throw new DeferredObjectRead(code);
           }
           throw error;

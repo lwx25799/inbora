@@ -78,9 +78,31 @@ try {
   });
   const windowed=await new ObservedReader(owner.dm,config).dmWindow(config.peers[0],0);
   assert.equal(windowed.dmViewport.viewport,40);assert.equal(windowed.events[0].platformEventId,'1');
-  await new ObservedReader(owner.dm,config).scrollDm(config.peers[0],windowed.dmViewport.maximum);
+  await owner.dm.evaluate(()=>{
+    const native=Object.getOwnPropertyDescriptor(document.querySelector('.message'),'__reactProps$fixture').value.children.props.message;
+    const parsed=native._parsedContent;delete native._parsedContent;
+    const parent=Object.create(Object.getPrototypeOf(native));Object.defineProperty(parent,'_parsedContent',{value:parsed});Object.setPrototypeOf(native,parent);
+  });
   const dmDiagnostic=await new ObservedReader(owner.dm,config).diagnostic('dm');
+  assert.equal(dmDiagnostic.windowRows,windowed.loaded);assert.equal(dmDiagnostic.contentMissingRows,0);
+  assert.deepEqual(dmDiagnostic.messageSamples.map(sample=>sample.windowIndex),Array.from({length:windowed.loaded},(_,index)=>index));
+  assert.equal(dmDiagnostic.messageSamples[0].contentMissing,false);assert.equal(dmDiagnostic.messageSamples[0].timeValid,true);
   assert.equal(dmDiagnostic.shareStage,'VERIFIED');assert.ok(dmDiagnostic.messageSamples[0].parsedFields.some(field=>field.key==='text'&&field.type==='string'));
+  assert.equal(dmDiagnostic.conversationSamples[0].titleCount,1);assert.equal(dmDiagnostic.conversationSamples[0].titleNonEmpty,true);
+  assert.equal(dmDiagnostic.conversationSamples[0].nativeConversationPresent,true);assert.equal(dmDiagnostic.conversationSamples[0].securePeerPresent,true);
+  assert.equal(dmDiagnostic.messageSamples[0].textNodes,1);assert.equal(dmDiagnostic.messageSamples[0].nonEmptyTextNodes,1);
+  assert.equal(dmDiagnostic.messageSamples[0].visibleCardNodes,0);
+  assert.equal(dmDiagnostic.messageSamples[0].parsedPresent,true);assert.equal(dmDiagnostic.messageSamples[0].parsedRejected,false);
+  await owner.dm.evaluate(()=>{
+    const row=document.querySelector('.message'),native=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture').value.children.props.message;
+    row.style.minHeight='18px';row.replaceChildren();native.type=800;native.serverStatus=0;
+  });
+  const missingDiagnostic=await new ObservedReader(owner.dm,config).diagnostic('dm',0,config.peers[0]);
+  assert.equal(missingDiagnostic.contentMissingRows,1);assert.equal(missingDiagnostic.messageSamples[0].windowIndex,0);
+  assert.equal(missingDiagnostic.messageSamples[0].contentMissing,true);assert.equal(missingDiagnostic.messageSamples[0].nativeKind,800);
+  assert.equal(missingDiagnostic.messageSamples[0].nativeStatus,0);
+  await assert.rejects(owner.dm.evaluate(captureObserved,{mapping:config,channel:'dm',index:0,evidenceId:'fixture-window-gap',peer:config.peers[0],dmWindow:true}),/OBSERVATION_DM_CONTENT_DOM_NOT_READY/);
+  await new ObservedReader(owner.dm,config).scrollDm(config.peers[0],windowed.dmViewport.maximum);
   const backDiagnostic=dmDiagnostic.back;
   assert.equal(backDiagnostic.count,1);assert.equal(backDiagnostic.nodes[0].tag,'BUTTON');
   assert.ok(!JSON.stringify(backDiagnostic).includes('fixture'));

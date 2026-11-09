@@ -31,7 +31,7 @@ export interface AdapterHandle {
 }
 export class BrowserService {
   private owner: BrowserProfileOwner | undefined;
-  private mode: "headed" | "headless" = "headed";
+  private mode: "headed" | "headless" = "headless";
   private currentIdentity = new Map<Channel, CapabilityIdentity>();
   private state = "CLOSED";
   private opening: Promise<void> | undefined;
@@ -40,6 +40,10 @@ export class BrowserService {
   private collector: InboxCollector | undefined;
   private collectorMapping = "";
   private previewHint:{ownId:string;conversationId:string}|undefined;
+  private recoveringLogin=false;
+  private loginGeneration=0;
+  private modeTransition:Promise<void>|undefined;
+  get loginRecovery(){return this.recoveringLogin;}
   get ownerEpoch() { return this.epoch; }
   constructor(
     readonly root: string,
@@ -60,10 +64,11 @@ export class BrowserService {
     requireSafe(this.owner, "BROWSER_NOT_RUNNING");
     return this.owner.actor;
   }
-  status() {
+  status():{state:string;mode:'headed'|'headless';loginRecovery?:boolean;version:string|null} {
     return {
-      state: this.state,
+      state: this.recoveringLogin?'LOGIN_RECOVERY':this.state,
       mode: this.mode,
+      loginRecovery:this.recoveringLogin,
       version: this.owner?.version() ?? null,
     };
   }
@@ -77,7 +82,7 @@ export class BrowserService {
     );
   }
   identity(channel: Channel): CapabilityIdentity | null {
-    return this.currentIdentity.get(channel) ?? null;
+    return this.recoveringLogin?null:this.currentIdentity.get(channel) ?? null;
   }
   private attachOwner(owner: BrowserProfileOwner): void {
     this.owner = owner;
@@ -91,7 +96,11 @@ export class BrowserService {
       this.closing = owner.close().finally(() => { this.closing = undefined; });
     });
   }
-  async open(mode: "headed" | "headless" = this.mode, signal?:AbortSignal): Promise<void> {
+  async open(_legacyMode: "headed" | "headless" = 'headless', signal?:AbortSignal): Promise<void> {
+    requireSafe(!this.recoveringLogin,'LOGIN_RECOVERY_IN_PROGRESS');
+    await this.openMode('headless',signal);
+  }
+  private async openMode(mode:'headed'|'headless',signal?:AbortSignal):Promise<void>{
     requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
     if (this.closing) await this.closing;
     if (this.opening) {
@@ -111,6 +120,69 @@ export class BrowserService {
     } finally {
       if (this.opening === opening) this.opening = undefined;
     }
+  }
+  async beginLoginRecovery():Promise<void>{
+    this.loginGeneration++;
+    this.recoveringLogin=true;
+    await this.changeMode('headed');
+  }
+  async finishLoginRecovery(generation=this.loginGeneration):Promise<boolean>{
+    if(generation!==this.loginGeneration)return false;
+    await this.changeMode('headless');
+    if(generation!==this.loginGeneration)return false;
+    for(const channel of ['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as const)await this.readIdentity(channel);
+    if(generation!==this.loginGeneration)return false;
+    this.recoveringLogin=false;
+    return true;
+  }
+  async completeLoginIfVerified(ownId:string):Promise<boolean>{
+    if(!this.recoveringLogin||this.modeTransition)return false;
+    const generation=this.loginGeneration;
+    if(!this.owner)await this.changeMode('headless');
+    if(generation!==this.loginGeneration||!this.owner)return false;
+    const owner=this.owner,observation=await loadObservationMapping(this.root);
+    if(!observation||observation.self.uid!==ownId)return false;
+    await owner.actor.run(async()=>{
+      requireSafe(this.owner===owner,'BROWSER_CLOSED');
+      for(const page of [owner.notification,owner.dm])await new ObservedReader(page,observation).guard();
+    });
+    return this.finishLoginRecovery(generation);
+  }
+  private async changeMode(mode:'headed'|'headless'):Promise<void>{
+    if(this.modeTransition)await this.modeTransition;
+    const task=(async()=>{
+      if(this.opening)await this.opening;
+      if(this.closing)await this.closing;
+      const owner=this.owner;
+      if(owner&&this.mode!==mode){
+        await owner.actor.run(async()=>{
+          requireSafe(this.owner===owner,'BROWSER_CLOSED');
+          for(const page of [owner.notification,owner.dm]){
+            const empty=await page.locator('[contenteditable="true"],textarea,input').evaluateAll(editors=>{
+              for(const editor of editors){
+                const style=getComputedStyle(editor),rect=editor.getBoundingClientRect();
+                if(style.display==='none'||style.visibility==='hidden'||rect.width<=0||rect.height<=0)continue;
+                if(editor instanceof HTMLInputElement&&!['text','search','email','url','tel','password'].includes(editor.type))continue;
+                const text=editor instanceof HTMLInputElement||editor instanceof HTMLTextAreaElement?editor.value:editor.textContent??'';
+                if(editor.querySelector('img,video,audio,iframe,object,input,[data-slate-void="true"],[data-attachment]'))return false;
+                const marker=editor.matches('[data-slate-editor="true"][data-zone-container="*"]')&&editor.children.length===1&&
+                  editor.firstElementChild?.matches('div.ace-line[data-node="true"]')&&editor.firstElementChild.children.length===1&&
+                  editor.firstElementChild.firstElementChild?.matches('span[data-enter="true"][data-string="true"][data-leaf="true"]')&&text==='\u200B';
+                if(text.length&&!marker)return false;
+                for(const node of editor.querySelectorAll('*'))if(!['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S'].includes(node.tagName))return false;
+              }
+              return true;
+            });
+            requireSafe(empty,'BROWSER_HAS_HUMAN_INPUT');
+          }
+          this.owner=undefined;this.epoch++;this.currentIdentity.clear();this.collector?.dispose();this.collector=undefined;this.state='CLOSED';
+          await owner.close();
+        });
+      }
+      await this.openMode(mode);
+    })();
+    this.modeTransition=task;
+    try{await task;}finally{if(this.modeTransition===task)this.modeTransition=undefined;}
   }
   private async launchOwner(mode: "headed" | "headless", signal?:AbortSignal): Promise<void> {
     this.state = "STARTING";
@@ -151,6 +223,7 @@ export class BrowserService {
     }
   }
   async close(): Promise<void> {
+    if(this.modeTransition)await this.modeTransition.catch(()=>{});
     this.collector?.dispose();this.collector=undefined;
     if (this.opening) await this.opening.catch(() => {});
     if (this.closing) return this.closing;
@@ -234,6 +307,10 @@ export class BrowserService {
     };
   }
   async refreshIdentity(channel: Channel): Promise<CapabilityIdentity | null> {
+    if(this.recoveringLogin)return null;
+    return this.readIdentity(channel);
+  }
+  private async readIdentity(channel:Channel):Promise<CapabilityIdentity|null>{
     const owner = this.owner;
     if (!owner) return null;
     const native =

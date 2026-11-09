@@ -129,6 +129,7 @@ export const commandSchema = z.discriminatedUnion("command", [
       command: z.literal("browser"),
       open: z.boolean(),
       mode: z.enum(["headed", "headless"]),
+      loginRecovery:z.boolean().optional(),
     })
     .strict(),
   z

@@ -25,6 +25,7 @@ export interface Status {
   browser: {
     state: string;
     mode: "headed" | "headless";
+    loginRecovery?:boolean;
     version: string | null;
   };
   lastSync: { channel: string; at: string }[];
@@ -157,6 +158,8 @@ export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
 export const reasons: Record<string, string> = {
+  LOGIN_RECOVERY_IN_PROGRESS:'正在等待本人登录或处理验证码，完成后自动恢复无头运行',
+  BROWSER_HAS_HUMAN_INPUT:'专属网页中还有未提交输入，已保留，请处理后再切换浏览器',
   PREPARING:'正在后台准备与核验',
   AUTO_POLICY_REQUIRED:'请先设置并启用准确的自动回复策略',
   POLICY_NO_LONGER_AUTHORIZED:'自动回复策略已撤销、暂停或范围变化',

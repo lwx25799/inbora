@@ -1,5 +1,19 @@
 # 来源与许可
 
+## 2026-11-09：普通无头与显式登录恢复
+
+落实用户持续无头要求前，复读MIT DSH固定`7989640e340f0fd79e2de9874880d5197546e755`的`browser-host.mjs:113–156`及许可。保留单Profile持有者组织，不采用其固定有头及移除静音参数的默认。另核对Apache-2.0 Playwright固定`cfe490d941f992655948eee8fd4fd94e1c4234bf`的`packages/playwright-core/src/server/chromium/chromium.ts:380–387,419–423`：无头参数与显式msedge通道是独立配置，沿用本机Edge、locale及静音，不切另一个浏览器产品。
+
+普通应用/CLI启动均无头，只有显式登录恢复或CLI login可有头；旧模式比较循环已停用。登录期只临时悬停原调度，不撤销持续范围或清额度；两Page本人及空输入核验后回无头。两个实证生命周期缺陷分别加最小代际和无头重开：旧完成不能解封新登录，扫码后关窗口仍可无头核验恢复；未完成登录不解封。三项实际红绿、新模式6项/UI1项、根最终23项与CLI7项通过；源码tsx/构建Node各22条实际DOM断言及CLI各8条入口断言通过。无原生重建或真实外发，旧有头证据不追认为无头全通过。
+
+## 2026-11-09：补齐视频类型及可选标记、刷新有界阶段证据
+
+真实只读字段证明漏识别卡片含`awemeType=55/is_slides=false`及`awemeType=0`而无图集标记。修复前读取Apache-2.0的Johnserf-Seed/f2固定`f6be8c0ffba9a127075bbeafe4838716650b6325`的`f2/apps/douyin/dl.py:22–38,203–219`和`tests/test_douyin_download_dispatch.py:37–45,59–76`，许可全文已复核。其抖音实现将0/55记录为视频，但未确认55的细分含义；分派按媒体资源，不要求is_slides必有。采用有限已知视频分支，未冒称平台官方枚举；不复制下载、签名、Cookie或宿主代码。[实现](https://github.com/Johnserf-Seed/f2/blob/f6be8c0ffba9a127075bbeafe4838716650b6325/f2/apps/douyin/dl.py#L22)、[对应测试](https://github.com/Johnserf-Seed/f2/blob/f6be8c0ffba9a127075bbeafe4838716650b6325/tests/test_douyin_download_dispatch.py#L59)
+
+图集显式true保持note；false或缺失仅0/55生成video。无效标记只阻断原生字段推断，不推翻独立准确href，原生ID冲突及多候选仍拒绝。新组合与独立href均实际红绿，分享21项、源码tsx/构建Node各7场景21断言通过。重复附件状态由本项目三个组件的重复渲染复现，按既有MIT DSH已核内容分类原则仅去重中性提示，保真实文字/可用图像，不猜未知类别。
+
+诊断修复前复读MIT DSH固定`7989640e340f0fd79e2de9874880d5197546e755`的`diagnostics.mjs:15–38`及许可，有界检查、固定失败代码原则独立适配。原每通道一次使旧META覆盖后续CONTENT证据，现按source/phase/code区分、每通道最多6次并覆盖固定文件；只存有界计数/布尔/字段形态，安全一层继承与getter拒绝保持。13项定向及两条序列化链通过，未改变实际采集映射或把无正文行猜成分享。
+
 ## 2026-11-09：媒体及分享消息的一次人工回复
 
 实现前复读MIT DSH固定`7989640e340f0fd79e2de9874880d5197546e755`的`chat-browser.mjs:411–425,505–525`，核对媒体类别与原生消息绑定；适配器另核对`:400–467,1332–1345,1381–1390,1420–1450`的稳定资源、网页人稿及发送前上下文检查。Chatwoot非enterprise MIT Expat固定`625d5964e3cb3f1d917b43c3b8332219e525a4b8`的会话actions与attachment来源沿用上节核验。没有可直接复用的本项目媒体人工资格合同，因此独立扩展既有人工命令/修订/审批，不复制宿主、上传、鼠标回退或另一发送路线。[媒体源码](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/chat-browser.mjs#L411-L425)

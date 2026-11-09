@@ -130,10 +130,17 @@ export class ClientService {
   }
   private keepOnline():void {
     if(!this.onlineEnabled||this.closing||this.onlineTask||!this.automation||this.automation.state().emergencyStopped||
-      !this.store.db.prepare("SELECT id FROM accounts WHERE id='account_001'").get()||this.authority.now()<this.onlineRetryAt||
-      !['CLOSED','BROWSER_START_FAILED'].includes(this.browser.status().state))return;
+      !this.store.db.prepare("SELECT id FROM accounts WHERE id='account_001'").get()||this.authority.now()<this.onlineRetryAt)return;
+    if(this.browser.loginRecovery){
+      this.onlineRetryAt=this.authority.now()+30_000;
+      const own=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string};
+      const task=this.browser.completeLoginIfVerified(own.own_id).then(done=>{if(done)this.resumeAfterLogin();})
+        .catch(()=>{}).finally(()=>{this.onlineTask=null;if(!this.closing)this.emit('status_updated');});
+      this.onlineTask=task;this.track(task);return;
+    }
+    if(!['CLOSED','BROWSER_START_FAILED'].includes(this.browser.status().state))return;
     if(this.onlineAbort.signal.aborted)this.onlineAbort=new AbortController();
-    const task=this.browser.open(this.browser.status().mode,this.onlineAbort.signal).catch(error=>{
+    const task=this.browser.open('headless',this.onlineAbort.signal).catch(error=>{
       if(this.closing||this.onlineAbort.signal.aborted)return;
       const code=clientError(error);
       this.onlineRetryAt=this.authority.now()+30_000;
@@ -141,6 +148,11 @@ export class ClientService {
       this.store.audit('SINGLE_ACCOUNT_CONNECTION_FAILED',digest(code),{stopped:collectionStops.has(code)});
     }).finally(()=>{this.onlineTask=null;if(!this.closing)this.emit('status_updated');});
     this.onlineTask=task;this.track(task);
+  }
+  private resumeAfterLogin():void{
+    if(this.browser.loginRecovery||this.closing)return;
+    this.collector?.suspend(false);this.verification?.suspend(false);
+    this.modelAbort=new AbortController();this.automaticAbort=new AbortController();this.onlineRetryAt=0;
   }
   private stopAutomaticReply():void {
     this.automaticAbort.abort();
@@ -251,6 +263,7 @@ export class ClientService {
       case 'closeHumanDialog':
         this.authority.release(token,c.eventId,c.generation);this.dialogs.delete(c.eventId);return this.thread(token,c.eventId);
       case 'sendHumanReply': {
+        requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
         requireSafe(this.automation,'AUTOMATION_NOT_READY');
         const input={...c.input,text:c.input.text.replace(/\r\n?/gu,'\n')};
         const fresh=this.humanReplies.queue(token,c.commandId,input);
@@ -399,7 +412,13 @@ export class ClientService {
       }
       case "browser": {
         this.authority.operator(token, "CONTROL");
-        if (c.open) await this.browser.open(c.mode);
+        if(c.open&&c.loginRecovery){
+          this.stopSync();this.collector?.suspend(true);this.verification?.suspend(true);
+          this.onlineAbort.abort();this.modelAbort.abort();this.stopAutomaticReply();
+          await this.browser.beginLoginRecovery();this.onlineRetryAt=0;
+        }
+        else if(c.open&&this.browser.loginRecovery){if(await this.browser.finishLoginRecovery())this.resumeAfterLogin();}
+        else if (c.open) await this.browser.open('headless');
         else {this.stopSync();this.collector?.cancel();await this.browser.close();}
         this.emit("status_updated");
         return this.status(token);
@@ -500,6 +519,7 @@ export class ClientService {
         );
         return this.status(token);
       case "generateSuggestion": {
+        requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
         this.authority.operator(token, "EDIT");
         requireSafe(
           this.authority.mode() !== "OBSERVE" && !this.authority.paused(),
@@ -528,6 +548,7 @@ export class ClientService {
           requireSafe(grant.scope.model===this.settings.model&&grant.scope.channels.includes(e.payload.channel),'MODEL_OUTSIDE_GRANT');
         }
         this.modelPending.add(e.id);
+        const modelSignal=this.modelAbort.signal;
         try {
           const result = await this.provider.generate(
             this.store,
@@ -536,9 +557,10 @@ export class ClientService {
             this.settings,
             this.key,
             this.modelAuthorized||!!grant,
-            this.modelAbort.signal,
+            modelSignal,
             grant?()=>this.automation!.reserve(grant.version,'MODEL',randomUUID()):undefined,
           );
+          requireSafe(!modelSignal.aborted&&!this.browser.loginRecovery,'MODEL_PAUSED');
           const id = randomUUID();
           this.store.db
             .prepare("INSERT INTO ai_suggestions VALUES(?,?,?,?,?,?,?,0)")
@@ -589,7 +611,7 @@ export class ClientService {
     }
   }
   async runAutomaticReply():Promise<void> {
-    if(this.closing||!this.automation||!this.key||this.modelPending.size)return;
+    if(this.closing||this.browser.loginRecovery||!this.automation||!this.key||this.modelPending.size)return;
     const grant=this.automation.active('AUTO_REPLY') as Grant<ReplyPolicy>|null;
     if(!grant||grant.scope.model!==this.settings.model)return;
     if(!this.automation.allowance(grant.version,'MODEL')||!this.automation.allowance(grant.version,'SEND'))return;

@@ -122,6 +122,117 @@ test('failed DM parsed diagnostics cap messages and keys without treating absent
   }finally{await owner.close();await server.close();}
 });
 
+test('DM list diagnostic distinguishes missing title and native metadata using fixed bounded booleans',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(()=>{
+      const row=document.querySelector('.conversation')!,title=row.querySelector('.title')!;
+      title.textContent='PRIVATE_CONTACT_NAME';
+      const empty=row.cloneNode(true) as Element;empty.querySelector('.title')!.textContent='';
+      Object.defineProperty(empty,'__reactFiber$fixture',{value:{return:{memoizedProps:{conversation:{_toParticipantSecUserId:'PRIVATE_SEC'}}}}});
+      row.parentElement!.append(empty);
+      for(let index=0;index<8;index++)row.parentElement!.append(row.cloneNode(true));
+      (document.querySelector('#chat') as HTMLElement).hidden=true;
+    });
+    const report=await new ObservedReader(owner.dm,config(server.origin)).diagnostic('dm');
+    expect(report.conversationSamples!.slice(0,2)).toMatchObject([
+      {titleCount:1,titleVisible:true,titleNonEmpty:true,nativeConversationPresent:true,securePeerPresent:true,metadataReadable:true},
+      {titleCount:1,titleVisible:true,titleNonEmpty:false,nativeConversationPresent:false,securePeerPresent:true,metadataReadable:true},
+    ]);
+    expect(report.conversationSamples).toHaveLength(6);
+    for(const value of ['PRIVATE_','conv-a','peer-sec'])expect(JSON.stringify(report)).not.toContain(value);
+  }finally{await owner.close();await server.close();}
+});
+
+test('DM message diagnostic distinguishes a visible card from absent or empty mapped text without exposing content',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(()=>{
+      const row=document.querySelector('.message')!;row.querySelector('.text')!.textContent='';
+      const card=document.createElement('div');card.className='MessageItemShareAwemecontainer';card.textContent='PRIVATE_CARD_BODY';row.append(card);
+      const nested=document.createElement('div');nested.className='message';nested.innerHTML='<span class="text">PRIVATE_NESTED_BODY</span><img src="/private-image">';row.append(nested);
+    });
+    const report=await new ObservedReader(owner.dm,config(server.origin)).diagnostic('dm',0,config(server.origin).peers[0]!);
+    expect(report.messageSamples![0]).toMatchObject({textNodes:1,visibleTextNodes:1,nonEmptyTextNodes:0,visibleMediaNodes:0,visibleCardNodes:1});
+    for(const value of ['PRIVATE_','private-image','conv-a','peer-sec'])expect(JSON.stringify(report)).not.toContain(value);
+  }finally{await owner.close();await server.close();}
+});
+
+test.each(['inherited-data','getter','own-prototype-conflict'] as const)('DM parsed diagnostic respects safe descriptor ownership (%s)',async shape=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(shape=>{
+      const native=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message;
+      const parsed={text:'PRIVATE_MESSAGE_BODY',itemId:'1234567890123456789'};delete native._parsedContent;
+      const parent=Object.create(Object.getPrototypeOf(native));
+      Object.defineProperty(parent,'_parsedContent',shape==='getter'?{get(){throw Error('PRIVATE_GETTER_RAN');},configurable:true}:{value:parsed,configurable:true});
+      Object.setPrototypeOf(native,parent);
+      if(shape==='own-prototype-conflict')Object.defineProperty(native,'_parsedContent',{value:{text:'PRIVATE_CONFLICT'},configurable:true});
+    },shape);
+    const report=await new ObservedReader(owner.dm,config(server.origin)).diagnostic('dm',0,config(server.origin).peers[0]!);
+    const sample=report.messageSamples![0]!;
+    if(shape==='inherited-data')expect(sample).toMatchObject({parsedPresent:true,parsedRejected:false,parsedFields:expect.arrayContaining([
+      {key:'itemId',type:'string',digitId:true,urlKind:'NONE'},
+    ])});
+    else expect(sample).toMatchObject({parsedPresent:false,parsedRejected:true,parsedFields:[]});
+    for(const value of ['PRIVATE_','1234567890123456789'])expect(JSON.stringify(report)).not.toContain(value);
+  }finally{await owner.close();await server.close();}
+});
+
+test.each([false,true])('DM diagnostic samples the business window and prioritizes its missing content (window gap: %s)',async missing=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(missing=>{
+      const first=document.querySelector('.box')!,native=Object.getOwnPropertyDescriptor(first.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message;
+      const list=document.createElement('div');list.id='diagnostic-window';list.style.cssText='position:fixed;top:120px;left:10px;height:96px;width:300px;overflow-y:auto';
+      for(let index=0;index<12;index++){
+        const box=first.cloneNode(true) as HTMLElement,row=box.querySelector('.message') as HTMLElement;
+        box.style.cssText='height:32px';row.style.cssText='height:24px';
+        Object.defineProperty(row,'__reactProps$fixture',{value:{children:{props:{message:{...native,serverId:String(1000+index),type:800,serverStatus:0}}}}});
+        if(index===0||missing&&index===4)row.replaceChildren();
+        if(index===1)row.style.display='none';
+        if(missing&&index===4)Object.assign(Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message,
+          {type:1001,serverStatus:2,createdAt:new Date(NaN)});
+        list.append(box);
+      }
+      for(const box of document.querySelectorAll('#chat > .box'))box.remove();
+      document.querySelector('#chat')!.append(list);list.scrollTop=64;
+    },missing);
+    const mapping=config(server.origin),peer=mapping.peers[0]!,input={mapping,channel:'dm' as const,index:0,evidenceId:'fixture-window',peer,dmWindow:true};
+    if(missing)await expect(owner.dm.evaluate(captureObserved,input)).rejects.toThrow('OBSERVATION_DM_CONTENT_DOM_NOT_READY');
+    else expect((await owner.dm.evaluate(captureObserved,input)).events.map(event=>event.platformEventId)).toEqual(['1002','1003','1004']);
+    const report=await new ObservedReader(owner.dm,mapping).diagnostic('dm',0,peer);
+    expect(report.messageSamples![0]!.textNodes).toBe(missing?0:1);
+    expect(report.messageSamples).toHaveLength(3);
+    expect(report).toMatchObject({windowRows:3,contentMissingRows:missing?1:0});
+    expect(report.messageSamples![0]).toMatchObject(missing
+      ?{windowIndex:2,contentMissing:true,textNodes:0,nativeKind:1001,nativeStatus:2,timeValid:false}
+      :{windowIndex:0,contentMissing:false,textNodes:1,nativeKind:800,nativeStatus:0,timeValid:true});
+    expect(report.messageSamples!.map(row=>row.windowIndex).sort()).toEqual([0,1,2]);
+    for(const value of ['controlled-1','1000','1002','conv-a','peer-sec'])expect(JSON.stringify(report)).not.toContain(value);
+  }finally{await owner.close();await server.close();}
+});
+
+test('DM diagnostic rejects invalid native state values and never invokes state getters',async()=>{
+  const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
+  try{
+    await mount(owner,server.origin);await owner.dm.evaluate(()=>{
+      const native=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message;
+      Object.assign(native,{type:-1,serverStatus:'PRIVATE_STATUS',createdAt:'PRIVATE_TIME'});
+    });
+    const reader=new ObservedReader(owner.dm,config(server.origin));
+    expect((await reader.diagnostic('dm')).messageSamples![0]).toMatchObject({nativeKind:null,nativeStatus:null,timeValid:false});
+    await owner.dm.evaluate(()=>{
+      const native=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message;
+      const state=window as unknown as {stateGetterCalls:number};state.stateGetterCalls=0;
+      Object.defineProperty(native,'type',{get(){state.stateGetterCalls++;throw Error('PRIVATE_GETTER_RAN');}});
+    });
+    const report=await reader.diagnostic('dm');expect(report.messageSamples![0]).toMatchObject({nativeKind:null,nativeStatus:null,parsedFields:[]});
+    expect(await owner.dm.evaluate(()=>(window as unknown as {stateGetterCalls:number}).stateGetterCalls)).toBe(0);
+    expect(JSON.stringify(report)).not.toContain('PRIVATE_');
+  }finally{await owner.close();await server.close();}
+});
+
 test('bounded back diagnostics distinguish a child control, occlusion and offscreen geometry without leaking content or invoking handlers',async()=>{
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true);
   try{

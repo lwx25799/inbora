@@ -15,8 +15,11 @@ export interface CollectionReadDiagnostic {
     nodes?:{index:number;parentIndex:number|null;tag:'DIV'|'BUTTON'|'SPAN'|'A'|'SVG'|'PATH'|'OTHER';visible:boolean;inViewport:boolean;width:number;height:number;
       props:'NONE'|'DATA'|'REJECTED';handlers:{onClick:boolean;onMouseDown:boolean;onPointerDown:boolean;onMouseUp:boolean}}[]};
   shareStage?:'CHAT_NOT_READY'|'HEADER_NOT_READY'|'CONVERSATION_UNVERIFIED'|'VERIFIED';
-  messageSamples?:{nativeIdPresent:boolean;conversationMatches:boolean;senderKnown:boolean;parsedPresent:boolean;parsedTruncated:boolean;
-    visibleTextNodes:number;visibleMediaNodes:number;parsedFields:{key:string;type:'string'|'number'|'boolean'|'object'|'array'|'null'|'undefined'|'accessor'|'other';
+  windowRows?:number;contentMissingRows?:number;
+  conversationSamples?:{titleCount:number;titleVisible:boolean;titleNonEmpty:boolean;nativeConversationPresent:boolean;securePeerPresent:boolean;metadataReadable:boolean}[];
+  messageSamples?:{windowIndex:number;contentMissing:boolean;nativeIdPresent:boolean;conversationMatches:boolean;senderKnown:boolean;
+    nativeKind:number|null;nativeStatus:number|null;timeValid:boolean;parsedPresent:boolean;parsedRejected:boolean;parsedTruncated:boolean;
+    textNodes:number;visibleTextNodes:number;nonEmptyTextNodes:number;visibleMediaNodes:number;visibleCardNodes:number;parsedFields:{key:string;type:'string'|'number'|'boolean'|'object'|'array'|'null'|'undefined'|'accessor'|'other';
       digitId:boolean;urlKind:'NONE'|'DOUYIN_VIDEO'|'DOUYIN_NOTE'|'HTTP_OTHER'|'DATA'|'BLOB'|'OTHER'}[]}[];
   samples:{visible:boolean;inWindow:boolean;hasBox:boolean;displayContents:boolean;top:number;bottom:number;width:number;height:number;bodies:number;visibleBodies:number}[];
 }
@@ -140,6 +143,31 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       else if (!seconds) { try { time = Date.prototype.getTime.call(value); } catch { /* no date evidence */ } }
       return Number.isFinite(time) && time >= Date.UTC(2000,0,1) && time <= Date.now() ? new Date(time).toISOString() : null;
     },
+    dmFrame(chat:Element,clipRows:boolean,window:boolean):{rows:Element[];scroller:Element|undefined;viewport:ObservationBatch['dmViewport']} {
+      const mounted=Array.from(chat.querySelectorAll(s.messages)),candidates=new Set<Element>();
+      if(window)for(const row of mounted.slice(0,100)){
+        let node=row.closest(s.messageBox)?.parentElement??row.parentElement;
+        for(let depth=0;node&&chat.contains(node)&&depth<8;depth++,node=node.parentElement){
+          if(/auto|scroll/.test(getComputedStyle(node).overflowY)&&node.clientHeight>0&&node.scrollHeight>node.clientHeight&&mounted.every(message=>node!.contains(message)))candidates.add(node);
+          if(node===chat)break;
+        }
+      }
+      dom.check(candidates.size<=1,'OBSERVATION_DM_SCROLL_NOT_UNIQUE');
+      const scroller=Array.from(candidates)[0],clip=(scroller??chat).getBoundingClientRect();
+      let viewport:ObservationBatch['dmViewport'];
+      if(scroller){
+        const range=Math.max(0,scroller.scrollHeight-scroller.clientHeight),reverse=scroller.scrollTop<0||getComputedStyle(scroller).flexDirection==='column-reverse';
+        viewport={top:scroller.scrollTop,height:scroller.scrollHeight,viewport:scroller.clientHeight,minimum:reverse?-range:0,maximum:reverse?0:range};
+      }
+      const rows=mounted.filter(dom.visible).filter(row=>!clipRows||row.getBoundingClientRect().bottom>Math.max(0,window?clip.top:0)&&
+        row.getBoundingClientRect().top<Math.min(innerHeight,window?clip.bottom:innerHeight));
+      return {rows,scroller,viewport};
+    },
+    dmContent(row:Element):{texts:Element[];media:Element[];missing:boolean} {
+      const texts=Array.from(row.querySelectorAll(s.messageText)).filter(node=>node.closest(s.messages)===row),
+        media=Array.from(row.querySelectorAll('img,video,audio')).filter(node=>node.closest(s.messages)===row&&dom.visible(node));
+      return {texts,media,missing:!media.length&&!(texts.length===1&&dom.visible(texts[0]!)&&(texts[0]!.textContent??'').length>0)};
+    },
   };
   dom.check(location.origin === m.origin && !/验证码|安全验证/.test(document.title), 'OBSERVATION_PAGE_BLOCKED');
   dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_PAGE_BLOCKED');
@@ -197,7 +225,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
         back.centerIndex=position<0?null:position;
         return back;
       },
-      messages():Pick<CollectionReadDiagnostic,'shareStage'|'messageSamples'> {
+      messages():Pick<CollectionReadDiagnostic,'shareStage'|'messageSamples'|'windowRows'|'contentMissingRows'> {
         const chats=Array.from(document.querySelectorAll(s.chat)).filter(dom.visible);
         if(chats.length!==1)return {shareStage:'CHAT_NOT_READY',messageSamples:[]};
         const chat=chats[0]!;let peer:DiscoveredPeer|undefined;
@@ -205,21 +233,34 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
           const header=dom.one(chat,s.chatHeader),conversation=dom.data(dom.childProps(header),'conversation'),id=dom.conversationId(conversation),
             secure=dom.data(conversation,'_toParticipantSecUserId');
           peer=input.peer??m.peers.find(item=>item.conversationId===id&&item.secUid===secure);
-          if(!peer||peer.conversationId!==id||peer.secUid!==secure)return {shareStage:'CONVERSATION_UNVERIFIED',messageSamples:[]};
+          if(!peer||peer.conversationId!==id||peer.secUid!==secure||dom.one(chat,s.chatTitle).textContent?.trim()!==peer.title)
+            return {shareStage:'CONVERSATION_UNVERIFIED',messageSamples:[]};
         }catch{return {shareStage:'HEADER_NOT_READY',messageSamples:[]};}
-        const messageSamples=Array.from(chat.querySelectorAll(s.messages)).filter(row=>dom.visible(row)&&row.closest(s.chat)===chat).slice(0,6).map(row=>{
-          const sample:NonNullable<CollectionReadDiagnostic['messageSamples']>[number]={nativeIdPresent:false,conversationMatches:false,senderKnown:false,
-            parsedPresent:false,parsedTruncated:false,visibleTextNodes:0,visibleMediaNodes:0,parsedFields:[]};
+        const frame=dom.dmFrame(chat,true,true);dom.check(frame.rows.length<=100,'OBSERVATION_WINDOW_TOO_LARGE');
+        const window=frame.rows.map((row,windowIndex)=>({row,windowIndex,content:dom.dmContent(row)}));
+        const contentMissingRows=window.filter(item=>item.content.missing).length;
+        const messageSamples=window.sort((a,b)=>Number(b.content.missing)-Number(a.content.missing)||a.windowIndex-b.windowIndex).slice(0,6).map(({row,windowIndex,content})=>{
+          const sample:NonNullable<CollectionReadDiagnostic['messageSamples']>[number]={windowIndex,contentMissing:content.missing,
+            nativeIdPresent:false,conversationMatches:false,senderKnown:false,nativeKind:null,nativeStatus:null,timeValid:false,
+            parsedPresent:false,parsedRejected:false,parsedTruncated:false,textNodes:0,visibleTextNodes:0,nonEmptyTextNodes:0,visibleMediaNodes:0,visibleCardNodes:0,parsedFields:[]};
           try{
             const native=dom.data(dom.childProps(row),'message'),sender=dom.data(native,'sender');
             sample.nativeIdPresent=!!dom.id(dom.data(native,'serverId'));
             sample.conversationMatches=dom.data(native,'conversationId')===peer!.conversationId;
             sample.senderKnown=sender===m.self.uid||peer!.uid!==null&&sender===peer!.uid;
             if(!sample.nativeIdPresent||!sample.conversationMatches||!sample.senderKnown)return sample;
-            sample.visibleTextNodes=Array.from(row.querySelectorAll(s.messageText)).filter(node=>node.closest(s.messages)===row&&dom.visible(node)).length;
-            sample.visibleMediaNodes=Array.from(row.querySelectorAll('img,video,audio')).filter(node=>node.closest(s.messages)===row&&dom.visible(node)).length;
-            const descriptor=native&&typeof native==='object'?Object.getOwnPropertyDescriptor(native,'_parsedContent'):undefined;
-            const parsed=descriptor&&Object.hasOwn(descriptor,'value')?descriptor.value:undefined;
+            const {texts,media}=content;
+            sample.textNodes=texts.length;sample.visibleTextNodes=texts.filter(dom.visible).length;
+            sample.nonEmptyTextNodes=texts.filter(node=>dom.visible(node)&&(node.textContent??'').length>0).length;
+            sample.visibleMediaNodes=media.length;
+            sample.visibleCardNodes=Array.from(row.querySelectorAll('[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]'))
+              .filter(node=>node.closest(s.messages)===row&&dom.visible(node)).length;
+            const kind=dom.data(native,'type'),status=dom.data(native,'serverStatus');
+            sample.nativeKind=typeof kind==='number'&&Number.isSafeInteger(kind)&&kind>=0&&kind<=65535?kind:null;
+            sample.nativeStatus=typeof status==='number'&&Number.isSafeInteger(status)&&status>=0&&status<=65535?status:null;
+            sample.timeValid=dom.time(dom.data(native,'createdAt'),false)!==null;
+            let parsed:unknown;
+            try{parsed=dom.data(native,'_parsedContent');}catch{sample.parsedRejected=true;return sample;}
             if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))return sample;
             sample.parsedPresent=true;const keys=Object.getOwnPropertyNames(parsed);sample.parsedTruncated=keys.length>32;
             for(const name of keys.slice(0,32)){
@@ -239,7 +280,23 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
           }catch{/* Missing metadata yields only fixed false flags, never an exception body. */}
           return sample;
         });
-        return {shareStage:'VERIFIED',messageSamples};
+        return {shareStage:'VERIFIED',windowRows:frame.rows.length,contentMissingRows,messageSamples};
+      },
+      conversations():NonNullable<CollectionReadDiagnostic['conversationSamples']> {
+        if(!container)return [];
+        return rows.filter(row=>dom.visible(row)&&row.closest(s.dmPanel)===container).slice(0,6).map(row=>{
+          const titles=Array.from(row.querySelectorAll(s.conversationTitle)).filter(node=>node.closest(s.conversationRows)===row);
+          const sample={titleCount:titles.length,titleVisible:titles.some(dom.visible),
+            titleNonEmpty:titles.some(node=>dom.visible(node)&&(node.textContent??'').trim().length>0),
+            nativeConversationPresent:false,securePeerPresent:false,metadataReadable:false};
+          try{
+            const native=dom.data(dom.fiberProps(row,s.conversationFiberDepth),'conversation'),first=dom.data(native,'conversationId'),second=dom.data(native,'id'),
+              secure=dom.data(native,'_toParticipantSecUserId');
+            const id=first??second;sample.nativeConversationPresent=typeof id==='string'&&id.length>0;
+            sample.securePeerPresent=typeof secure==='string'&&secure.length>0;sample.metadataReadable=true;
+          }catch{/* A descriptor failure is only a fixed boolean, never an exception body. */}
+          return sample;
+        });
       },
     };
     const diagnostic:CollectionReadDiagnostic={source:comments?'comments':'dm',containers:containers.length,visibleContainers:visible.length,
@@ -249,7 +306,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       chatInViewport:!comments&&Array.from(document.querySelectorAll(s.chat)).some(probe.inViewport),
       backVisible:!comments&&Array.from(document.querySelectorAll(s.chatBack)).some(dom.visible),
       backInViewport:!comments&&Array.from(document.querySelectorAll(s.chatBack)).some(probe.inViewport),samples:roots.slice(0,6).map(probe.sample)};
-    if(!comments){diagnostic.back=probe.back();Object.assign(diagnostic,probe.messages());}
+    if(!comments){diagnostic.back=probe.back();diagnostic.conversationSamples=probe.conversations();Object.assign(diagnostic,probe.messages());}
     return {events,evidenceId,unsupported,loaded,diagnostic};
   }
   if(channel==='navigate') {
@@ -365,31 +422,14 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     const id = dom.conversationId(conversation);
     dom.check(id === peer!.conversationId && dom.data(conversation,'_toParticipantSecUserId') === peer!.secUid &&
       dom.one(chat,s.chatTitle).textContent?.trim() === peer!.title,'OBSERVATION_CONVERSATION_CHANGED');
-    const mounted=Array.from(chat.querySelectorAll(s.messages)),candidates=new Set<Element>();
-    if(input.dmWindow||channel==='dmScroll') {
-      for(const row of mounted.slice(0,100)) {
-        let node=row.closest(s.messageBox)?.parentElement??row.parentElement;
-        for(let depth=0;node&&chat.contains(node)&&depth<8;depth++,node=node.parentElement) {
-          if(/auto|scroll/.test(getComputedStyle(node).overflowY)&&node.clientHeight>0&&node.scrollHeight>node.clientHeight&&mounted.every(message=>node!.contains(message)))candidates.add(node);
-          if(node===chat)break;
-        }
-      }
-      dom.check(candidates.size<=1,'OBSERVATION_DM_SCROLL_NOT_UNIQUE');
-    }
-    const scroller=Array.from(candidates)[0];
-    if(scroller){
-      const range=Math.max(0,scroller.scrollHeight-scroller.clientHeight);
-      const reverse=scroller.scrollTop<0||getComputedStyle(scroller).flexDirection==='column-reverse';
-      dmViewport={top:scroller.scrollTop,height:scroller.scrollHeight,viewport:scroller.clientHeight,minimum:reverse?-range:0,maximum:reverse?0:range};
-    }
+    const {rows,scroller,viewport}=dom.dmFrame(chat,!!input.peer,!!input.dmWindow||channel==='dmScroll');dmViewport=viewport;
     if(channel==='dmScroll') {
       dom.emptyEditors();
       dom.check(scroller&&dmViewport&&Number.isFinite(input.dmTop),'OBSERVATION_DM_SCROLL_UNAVAILABLE');
       scroller!.scrollTop=Math.max(dmViewport!.minimum,Math.min(dmViewport!.maximum,input.dmTop!));
       return {events,evidenceId,unsupported,loaded,dmViewport:dmViewport!};
     }
-    const clip=(scroller??chat).getBoundingClientRect();
-    const rows = mounted.filter(dom.visible).filter(row=>!input.peer||row.getBoundingClientRect().bottom>Math.max(0,input.dmWindow?clip.top:0)&&row.getBoundingClientRect().top<Math.min(innerHeight,input.dmWindow?clip.bottom:innerHeight)); loaded = rows.length;
+    loaded=rows.length;
     dom.check(rows.length <= 100,'OBSERVATION_WINDOW_TOO_LARGE');
     // Unknown direct peers are bound by the same native conversation and the unique non-self message sender.
     // Do not derive a UID from a nickname or invent one from a local fingerprint.
@@ -407,8 +447,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       for (let node: Element | null = row; node && box!.contains(node); node = node.parentElement)
         if (node.classList.contains(s.fromMeClass)) fromMe = true;
       dom.check(fromMe === (sender === m.self.uid),'OBSERVATION_DIRECTION_CONFLICT');
-      const texts=Array.from(row.querySelectorAll(s.messageText)).filter(node=>node.closest(s.messages)===row);
-      const media=Array.from(row.querySelectorAll('img,video,audio')).filter(node=>node.closest(s.messages)===row&&dom.visible(node));
+      const {texts,media,missing}=dom.dmContent(row);
       let text:string,contentType:InboundEvent['contentType'];
       if(media.length) {
         const types=new Set(media.map(node=>node.tagName));
@@ -418,7 +457,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
           contentType==='AUDIO'?'[音频消息，需人工查看]':'[含媒体的消息，需人工查看]';
         unsupported++;
       }else {
-        dom.check(texts.length===1&&dom.visible(texts[0]!)&&(texts[0]!.textContent??'').length>0,'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
+        dom.check(!missing,'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
         text=texts[0]!.textContent??'';
         const parsed=dom.data(message,'_parsedContent');
         dom.check(text===dom.data(parsed,'text'),'OBSERVATION_MESSAGE_TEXT_CONFLICT');

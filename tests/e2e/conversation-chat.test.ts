@@ -204,14 +204,16 @@ test('a group projection change invalidates a revoked confirmed bubble in an exp
   }finally{await f.close();}
 });
 
-test('an actual weak image message shows its preview and inline composer without repeating the placeholder or enabling send at minimum size',async()=>{
+test('an actual weak image message shows its preview and human composer while AI stays disabled at minimum size',async()=>{
   const f=await setup({width:900,height:640},true);try{
     await f.page.locator('.task').filter({hasText:'[图片或表情消息，需人工查看]'}).click();await editor(f.page).waitFor();
     const image=f.page.getByRole('log').getByRole('img',{name:'合成图片'});await image.waitFor();
     expect(await image.evaluate(node=>(node as HTMLImageElement).naturalWidth)).toBe(96);
     expect(await f.page.getByRole('log').getByText('[图片或表情消息，需人工查看]',{exact:true}).count()).toBe(0);
     await editor(f.page).fill('看图后保留的人工草稿');await expect.poll(()=>f.service.authority.draftFor(f.a)?.text).toBe('看图后保留的人工草稿');
-    const send=f.page.getByRole('button',{name:'发送',exact:true});expect(await send.isDisabled()).toBe(true);
+    const send=f.page.getByRole('button',{name:'发送',exact:true});await expect.poll(()=>send.isEnabled()).toBe(true);
+    expect(f.service.authority.draftFor(f.a)?.origin).toBe('HUMAN_TYPED');
+    expect(await f.page.getByRole('button',{name:'生成 AI 建议',exact:true}).isDisabled()).toBe(true);
     const bounds=await send.boundingBox();expect(bounds!.y+bounds!.height).toBeLessThanOrEqual(640);
     expect(await f.page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     await image.scrollIntoViewIfNeeded();

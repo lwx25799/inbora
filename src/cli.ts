@@ -19,7 +19,6 @@ import { SendCoordinator } from './core/send-coordinator.js';
 import { ManualCommentRetry } from './core/manual-comment-retry.js';
 import { diagnostic } from './observability/audit.js';
 import { caseIds, pruneEvidence, recordEvidence } from './observability/evidence.js';
-import { browserMetrics } from './observability/browser-metrics.js';
 import { ClientService } from './app/service.js';
 import { BrowserService } from './app/browser-service.js';
 import { randomUUID } from 'node:crypto';
@@ -45,12 +44,12 @@ pnpm inbora <command> [id] [options]
   verify-comment DRAFT_ID --real-account --private-access
   pause EVENT_ID | resume EVENT_ID
   review-uncertain              查看未知态（仅人工核对，不提供自动重发）
-  compare-modes --real-account --private-access
+  compare-modes                历史模式比较已停用，保留既有证据
   real-test --case ID --real-account --private-access
   authorize-model --endpoint HTTPS_URL --model NAME
   prune-evidence               按本机配置保留期清理脱敏证据
 
-通用选项：--runtime PATH（默认 %LOCALAPPDATA%\\inbora），--headed（默认），--headless。
+通用选项：--runtime PATH（默认 %LOCALAPPDATA%\\inbora），普通操作默认 --headless；--headed 仅供 login 登录或验证码恢复。
 默认 test:e2e 只访问本地合成页面。真实网页需本次显式声明访问权限。
 观察需已校准映射；私信审批/发送需 dm-reply 或 site-mapping，一级评论回复需 comment-reply 或 site-mapping。帮助和 status 不访问网页。
 schema3请在客户端生成人工/AI草稿；旧draft与独立approve入口在调用模型前拒绝，send-once使用统一服务交互确认。
@@ -141,6 +140,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const known = ['init','status','login','install-mapping','observe','draft','show','edit','approve','reject','send-once','calibrate-client','retry-comment-once','verify-comment',
     'pause','resume','review-uncertain','compare-modes','real-test','authorize-model','prune-evidence'];
   requireSafe(known.includes(command), 'UNKNOWN_COMMAND');
+  requireSafe(!values.headed||command==='login','HEADED_ONLY_FOR_LOGIN');
+  requireSafe(command!=='compare-modes','BROWSER_MODE_COMPARISON_DISABLED');
+  requireSafe(command!=='login'||!values.headless,'LOGIN_REQUIRES_HEADED');
+  const headless=command!=='login';
   const root = runtimeRoot(values.runtime);
   // Dedicated control path: never calls recover() while another worker may own an active intent.
   if (command === 'pause') {
@@ -226,7 +229,6 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     }
     realAccess();
     if (command === 'login') {
-      requireSafe(!values.headless, 'LOGIN_REQUIRES_HEADED');
       browser = await BrowserProfileOwner.launch(join(root, 'profile'), false); await browser.open('https://www.douyin.com');
       await ask('请在可见浏览器扫码或处理验证码。完成后按回车关闭并保存专属 Profile（不代表身份核验通过）：');
       print({ profileSaved: true, identityVerified: false, browserVersion: browser.version() }); return;
@@ -234,7 +236,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === 'observe' && ['dm','works'].includes(id ?? '')) {
       const observation = await loadObservationMapping(root);
       if (observation) {
-        browser = await BrowserProfileOwner.launch(join(root,'profile'),values.headless ?? false);
+        browser = await BrowserProfileOwner.launch(join(root,'profile'),headless);
         await browser.open(observation.entryUrl);
         const reader = new ObservedReader(id === 'dm' ? browser.dm : browser.notification,observation);
         const result = await browser.actor.run(async()=>{
@@ -243,7 +245,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
           for (let index = 0; index < count; index++) {
             const batch = id === 'dm' ? await reader.dm(index) : await reader.comments(index);
             const evidenceId = await recordEvidence(join(root,'evidence'),{caseId:id === 'dm'?'D01':'N01',
-              browserVersion:browser!.version(),mode:values.headless?'headless':'headed',taskId:null,action:'OBSERVE',
+              browserVersion:browser!.version(),mode:headless?'headless':'headed',taskId:null,action:'OBSERVE',
               result:'UNVERIFIED',source:'AUTOMATED_REAL',diagnostics:['READ_ONLY_CAPTURE_COMPLETE',
                 id === 'dm'?'PERMITTED_CONVERSATION':'ALLOWED_WORK_FALLBACK','SEND_UNVERIFIED'],proofDigest:digest(batch)});
             const scope = id === 'dm' ? observation.peers[index]!.conversationId : `work:${observation.works[index]!.id}`;
@@ -267,11 +269,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         const intent=store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(event.id) as {id:string}|undefined;
         requireSafe(intent,'COMMENT_REPLY_INTENT_REQUIRED');
         const boundary=retry?store.commentRetryBoundary(retry.retryId):store.intentBoundary(intent.id);
-        browser=await BrowserProfileOwner.launch(join(root,'profile'),values.headless??false);
+        browser=await BrowserProfileOwner.launch(join(root,'profile'),headless);
         const adapter=new ObservedCommentReply(browser.notification,native);
         try{
           const proof=await browser.actor.run(()=>adapter.verifyExisting(event.payload,store!.draft(id).text,boundary));
-          const evidenceId=await recordEvidence(join(root,'evidence'),{caseId:'C05',browserVersion:browser.version(),mode:values.headless?'headless':'headed',
+          const evidenceId=await recordEvidence(join(root,'evidence'),{caseId:'C05',browserVersion:browser.version(),mode:headless?'headless':'headed',
             taskId:event.id,action:'OBSERVE',result:proof?'PASS':'BLOCKED',source:'AUTOMATED_REAL',
             diagnostics:['AUTOMATED_READ_ONLY_RECHECK',proof?'BOUND_PROOF':'NO_BOUND_PROOF','ORIGINAL_RECEIPTS_RETAINED'],proofDigest:proof?digest(proof):null});
           print({verified:!!proof,evidenceId,originalReceiptsRetained:true});
@@ -281,46 +283,20 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       if(event.payload.channel==='DIRECT_MESSAGE'){
         const native=await loadDmReplyMapping(root);
         if(native){
-          browser=await BrowserProfileOwner.launch(join(root,'profile'),values.headless??false);await browser.open(native.observation.entryUrl);
-          await replyCommand(command,id,store,browser,new ObservedDmReply(browser.dm,native),root,values.headless??false);return;
+          browser=await BrowserProfileOwner.launch(join(root,'profile'),headless);await browser.open(native.observation.entryUrl);
+          await replyCommand(command,id,store,browser,new ObservedDmReply(browser.dm,native),root,headless);return;
         }
       }else{
         const native=await loadCommentReplyMapping(root);
         if(native){
-          browser=await BrowserProfileOwner.launch(join(root,'profile'),values.headless??false);await browser.open(native.observation.entryUrl);
-          await replyCommand(command,id,store,browser,new ObservedCommentReply(browser.notification,native),root,values.headless??false);return;
+          browser=await BrowserProfileOwner.launch(join(root,'profile'),headless);await browser.open(native.observation.entryUrl);
+          await replyCommand(command,id,store,browser,new ObservedCommentReply(browser.notification,native),root,headless);return;
         }
       }
     }
     requireSafe(command!=='retry-comment-once','NATIVE_COMMENT_REPLY_MAPPING_REQUIRED');
     const mapping = await loadMapping(root);
-    if (command === 'compare-modes') {
-      const results: unknown[] = [];
-      for (const headless of [false, true]) {
-        const start = performance.now(); const cpu = process.cpuUsage();
-        browser = await BrowserProfileOwner.launch(join(root, 'profile'), headless);
-        try {
-          await browser.open(mapping.origin);
-          const notification = new DomAdapter(browser.notification, 'COMMENT_NOTIFICATION', mapping);
-          const dm = new DomAdapter(browser.dm, 'DIRECT_MESSAGE', mapping);
-          await browser.actor.run(async () => {
-            await notification.observeNotifications();
-            for (const conversation of await dm.conversations()) await dm.observeDm(conversation.id, conversation.peerId);
-          });
-          const evidenceId = await recordEvidence(join(root, 'evidence'), { caseId: 'H01', browserVersion: browser.version(),
-            mode: headless ? 'headless' : 'headed', taskId: null, action: 'MODE_COMPARE', result: 'PASS', source: 'AUTOMATED_REAL',
-            diagnostics: ['READ_ONLY_CHANNELS_PASSED_SEND_UNVERIFIED'], proofDigest: digest(mapping) });
-          results.push({ headless, evidenceId, readOnly: 'PASS', sends: 'UNVERIFIED', elapsedMs: Math.round(performance.now()-start),
-            nodeRssBytes: process.memoryUsage().rss, nodeCpuMicros: process.cpuUsage(cpu), browser:await browserMetrics() });
-        } catch (error) {
-          const evidenceId = await recordEvidence(join(root, 'evidence'), { caseId: 'H01', browserVersion: browser.version(),
-            mode: headless ? 'headless' : 'headed', taskId: null, action: 'MODE_COMPARE', result: 'BLOCKED', source: 'AUTOMATED_REAL',
-            diagnostics: [safeCode(error)], proofDigest: null }); results.push({ headless, evidenceId, result: 'BLOCKED' });
-        } finally { await browser.close(); browser = undefined; }
-      }
-      print({ results, conclusion: 'SEND_COMPARISON_REQUIRES_INDIVIDUAL_APPROVAL' }); return;
-    }
-    browser = await BrowserProfileOwner.launch(join(root, 'profile'), values.headless ?? false); await browser.open(mapping.origin);
+    browser = await BrowserProfileOwner.launch(join(root, 'profile'),headless); await browser.open(mapping.origin);
     const notification = new DomAdapter(browser.notification, 'COMMENT_NOTIFICATION', mapping);
     const dm = new DomAdapter(browser.dm, 'DIRECT_MESSAGE', mapping);
     if (command === 'observe') {
@@ -343,13 +319,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       const answer = await ask(`按 tests/manual/real-account-checklist.md 执行 ${values.case}。输入 PASS / FAIL / BLOCKED；此记录为人工声明，不能替代自动收据：`);
       requireSafe(['PASS','FAIL','BLOCKED'].includes(answer), 'INVALID_RESULT');
       const evidenceId = await recordEvidence(join(root, 'evidence'), { caseId: values.case as typeof caseIds[number], browserVersion: browser.version(),
-        mode: values.headless ? 'headless' : 'headed', taskId: null, action: 'MANUAL_CHECK', result: answer as 'PASS'|'FAIL'|'BLOCKED',
+        mode:headless ? 'headless' : 'headed', taskId: null, action: 'MANUAL_CHECK', result: answer as 'PASS'|'FAIL'|'BLOCKED',
         source: 'MANUAL_ATTESTATION', diagnostics: ['CHECKLIST_MANUAL_ATTESTATION'], proofDigest: digest(mapping) });
       print({ evidenceId, source: 'MANUAL_ATTESTATION' }); return;
     }
     requireSafe(id && ['approve','send-once'].includes(command), 'DRAFT_ID_REQUIRED');
     const event=store.event(store.draft(id).eventId);
-    await replyCommand(command,id,store,browser,event.payload.channel==='DIRECT_MESSAGE'?dm:notification,root,values.headless??false);
+    await replyCommand(command,id,store,browser,event.payload.channel==='DIRECT_MESSAGE'?dm:notification,root,headless);
   } finally {
     try { if (browser) await browser.close(); }
     finally { try { if (store) store.close(); } finally { await lock.close(); } }

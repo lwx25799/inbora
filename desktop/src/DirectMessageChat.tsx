@@ -2,16 +2,15 @@ import {useEffect,useLayoutEffect,useRef,useState} from 'react';
 import {request,reasons,type Thread,type TimelineItem} from './api';
 import {time} from './presentation';
 import {ReplyComposer} from './ReplyComposer';
-import {MessageAttachments} from './MessageAttachments';
+import {MessageAttachments,isMediaPlaceholder} from './MessageAttachments';
 import {ShareLink,validShare} from './ShareLink';
 import type {ReplyViewProps} from './reply-view-types';
 import './chat.css';
 
 type Timeline=NonNullable<Thread['timeline']>;
 const empty:Timeline={items:[],pageSize:30,hasMore:false,before:null};
-const mediaPlaceholders={IMAGE:'[图片或表情消息，需人工查看]',VIDEO:'[视频消息，需人工查看]',AUDIO:'[音频消息，需人工查看]',MIXED:'[含媒体的消息，需人工查看]'};
 const imageReplacesPlaceholder=(message:TimelineItem)=>message.observationIssue==='DM_CONTENT_UNVERIFIED'&&message.contentType&&
-  message.text===mediaPlaceholders[message.contentType]&&(!!validShare(message.share)||message.attachments.some(item=>item.state==='READY'));
+  isMediaPlaceholder(message.text,message.contentType)&&(!!validShare(message.share)||message.attachments.length>0);
 const compare=(a:TimelineItem,b:TimelineItem)=>(Date.parse(a.occurredAt??'')||0)-(Date.parse(b.occurredAt??'')||0)||a.id.localeCompare(b.id);
 function merge(prior:TimelineItem[],next:TimelineItem[]){
   const incoming=new Map(next.map(item=>[item.id,item]));

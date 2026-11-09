@@ -2,6 +2,10 @@ import {useEffect,useState} from 'react';
 import {request,type TimelineItem} from './api';
 import type {MessagePreviewData} from '../../src/storage/message-previews.js';
 
+const mediaPlaceholders={IMAGE:'[图片或表情消息，需人工查看]',VIDEO:'[视频消息，需人工查看]',AUDIO:'[音频消息，需人工查看]',MIXED:'[含媒体的消息，需人工查看]'};
+export const isMediaPlaceholder=(text:string,contentType?:TimelineItem['contentType'])=>contentType
+  ?text===mediaPlaceholders[contentType]:Object.values(mediaPlaceholders).includes(text);
+
 export function MessageAttachments({message}:{message:Pick<TimelineItem,'eventId'|'attachments'>}){
   const [images,setImages]=useState<Record<string,string>>({});
   const [failed,setFailed]=useState<Record<string,boolean>>({});
@@ -20,10 +24,12 @@ export function MessageAttachments({message}:{message:Pick<TimelineItem,'eventId
     }
     return()=>{cancelled=true;};
   },[message.eventId,identity]);
-  return <div className="message-attachments">{attachments.slice(0,4).map((attachment,index)=><figure key={attachment.previewId??index}>
+  const ready=attachments.slice(0,4).filter(attachment=>attachment.state==='READY'&&attachment.previewId&&!failed[attachment.previewId]);
+  const unavailable=attachments.slice(0,4).some(attachment=>attachment.state!=='READY'||!attachment.previewId||failed[attachment.previewId]);
+  return <div className="message-attachments">{ready.map((attachment,index)=><figure key={attachment.previewId??index}>
     {attachment.previewId&&images[attachment.previewId]
       ?<img src={images[attachment.previewId]} alt={attachment.label||'私信图片预览'}/>
-      :<span className="attachment-unavailable">{attachment.state==='READY'&&attachment.previewId&&!failed[attachment.previewId]?'正在读取图片预览':'图片预览暂不可用'}</span>}
+      :<span className="attachment-loading">正在读取图片预览</span>}
     {attachment.label&&<figcaption>{attachment.label}</figcaption>}
-  </figure>)}</div>;
+  </figure>)}{unavailable&&<span className="attachment-unavailable">消息预览暂不可用</span>}</div>;
 }

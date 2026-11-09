@@ -24,7 +24,7 @@ async function fixture(){
 test('an in-flight actual BrowserService observation cannot replace CLOSED after explicit close',async()=>{
   const f=await fixture(),read=gate(),entered=gate();
   const observe=vi.spyOn(DomAdapter.prototype,'observeNotifications').mockImplementation(async()=>{entered.release();await read.promise;return{events:[],evidenceId:'synthetic-only',loaded:0};});
-  const browser=BrowserService.adopt(f.root,f.owner,'headed');
+  const browser=BrowserService.adopt(f.root,f.owner,'headless');
   let work:Promise<void>|undefined;
   try{
     work=browser.observe(f.store,'notifications');const outcome=work.catch(error=>error);await entered.promise;

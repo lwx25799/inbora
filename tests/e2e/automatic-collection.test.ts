@@ -96,12 +96,16 @@ test('a failed native return after successful DM collection retains its read wat
     const diagnostics=()=>readdir(join(root,'evidence')).then(names=>names.filter(name=>name.startsWith('collection-read-')));
     expect(await diagnostics()).toHaveLength(1);
     const diagnostic=JSON.parse(await readFile(join(root,'evidence',(await diagnostics())[0]!),'utf8'));
-    expect(diagnostic).toMatchObject({code,report:{source:'dm',chatVisible:true,chatInViewport:true,backVisible:true,backInViewport:true}});
+    expect(diagnostic).toMatchObject({phase:'ADVANCE',code,report:{source:'dm',chatVisible:true,chatInViewport:true,backVisible:true,backInViewport:true}});
     for(const privateValue of ['conv-a','peer-sec','controlled-1','controlled-2','controlled-3','owner text'])
       expect(JSON.stringify(diagnostic)).not.toContain(privateValue);
-    // The next LIST recovery failure must retain the first diagnostic and the completed thread read.
+    // A different LIST stage replaces the fixed latest report, preserving the completed thread read.
     await expect(collector.collect('dm',signal)).rejects.toMatchObject({code});
     expect(await diagnostics()).toHaveLength(1);
+    const listDiagnostic=JSON.parse(await readFile(join(root,'evidence',(await diagnostics())[0]!),'utf8'));
+    expect(listDiagnostic).toMatchObject({phase:'LIST',code});
+    await expect(collector.collect('dm',signal)).rejects.toMatchObject({code});
+    expect(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='COLLECTION_READ_DIAGNOSTIC'").get()).toEqual({n:2});
     expect(store.db.prepare("SELECT last_read FROM discovered_conversations WHERE id='conv-a'").get()).toEqual({last_read:now});
     expect(store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='DM_READ_DEFERRED'").get()).toEqual({n:0});
     expect(store.db.prepare('SELECT count(*) AS n FROM model_calls').get()).toEqual({n:0});

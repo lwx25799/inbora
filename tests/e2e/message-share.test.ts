@@ -126,3 +126,44 @@ test.each([{awemeType:0,isSlides:false,route:'video'},{awemeType:68,isSlides:tru
       expect(screenshot).not.toHaveBeenCalled();expect(f.event.contentType).toBe('IMAGE');
     }finally{await f.close();}
   });
+
+test.each([{awemeType:0},{awemeType:55,isSlides:false},{awemeType:55}])(
+  'known native video type $awemeType supports its optional slideshow flag ($isSlides)',async spec=>{
+    const f=await setup([]);
+    try{
+      await f.owner.dm.evaluate(spec=>{
+        const parsed=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message._parsedContent;
+        Object.assign(parsed,{aweType:800,awemeType:spec.awemeType});
+        if('isSlides' in spec)parsed.is_slides=spec.isSlides;else delete parsed.is_slides;
+      },spec);
+      const screenshot=vi.spyOn(f.owner.dm,'screenshot');await saveMessagePreviews(f.owner.dm,f.mapping,f.batch,f.root,f.signal);
+      expect(new MessageShareStore(f.root).read(f.event,'100')).toEqual({kind:'DOUYIN_WORK',url:'https://www.douyin.com/video/123456',workId:'123456'});
+      expect(screenshot).not.toHaveBeenCalled();expect(f.event.contentType).toBe('IMAGE');
+    }finally{await f.close();}
+  });
+
+test.each([{awemeType:999},{awemeType:999,isSlides:false},{awemeType:0,isSlides:null},{awemeType:55,isSlides:'false'}])(
+  'unknown native video kinds and explicit invalid slideshow metadata remain unavailable ($awemeType/$isSlides)',async spec=>{
+    const f=await setup([]);
+    try{
+      await f.owner.dm.evaluate(spec=>{
+        const parsed=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message._parsedContent;
+        parsed.awemeType=spec.awemeType;if('isSlides' in spec)parsed.is_slides=spec.isSlides;else delete parsed.is_slides;
+      },spec);
+      const screenshot=vi.spyOn(f.owner.dm,'screenshot');await saveMessagePreviews(f.owner.dm,f.mapping,f.batch,f.root,f.signal);
+      expect(new MessageShareStore(f.root).read(f.event,'100')).toBeNull();expect(screenshot).not.toHaveBeenCalled();
+    }finally{await f.close();}
+  });
+
+test.each([true,false])('an invalid optional flag only blocks native inference, preserving an independently exact owned href (%s)',async hasHref=>{
+  const f=await setup(hasHref?['https://www.douyin.com/video/123456']:[]);
+  try{
+    await f.owner.dm.evaluate(()=>{
+      const parsed=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message._parsedContent;
+      Object.assign(parsed,{awemeType:55,is_slides:'false'});
+    });
+    const screenshot=vi.spyOn(f.owner.dm,'screenshot');await saveMessagePreviews(f.owner.dm,f.mapping,f.batch,f.root,f.signal);
+    expect(new MessageShareStore(f.root).read(f.event,'100')).toEqual(hasHref?{kind:'DOUYIN_WORK',url:'https://www.douyin.com/video/123456',workId:'123456'}:null);
+    expect(screenshot).not.toHaveBeenCalled();
+  }finally{await f.close();}
+});

@@ -11,6 +11,7 @@ export class VerificationScheduler {
   private abort:AbortController|undefined;
   private closed=false;
   private activeDeadline=0;
+  private suspended=false;
   constructor(readonly data:AutomationStore,
     private readonly verify:(eventId:string,signal:AbortSignal)=>Promise<{verified:boolean;evidenceId:string;nativeIdDigest?:string}>,
     private readonly updated:()=>void=()=>{},
@@ -31,7 +32,7 @@ export class VerificationScheduler {
   }
   async tick():Promise<void> {
     if(this.running){if(this.data.now()>=this.activeDeadline)this.abort?.abort();return;}
-    if(this.closed||this.data.state().emergencyStopped)return;
+    if(this.closed||this.suspended||this.data.state().emergencyStopped)return;
     this.data.store.db.prepare("UPDATE verification_jobs SET state='NOT_NEEDED' WHERE state='PENDING' AND intent_id IN (SELECT id FROM send_intents WHERE status='CONFIRMED')").run();
     this.data.store.db.prepare("UPDATE verification_jobs SET state='REVIEW',last_error='VERIFICATION_DEADLINE' WHERE state='PENDING' AND (deadline<=? OR attempts>=2)").run(this.data.now());
     const job=this.data.store.db.prepare("SELECT j.* FROM verification_jobs j JOIN send_intents i ON i.id=j.intent_id WHERE j.state='PENDING' AND j.next_at<=? AND i.status='UNCERTAIN' ORDER BY j.next_at LIMIT 1").get(this.data.now()) as VerificationJob|undefined;
@@ -79,5 +80,6 @@ export class VerificationScheduler {
     this.running=task;await task;
   }
   cancel():void {this.abort?.abort();}
+  suspend(value:boolean):void {this.suspended=value;if(value)this.cancel();}
   async close():Promise<void> {this.closed=true;clearInterval(this.timer);this.cancel();await this.running;}
 }

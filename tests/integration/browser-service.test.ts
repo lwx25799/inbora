@@ -43,7 +43,7 @@ test("browser launch is single-flight, loads current mapping identity, and relea
   expect(launches).toBe(1);
   expect(browser.identity("DIRECT_MESSAGE")).toMatchObject({
     browserVersion: "synthetic-edge-1",
-    browserMode: "headed",
+    browserMode: "headless",
   });
   owners[0]!.context.emit("close");
   await browser.open();
@@ -58,10 +58,10 @@ test("first login can open the fixed authorized entry without mapping and keeps 
       privateTemp("browser-first-login-"),
       async () => fake.owner,
     );
-  await browser.open("headed");
+  await browser.beginLoginRecovery();
   expect(fake.opened()).toBe("https://www.douyin.com/");
   expect(browser.identity("DIRECT_MESSAGE")).toBeNull();
-  expect(browser.status().state).toBe("OPEN_IDENTITY_UNVERIFIED");
+  expect(browser.status()).toMatchObject({state:'LOGIN_RECOVERY',mode:'headed',loginRecovery:true});
   await browser.close();
 });
 test("changed mapping is reflected in authority identity and malformed mapping fails closed", async () => {

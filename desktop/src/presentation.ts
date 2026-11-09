@@ -11,6 +11,7 @@ export const modes = {
   LIMITED_AUTO: "规则自动回复",
 };
 export function browserState(state:string,stopped=false){
+  if(state==='LOGIN_RECOVERY')return '等待本人登录，完成后自动恢复无头运行';
   if(state==='CLOSED')return stopped?'已关闭（已急停）':'正在自动连接';
   if(state==='STARTING')return '正在启动';
   if(state==='OPEN_LAST_READ_VERIFIED')return '已连接';
