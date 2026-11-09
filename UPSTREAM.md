@@ -1,5 +1,16 @@
 # 来源与许可
 
+## 2026-11-10：douyin-cli 关键链路完整审查与直接复用计划
+
+用户要求审查 [`Yht20927/douyin-cli`](https://github.com/Yht20927/douyin-cli/tree/4073159bea585de6d33a4747a475669440737932)，并明确允许确认可复用的源码直接复制、移植或改造；已同步项目规则。固定SHA仍为 `4073159bea585de6d33a4747a475669440737932`，核对根LICENSE及package声明为MIT（Copyright 2026 Yht20927）。此前下文只覆盖评论增量，本次扩展Bridge、账号、IM、SQLite、ReplyEngine、模型、统计和保留维护。
+
+- 计划直接适配 `lib/reply-engine/prompt-builder.js:100–131` 成功参考/avoid片段、`context-scope.js:39–49` 去重纯函数、`lib/memory/llm-usage.js:56–82` 及 `failures.js:76–102` 聚合查询；接本项目既有准确目标上下文、model_calls及固定枚举，不另建全局语料或重复账本。复制时保留MIT许可及来源；本轮尚未复制到业务源码。
+- `lib/shared/parseResponse.js:23–64` 分类分支与合成用例可复用，但须先改安全ID与固定原因码；上游reviver无法恢复已损精度的19位ID。`get.js:161–166`混排提前break已实际复现漏后页；不替换本应用已实现的晚到、根子独立分页与持久续查。
+- `lib/server/router.js:320–364` 的WS超时转轮询可重复派发写表达式；`scripts/douyin.user.js:63–93`强制探测为空可保留旧账号缓存；三项本机纯合成probe验证ID失真、旧身份缓存与WS重投。当前油猴默认HTTP，不能把WS支持路径缺陷泛化为默认HTTP必重发。另有WS握手无token/origin校验、静态token、任意eval与公开账号状态等静态发现，原样Bridge不进入可信控制链。
+- 本地合成100/1k/10k事件、5次热运行中位数已量化全库查询与N+1成本；优先优化四条热读取、查询索引、已有Tauri事件，再按需适配上游模块。仅合成结论，不触真实库/Profile、GUI、模型或发送；未安装上游依赖或运行上游全套测试。
+
+详细候选/文件/固定链接、采用与不采用原因、实测基准、分批变更、验证及回滚见 [douyin-cli 源码审查与优化计划](docs/DOUYIN-CLI-OPTIMIZATION-PLAN.zh-CN.md)。只读检出保留于忽略的 `.local/douyin-cli`；最小复现及脱敏基准留于 `.local/tests/source-audit-20261110`。历史“未复制/未采用”记录保留原时点含义，不构成当前禁止源码复用的规则。
+
 ## 2026-11-10：按用户要求追加核对评论增量候选
 
 - MIT [`Yht20927/douyin-cli`](https://github.com/Yht20927/douyin-cli/tree/4073159bea585de6d33a4747a475669440737932)，固定`4073159bea585de6d33a4747a475669440737932`：读`lib/commands/get.js:26–76,107–119,150–194`、`lib/memory/comments.js:77–95`和`scripts/douyin.user.js:1083–1089`，核对其LICENSE。采用原生cid去重、原评论与子评论分别分页、每批持久保存的结论。它的`--new`在同批出现较旧评论时提前停止，并不证明后页没有晚到新评论；当前混排场景不照搬该提前结束。油猴bridge直接接口及其并行请求不引入现有客户端；既有单账号队列、正常网页读取及意图账本继续使用。
