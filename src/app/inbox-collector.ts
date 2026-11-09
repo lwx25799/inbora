@@ -20,6 +20,7 @@ import {dmLatestSchema,dmWindowCoverage,latestDmWindow,overlapsCompletedDm} from
 import {dmActivitySchema,readDmActivity} from './dm-activity.js';
 import {previewRetryFields,preparePreviewRetry,finishPreviewNormalTurn} from './preview-retry.js';
 import {commentThreadsSchema,collectCommentThread} from './comment-thread-collection.js';
+import {qualifyLateArrivals} from './late-arrival-qualification.js';
 
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
@@ -134,6 +135,7 @@ export class InboxCollector {
       }
       this.data.store.observe(source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION',scope,batch.events.map(e=>({...e,evidenceId:evidence})),
         this.mapping.self.uid,evidence,new Date(this.data.now()).toISOString(),this.data.state().startedAt);
+      qualifyLateArrivals(this.data,{source,scope,ownId:this.mapping.self.uid,workIds:this.mapping.works.map(work=>work.id),events:batch.events,evidence,signal});
       if(source==='dm')new ChatMessageStore(this.data.store).observe(batch.events,this.mapping.self.uid,this.data.state().startedAt,this.data.now());
       if(displayChanged)this.data.store.audit('MESSAGE_DISPLAY_CHANGED',digest(['account_001','dm:'+scope]));
     }).immediate();
