@@ -41,7 +41,7 @@ export class BrowserService {
   private epoch = 0;
   private collector: InboxCollector | undefined;
   private collectorMapping = "";
-  private previewHint:{ownId:string;conversationId:string}|undefined;
+  private previewHint:{ownId:string;conversationId:string;eventId?:string}|undefined;
   private recoveringLogin=false;
   private autoFinishLogin=true;
   private loginGeneration=0;
@@ -470,11 +470,11 @@ export class BrowserService {
     if(!this.collector||this.collectorMapping!==key) {
       this.collector?.dispose();this.collector=new InboxCollector(owner,mapping,data,this.root,this.mode);this.collectorMapping=key;
     }
-    if(source==='dm'&&this.previewHint){const hint=this.previewHint;this.previewHint=undefined;this.collector.prioritize(hint.ownId,hint.conversationId);}
+    if(source==='dm'&&this.previewHint){const hint=this.previewHint;this.previewHint=undefined;this.collector.prioritize(hint.ownId,hint.conversationId,hint.eventId,'SELECTION');}
     await this.collector.collect(source,signal);
     requireSafe(this.owner===owner,'BROWSER_CLOSED');
   }
-  prioritizePreview(data:AutomationStore,event:InboundEvent):void {
+  prioritizePreview(data:AutomationStore,event:InboundEvent,eventId?:string):void {
     const state=data.state(),collection=state.collection;
     if(state.emergencyStopped||!collection?.inbox||event.channel!=='DIRECT_MESSAGE'||!event.conversationId||
       event.observationIssue!=='DM_CONTENT_UNVERIFIED'||!['IMAGE','MIXED'].includes(event.contentType??''))return;
@@ -482,8 +482,8 @@ export class BrowserService {
     const peer=data.store.db.prepare('SELECT own_id FROM discovered_conversations WHERE id=?').get(event.conversationId) as {own_id:string}|undefined;
     if(own?.own_id!==collection.ownId||peer?.own_id!==collection.ownId||
       new MessagePreviewStore(this.root).list(event,collection.ownId).some(item=>item.state==='READY'))return;
-    if(this.collector)this.collector.prioritize(collection.ownId,event.conversationId);
-    else this.previewHint={ownId:collection.ownId,conversationId:event.conversationId};
+    if(this.collector)this.collector.prioritize(collection.ownId,event.conversationId,eventId,'SELECTION');
+    else this.previewHint={ownId:collection.ownId,conversationId:event.conversationId,...(eventId?{eventId}:{})};
   }
   async verifyExisting(
     store: EventStore,

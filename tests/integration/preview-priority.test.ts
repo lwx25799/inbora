@@ -19,14 +19,14 @@ test('only explicit selection requests a bounded preview hint, with enabled scop
   const event=candidate({text:'[图片或表情消息，需人工查看]',contentType:'IMAGE',observationIssue:'DM_CONTENT_UNVERIFIED'});
   store.observe(event.channel,event.conversationId!,[event],'own-1','synthetic-media');const eventId=store.events()[0]!.id;
   const browser=new BrowserService(root),service=new ClientService(store,browser);await service.loadSettings();
-  const data=new AutomationStore(store),token=service.authority.issueSession(),hints:{ownId:string;conversationId:string}[]=[];
-  Object.assign(browser,{collector:{prioritize:(ownId:string,conversationId:string)=>{hints.push({ownId,conversationId});return true;}}});
+  const data=new AutomationStore(store),token=service.authority.issueSession(),hints:{ownId:string;conversationId:string;eventId:string|undefined;trigger:string|undefined}[]=[];
+  Object.assign(browser,{collector:{prioritize:(ownId:string,conversationId:string,eventId?:string,trigger?:string)=>{hints.push({ownId,conversationId,eventId,trigger});return true;}}});
   data.configureCollection({ownId:'own-1',comments:false,inbox:true,commentIntervalMs:30000,dmIntervalMs:15000});
   store.db.prepare('INSERT INTO discovered_conversations VALUES(?,?,?,?,?,?,?,0)').run(event.conversationId,'own-1','peer-1','peer-sec','Fixture peer',Date.now(),Date.now());
   const select=()=>service.dispatch(token,{command:'selectTarget',eventId,selectionId:randomUUID()});
   try{
     await service.dispatch(token,{command:'getThread',eventId});await service.dispatch(token,{command:'getThread',eventId});
-    expect(hints).toEqual([]);await select();expect(hints).toEqual([{ownId:'own-1',conversationId:event.conversationId}]);
+    expect(hints).toEqual([]);await select();expect(hints).toEqual([{ownId:'own-1',conversationId:event.conversationId,eventId,trigger:'SELECTION'}]);
     data.stop(true);await select();expect(hints).toHaveLength(1);data.stop(false);
     data.configureCollection({...data.state().collection!,inbox:false});await select();expect(hints).toHaveLength(1);
     data.configureCollection({...data.state().collection!,inbox:true});

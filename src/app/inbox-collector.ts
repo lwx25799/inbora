@@ -23,6 +23,7 @@ import {previewRetryFields,preparePreviewRetry,finishPreviewNormalTurn} from './
 import {commentThreadsSchema,collectCommentThread} from './comment-thread-collection.js';
 import {qualifyLateArrivals} from './late-arrival-qualification.js';
 import {retainStoredDmMedia} from './dm-media-representation.js';
+import {locatePreviewTarget,type PreviewTargetResult} from './preview-target.js';
 import {recordCommentWindow,type CommentWindowRead} from '../observability/comment-window-diagnostics.js';
 import {CommentListDiagnostics} from '../adapters/comment-list-diagnostics.js';
 
@@ -48,7 +49,7 @@ type DiagnosticPhase='LIST'|'THREAD'|'ADVANCE'|'HINT';
 export class InboxCollector {
   private discovery: OwnWorksDiscovery;
   private diagnosed=new Set<string>();
-  private priority:string|undefined;
+  private priority:{conversationId:string;eventId?:string;trigger:'AUTOMATIC'|'SELECTION'}|undefined;
   private lastPriority:{id:string;at:number}|undefined;
   private priorityNeedsNormal=false;
   private disposed=false;
@@ -70,7 +71,7 @@ export class InboxCollector {
       await (source==='works'?this.owner.notification:this.owner.dm).bringToFront();
       this.check(source,signal);
       if(source==='dm'){
-        if(preparePreviewRetry(this.data,this.root,!this.priority&&!this.priorityNeedsNormal,id=>this.prioritize(this.mapping.self.uid,id)))this.priorityNeedsNormal=true;
+        if(preparePreviewRetry(this.data,this.root,!this.priority&&!this.priorityNeedsNormal,(id,eventId)=>this.prioritize(this.mapping.self.uid,id,eventId,'AUTOMATIC')))this.priorityNeedsNormal=true;
         if(this.priority&&!this.priorityNeedsNormal)await this.previewPriority(signal);
         else{try{await this.dm(signal);}finally{
           if(!signal.aborted&&!this.disposed){this.priorityNeedsNormal=false;finishPreviewNormalTurn(this.data);}
@@ -81,7 +82,7 @@ export class InboxCollector {
       }
     },'background');
   }
-  prioritize(ownId:string,conversationId:string):boolean {
+  prioritize(ownId:string,conversationId:string,eventId?:string,trigger:'AUTOMATIC'|'SELECTION'='SELECTION'):boolean {
     const state=this.data.state();
     if(this.disposed||state.emergencyStopped||!state.collection?.inbox||state.collection.ownId!==ownId||ownId!==this.mapping.self.uid||
       this.lastPriority?.id===conversationId&&this.data.now()-this.lastPriority.at<objectRetryMs)return false;
@@ -90,10 +91,16 @@ export class InboxCollector {
     const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
     if(own?.own_id!==ownId||peer?.own_id!==ownId||!peer.sec_uid||cursor.deferred.some(item=>item.id===conversationId&&item.until>this.data.now()))return false;
-    this.priority=conversationId;return true;
+    if(eventId){
+      let event;try{event=this.data.store.event(eventId).payload;}catch{return false;}
+      if(event.accountId!=='account_001'||event.channel!=='DIRECT_MESSAGE'||event.kind!=='DM'||event.direction!=='INCOMING'||
+        event.conversationId!==conversationId||!event.actorId||event.actorId===ownId||!event.platformEventId||
+        !/^[1-9]\d{0,63}$/u.test(event.platformEventId)||!event.occurredAt)return false;
+    }
+    this.priority={conversationId,...(eventId?{eventId}:{}),trigger};return true;
   }
   private async previewPriority(signal:AbortSignal):Promise<void> {
-    const id=this.priority!;this.priority=undefined;this.priorityNeedsNormal=true;this.lastPriority={id,at:this.data.now()};
+    const priority=this.priority!,id=priority.conversationId;this.priority=undefined;this.priorityNeedsNormal=true;this.lastPriority={id,at:this.data.now()};
     this.check('dm',signal);
     const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
@@ -103,13 +110,23 @@ export class InboxCollector {
     requireSafe(current,'OBSERVATION_CONVERSATION_CHANGED');
     const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal),peer={uid:current.uid,secUid:current.sec_uid,title:current.title,conversationId:id};
     let top:number|undefined,canRestore=false,restoring=false;
+    let targetResult:PreviewTargetResult={found:false,windows:0,persisted:0,reason:'INTERRUPTED'};
     try{
       top=(await reader.conversations()).scroll?.top;canRestore=true;this.check('dm',signal);
       const messages=await reader.dmWindow(peer,undefined,true);this.check('dm',signal);
-      await this.persist('dm',id,messages,signal,peer);
+      if(priority.eventId){
+        const target=this.data.store.event(priority.eventId).payload;
+        const anchors=[...(cursor.sweep?[cursor.sweep]:[]),...cursor.parked].filter(item=>item.peer.conversationId===id&&item.anchor)
+          .map(item=>({...item.anchor!,phase:item.phase}));
+        await locatePreviewTarget({reader,peer,target,initial:messages,anchors,
+          check:()=>this.check('dm',signal),persist:batch=>this.persist('dm',id,batch,signal,peer),
+          record:result=>{targetResult=result;}});
+      }else await this.persist('dm',id,messages,signal,peer);
       this.check('dm',signal);restoring=true;await reader.conversations(undefined,top);
     }catch(error){
       const code=error instanceof Blocked?error.code:'DM_THREAD_READ_FAILED';
+      if(!targetResult.windows)targetResult.reason=signal.aborted||code==='COLLECTION_CANCELLED'||code==='OBSERVATION_CANCELLED'?'CANCELLED':
+        collectionStops.has(code)?'IDENTITY_CHANGED':'INTERRUPTED';
       if(collectionStops.has(code)||code==='BROWSER_CLOSED'||signal.aborted||this.disposed)throw error;
       this.check('dm',signal);
       // Preserve the complete normal rotation/checkpoints; only the failed object's existing cooldown changes.
@@ -118,6 +135,8 @@ export class InboxCollector {
       await this.diagnose(reader,'dm',code,signal,peer,'HINT');
       if(canRestore&&!restoring)try{await reader.conversations(undefined,top);}catch{/* No second return click if restoration itself failed. */}
       throw new DeferredObjectRead(code);
+    }finally{
+      if(priority.eventId){const {reason,...counts}=targetResult;this.data.store.audit('MESSAGE_PREVIEW_TARGET_ATTEMPT_'+priority.trigger+'_'+reason,priority.eventId,counts);}
     }
   }
   private async persist(source:CollectionSource,scope:string,batch:ObservationBatch,signal:AbortSignal,exactPeer?:DiscoveredPeer,window?:CommentWindowRead):Promise<void> {

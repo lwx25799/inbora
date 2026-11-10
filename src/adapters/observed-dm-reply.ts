@@ -265,7 +265,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
         const inlineText=dom.data(message,'type')===m.textMessageType&&ownedMedia.length>0&&ownedMedia.length<=8&&texts.length===1&&dom.visible(texts[0]!)&&
           ownedMedia.every(node=>node.tagName==='IMG'&&texts[0]!.contains(node))?dom.dmText(texts[0]!,row):null;
         const exactInline=inlineText!==null&&inlineText.length>0&&inlineText===parsedText;
-        const body=exactInline?inlineText:texts.length===1&&dom.visible(texts[0]!)&&!texts[0]!.querySelector('img,video,audio')?texts[0]!.textContent:null;
+        const body=exactInline?inlineText:ownedMedia.length===0&&texts.length===1&&dom.visible(texts[0]!)&&!texts[0]!.querySelector('img,video,audio')?texts[0]!.textContent:null;
         if(body!==null)dom.check(body===parsedText,'NATIVE_REPLY_MESSAGE_TEXT_CONFLICT');
         const pending=dom.flagged(box!,m.pending),failed=dom.flagged(box!,m.failed);
         const status=dom.data(message,'serverStatus'),type=dom.data(message,'type');

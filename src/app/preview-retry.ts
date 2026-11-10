@@ -17,7 +17,7 @@ function save(data:AutomationStore,cursor:ReturnType<typeof load>):void{
 }
 
 /** One bounded exact-event preview retry, sharing the normal actor and yielding its next turn to collection. */
-export function preparePreviewRetry(data:AutomationStore,root:string,canSchedule:boolean,prioritize:(conversationId:string)=>boolean):boolean {
+export function preparePreviewRetry(data:AutomationStore,root:string,canSchedule:boolean,prioritize:(conversationId:string,eventId:string)=>boolean):boolean {
   const cursor=load(data),state=data.state(),ownId=state.collection?.ownId;
   if(state.emergencyStopped||!state.collection?.inbox||!ownId)return cursor.previewRetryNeedsNormal;
   data.requireAccount(ownId);
@@ -42,7 +42,7 @@ export function preparePreviewRetry(data:AutomationStore,root:string,canSchedule
     const latest=data.store.db.prepare(`SELECT COALESCE(max(json_extract(a.detail_redacted,'$.attemptedAt')),0) AS at FROM audit_events a
       JOIN inbound_events e ON e.id=a.entity_id WHERE a.event_type='MESSAGE_PREVIEW_RETRY' AND e.account_id='account_001' AND e.target_key=?`)
       .get('dm:'+retry.conversationId) as {at:number};
-    if(latest.at&&data.now()-latest.at<interval||!prioritize(retry.conversationId))continue;
+    if(latest.at&&data.now()-latest.at<interval||!prioritize(retry.conversationId,retry.eventId))continue;
     retry.attempts++;retry.lastAttempt=data.now();cursor.previewRetryNeedsNormal=true;
     data.store.db.transaction(()=>{data.store.audit('MESSAGE_PREVIEW_RETRY',retry.eventId,{attempt:retry.attempts,attemptedAt:retry.lastAttempt});save(data,cursor);}).immediate();
     return false;

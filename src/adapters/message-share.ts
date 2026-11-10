@@ -260,10 +260,12 @@ export function inspectMessageShare(input:ShareInput):ShareInspection {
       parsedScalars:['text','itemId','aweType','awemeType','is_slides','related_share_video'].map(key=>dom.field(parsed,key).shape),
       related:dom.related(parsed),text:dom.textCalibration(native,parsed,row),modernShare:dom.modernShare(parsed)};
   }catch{/* Shape diagnostics cannot change an exact message's existing share decision. */}
-  const nativeText=dom.field(parsed,'text');
+  const nativeText=dom.field(parsed,'text'),nativeValue=nativeText.value;
+  const nativeUsable=nativeText.shape.type==='STRING'&&typeof nativeValue==='string'&&nativeValue.length<=10_000&&nativeValue.trim().length>0&&
+    !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(nativeValue);
   const measured=calibration?.text;
-  const display=calibration?.nativeMessageKind===7&&measured?.bodyReconstructed&&measured.bodyNonEmpty&&nativeText.shape.type==='STRING'?
-    {displayText:measured.bodyMatchesNative?nativeText.value as string:null}:{};
+  const display=calibration?.nativeMessageKind===7&&measured?.bodyReconstructed&&measured.bodyNonEmpty&&nativeUsable?
+    {displayText:measured.bodyMatchesNative?nativeValue as string:null}:{};
   return {share:nativeItemIdConflict?null:candidate,detected:cardMarkers>0||candidates.size>0||nativeShare,...display,
     diagnostic:{anchors:anchors.length,cardMarkers,nativeItemIdPresent:!!nativeItemId,nativeItemIdConflict,nativeKinds,shareInfo,urlKinds,parsedFields:fields,...(calibration?{calibration}:{})}};
 }
