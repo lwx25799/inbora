@@ -2,6 +2,7 @@ import type {Inbox} from './api';
 import {time} from './presentation';
 import {MessageAttachments,isMediaPlaceholder} from './MessageAttachments';
 import {validShare,sharedWorkLabel} from './ShareLink';
+import {MessageText} from './MessageText';
 import './inbox-channels.css';
 
 interface InboxListProps {
@@ -30,7 +31,7 @@ export function InboxList({inbox,selected,selectedGroup,channel,setChannel,filte
           {item.replyStatus==='REPLIED'?'已回复':'等待回复'}
         </span></div>
         {item.channel!=='DIRECT_MESSAGE'&&(item.commentCount??0)>0&&<small>评论串 · {item.commentCount} 条留言{item.waitingCount?` · ${item.waitingCount} 条待回复`:''}</small>}
-        {(!attachmentPreview||!isMediaPlaceholder(item.preview))&&<p>{share?`分享${sharedWorkLabel(share)} · ${share.url}`:item.preview}</p>}
+        {(!!item.displayText||!attachmentPreview||!isMediaPlaceholder(item.preview))&&<p><MessageText text={item.displayText??(share?`分享${sharedWorkLabel(share)} · ${share.url}`:item.preview)}/></p>}
         {attachmentPreview&&item.previewEventId&&item.attachments?<MessageAttachments message={{eventId:item.previewEventId,attachments:item.attachments.slice(0,1)}}/>:null}
         <small><span className="channel-label">{item.channel==='DIRECT_MESSAGE'?'私信':'评论'}</span> · {time(item.time)}
           {item.channel==='DIRECT_MESSAGE'&&item.messageCount?` · ${item.messageCount} 条入站`:''}</small>

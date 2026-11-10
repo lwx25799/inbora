@@ -1,6 +1,7 @@
 import {useEffect,useRef,useState} from 'react';
 import {request,type Thread} from './api';
 import {time} from './presentation';
+import {MessageText} from './MessageText';
 
 type Context=NonNullable<Thread['commentContext']>;
 type Item=Context['items'][number];
@@ -34,13 +35,13 @@ export function CommentThreadContext({thread,choose}:{thread:Thread;choose:(id:s
     {shown.items.map(message=><article key={message.id} className={message.direction==='OUTGOING'?'outgoing':''}>
       <small>{message.isRoot?'一级根评论':message.direction==='OUTGOING'?'我方已回复':message.payload.actorName||'对方'}
         {message.direction==='INCOMING'&&message.payload.commentId===thread.event.payload.commentId?' · 当前回复目标':''} · {time(message.occurredAt)}</small>
-      <p>{message.text}</p>
+      <p><MessageText text={message.text}/></p>
       {message.direction==='INCOMING'&&!message.historical&&message.eventId!==thread.event.id&&
         <button onClick={()=>choose(message.eventId)}>查看这条评论</button>}
     </article>)}
     {!shown.items.some(item=>item.direction==='INCOMING'&&item.payload.commentId===thread.event.payload.commentId)&&<article>
       <small>当前回复目标 · {thread.event.payload.actorName||'对方'} · {time(thread.event.payload.occurredAt)}</small>
-      <p>{thread.event.payload.text}</p>
+      <p><MessageText text={thread.event.payload.text}/></p>
     </article>}
     {shown.hasMore&&<button disabled={loading} onClick={()=>void older()}>{loading?'正在加载较早回复':'加载较早回复'}</button>}
     {error&&<p role="status" className="hint">{error}</p>}

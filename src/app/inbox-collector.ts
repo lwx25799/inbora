@@ -124,7 +124,8 @@ export class InboxCollector {
     try {
     this.check(source,signal);
     const display=()=>digest(batch.events.filter(event=>event.observationIssue==='DM_CONTENT_UNVERIFIED').map(event=>[
-      event.platformEventId,new MessageShareStore(this.root).read(event,this.mapping.self.uid),new MessagePreviewStore(this.root).list(event,this.mapping.self.uid)]));
+      event.platformEventId,new MessageShareStore(this.root).read(event,this.mapping.self.uid),new MessagePreviewStore(this.root).list(event,this.mapping.self.uid),
+      new MessagePreviewStore(this.root).displayText(event,this.mapping.self.uid)]));
     const beforeDisplay=source==='dm'?display():null;
     if(source==='dm')await saveMessagePreviews(this.owner.dm,this.mapping,batch,this.root,signal,exactPeer);
     const displayChanged=source==='dm'&&beforeDisplay!==display();

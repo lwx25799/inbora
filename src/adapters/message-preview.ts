@@ -347,7 +347,9 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
     if(!peer){diagnostics.increment('skipped','BINDING_MISSING');continue;}
     try{
       const inspected=await page.evaluate(inspectMessageShare,{mapping,event,peer});diagnostics.snapshot.shareInspected++;
-      if(inspected.diagnostic&&diagnostics.snapshot.shareSamples.length<8)diagnostics.snapshot.shareSamples.push(inspected.diagnostic);
+      if(inspected.diagnostic&&diagnostics.snapshot.shareSamples.length<8)diagnostics.snapshot.shareSamples.push({...inspected.diagnostic,eventBinding:eventBinding(event),phase:'SHARE'});
+      if(Object.hasOwn(inspected,'displayText'))try{store.saveDisplayText(event,mapping.self.uid,inspected.displayText??null);}
+      catch{diagnostics.increment('caught','MESSAGE_PREVIEW_DISPLAY_TEXT_WRITE_FAILED');}
       if(inspected.detected){
         if(inspected.share){try{new MessageShareStore(root).save(event,mapping.self.uid,inspected.share);diagnostics.snapshot.shareLinked++;}catch{diagnostics.increment('caught','SHARE_WRITE');}}
         else diagnostics.snapshot.shareDetectedNoLink++;

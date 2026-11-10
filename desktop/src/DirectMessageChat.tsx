@@ -4,6 +4,7 @@ import {time} from './presentation';
 import {ReplyComposer} from './ReplyComposer';
 import {MessageAttachments,isMediaPlaceholder} from './MessageAttachments';
 import {ShareLink,validShare} from './ShareLink';
+import {MessageText} from './MessageText';
 import type {ReplyViewProps} from './reply-view-types';
 import './chat.css';
 
@@ -70,9 +71,9 @@ export function DirectMessageChat(props:ReplyViewProps & {thread:Thread}){
       {!visible.items.length&&<p className="empty">正在读取会话消息</p>}
       {visible.items.map(message=><article key={message.id} className={'chat-message '+(message.direction==='OUTGOING'?'outgoing':'incoming')}>
         <small>{message.direction==='OUTGOING'?message.origin==='CONFIRMED'?'我方已回复':'我方消息':'对方'} · {time(message.occurredAt)}{message.historical?' · 历史消息':''}</small>
-        <div className="message-bubble">{!imageReplacesPlaceholder(message)&&<p>{message.text}</p>}
+        <div className="message-bubble">{(!!message.displayText||!imageReplacesPlaceholder(message))&&<p><MessageText text={message.displayText??message.text}/></p>}
           {validShare(message.share)?<ShareLink key={message.share!.url} share={message.share!}/>:<MessageAttachments message={message}/>}
-          {message.observationIssue&&<p className="message-quality">{reasons[message.observationIssue]??'此消息需人工查看'}</p>}
+          {message.observationIssue&&<p className="message-quality">{message.displayText?'此消息的其他内容仍需人工查看，暂不自动回复':reasons[message.observationIssue]??'此消息需人工查看'}</p>}
         </div>
       </article>)}
     </div>

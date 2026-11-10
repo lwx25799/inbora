@@ -3,11 +3,29 @@ import type {ObservationMapping} from '../config/site-mapping.js';
 import type {DiscoveredPeer} from './observed-reader.js';
 import type {MessageShare} from '../storage/message-shares.js';
 
+interface ShareFieldShape {key:string;type:'ABSENT'|'ACCESSOR'|'CONFLICT'|'STRING'|'NUMBER'|'BOOLEAN'|'NULL'|'ARRAY'|'OBJECT'|'OTHER';
+  digitId:boolean;urlKind:'DOUYIN_VIDEO'|'DOUYIN_NOTE'|'OTHER_URL'|'NOT_URL';fields?:ShareFieldShape[]}
+interface OwnershipPath {steps:{tag:'DIV'|'SPAN'|'IMG'|'VIDEO'|'AUDIO'|'A'|'BUTTON'|'P'|'BR'|'OTHER';childIndex:number|null}[];reachedRow:boolean;truncated:boolean}
+interface MediaOwnershipShape {path:OwnershipPath;textRelation:'BEFORE'|'AFTER'|'CONTAINS'|'INSIDE'|'UNAVAILABLE';commonDepth:number|null;
+  inRowRect:boolean;inTextRect:boolean;anchor:boolean;menu:boolean;dialog:boolean;ariaHidden:boolean;quote:boolean}
+interface ModernShareShape {
+  snakeItem:ShareFieldShape;schema:{type:ShareFieldShape['type'];kind:'AWEME_DETAIL'|'WEB_VIDEO'|'WEB_NOTE'|'OTHER'|'INVALID';
+    itemMatchesSnake:boolean|null;itemMatchesCamel:boolean|null;itemMatchesAwemeItem:boolean|null;itemMatchesAwemeId:boolean|null};
+  awemeInfo:{type:ShareFieldShape['type'];fields:ShareFieldShape[];awemeType:number|null;typeValue:number|null;itemMatchesSnake:boolean|null;awemeMatchesSnake:boolean|null};
+  identityConflict:boolean;
+}
+interface ShareCalibration {
+  nativeMessageKind:number|null;nativeRoute:'VIDEO'|'NOTE'|'UNAVAILABLE';
+  routeReason:'LINKED'|'ITEM_CONFLICT'|'MULTIPLE_LINKS'|'MISSING_ITEM_ID'|'INVALID_SLIDES'|'UNKNOWN_ROUTE'|'NO_CARD_OR_NATIVE_SHARE';
+  parsedScalars:ShareFieldShape[];related:{type:ShareFieldShape['type'];fields:ShareFieldShape[];truncated:boolean};modernShare?:ModernShareShape;
+  text:{nativeType7:boolean;ownedTextCount:number;visibleTextCount:number;inlineImages:number;otherMedia:number;reconstructed:boolean;matchesNative:boolean;
+    bodyReconstructed:boolean;bodyNonEmpty:boolean;bodyMatchesNative:boolean;textPath:OwnershipPath|null;mediaShapes:MediaOwnershipShape[];mediaShapesTruncated:boolean};
+}
 export interface ShareInspection {
-  share:MessageShare|null;detected:boolean;
+  share:MessageShare|null;detected:boolean;displayText?:string|null;
   diagnostic:{anchors:number;cardMarkers:number;nativeItemIdPresent:boolean;nativeItemIdConflict:boolean;urlKinds:Record<string,number>;
     nativeKinds:{aweType:number|null;awemeType:number|null;isSlides:boolean|null};
-    shareInfo:{type:string;fields:{key:string;type:string;urlKind:string}[]}[];parsedFields:{key:string;type:string;digitId:boolean}[]};
+    shareInfo:{type:string;fields:{key:string;type:string;urlKind:string}[]}[];parsedFields:{key:string;type:string;digitId:boolean}[];calibration?:ShareCalibration};
 }
 interface ShareInput {mapping:ObservationMapping;event:InboundEvent;peer:DiscoveredPeer}
 
@@ -43,6 +61,132 @@ export function inspectMessageShare(input:ShareInput):ShareInspection {
         if(url.protocol!=='https:'||!['www.douyin.com','douyin.com'].includes(url.hostname)||url.username||url.password||url.port||!match)return null;
         return {kind:'DOUYIN_WORK',url:'https://www.douyin.com/'+match[1]+'/'+match[2],workId:match[2]!};
       }catch{return null;}
+    },
+    field(object:unknown,key:string):{shape:ShareFieldShape;value:unknown}{
+      const shape:ShareFieldShape={key,type:'ABSENT',digitId:false,urlKind:'NOT_URL'};
+      if(!object||typeof object!=='object')return {shape,value:undefined};
+      const own=Object.getOwnPropertyDescriptor(object,key),inherited=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(object)??{},key);
+      if(own&&!Object.hasOwn(own,'value')||inherited&&!Object.hasOwn(inherited,'value'))return{shape:{...shape,type:'ACCESSOR'},value:undefined};
+      if(own&&inherited&&own.value!==inherited.value)return{shape:{...shape,type:'CONFLICT'},value:undefined};
+      const descriptor=own??inherited,value=descriptor?.value;
+      shape.type=!descriptor||value===undefined?'ABSENT':value===null?'NULL':Array.isArray(value)?'ARRAY':
+        typeof value==='string'?'STRING':typeof value==='number'?'NUMBER':typeof value==='boolean'?'BOOLEAN':typeof value==='object'?'OBJECT':'OTHER';
+      shape.digitId=typeof value==='string'&&/^[1-9]\d{0,63}$/u.test(value);
+      if(typeof value==='string'&&value.length<=2000){const work=dom.work(value);
+        shape.urlKind=work?work.url.includes('/note/')?'DOUYIN_NOTE':'DOUYIN_VIDEO':/^(?:https?:|\/)/u.test(value)?'OTHER_URL':'NOT_URL';}
+      return {shape,value};
+    },
+    related(parsed:unknown):ShareCalibration['related']{
+      const root=dom.field(parsed,'related_share_video'),result:ShareCalibration['related']={type:root.shape.type,fields:[],truncated:false};
+      if(root.shape.type!=='OBJECT')return result;
+      const queue:{value:unknown;fields:ShareFieldShape[];level:number}[]=[{value:root.value,fields:result.fields,level:0}];let remaining=16;
+      for(let index=0;index<queue.length&&index<17;index++){
+        const item=queue[index]!,keys=Object.getOwnPropertyNames(item.value);if(keys.length>remaining)result.truncated=true;
+        for(const key of keys){
+          if(remaining===0){result.truncated=true;break;}if(!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(key)){result.truncated=true;continue;}
+          const field=dom.field(item.value,key);remaining--;item.fields.push(field.shape);
+          if(field.shape.type==='OBJECT'){
+            if(item.level===0&&remaining>0){field.shape.fields=[];queue.push({value:field.value,fields:field.shape.fields,level:1});}
+            else result.truncated=true;
+          }
+        }
+      }
+      return result;
+    },
+    modernShare(parsed:unknown):ModernShareShape{
+      const camel=dom.field(parsed,'itemId'),snake=dom.field(parsed,'item_id'),schema=dom.field(parsed,'schema'),info=dom.field(parsed,'aweme_info');
+      const item=dom.field(info.value,'item_id'),awemeId=dom.field(info.value,'aweme_id'),awemeType=dom.field(info.value,'aweme_type'),type=dom.field(info.value,'type');
+      const check={
+        id(value:unknown):string|null{return typeof value==='string'&&/^[1-9]\d{0,63}$/u.test(value)?value:null;},
+        equal(first:unknown,second:unknown):boolean|null{const a=check.id(first),b=check.id(second);return a&&b?a===b:null;},
+        number(value:unknown):number|null{return typeof value==='number'&&Number.isSafeInteger(value)&&value>=0&&value<=1000?value:null;},
+      };
+      let kind:ModernShareShape['schema']['kind']='INVALID',schemaId:string|null=null;
+      if(typeof schema.value==='string'&&schema.value.length>0&&schema.value.length<=2048&&!/[\\\x00-\x20\x7f]/u.test(schema.value))try{
+        const url=new URL(schema.value);kind='OTHER';
+        if(url.username||url.password||url.port)kind='INVALID';
+        else if(url.protocol==='aweme:'&&url.hostname==='aweme'){
+          const match=/^\/detail\/([1-9]\d{0,63})\/?$/u.exec(url.pathname);if(match){kind='AWEME_DETAIL';schemaId=match[1]!;}
+        }else if(url.protocol==='https:'&&['www.douyin.com','douyin.com'].includes(url.hostname)){
+          const match=/^\/(video|note)\/([1-9]\d{0,63})\/?$/u.exec(url.pathname);if(match){kind=match[1]==='video'?'WEB_VIDEO':'WEB_NOTE';schemaId=match[2]!;}
+        }
+      }catch{/* Invalid or unsupported schema is measured, never opened or used as a share. */}
+      const ids=[camel.value,snake.value,item.value,awemeId.value,schemaId].map(value=>check.id(value)).filter((value):value is string=>value!==null);
+      return {snakeItem:snake.shape,schema:{type:schema.shape.type,kind,itemMatchesSnake:check.equal(schemaId,snake.value),
+        itemMatchesCamel:check.equal(schemaId,camel.value),itemMatchesAwemeItem:check.equal(schemaId,item.value),itemMatchesAwemeId:check.equal(schemaId,awemeId.value)},
+        awemeInfo:{type:info.shape.type,fields:[item.shape,awemeId.shape,awemeType.shape,type.shape],awemeType:check.number(awemeType.value),
+          typeValue:check.number(type.value),itemMatchesSnake:check.equal(item.value,snake.value),awemeMatchesSnake:check.equal(awemeId.value,snake.value)},
+        identityConflict:new Set(ids).size>1};
+    },
+    ownershipPath(node:Element,row:Element):OwnershipPath{
+      const result:OwnershipPath={steps:[],reachedRow:false,truncated:false};let current:Element|null=node;
+      for(let depth=0;current&&current!==row&&depth<6;depth++,current=current.parentElement){
+        const tag=current.tagName,known=['DIV','SPAN','IMG','VIDEO','AUDIO','A','BUTTON','P','BR'].includes(tag),parent=current.parentElement;
+        const bounded=!!parent&&parent.childElementCount<=250,index=bounded?Array.prototype.indexOf.call(parent.children,current):-1;
+        result.steps.push({tag:known?tag as OwnershipPath['steps'][number]['tag']:'OTHER',childIndex:index>=0?index:null});
+        if(!bounded)result.truncated=true;
+      }
+      result.reachedRow=current===row;result.truncated=result.truncated||!result.reachedRow;return result;
+    },
+    mediaShape(node:Element,text:Element|null,row:Element):MediaOwnershipShape{
+      const result:MediaOwnershipShape={path:dom.ownershipPath(node,row),textRelation:'UNAVAILABLE',commonDepth:null,
+        inRowRect:false,inTextRect:false,anchor:false,menu:false,dialog:false,ariaHidden:false,quote:false};
+      const bounds=node.getBoundingClientRect(),rowBounds=row.getBoundingClientRect(),textBounds=text?.getBoundingClientRect();
+      result.inRowRect=bounds.left>=rowBounds.left&&bounds.right<=rowBounds.right&&bounds.top>=rowBounds.top&&bounds.bottom<=rowBounds.bottom;
+      result.inTextRect=!!textBounds&&bounds.left>=textBounds.left&&bounds.right<=textBounds.right&&bounds.top>=textBounds.top&&bounds.bottom<=textBounds.bottom;
+      if(text){
+        result.textRelation=text.contains(node)?'INSIDE':node.contains(text)?'CONTAINS':
+          text.compareDocumentPosition(node)&Node.DOCUMENT_POSITION_FOLLOWING?'AFTER':
+            text.compareDocumentPosition(node)&Node.DOCUMENT_POSITION_PRECEDING?'BEFORE':'UNAVAILABLE';
+        let common:Element|null=node;
+        for(let depth=0;common&&depth<=6;depth++,common=common.parentElement){
+          if(!common.contains(text))continue;
+          let ancestor:Element|null=common;
+          for(let rowDepth=0;ancestor&&rowDepth<=6;rowDepth++,ancestor=ancestor.parentElement)if(ancestor===row){result.commonDepth=rowDepth;break;}
+          break;
+        }
+      }
+      for(let current:Element|null=node,depth=0;current&&current!==row&&depth<6;depth++,current=current.parentElement){
+        const role=Element.prototype.getAttribute.call(current,'role');
+        result.anchor=result.anchor||current.tagName==='A'&&current.hasAttribute('href');
+        result.menu=result.menu||role==='menu';result.dialog=result.dialog||role==='dialog'||current.tagName==='DIALOG';
+        result.ariaHidden=result.ariaHidden||Element.prototype.getAttribute.call(current,'aria-hidden')==='true';
+        result.quote=result.quote||current.matches('blockquote,q,[data-e2e="message-quote"],[data-e2e="message-reply-preview"],[class*="MessageItemReply"],[class*="MessageItemQuote"],[class*="QuoteMessage"]');
+      }
+      return result;
+    },
+    textCalibration(native:unknown,parsed:unknown,row:Element):ShareCalibration['text']{
+      const texts=Array.from(row.querySelectorAll(s.messageText)).filter(node=>node.closest(s.messages)===row),visible=texts.filter(dom.visible),
+        media=Array.from(row.querySelectorAll('img,video,audio')).filter(node=>node.closest(s.messages)===row&&dom.visible(node));
+      const inline=media.filter(node=>node.tagName==='IMG'&&visible.some(text=>text.contains(node))),other=media.length-inline.length;
+      const result={nativeType7:dom.field(native,'type').value===7,ownedTextCount:Math.min(250,texts.length),visibleTextCount:Math.min(250,visible.length),
+        inlineImages:Math.min(250,inline.length),otherMedia:Math.min(250,other),reconstructed:false,matchesNative:false,bodyReconstructed:false,bodyNonEmpty:false,bodyMatchesNative:false,
+        textPath:visible.length===1?dom.ownershipPath(visible[0]!,row):null,
+        mediaShapes:media.slice(0,4).map(node=>dom.mediaShape(node,visible.length===1?visible[0]!:null,row)),mediaShapesTruncated:media.length>4};
+      if(visible.length!==1)return result;
+      let visited=0,images=0,length=0;
+      const traversal={
+        append(value:string):string|null{length+=value.length;return length<=10_000?value:null;},
+        walk(node:Node):string|null{
+          if(++visited>180)return null;if(node.nodeType===Node.TEXT_NODE)return traversal.append(node.nodeValue??'');
+          if(!(node instanceof Element)||node.closest(s.messages)!==row||!['SPAN','DIV','P','B','I','EM','STRONG','A','BR','IMG'].includes(node.tagName))return null;
+          const style=getComputedStyle(node);if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return '';
+          if(node.tagName==='BR')return traversal.append('\n');
+          if(node.tagName==='IMG'){
+            if(++images>8||node.childNodes.length||node.closest('a[href]'))return null;
+            const alt=Element.prototype.getAttribute.call(node,'alt'),source=Element.prototype.getAttribute.call(node,'src');
+            if(!alt||alt.length>32||/[\x00-\x1f\x7f]/u.test(alt)||
+              !/(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[0-9#*]\uFE0F?\u20E3)/u.test(alt)&&!/^\[[^\[\]\r\n]{1,20}\]$/u.test(alt)||!source)return null;
+            try{const url=new URL(source,location.origin);if(url.username||url.password||url.protocol!=='https:'&&!(m.environment==='fixture'&&url.origin===location.origin))return null;}catch{return null;}
+            return traversal.append(alt);
+          }
+          let value='';for(const child of node.childNodes){const part=traversal.walk(child);if(part===null)return null;value+=part;}return value;
+        },
+      };
+      const text=traversal.walk(visible[0]!);result.bodyReconstructed=text!==null;result.bodyNonEmpty=text!==null&&text.trim().length>0;
+      result.bodyMatchesNative=text!==null&&text===dom.field(parsed,'text').value;
+      result.reconstructed=!other&&inline.length<=8&&result.bodyReconstructed;result.matchesNative=result.reconstructed&&result.bodyMatchesNative;
+      return result;
     },
   };
   dom.check(event.channel==='DIRECT_MESSAGE'&&!!event.platformEventId&&!!event.conversationId&&!!event.actorId&&!!event.occurredAt&&
@@ -106,6 +250,20 @@ export function inspectMessageShare(input:ShareInput):ShareInspection {
     typeof event.platformEventId==='string'&&/^[1-9]\d{0,63}$/u.test(event.platformEventId)&&(secondType===undefined||awemeType!==null)&&!!route;
   if(candidates.size===0&&(cardMarkers===1||nativeShare)&&nativeItemId&&route)candidate={kind:'DOUYIN_WORK',url:'https://www.douyin.com/'+route+'/'+nativeItemId,workId:nativeItemId};
   const nativeItemIdConflict=!!nativeItemId&&!!candidate&&nativeItemId!==candidate.workId;
-  return {share:nativeItemIdConflict?null:candidate,detected:cardMarkers>0||candidates.size>0||nativeShare,
-    diagnostic:{anchors:anchors.length,cardMarkers,nativeItemIdPresent:!!nativeItemId,nativeItemIdConflict,nativeKinds,shareInfo,urlKinds,parsedFields:fields}};
+  let calibration:ShareCalibration|undefined;
+  try{
+    const kind=dom.field(native,'type').value;
+    calibration={nativeMessageKind:typeof kind==='number'&&Number.isSafeInteger(kind)&&kind>=0&&kind<=65535?kind:null,
+      nativeRoute:route==='video'?'VIDEO':route==='note'?'NOTE':'UNAVAILABLE',
+      routeReason:nativeItemIdConflict?'ITEM_CONFLICT':candidate?'LINKED':candidates.size>1?'MULTIPLE_LINKS':!nativeItemId?'MISSING_ITEM_ID':
+        invalidSlides?'INVALID_SLIDES':!route?'UNKNOWN_ROUTE':'NO_CARD_OR_NATIVE_SHARE',
+      parsedScalars:['text','itemId','aweType','awemeType','is_slides','related_share_video'].map(key=>dom.field(parsed,key).shape),
+      related:dom.related(parsed),text:dom.textCalibration(native,parsed,row),modernShare:dom.modernShare(parsed)};
+  }catch{/* Shape diagnostics cannot change an exact message's existing share decision. */}
+  const nativeText=dom.field(parsed,'text');
+  const measured=calibration?.text;
+  const display=calibration?.nativeMessageKind===7&&measured?.bodyReconstructed&&measured.bodyNonEmpty&&nativeText.shape.type==='STRING'?
+    {displayText:measured.bodyMatchesNative?nativeText.value as string:null}:{};
+  return {share:nativeItemIdConflict?null:candidate,detected:cardMarkers>0||candidates.size>0||nativeShare,...display,
+    diagnostic:{anchors:anchors.length,cardMarkers,nativeItemIdPresent:!!nativeItemId,nativeItemIdConflict,nativeKinds,shareInfo,urlKinds,parsedFields:fields,...(calibration?{calibration}:{})}};
 }

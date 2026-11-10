@@ -514,3 +514,15 @@ GET_NONE 的被动关系校准前复读 MIT `miqian-nomad/dsh-douyin-watch@17781
 绘制顺序修复另核对 [CSS2 Appendix E](https://www.w3.org/TR/CSS22/zindex.html)、[Transforms 绘制规则](https://www.w3.org/TR/css-transforms-1/#transform-rendering)、[Flex](https://www.w3.org/TR/css-flexbox-1/#painting)／[Grid](https://www.w3.org/TR/css-grid-1/#z-order) 的重排例外及 [top layer](https://drafts.csswg.org/css-position-4/#top-layer)。正常实机采集已绑定两条既有媒体的前置、同父 isolation 零层级背景误拒形态；独立实现仅在首分歧上下文同父、层级相等、准确树序且到公共上下文均为普通块布局时证明前置背景在后绘图像下方。重排、三维、顶层及未能证明的路径继续拒绝，原较低层级分支及准确消息前后核验保持。没有复制新的上游代码或增加依赖；固定 DSH 来源及 MIT 许可沿用上述记录。
 
 隔离旧实现 14 个像素对照中 2 项有效失败、12 项通过；修复后相关四文件 88 项通过，再补与实机一致的 isolation 前后对照至 16 项，源码 tsx 和构建 Node 均实际通过这 16 种形态。颜色像素只证明这些夹具的绘制结果，不冒称任意图片全部像素已验证；真实缓存和界面显示另列。
+
+## 2026-11-10：多条分享及行内表情的准确校准
+
+用户指出多条分享或含表情的消息仍显示不可预览后，再读 DSH MIT 固定 `7989640e340f0fd79e2de9874880d5197546e755` 的 `tree/chat-browser.mjs:398–459,494–508` 及许可。复用准确原生消息、作品 ID 与可见链接交叉核验原则，不采用一律 video、打开卡片或猜测未知类别的行为；该源码未提供已校准的 `related_share_video` 解析，本轮该字段仅测量形态。诊断附准确事件摘要，保留原每批最多 8 项；仅在原身份门禁后读取有界类型、固定路由拒绝原因、六个字段及固定关联对象两层／共 16 字段形态，未执行 getter、解析字段 JSON 或输出字段值。
+
+进一步复读同固定源码的 `:259–271,406–425`，采用正文与独立媒体分离的原则：独立正文全文匹配与整体行内候选分开测量，媒体归属最多四项、六层固定标签路径，不以正文匹配证明外部图片可忽略。现代分享另核对 [TeamBreakerr/douyin-chat-export 固定 9e39afa980945737270ee88f8e33da470742cd9b 的 getShareInfo](https://github.com/TeamBreakerr/douyin-chat-export/blob/9e39afa980945737270ee88f8e33da470742cd9b/frontend/src/lib/douyinMessage.js#L224-L257)，源码实际同时读取 itemId、item_id、aweme_info.item_id；README 声明 MIT，但固定树无独立许可全文，本轮只研究字段组织，未复制代码。新增 schema、snake ID 和固定 aweme_info 字段的形态及一致性诊断，`AWEME_DETAIL` 不推断 video/note，kind110 和单一 ID 不用于生成路由。八项旧实现失败；新组合十二项、类型／构建及源码／构建两链各二十六条实际浏览器断言通过。
+
+准确正常样本证明一条旧媒体消息的唯一正文可逐字匹配原生全文，因此复用本项目原私有预览 manifest，附可选 displayText，不迁移数据库、不改变旧事件绑定、质量、模型或发送资格。仅在准确本人／会话／原生消息／作者／时间／方向门禁后产生非空完整文字见证；缺挂载、空正文及缺证不撤销，准确非空反证才撤销文字，图片保持。文字限制 10,000 字符、保留有效原空白，manifest 限 64KiB，沿用保留期及 500 条／80MiB 清理；前端经原鉴权查询读取转义文本，原展示摘要纳入文字以刷新已展开历史页。存储及 UI 四项旧失败转绿，联合直接七文件四十四项、最后投影／空正文两项、父组件三文件二十项及类型／Node／Web 构建通过；正文见证源码 tsx／构建 Node 各七条实际断言通过。首次联合类型检查的夹具 Element.hidden 错误保留，修正夹具类型后通过，未改产品断言。
+
+展示表情前核对 [hellodigua/UniEmoji 固定 57568e94124772d5a4802f3e42d9c93c1fc5690d](https://github.com/hellodigua/UniEmoji/tree/57568e94124772d5a4802f3e42d9c93c1fc5690d) 的 emoji.json、docs/archive/EMOJI_KEYS.md、LICENSE 和 THIRD_PARTY_NOTICES。代码／文档为 MIT，平台图片不在授权内；只独立适配 `[赞]→👍`、`[微笑]→🙂` 两种 Unicode 展示等价，保留原标签作可访问说明，未知原样。许可全文保留 `third_party/UniEmoji-MIT.txt`，未复制平台图片、增加媒体请求或依赖。组件只包只读正文，不改编辑器、原文、摘要或批准。原纯文字基线三失败／一通过，新四项通过，含 900×640、1240×800、顺序、重复和恶意文字转义；其通过不代替原生窗口视觉验收。
+
+首轮 16:20 被动校准时，行内表情仅诊断唯一正文、全部媒体归属及与原生全文逐字相等的结果，最多 180 节点、8 图、10,000 字符；原生类型 7 只计数，不授予模型或发送资格。分享结果、旧绑定和采集门禁保持。新校准旧实现 4 项全失败，新增及既有分享共 27 项、类型／构建和源码／构建各 20 断言通过；首次私有冒烟夹具解析失败保留，修正夹具后两条真实运行链通过，不将其记成产品序列化问题。校准覆盖现有正常范围，两条已定位消息是锚点，不能替代用户所说的其它条目。

@@ -66,6 +66,7 @@ export interface Inbox {
     channel: string;
     author: string | null;
     preview: string;
+    displayText?: string;
     time: string | null;
     source: string;
     groupKey?:string;

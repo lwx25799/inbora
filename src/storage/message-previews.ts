@@ -16,7 +16,8 @@ const idSchema=z.string().regex(/^[a-f0-9]{64}$/u);
 const attachmentSchema=z.object({previewId:idSchema.nullable(),kind:z.literal('IMAGE'),label:z.string().max(120).nullable(),
   state:z.enum(['READY','UNAVAILABLE']),reason:z.string().regex(/^MESSAGE_PREVIEW_[A-Z_]+$/u).optional(),
   width:z.number().int().min(1).max(512).optional(),height:z.number().int().min(1).max(512).optional()}).strict();
-const manifestSchema=z.object({version:z.literal(1),key:idSchema,attachments:z.array(attachmentSchema).max(4)}).strict();
+const displayTextSchema=z.string().min(1).max(10_000).refine(text=>text.trim().length>0&&!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text));
+const manifestSchema=z.object({version:z.literal(1),key:idSchema,attachments:z.array(attachmentSchema).max(4),displayText:displayTextSchema.optional()}).strict();
 
 function pngSize(bytes:Buffer):{width:number;height:number}|null {
   if(bytes.length<33||bytes.length>maximumPreviewBytes||!bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))||
@@ -50,12 +51,27 @@ export class MessagePreviewStore {
   }
   private manifest(event:InboundEvent,ownId:string){
     const key=this.key(event,ownId),directory=this.directory(),file=join(directory,key+'.json'),stat=lstatSync(file);
-    requireSafe(stat.isFile()&&!stat.isSymbolicLink()&&stat.size<=16_384&&Date.now()-stat.mtimeMs<=this.retentionMs(),'MESSAGE_PREVIEW_UNAVAILABLE');
+    requireSafe(stat.isFile()&&!stat.isSymbolicLink()&&stat.size<=65_536&&Date.now()-stat.mtimeMs<=this.retentionMs(),'MESSAGE_PREVIEW_UNAVAILABLE');
     const manifest=manifestSchema.parse(JSON.parse(readFileSync(file,'utf8')));
     requireSafe(manifest.key===key,'MESSAGE_PREVIEW_UNAVAILABLE');return {manifest,directory};
   }
   list(event:InboundEvent,ownId:string):MessagePreviewAttachment[] {
     try{return this.manifest(event,ownId).manifest.attachments;}catch{return [];}
+  }
+  /** Exact native text for human display only; callers never promote the original event's quality. */
+  displayText(event:InboundEvent,ownId:string):string|null {
+    try{return this.manifest(event,ownId).manifest.displayText??null;}catch{return null;}
+  }
+  /** A null witness revokes only display text; the original event and existing images are untouched. */
+  saveDisplayText(event:InboundEvent,ownId:string,text:string|null):void {
+    const parsed=displayTextSchema.nullable().safeParse(text);requireSafe(parsed.success,'MESSAGE_PREVIEW_UNAVAILABLE');
+    const key=this.key(event,ownId),directory=this.directory(true),attachments=this.list(event,ownId);
+    this.writeManifest(directory,manifestSchema.parse({version:1,key,attachments,...(text===null?{}:{displayText:text})}));this.prune(directory);
+  }
+  private writeManifest(directory:string,manifest:z.infer<typeof manifestSchema>):void {
+    const temporary=join(directory,randomUUID()+'.tmp');
+    try{writeFileSync(temporary,JSON.stringify(manifest),{flag:'wx',mode:0o600});renameSync(temporary,join(directory,manifest.key+'.json'));}
+    finally{if(existsSync(temporary))unlinkSync(temporary);}
   }
   read(event:InboundEvent,ownId:string,previewId:string):MessagePreviewData {
     try{
@@ -71,7 +87,7 @@ export class MessagePreviewStore {
   }
   save(event:InboundEvent,ownId:string,images:CapturedMessageImage[]):void {
     const key=this.key(event,ownId),directory=this.directory(true);this.prune(directory);
-    const previous=this.list(event,ownId);
+    const previous=this.list(event,ownId),displayText=this.displayText(event,ownId);
     let bytesOnDisk=readdirSync(directory).filter(name=>/^[a-f0-9]{64}\.png$/u.test(name)).reduce((total,name)=>{
       const stat=lstatSync(join(directory,name));return total+(stat.isFile()&&!stat.isSymbolicLink()?stat.size:0);
     },0);
@@ -89,10 +105,7 @@ export class MessagePreviewStore {
       }
       return {previewId,kind:'IMAGE',label,state:'READY',width:size.width,height:size.height};
     });
-    const manifest=manifestSchema.parse({version:1,key,attachments}),temporary=join(directory,randomUUID()+'.tmp');
-    try{
-      writeFileSync(temporary,JSON.stringify(manifest),{flag:'wx',mode:0o600});renameSync(temporary,join(directory,key+'.json'));
-    }finally{if(existsSync(temporary))unlinkSync(temporary);}
+    this.writeManifest(directory,manifestSchema.parse({version:1,key,attachments,...(displayText===null?{}:{displayText})}));
     for(const old of previous)if(old.previewId&&!attachments.some(item=>item.previewId===old.previewId))this.removeImage(directory,old.previewId);
     this.prune(directory);
   }
@@ -105,7 +118,7 @@ export class MessagePreviewStore {
     for(const name of readdirSync(directory)){
       if(!/^[a-f0-9]{64}\.json$/u.test(name))continue;
       try{
-        const file=join(directory,name),stat=lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink()||stat.size>16_384)continue;
+        const file=join(directory,name),stat=lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink()||stat.size>65_536)continue;
         const manifest=manifestSchema.parse(JSON.parse(readFileSync(file,'utf8')));if(name!==manifest.key+'.json')continue;
         const bytes=manifest.attachments.reduce((total,item)=>{
           if(!item.previewId)return total;try{const image=lstatSync(join(directory,item.previewId+'.png'));return total+(image.isFile()&&!image.isSymbolicLink()?image.size:0);}catch{return total;}

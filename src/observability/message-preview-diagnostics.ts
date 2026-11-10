@@ -7,7 +7,7 @@ import type {inspectMessageImage} from '../adapters/message-preview.js';
 /** One overwritten, body-free operational snapshot; neither native IDs nor exception text belong here. */
 export class MessagePreviewDiagnostics {
   readonly snapshot={at:new Date().toISOString(),batchDMcount:0,eligibleCount:0,inspected:0,ready:0,reusedReady:0,
-    shareInspected:0,shareLinked:0,shareDetectedNoLink:0,shareSamples:[] as ShareInspection['diagnostic'][],
+    shareInspected:0,shareLinked:0,shareDetectedNoLink:0,shareSamples:[] as (ShareInspection['diagnostic']&{eventBinding:string;phase:'SHARE'})[],
     imageObstructions:[] as (NonNullable<Awaited<ReturnType<typeof inspectMessageImage>>['obstruction']>&{eventBinding:string;imageIndex:number;phase:'BEFORE'})[],
     unavailable:{} as Record<string,number>,caught:{} as Record<string,number>,skipped:{} as Record<string,number>,cancelled:false};
   increment(group:'unavailable'|'caught'|'skipped',code:string):void {

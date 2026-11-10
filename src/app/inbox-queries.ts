@@ -13,6 +13,7 @@ export interface TimelineItem {
   eventId:string;
   direction:'INCOMING'|'OUTGOING';
   text:string;
+  displayText?:string;
   occurredAt:string|null;
   historical:boolean;
   origin:'OBSERVED'|'CONFIRMED';
@@ -54,10 +55,11 @@ export class InboxQueries {
       .sort((a,b)=>time(b.latest)-time(a.latest)||(projection.order.get(b.latest.id)??0)-(projection.order.get(a.latest.id)??0));
     const own=projection.own.get('account_001'),previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
     return {total:rows.length,page:c.page,pageSize:20,items:rows.slice(c.page*20,c.page*20+20).map(row=>{
-      const share=own?shares.read(row.latest.payload,own):null;
+      const share=own?shares.read(row.latest.payload,own):null,displayText=own?previews.displayText(row.latest.payload,own):null;
       return {
         id:row.selected.id,status:row.selected.status,replyStatus:row.replyStatus,channel:row.latest.payload.channel,
         author:row.latest.payload.actorName,preview:row.latest.payload.text,time:row.latest.payload.occurredAt,
+        ...(displayText!==null?{displayText}:{}),
         source:row.latest.payload.discovery??(row.latest.payload.channel==='DIRECT_MESSAGE'?'DIRECT_MESSAGE':'NOTIFICATION'),
         groupKey:row.groupKey,latestEventId:row.latest.id,messageCount:row.members.length,
         ...(row.latest.payload.channel==='COMMENT_NOTIFICATION'?{commentCount:row.members.length,
@@ -127,9 +129,10 @@ export class InboxQueries {
     const items=selected.reverse().map((row):TimelineItem=>{
       const inbound=row.id.startsWith('in:'),native=row.id.startsWith('observed:'),
         payload=inbound?this.store.event(row.event_id).payload:native?new ChatMessageStore(this.store).get(row.event_id)?.payload:null;
-      const share=payload&&own?shares.read(payload,own.own_id):null;
+      const share=payload&&own?shares.read(payload,own.own_id):null,displayText=payload&&own?previews.displayText(payload,own.own_id):null;
       return {id:row.id,eventId:row.event_id,direction:inbound?'INCOMING':'OUTGOING',text:row.text,occurredAt:row.occurred_at,
         historical:!!row.historical,origin:inbound||native?'OBSERVED':'CONFIRMED',...(payload?.contentType?{contentType:payload.contentType}:{}),
+        ...(displayText!==null?{displayText}:{}),
         ...(payload?.observationIssue?{observationIssue:payload.observationIssue}:{}),
         attachments:!share&&payload&&own?previews.list(payload,own.own_id):[],...(share?{share}:{})};
     });
