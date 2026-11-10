@@ -1,0 +1,58 @@
+:root {
+  --dm-ink: #245a86;
+  --dm-fill: #edf5fc;
+  --comment-ink: #8a4b16;
+  --comment-fill: #fff4e8;
+}
+.task[data-channel="DIRECT_MESSAGE"] {
+  background: #f5f9fd;
+}
+.task[data-channel="COMMENT_NOTIFICATION"] {
+  background: #fff9f2;
+}
+.task[data-channel="DIRECT_MESSAGE"]:hover:enabled,
+.segments button[data-channel="DIRECT_MESSAGE"].active {
+  background: var(--dm-fill);
+}
+.task[data-channel="COMMENT_NOTIFICATION"]:hover:enabled,
+.segments button[data-channel="COMMENT_NOTIFICATION"].active {
+  background: var(--comment-fill);
+}
+.task[data-channel="DIRECT_MESSAGE"].selected {
+  background: #deecf9;
+  box-shadow: inset 0 0 0 1px #94b9db;
+}
+.task[data-channel="COMMENT_NOTIFICATION"].selected {
+  background: #ffead3;
+  box-shadow: inset 0 0 0 1px #d8aa78;
+}
+.channel-label {
+  display: inline-block;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-weight: 600;
+}
+.task[data-channel="DIRECT_MESSAGE"] .channel-label,
+.segments button[data-channel="DIRECT_MESSAGE"],
+.chat-detail .chat-heading h2,
+.chat-detail .chat-heading .eyebrow {
+  color: var(--dm-ink);
+}
+.task[data-channel="DIRECT_MESSAGE"] .channel-label {
+  background: #deecf9;
+}
+.task[data-channel="COMMENT_NOTIFICATION"] .channel-label,
+.segments button[data-channel="COMMENT_NOTIFICATION"],
+.detail[data-channel="COMMENT_NOTIFICATION"] .detail-heading h2,
+.detail[data-channel="COMMENT_NOTIFICATION"] .detail-heading .eyebrow {
+  color: var(--comment-ink);
+}
+.task[data-channel="COMMENT_NOTIFICATION"] .channel-label {
+  background: #ffead3;
+}
+.chat-detail .chat-heading {
+  background: var(--dm-fill);
+}
+.detail[data-channel="COMMENT_NOTIFICATION"] .detail-heading {
+  background: var(--comment-fill);
+}
