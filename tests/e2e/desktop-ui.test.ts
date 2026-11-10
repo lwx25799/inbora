@@ -200,6 +200,13 @@ test.each([
       await page.getByRole("checkbox").nth(1).check();
       await page.getByRole("button", { name: "连接收件箱" }).click();
       await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
+      for(const name of ['全部','评论','私信'])expect(await page.getByRole('button',{name,exact:true}).count()).toBe(1);
+      const dmRow=page.locator('.task[data-channel="DIRECT_MESSAGE"]').first(),commentRow=page.locator('.task[data-channel="COMMENT_NOTIFICATION"]').first();
+      await dmRow.waitFor();await commentRow.waitFor();
+      const dmTone=await dmRow.locator('.channel-label').evaluate(node=>getComputedStyle(node).color),
+        commentTone=await commentRow.locator('.channel-label').evaluate(node=>getComputedStyle(node).color);
+      expect(dmTone).not.toBe(commentTone);
+      expect(await dmRow.evaluate(node=>getComputedStyle(node).backgroundColor)).not.toBe(await commentRow.evaluate(node=>getComputedStyle(node).backgroundColor));
       expect(await page.getByRole('combobox',{name:'任务状态'}).locator('option').allTextContents()).toEqual(['等待回复','已回复']);
       expect(await page.getByRole('button',{name:'同步私信',exact:true}).count()).toBe(0);
       expect(await page.getByRole('button',{name:'同步作品评论',exact:true}).count()).toBe(0);
@@ -236,6 +243,7 @@ test.each([
       await page.getByRole("button", { name: /合成私信作者/ }).click();
       const dialog=page.getByRole('dialog',{name:'人工回复对话框'}),editor=page.getByRole('textbox',{name:'人工回复草稿'});
       await editor.waitFor();
+      expect(await page.locator('.chat-heading h2').evaluate(node=>getComputedStyle(node).color)).toBe(dmTone);
       expect(await dialog.getByRole('button',{name:'人工接管',exact:true}).count()).toBe(0);
       expect(await dialog.getByRole('button',{name:'保存草稿',exact:true}).count()).toBe(0);
       holdSave=true;
@@ -259,6 +267,7 @@ test.each([
       await page.getByRole('button',{name:'收件箱',exact:true}).click();
       await page.getByRole('button',{name:/合成评论作者/}).click();
       await page.getByRole('heading',{name:'合成评论作者',exact:true}).waitFor();
+      expect(await page.locator('.detail-heading h2').evaluate(node=>getComputedStyle(node).color)).toBe(commentTone);
       expect(await page.locator('section.detail > details.identity').evaluate(node=>(node as HTMLDetailsElement).open)).toBe(false);
       await page.getByText('消息信息',{exact:true}).click();
       await page.getByRole('button',{name:'打开人工回复',exact:true}).click();
@@ -270,7 +279,7 @@ test.each([
       await editor.fill('人工单击绑定最新全文，无需模型。');
       await page.getByRole('button',{name:'发送',exact:true}).click();
       await service.drain();await expect.poll(()=>store.event(dm).status).toBe('CONFIRMED');
-      await expect.poll(()=>page.locator('.send-state').textContent()).toContain('已回复');
+      await expect.poll(()=>page.getByTestId('reply-send-result').textContent()).toContain('已回复');
       expect(clicks).toBe(1);
       const followup=pending(store,candidate({platformEventId:'ui-dm-after-confirmed',actorName:'合成私信作者',
         text:'已经回复后同会话新增入站',occurredAt:'2026-11-04T01:00:20Z'}));

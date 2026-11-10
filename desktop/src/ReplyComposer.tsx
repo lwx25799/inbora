@@ -10,6 +10,17 @@ const draftOrigins = new Map([
 
 export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
   const {thread,status,busy,act,setNotice,readOnly,saving,dirty,error,notice,text,setText,setSuggestionId,setReview,refreshThread,block,send,sendCurrentText}=props;
+  const replied=thread.replyStatus==='REPLIED';
+  const pending=['PREPARING','QUEUED','PREFLIGHT','SENDING'].includes(send?.status??'');
+  const reviewing=thread.verification?.state==='REVIEW';
+  const failed=send?.status==='FAILED_BEFORE_CLICK';
+  const hasResult=replied||!!thread.intent||!!thread.verification||!!send;
+  const resultTitle=replied?'已回复':failed?'尚未发送':pending?'正在发送':'等待确认';
+  const resultDetail=replied?null:failed
+    ?reasons[send?.reason??'']??'本次未发送，草稿已保留'
+    :pending?'正在处理，请勿重复发送'
+    :reviewing?'暂时无法确认送达，草稿和记录已保留，请勿重复发送'
+    :'正在后台确认送达，请勿重复发送';
   return <div className="reply-composer">
     <p className="composer-status hint">{thread.ownership.isMine?saving?'正在保存':dirty?'正在自动保存':'修改已保存':'正在准备回复输入'}</p>
     {thread.event.payload.channel!=='DIRECT_MESSAGE'&&(error||notice||busy)&&<p role={error?'alert':'status'} className={error?'error':'hint'}>{error||busy||notice}</p>}
@@ -124,28 +135,16 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
     </button>
   </section>
 ))}
-{thread.receipt && (
-  <section className="receipt">
-    <strong>{thread.replyStatus==='REPLIED'?'已回复':'等待回复'}</strong>
-    <p>回读记录：{time(thread.receipt.verified_at)}</p>
-    <small>送达记录已保存。</small>
+{hasResult && (
+  <section className="receipt" role="status" aria-label="发送结果" data-testid="reply-send-result">
+    <strong>{resultTitle}</strong>
+    {resultDetail&&<p>{resultDetail}</p>}
+    {replied&&thread.receipt&&<small>确认于 {time(thread.receipt.verified_at)}</small>}
   </section>
 )}
-{thread.verification&&<p className="receipt">{thread.verification.verified?'消息已送达，原发送记录已保留':thread.verification.state==='REVIEW'?'暂时无法确定是否送达，已停止重复发送，草稿和记录已保留':'正在后台检查送达情况，无需重复发送'}</p>}
-{thread.automationJob?.reason&&<p className="hint">自动回复暂未完成：{reasons[thread.automationJob.reason]??'后台处理遇到问题，消息和草稿已保留'}</p>}
-{send && (
-  <p role="status" className="send-state">
-    {thread.replyStatus==='REPLIED'?'已回复':'等待回复'}
-    {send.reason
-      ? " · " + (reasons[send.reason] ?? send.reason)
-      : ""}
-  </p>
-)}
+{!replied&&thread.automationJob?.reason&&<p className="hint">自动回复暂未完成：{reasons[thread.automationJob.reason]??'后台处理遇到问题，消息和草稿已保留'}</p>}
   <div className="send-footer">
-    <p className="hint">
-      {block ||
-        "输入回复后点击发送，系统自动完成其余步骤。"}
-    </p>
+    {!hasResult&&<p className="hint">{block || "输入回复后点击发送，系统自动完成其余步骤。"}</p>}
     <div>
       <small>Ctrl+Enter 也可发送当前全文</small>
       <button

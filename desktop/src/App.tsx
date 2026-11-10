@@ -53,6 +53,8 @@ export function App() {
     [, setReview] = useState<null>(null);
   const [send, setSend] = useState<{
     commandId: string;
+    eventId: string;
+    selectionId: string;
     status: string;
     reason: string | null;
   } | null>(null);
@@ -181,33 +183,28 @@ export function App() {
   useEffect(() => {
     if (!send || !["PREPARING", "QUEUED", "PREFLIGHT", "SENDING"].includes(send.status))
       return;
-    let ignore = false;
-    const id = setInterval(
-      () =>
-        void request<typeof send>({
-          command: "getSendResult",
-          commandId: send.commandId,
-        })
-          .then(async (result) => {
-            if (ignore || !result) return;
-            setSend(result);
-            if (
-              !["PREPARING", "QUEUED", "PREFLIGHT", "SENDING"].includes(result.status) &&
-              selectedRef.current
-            ) {
-              await refreshThread(selectedRef.current);
-            }
-          })
-          .catch((e) => {
-            if (!ignore) setError(explain(e));
-          }),
-      500,
-    );
+    const {commandId,eventId,selectionId}=send;
+    if(!eventId||!selectionId){setSend(null);return;}
+    let ignore = false, timer:ReturnType<typeof setTimeout>;
+    const current=()=>!ignore&&selectedRef.current===eventId&&selection.current===selectionId;
+    const poll=async()=>{
+      if(!current())return;
+      try{
+        const result=await request<{commandId:string;status:string;reason:string|null}>({command:'getSendResult',commandId});
+        if(!current())return;
+        setSend({...result,eventId,selectionId});
+        if(!['PREPARING','QUEUED','PREFLIGHT','SENDING'].includes(result.status)){
+          await refreshThread(eventId);return;
+        }
+      }catch(error){if(current())setError(explain(error));}
+      if(current())timer=setTimeout(()=>void poll(),500);
+    };
+    timer=setTimeout(()=>void poll(),500);
     return () => {
       ignore = true;
-      clearInterval(id);
+      clearTimeout(timer);
     };
-  }, [send?.commandId, send?.status]);
+  }, [send?.commandId, send?.status, selected]);
 
   async function act(label: string, fn: () => Promise<void>) {
     setBusy(label);
@@ -233,6 +230,7 @@ export function App() {
         detailRequest.current === requestId
       ) {
         setThread(t);
+        if(t.replyStatus==='REPLIED')setError(current=>current==='COMMAND_NOT_FOUND'?'':current);
         if (!editorLoaded.current) {
           editorLoaded.current = true;
           const saved = buffers.current.get(eventId);
@@ -329,6 +327,8 @@ export function App() {
       return thread.replyStatus === 'REPLIED'
         ? "这条消息已回复"
         : "这条回复已提交，正在后台检查送达情况，请勿重复发送";
+    if(send&&['PREPARING','QUEUED','PREFLIGHT','SENDING'].includes(send.status))
+      return "正在发送这条回复，请勿重复发送";
     if (thread.frozen) return reasons.TARGET_FROZEN;
     if (status.automation?.emergencyStopped||status.paused) return "已急停，恢复运行后可继续回复";
     if (thread.paused) return reasons.TARGET_PAUSED;
@@ -405,10 +405,16 @@ export function App() {
       await saveTask.current;
       const detail=await request<Thread>({command:'getThread',eventId});
       if(selectedRef.current!==eventId||selection.current!==selectionId)throw Error('TARGET_SELECTION_CHANGED');
-      const commandId=crypto.randomUUID();setSend({commandId,status:'PREPARING',reason:null});
+      const commandId=crypto.randomUUID();setSend(null);
       const result=await request<NonNullable<typeof send>>({command:'sendHumanReply',commandId,input:{eventId,generation:detail.ownership.generation,
         expectedVersion:detail.draft?.version??0,text:submittedText,contextVersion:detail.contextVersion,selectionId,suggestionId:submittedSuggestion}});
-      setSend(result);await refreshThread(eventId);
+      if(selectedRef.current!==eventId||selection.current!==selectionId)return;
+      setSend({...result,eventId,selectionId});await refreshThread(eventId);
+    }catch(error){
+      if(selectedRef.current===eventId&&selection.current===selectionId){
+        await refreshThread(eventId).catch(()=>{});
+        throw error;
+      }
     }finally{sending.current=false;}
   }
 
