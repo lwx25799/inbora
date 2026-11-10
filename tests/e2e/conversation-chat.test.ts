@@ -141,7 +141,8 @@ test('grouped unknown comment children remain readable with sending disabled, in
     await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();
     const dialog=f.page.getByRole('dialog',{name:'人工回复对话框'});await dialog.waitFor();
     const send=dialog.getByRole('button',{name:'发送',exact:true});expect(await send.count()?await send.isDisabled():true).toBe(true);
-    expect(await editor(f.page).count()).toBe(0);
+    await editor(f.page).waitFor();expect(await editor(f.page).inputValue()).toBe('');
+    expect(await editor(f.page).isEditable()).toBe(true);
     await dialog.locator('[aria-label="已提交回复"]').getByText('保留的未知回复',{exact:true}).waitFor();
     await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
     const context=f.page.getByRole('region',{name:'评论完整上下文'}).first();
@@ -150,8 +151,10 @@ test('grouped unknown comment children remain readable with sending disabled, in
     await expect.poll(()=>f.calls.filter(call=>call.command==='selectTarget').at(-1)?.eventId)
       .toBe(f.store.events().find(event=>event.payload.commentId==='1101')!.id);
     await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();await dialog.waitFor();
-    expect(await dialog.getByRole('button',{name:'发送',exact:true}).count()).toBe(0);
-    expect(await dialog.getByRole('textbox',{name:'人工回复草稿'}).count()).toBe(0);
+    expect(await dialog.getByRole('button',{name:'发送',exact:true}).count()).toBe(1);
+    expect(await dialog.getByRole('button',{name:'发送',exact:true}).isDisabled()).toBe(true);
+    expect(await dialog.getByRole('textbox',{name:'人工回复草稿'}).isEditable()).toBe(true);
+    expect(await dialog.getByRole('textbox',{name:'人工回复草稿'}).inputValue()).toBe('');
     expect(await dialog.getByText('这条楼中楼需要前面的上下文',{exact:true}).count()).toBe(1);
     expect(f.store.sendFrozen(source.id)).toBe(true);
     expect(f.store.db.prepare('SELECT status FROM send_intents WHERE id=?').get(intent)).toEqual({status:'UNCERTAIN'});

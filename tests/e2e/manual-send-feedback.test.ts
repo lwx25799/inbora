@@ -15,8 +15,12 @@ import {targetKey,digest} from '../../src/core/contracts.js';
 interface SendResult {commandId:string;status:string;reason:string|null}
 const editor=(page:Page)=>page.getByRole('textbox',{name:'人工回复草稿'});
 async function expectSentDraftCleared(page:Page){
-  await expect.poll(async()=>await editor(page).count()?await editor(page).inputValue():'').toBe('');
+  await editor(page).waitFor();
+  expect(await editor(page).isEditable()).toBe(true);
+  await expect.poll(()=>editor(page).inputValue()).toBe('');
   expect(await page.locator('.reply-composer').innerText()).not.toContain('修改已保存');
+  expect(await page.locator('.reply-composer').innerText()).not.toContain('版本 1');
+  expect(await page.getByRole('button',{name:'发送',exact:true}).count()).toBe(1);
 }
 async function setup(viewport={width:1240,height:800},comment=false){
   const root=privateTemp('manual-send-feedback-'),store=database();
@@ -29,7 +33,8 @@ async function setup(viewport={width:1240,height:800},comment=false){
   const server=await createServer({configFile:resolve('desktop/vite.config.ts'),server:{port:0,strictPort:false},logLevel:'error'});
   await server.listen();const browser=await chromium.launch({channel:'msedge',headless:true}),page=await browser.newPage({viewport});
   page.setDefaultTimeout(4000);
-  const calls:Record<string,unknown>[]=[],errors:string[]=[],commands=new Map<string,{eventId:string;text:string;result:SendResult}>();
+  const calls:Record<string,unknown>[]=[],errors:string[]=[],commands=new Map<string,{eventId:string;text:string;result:SendResult;followup:boolean}>();
+  const followupDrafts=new Map<string,NonNullable<Thread['draft']>>();
   const delays=new Map<string,{entered:boolean;release?:()=>void}>();
   let suggestions:{id:string;text:string}[]=[];
   let durableUncertain=false;
@@ -44,10 +49,18 @@ async function setup(viewport={width:1240,height:800},comment=false){
     if(command!=='client_request')throw Error('UNEXPECTED_NATIVE_COMMAND');
     const body=args.body!;calls.push(body);
     if(body.command==='connect')return service.dispatch(token,{command:'getStatus'});
-    if(body.command==='sendHumanReply'){
+    if(body.command==='saveHumanFollowupDraft'){
+      const old=followupDrafts.get(body.eventId as string);
+      if(body.expectedVersion!==(old?.version??0))throw Error('DRAFT_VERSION_CONFLICT');
+      const draft={id:old?.id??randomUUID(),eventId:body.eventId as string,text:body.text as string,model:'human',version:(old?.version??0)+1,
+        status:'DRAFT' as const,approval:null,origin:'HUMAN_TYPED'};
+      followupDrafts.set(draft.eventId,draft);return draft;
+    }
+    if(body.command==='sendHumanReply'||body.command==='sendHumanFollowup'){
       await wait('sendHumanReply');if(rejectSend)throw Error(rejectSend);
       const result={commandId:body.commandId as string,status:nextStatus,reason:nextReason};
       const input=body.input as {eventId:string;text:string;generation:number;expectedVersion:number;suggestionId:string|null};
+      if(body.command==='sendHumanFollowup'&&input.expectedVersion!==(followupDrafts.get(input.eventId)?.version??0))throw Error('DRAFT_VERSION_CONFLICT');
       if(durableUncertain){
         const draft=service.authority.save(token,input.eventId,input.generation,input.expectedVersion,input.text,input.suggestionId),event=store.event(input.eventId),intent=randomUUID();
         store.db.prepare("UPDATE reply_drafts SET status='APPROVED' WHERE id=?").run(draft.id);
@@ -56,7 +69,10 @@ async function setup(viewport={width:1240,height:800},comment=false){
         store.db.prepare('INSERT INTO delivery_receipts VALUES(?,?,?,?,?)').run(randomUUID(),intent,'UNCERTAIN','synthetic-proof',new Date().toISOString());
         store.db.prepare("UPDATE inbound_events SET status='UNCERTAIN' WHERE id=?").run(event.id);
       }
-      commands.set(result.commandId,{eventId:input.eventId,text:input.text,result});return result;
+      const followup=body.command==='sendHumanFollowup';
+      if(followup)followupDrafts.set(input.eventId,{id:followupDrafts.get(input.eventId)?.id??randomUUID(),eventId:input.eventId,text:'',model:'human',
+        version:input.expectedVersion+(followupDrafts.has(input.eventId)?1:2),status:'DRAFT',approval:null,origin:'HUMAN_TYPED'});
+      commands.set(result.commandId,{eventId:input.eventId,text:input.text,result,followup});return result;
     }
     if(body.command==='getSendResult'){
       const row=commands.get(body.commandId as string);if(!row)throw Error('COMMAND_NOT_FOUND');
@@ -69,7 +85,7 @@ async function setup(viewport={width:1240,height:800},comment=false){
     if(body.command==='getThread'||body.command==='openHumanDialog'){
       const thread=result as Thread;thread.strong=true;thread.capability={state:'SEND_AVAILABLE',reason:'',evidence:'synthetic-only'};
       thread.suggestions=suggestions.map(value=>({...value,model:'synthetic',draft_version:thread.draft?.version??0,context_version:thread.contextVersion}));
-      const sent=[...commands.values()].find(row=>row.eventId===body.eventId&&['CONFIRMED','UNCERTAIN','SENDING'].includes(row.result.status));
+      const sent=[...commands.values()].find(row=>row.eventId===body.eventId&&!row.followup&&['CONFIRMED','UNCERTAIN','SENDING'].includes(row.result.status));
       if(sent){
         thread.intent??={id:'synthetic-intent',status:sent.result.status};
         if(!durableUncertain)thread.draft={id:'synthetic-saved-draft',eventId:thread.event.id,text:sent.text,model:'human',version:1,status:'APPROVED',approval:null,origin:'HUMAN_TYPED'};
@@ -78,6 +94,12 @@ async function setup(viewport={width:1240,height:800},comment=false){
           thread.receipt={result:'CONFIRMED',verified_at:'2026-11-10T04:35:35Z',proof_ref:'synthetic-only'};
         }
         thread.verification={state:sent.result.status==='UNCERTAIN'?'REVIEW':'PENDING',attempts:0,last_error:null,verified:null,checked_at:null};
+      }
+      if(sent?.result.status==='CONFIRMED'){
+        const turn=[...commands.values()].filter(row=>row.eventId===body.eventId&&row.followup).at(-1);
+        Object.assign(thread,{followup:{eligible:!turn||turn.result.status==='CONFIRMED',reason:null,draft:followupDrafts.get(thread.event.id)??null,
+          latestTurn:turn?{commandId:turn.result.commandId,status:turn.result.status,reason:turn.result.reason,
+            text:turn.text,intentId:'synthetic-followup-intent',verifiedAt:turn.result.status==='CONFIRMED'?'2026-11-10T04:35:36Z':null}:null}});
       }
     }
     return result;
@@ -151,10 +173,66 @@ test.each([{width:900,height:640},{width:1240,height:800}])('confirmed human sen
     expect(await f.page.locator('.reply-composer').innerText()).not.toContain('送达记录已保存');
     expect(await f.page.locator('.reply-composer .receipt, .reply-composer .send-state').count()).toBe(1);
     const sendButton=f.page.getByRole('button',{name:'发送',exact:true});
-    expect(await sendButton.count()===0||await sendButton.isDisabled()).toBe(true);
+    expect(await sendButton.count()).toBe(1);expect(await sendButton.isDisabled()).toBe(true);
     await expectSentDraftCleared(f.page);
     expect(f.calls.filter(call=>call.command==='sendHumanReply')).toHaveLength(1);
     await f.page.screenshot({path:join(f.root,`confirmed-${viewport.width}.png`)});expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
+
+test.each([false,true])('a confirmed reply keeps an editable composer for the next explicit reply (comment=%s)',async comment=>{
+  const f=await setup({width:1240,height:800},comment);try{
+    await f.page.getByRole('button',{name:/反馈目标A/}).click();
+    if(comment)await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+    await editor(f.page).fill('先保存的原稿第一版');
+    await expect.poll(()=>f.store.db.prepare('SELECT version FROM reply_drafts WHERE event_id=?').get(f.a)).toMatchObject({version:1});
+    await editor(f.page).fill('先保存的原稿第二版');
+    await expect.poll(()=>f.store.db.prepare('SELECT version FROM reply_drafts WHERE event_id=?').get(f.a)).toMatchObject({version:2});
+    await editor(f.page).fill('第一条明确点击发送的回复');
+    await f.page.getByRole('button',{name:'发送',exact:true}).click();
+    await f.page.getByTestId('reply-send-result').getByText('已回复',{exact:true}).waitFor();
+    await expectSentDraftCleared(f.page);
+    await editor(f.page).fill('这是随后主动补充的第二条回复');
+    expect(await editor(f.page).isEditable()).toBe(true);
+    expect(await f.page.getByRole('button',{name:'发送',exact:true}).isEnabled()).toBe(true);
+    await f.page.getByRole('button',{name:'发送',exact:true}).click();
+    await expect.poll(()=>f.calls.filter(call=>String(call.command).startsWith('sendHuman')).length).toBe(2);
+    await expectSentDraftCleared(f.page);
+    const sent=f.calls.filter(call=>String(call.command).startsWith('sendHuman'));
+    expect(sent[0]!.commandId).not.toBe(sent[1]!.commandId);
+    expect((sent[0]!.input as {eventId:string}).eventId).toBe(f.a);
+    expect((sent[1]!.input as {eventId:string}).eventId).toBe(f.a);
+    expect((sent[0]!.input as {text:string}).text).toBe('第一条明确点击发送的回复');
+    expect((sent[1]!.input as {text:string}).text).toBe('这是随后主动补充的第二条回复');
+    if(comment)await f.page.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
+    await f.page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+    await f.page.locator('.message').filter({hasText:'已读取内核权威状态，未重放发送；未保存人稿保留'}).waitFor();
+    if(comment)await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+    await expectSentDraftCleared(f.page);
+    expect(f.calls.filter(call=>String(call.command).startsWith('sendHuman'))).toHaveLength(2);
+    expect(f.calls.some(call=>call.command==='generateSuggestion')).toBe(false);expect(f.errors).toEqual([]);
+    await f.page.screenshot({path:join(f.root,comment?'continued-comment.png':'continued-dm.png')});
+  }catch(error){await f.page.screenshot({path:join(f.root,'followup-failure.png')});throw error;}
+  finally{await f.close();}
+});
+
+test('an uncertain follow-up keeps its new composer editable while preventing a third submit',async()=>{
+  const f=await setup();try{
+    await f.page.getByRole('button',{name:/反馈目标A/}).click();await editor(f.page).fill('第一条已经确认');
+    await f.page.getByRole('button',{name:'发送',exact:true}).click();
+    await f.page.getByTestId('reply-send-result').getByText('已回复',{exact:true}).waitFor();await expectSentDraftCleared(f.page);
+    f.status('UNCERTAIN');await editor(f.page).fill('第二条送达结果还未确认');
+    await f.page.getByRole('button',{name:'发送',exact:true}).click();
+    await expect.poll(()=>f.calls.filter(call=>call.command==='sendHumanFollowup').length).toBe(1);
+    await f.page.getByTestId('reply-send-result').getByText('等待确认',{exact:true}).waitFor();
+    expect(await editor(f.page).isEditable()).toBe(true);
+    await expect.poll(()=>editor(f.page).inputValue()).toBe('');
+    await editor(f.page).fill('等待结果时先写第三条');
+    expect(await f.page.getByRole('button',{name:'发送',exact:true}).isDisabled()).toBe(true);
+    await f.emit('backend_restarted');await f.page.getByText('开发内核已恢复；人稿保留，未重放模型、保存或发送',{exact:true}).waitFor();
+    expect(await editor(f.page).inputValue()).toBe('等待结果时先写第三条');
+    expect(await f.page.getByRole('button',{name:'发送',exact:true}).isDisabled()).toBe(true);
+    expect(f.calls.filter(call=>String(call.command).startsWith('sendHuman'))).toHaveLength(2);expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
 
@@ -203,7 +281,9 @@ test('uncertain delivery shows its submitted text as a preview instead of an edi
     await f.page.getByRole('button',{name:'发送',exact:true}).click();
     await f.page.getByTestId('reply-send-result').getByText('等待确认',{exact:true}).waitFor();
     await f.page.locator('[aria-label="已提交回复"]').getByText('结果未知时必须保留的草稿',{exact:true}).waitFor();
-    expect(await editor(f.page).count()).toBe(0);
+    await editor(f.page).waitFor();expect(await editor(f.page).inputValue()).toBe('');
+    expect(await editor(f.page).isEditable()).toBe(true);
+    expect(await f.page.getByRole('button',{name:'发送',exact:true}).isDisabled()).toBe(true);
     expect(f.calls.filter(call=>call.command==='sendHumanReply')).toHaveLength(1);expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
@@ -232,7 +312,7 @@ test('confirmation retires only the submitted text and preserves newer human inp
     await f.page.getByTestId('reply-send-result').getByText('已回复',{exact:true}).waitFor();
     expect(await editor(f.page).inputValue()).toBe('等待确认期间继续输入的新文字');
     expect(await editor(f.page).isEditable()).toBe(true);
-    expect(await f.page.locator('.reply-composer').innerText()).toContain('未发送内容仅在当前窗口保留');
+    expect(await f.page.locator('.reply-composer').innerText()).toContain('继续输入下一条回复');
     await f.page.getByRole('button',{name:'重新连接内核',exact:true}).click();
     await f.page.getByText('已读取内核权威状态，未重放发送；未保存人稿保留',{exact:true}).waitFor();
     expect(await editor(f.page).inputValue()).toBe('等待确认期间继续输入的新文字');
@@ -277,7 +357,7 @@ test('confirmation preserves text that the human deliberately clears and retypes
     await editor(f.page).fill('');await editor(f.page).fill(text);f.complete();f.release('getSendResult');
     await f.page.getByTestId('reply-send-result').getByText('已回复',{exact:true}).waitFor();
     expect(await editor(f.page).inputValue()).toBe(text);
-    expect(await f.page.locator('.reply-composer').innerText()).toContain('未发送内容仅在当前窗口保留');
+    expect(await f.page.locator('.reply-composer').innerText()).toContain('继续输入下一条回复');
     await f.page.getByRole('button',{name:'重新连接内核',exact:true}).click();
     await f.page.getByText('已读取内核权威状态，未重放发送；未保存人稿保留',{exact:true}).waitFor();
     expect(await editor(f.page).inputValue()).toBe(text);
@@ -326,7 +406,7 @@ test.each([false,true])('confirmation clears the submitted AI source and preserv
     }
     f.complete();f.release('getSendResult');if(!newer)await f.emit('status_updated');
     await f.page.getByTestId('reply-send-result').getByText('已回复',{exact:true}).waitFor();
-    if(newer){expect(await editor(f.page).inputValue()).toBe(text);expect(await f.page.locator('.reply-composer').innerText()).toContain('未发送内容仅在当前窗口保留');}
+    if(newer){expect(await editor(f.page).inputValue()).toBe(text);expect(await f.page.locator('.reply-composer').innerText()).toContain('继续输入下一条回复');}
     else await expectSentDraftCleared(f.page);
     const sent=f.calls.filter(call=>call.command==='sendHumanReply');expect(sent).toHaveLength(1);
     expect((sent[0]!.input as {suggestionId:string}).suggestionId).toBe(first);

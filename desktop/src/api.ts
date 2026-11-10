@@ -103,6 +103,11 @@ export interface Thread {
   paused: boolean;
   frozen: boolean;
   intent: { id: string; status: string } | null;
+  followup?:{
+    draft:(Draft & {origin:string})|null;
+    latestTurn:{commandId:string;status:string;text:string;reason:string|null;intentId:string|null;verifiedAt:string|null}|null;
+    eligible:boolean;reason:string|null;
+  };
   receipt: { result: string; verified_at: string; proof_ref: string } | null;
   suggestions: {
     id: string;
@@ -225,6 +230,10 @@ export const reasons: Record<string, string> = {
   ACCOUNT_PAUSED: "账号已暂停",
   TARGET_PAUSED: "此目标已暂停",
   TARGET_FROZEN: "此前回复尚未确认送达；可以编辑草稿，发送暂不可用",
+  FOLLOWUP_REQUIRES_CONFIRMED_REPLY: '上一条回复尚未确认送达，可先输入新内容',
+  FOLLOWUP_REPLY_UNRESOLVED: '上一条回复尚未处理完成，可先输入新内容',
+  FOLLOWUP_HUMAN_TEXT_REQUIRED: '请直接输入本次人工回复',
+  FOLLOWUP_NOT_READY: '人工回复记录正在准备，请稍后继续',
   LEASE_EXPIRED_OR_CHANGED: "接管已过期或代际已变化，请重新接管",
   DRAFT_VERSION_CONFLICT: "草稿版本已变化，请重新读取并核对",
   CONTEXT_VERSION_CONFLICT: "上下文已变化，请重新核对",
