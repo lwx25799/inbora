@@ -25,7 +25,10 @@ test('only current normal root-list response counts survive, without comment bod
   const f=fixture();try{
     f.emit();const summary=await f.watcher.summary(f.signal());
     expect(summary).toEqual({count:4,total:20,hasMore:true,requestedCursor:0,cursor:20,cursorAdvances:true,afterOrigin:1,fresh30m:1,older30m:1,
-      unknownTime:1,futureTime:1,ownCount:1,metadataMissing:1,newestAgeMs:300000,newestNonOwnAgeMs:300000});
+      unknownTime:1,futureTime:1,ownCount:1,metadataMissing:1,newestAgeMs:300000,newestNonOwnAgeMs:300000,
+      inlineShape:{roots:4,arrays:0,missing:4,other:0,children:0,truncated:false,duplicateIds:0,nativeId:0,workMatches:0,rootMatches:0,
+        replyToMissing:0,replyToString:0,replyToNumber:0,replyToNull:0,replyToOther:0,toRoot:0,toKnownChild:0,toSelf:0,toUnknown:0,
+        own:0,confirmed:0,timeValid:0,completeOwnChildRelations:0}});
     expect(JSON.stringify(summary)).not.toMatch(/PRIVATE_|"21"|"22"|https:|douyin|nickname/u);expect(f.reads()).toBe(1);
     f.page.emit('framenavigated',f.frame);expect(await f.watcher.summary(f.signal())).toBeNull();
   }finally{f.watcher.dispose();expect(f.page.listenerCount('request')).toBe(0);expect(f.page.listenerCount('response')).toBe(0);}

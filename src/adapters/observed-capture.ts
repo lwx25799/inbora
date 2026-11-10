@@ -8,6 +8,8 @@ export interface CaptureInput { mapping: ObservationMapping; channel: 'identity'
   commentRootId?:string;commentChildOffset?:number;conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number; collectionPartial?:boolean }
 export type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'|'collectionPartial'|'navigationUrl'|'commentRootId'|'commentChildOffset'|'commentOffset'|'commentStay'>;
 interface CommentScrollShape {depth:number;tag:string;overflowY:string;clientHeight:number;scrollHeight:number;scrollTop:number;visible:boolean;containsList:boolean}
+export interface CommentRelationField {type:'ABSENT'|'ACCESSOR'|'CONFLICT'|'STRING'|'NUMBER'|'NULL'|'OTHER';nativeId:boolean;zero:boolean;root:boolean;child:boolean;self:boolean}
+export interface CommentRelationShape {sampled:number;truncated:boolean;samples:{own:boolean;rootBound:boolean;replyToReplyId:CommentRelationField;replyToReplyID:CommentRelationField}[]}
 export interface CollectionReadDiagnostic {
   source:'dm'|'comments';containers:number;visibleContainers:number;rows:number;visibleRows:number;roots:number;windowRoots:number;
   viewportHeight:number;containerTop:number;containerBottom:number;scrollTop:number;chatVisible:boolean;
@@ -30,6 +32,7 @@ export interface CollectionReadDiagnostic {
   samples:{visible:boolean;inWindow:boolean;hasBox:boolean;displayContents:boolean;top:number;bottom:number;width:number;height:number;bodies:number;visibleBodies:number}[];
 }
 export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; unsupported: number; loaded: number; incomplete?:'CONTENT_NOT_READY';
+  commentRelations?:CommentRelationShape;
   dmCoverage?:{id:string;occurredAt:string;precisionMs:number;captured:boolean}[];
   conversation?: { rowIndex: number | null; hasList: boolean };
   peers?: DiscoveredPeer[];
@@ -56,6 +59,17 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       dom.check(!inherited || Object.hasOwn(inherited,'value'), 'RENDERED_ACCESSOR_UNSUPPORTED');
       dom.check(!own || !inherited || own.value === inherited.value, 'RENDERED_FIELD_CONFLICT');
       return own ? own.value : inherited?.value;
+    },
+    relation(object:unknown,key:'replyToReplyId'|'replyToReplyID',root:string,id:string,children:Set<string>):CommentRelationField {
+      const shape:CommentRelationField={type:'ABSENT',nativeId:false,zero:false,root:false,child:false,self:false};
+      if(!object||typeof object!=='object')return shape;
+      const own=Object.getOwnPropertyDescriptor(object,key),parent=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(object)??{},key);
+      if(own&&!Object.hasOwn(own,'value')||parent&&!Object.hasOwn(parent,'value'))return{...shape,type:'ACCESSOR'};
+      if(own&&parent&&own.value!==parent.value)return{...shape,type:'CONFLICT'};
+      const value=own?own.value:parent?.value;
+      shape.type=value===undefined?'ABSENT':value===null?'NULL':typeof value==='string'?'STRING':typeof value==='number'?'NUMBER':'OTHER';
+      shape.nativeId=typeof value==='string'&&/^[1-9]\d{0,63}$/u.test(value);shape.zero=value==='0';shape.root=value===root;
+      shape.self=value===id;shape.child=shape.nativeId&&!shape.self&&children.has(value as string);return shape;
     },
     visible(element: Element): boolean {
       if(!element.isConnected||!element.getClientRects().length)return false;
@@ -211,6 +225,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   const avatar = dom.one(document,s.selfAvatar,'OBSERVATION_ACCOUNT_AVATAR'), own = dom.fiberProps(avatar,s.selfFiberDepth);
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
   const events: InboundEvent[] = [],commentThreads:NonNullable<ObservationBatch['commentThreads']>=[]; let unsupported = 0, loaded = 0,incomplete=false;
+  const relationRows:{native:unknown;id:string;root:string;own:boolean}[]=[];
   const dmCoverage:NonNullable<ObservationBatch['dmCoverage']>=[];
   const bindings: NonNullable<ObservationBatch['bindings']> = [];
   let dmViewport:ObservationBatch['dmViewport'];
@@ -628,6 +643,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       const parentVerified=!parent||rootId!==null&&/^[1-9]\d{0,63}$/.test(rootId)&&id!==rootId&&/^[1-9]\d{0,63}$/.test(id!)&&
         dom.data(rootProps,'level')===1&&dom.data(rootComment,'replyId')==='0'&&dom.data(props,'level')===2&&
         dom.data(comment,'replyId')===rootId&&(dom.data(props,'levelOneCid')===undefined||dom.data(props,'levelOneCid')===rootId);
+      if(parent&&parentVerified&&verified)relationRows.push({native:comment,id:id!,root:rootId!,own:nativeUid===m.self.uid});
       if(!verified||!parentVerified)unsupported++;
       bindings.push({targetKey:`comment:${work!.id}:${id}`,uid:peer.uid,secUid:peer.secUid,title:peer.title,conversationId:null});
       events.push({ accountId:'account_001',channel:'COMMENT_NOTIFICATION',platformEventId:id,actorId:peer.uid,
@@ -639,7 +655,12 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
   }
   dom.check(new Set(events.map(e=>e.platformEventId).filter(Boolean)).size === events.filter(e=>e.platformEventId).length,
     'OBSERVATION_MESSAGE_ID_COLLISION');
+  const commentRelations:CommentRelationShape|undefined=relationRows.length?{sampled:Math.min(3,relationRows.length),truncated:relationRows.length>3,
+    samples:relationRows.slice(0,3).map(row=>{const children=new Set(relationRows.filter(item=>item.root===row.root).map(item=>item.id));
+      return{own:row.own,rootBound:true,replyToReplyId:dom.relation(row.native,'replyToReplyId',row.root,row.id,children),
+        replyToReplyID:dom.relation(row.native,'replyToReplyID',row.root,row.id,children)};})}:undefined;
   return { events,evidenceId,unsupported,loaded,bindings,...(dmViewport?{dmViewport}:{}),...(incomplete?{incomplete:'CONTENT_NOT_READY' as const}:{}),
+    ...(commentRelations?{commentRelations}:{}),
     ...(commentThreads.length?{commentThreads}:{}),
     ...(dmCoverage.length===loaded&&loaded>0&&new Set(dmCoverage.map(row=>row.id)).size===loaded?{dmCoverage}:{}) };
 }

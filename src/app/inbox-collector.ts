@@ -466,14 +466,25 @@ export class InboxCollector {
           const code=error instanceof Blocked?error.code:'WORK_READ_FAILED_PRIVATE_DIAGNOSTICS';
           if(!collectionStops.has(code)&&code!=='BROWSER_CLOSED'&&!signal.aborted){
             if(batch&&!persisted)await this.persist('works',`work:${work.id}`,batch,signal,undefined,window);
-            const next=!headRead&&batch&&/^OBSERVATION_COMMENT_(THREAD|EXPAND)_/.test(code)?await reader.advanceComments(0):undefined;
             cursor.workIndex++;
             cursor.threadBurst=0;
             if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
-            this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
-            this.data.store.audit('WORK_READ_DEFERRED',digest(work.id));
-            this.data.store.db.prepare(`INSERT INTO work_collection_progress VALUES(?,0,0,0,?,?,?) ON CONFLICT(work_id)
-              DO UPDATE SET last_error=excluded.last_error,next_at=excluded.next_at`).run(work.id,0,code,this.data.now()+objectRetryMs);
+            // A cleanup scroll can itself fail or cancel. Retain the captured child checkpoint and rotation first.
+            this.data.store.db.transaction(()=>{
+              this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
+              this.data.store.audit('WORK_READ_DEFERRED',digest(work.id));
+              this.data.store.db.prepare(`INSERT INTO work_collection_progress VALUES(?,0,0,0,?,?,?) ON CONFLICT(work_id)
+                DO UPDATE SET last_error=excluded.last_error,next_at=excluded.next_at`).run(work.id,0,code,this.data.now()+objectRetryMs);
+            }).immediate();
+            let next:ObservationBatch['scroll'];
+            try{next=!headRead&&batch&&/^OBSERVATION_COMMENT_(THREAD|EXPAND)_/.test(code)?await reader.advanceComments(0):undefined;}
+            catch(advanceError){
+              const advanceCode=advanceError instanceof Blocked?advanceError.code:'WORK_READ_FAILED_PRIVATE_DIAGNOSTICS';
+              if(collectionStops.has(advanceCode)||advanceCode==='BROWSER_CLOSED'||signal.aborted||
+                advanceCode==='OBSERVATION_CANCELLED'||advanceCode==='COLLECTION_CANCELLED')throw advanceError;
+              // The same exact work already has a durable deferral; its cleanup failure cannot back off unrelated works.
+              throw new DeferredObjectRead(advanceCode);
+            }
             if(next)this.data.store.db.prepare('UPDATE work_collection_progress SET scroll_top=?,last_height=?,end_observations=0 WHERE work_id=?').run(next.top,next.height,work.id);
             await this.diagnose(reader,'works',code,signal,undefined,'THREAD');
             throw new DeferredObjectRead(code);
