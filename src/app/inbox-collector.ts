@@ -100,7 +100,7 @@ export class InboxCollector {
     const current=this.data.store.db.prepare('SELECT uid,sec_uid,title FROM discovered_conversations WHERE own_id=? AND id=?')
       .get(this.mapping.self.uid,id) as {uid:string|null;sec_uid:string;title:string}|undefined;
     requireSafe(current,'OBSERVATION_CONVERSATION_CHANGED');
-    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt),peer={uid:current.uid,secUid:current.sec_uid,title:current.title,conversationId:id};
+    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal),peer={uid:current.uid,secUid:current.sec_uid,title:current.title,conversationId:id};
     let top:number|undefined,canRestore=false,restoring=false;
     try{
       top=(await reader.conversations()).scroll?.top;canRestore=true;this.check('dm',signal);
@@ -294,7 +294,7 @@ export class InboxCollector {
     return reader.dmWindow(peer,top,true);
   }
   private async dm(signal:AbortSignal):Promise<void> {
-    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt);
+    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal);
     const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
     const park=(sweep:DmSweep)=>{cursor.parked=cursor.parked.filter(item=>item.peer.conversationId!==sweep.peer.conversationId);cursor.parked.push(sweep);};
@@ -405,7 +405,7 @@ export class InboxCollector {
     const row=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='works'").get() as {cursor_json:string};
     const cursor=worksCursorSchema.parse(JSON.parse(row.cursor_json));
     if(cursor.phase==='discovery') {
-      const reader=new ObservedReader(this.owner.notification,this.mapping);
+      const reader=new ObservedReader(this.owner.notification,this.mapping,undefined,signal);
       const result=await this.discovery.scan(reader,cursor.first,signal,cursor.pending as PendingWork[]);
       this.check('works',signal);
       for(const work of result.works)this.data.registerWork(work);

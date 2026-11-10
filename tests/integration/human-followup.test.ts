@@ -60,8 +60,8 @@ test.each(['DIRECT_MESSAGE','COMMENT_NOTIFICATION'] as const)('%s confirms two i
   }finally{await f.close();}
 });
 
-test('unknown followup keeps its immutable original and freezes new turns without replay after restart',async()=>{
-  const f=await setup();try{
+test.each(['DIRECT_MESSAGE','COMMENT_NOTIFICATION'] as const)('%s unknown followup keeps its immutable original and freezes new turns without replay after restart',async channel=>{
+  const f=await setup(channel);try{
     const before=f.originalRows();f.browser.uncertain=true;const commandId=randomUUID(),input=f.nextInput();
     await f.service.dispatch(f.token,{command:'sendHumanFollowup',commandId,input});await f.service.drain();
     expect(await f.service.dispatch(f.token,{command:'getSendResult',commandId})).toMatchObject({status:'UNCERTAIN'});
@@ -69,6 +69,65 @@ test('unknown followup keeps its immutable original and freezes new turns withou
     expect(await f.service.dispatch(f.token,{command:'getInbox',channel:'ALL',status:'PENDING',page:0})).toMatchObject({total:1,items:[{replyStatus:'WAITING'}]});
     await expect(f.service.dispatch(f.token,{command:'sendHumanFollowup',commandId:randomUUID(),input:f.nextInput('must not submit')})).rejects.toThrow('FOLLOWUP_REPLY_UNRESOLVED');
     f.followups.recover();expect(f.browser.clicks).toBe(2);expect(f.originalRows()).toEqual(before);
+  }finally{await f.close();}
+});
+
+test('an unknown followup does not permanently freeze a distinct later inbound in the same DM conversation',async()=>{
+  const f=await setup();try{
+    f.browser.uncertain=true;const unknown=randomUUID();
+    await f.service.dispatch(f.token,{command:'sendHumanFollowup',commandId:unknown,input:f.nextInput()});await f.service.drain();
+    const boundary=Date.now()-120_000;
+    f.store.db.prepare('UPDATE human_reply_turns SET attempt_started_at=? WHERE command_id=?').run(new Date(boundary).toISOString(),unknown);
+    const old=f.followups.turn(unknown),oldOriginal=f.originalRows();
+    expect(f.store.db.prepare('SELECT * FROM pauses').all()).toEqual([]);
+    const next=pending(f.store,candidate({platformEventId:'independent-after-followup',occurredAt:new Date(boundary+60_000).toISOString()}));
+    expect(f.store.sendFrozen(f.eventId)).toBe(true);expect(f.store.sendFrozen(next)).toBe(false);
+    const selectionId=randomUUID(),detail=await f.service.dispatch(f.token,{command:'openHumanDialog',eventId:next,selectionId}) as {ownership:{generation:number};contextVersion:string};
+    f.browser.uncertain=false;const commandId=randomUUID(),input={...f.original,eventId:next,generation:detail.ownership.generation,
+      contextVersion:detail.contextVersion,selectionId,text:'reply only to the independent later inbound'};
+    await f.service.dispatch(f.token,{command:'sendHumanReply',commandId,input});await f.service.drain();
+    expect(await f.service.dispatch(f.token,{command:'getSendResult',commandId})).toMatchObject({status:'CONFIRMED'});
+    await f.service.dispatch(f.token,{command:'sendHumanReply',commandId,input});await f.service.drain();f.followups.recover();
+    expect(f.browser.clicks).toBe(3);expect(f.followups.view(next)?.eligible).toBe(true);
+    const continuation=randomUUID(),reopened=await f.service.dispatch(f.token,{command:'openHumanDialog',eventId:next,selectionId}) as {ownership:{generation:number};contextVersion:string};
+    const followupInput={...input,generation:reopened.ownership.generation,contextVersion:reopened.contextVersion,
+      expectedVersion:0,text:'another explicit reply to the independent inbound'};
+    await f.service.dispatch(f.token,{command:'sendHumanFollowup',commandId:continuation,input:followupInput});await f.service.drain();
+    expect(await f.service.dispatch(f.token,{command:'getSendResult',commandId:continuation})).toMatchObject({status:'CONFIRMED'});
+    expect(f.browser.clicks).toBe(4);expect(f.followups.turn(unknown)).toEqual(old);expect(f.store.sendFrozen(f.eventId)).toBe(true);
+    for(const [index,table] of ['inbound_events','reply_drafts','send_intents','delivery_receipts'].entries())
+      expect(f.store.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().slice(0,oldOriginal[index]!.length)).toEqual(oldOriginal[index]);
+  }finally{await f.close();}
+});
+
+test.each(['clock-overlap','before-intent','future-time','missing-time','missing-boundary','other-sender','in-flight'] as const)(
+  'a followup unknown still freezes ambiguous or active DM boundaries (%s)',async fault=>{
+  const f=await setup();try{
+    f.browser.uncertain=true;const unknown=randomUUID();
+    await f.service.dispatch(f.token,{command:'sendHumanFollowup',commandId:unknown,input:f.nextInput()});await f.service.drain();
+    const boundary=Date.now()-120_000;
+    f.store.db.prepare('UPDATE human_reply_turns SET attempt_started_at=?,status=? WHERE command_id=?')
+      .run(fault==='missing-boundary'?null:new Date(boundary).toISOString(),fault==='in-flight'?'INTENT_RECORDED':'UNCERTAIN',unknown);
+    const occurredAt=fault==='clock-overlap'?new Date(boundary+2000).toISOString():fault==='before-intent'?new Date(boundary-1).toISOString():
+      fault==='future-time'?new Date(Date.now()+60_000).toISOString():new Date(boundary+60_000).toISOString();
+    const next=pending(f.store,candidate({platformEventId:'independent-'+fault,occurredAt,actorId:fault==='other-sender'?'other-peer':'peer-1'}));
+    if(fault==='missing-time')f.store.db.prepare('UPDATE inbound_events SET payload=json_set(payload,\'$.occurredAt\',NULL) WHERE id=?').run(next);
+    const old=f.followups.turn(unknown);expect(f.store.sendFrozen(next)).toBe(true);expect(f.store.sendFrozen(f.eventId)).toBe(true);
+    expect(f.followups.turn(unknown)).toEqual(old);expect(f.browser.clicks).toBe(2);
+  }finally{await f.close();}
+});
+
+test('an explicit target pause remains effective for a later inbound after an unknown followup',async()=>{
+  const f=await setup();try{
+    f.browser.uncertain=true;const unknown=randomUUID();
+    await f.service.dispatch(f.token,{command:'sendHumanFollowup',commandId:unknown,input:f.nextInput()});await f.service.drain();
+    const boundary=Date.now()-120_000;
+    f.store.db.prepare('UPDATE human_reply_turns SET attempt_started_at=? WHERE command_id=?').run(new Date(boundary).toISOString(),unknown);
+    const next=pending(f.store,candidate({platformEventId:'later-but-explicitly-paused',occurredAt:new Date(boundary+60_000).toISOString()}));
+    f.store.pause(targetKey(f.store.event(next).payload),true);const old=f.followups.turn(unknown);
+    const detail=await f.service.dispatch(f.token,{command:'getThread',eventId:next}) as {frozen:boolean;paused:boolean};
+    expect(detail).toMatchObject({frozen:false,paused:true});expect(f.browser.clicks).toBe(2);expect(f.followups.turn(unknown)).toEqual(old);
+    expect(f.store.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(targetKey(f.store.event(next).payload))).toEqual({paused:1});
   }finally{await f.close();}
 });
 

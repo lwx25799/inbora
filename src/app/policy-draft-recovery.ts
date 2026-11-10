@@ -16,12 +16,12 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
     JOIN automation_grants g ON g.version=j.grant_version AND g.kind='AUTO_REPLY'
     JOIN reply_drafts d ON d.event_id=j.event_id JOIN draft_revisions r ON r.draft_id=d.id AND r.version=d.version
     WHERE r.origin='AUTO_POLICY' AND d.version=j.draft_version
-    AND ((j.state='FAILED_BEFORE_CLICK' AND j.reason IN ('CLIENT_CLOSING','TARGET_CHANGED_REAPPROVE','NATIVE_REPLY_EXISTING_DRAFT','COMMENT_REPLY_ROOT_NOT_UNIQUE')) OR (j.state='REVIEW' AND j.reason='RESTART_NO_REPLAY'))
+    AND ((j.state='FAILED_BEFORE_CLICK' AND j.reason IN ('CLIENT_CLOSING','TARGET_CHANGED_REAPPROVE','NATIVE_REPLY_EXISTING_DRAFT','COMMENT_REPLY_ROOT_NOT_UNIQUE','COMMENT_REPLY_CLOCK_UNVERIFIED')) OR (j.state='REVIEW' AND j.reason='RESTART_NO_REPLAY'))
     AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=j.event_id)
     AND NOT EXISTS(SELECT 1 FROM audit_events a WHERE a.event_type='AUTO_COMMENT_ROOT_CLOSE_RESUMED' AND a.entity_id=d.id)
     AND (NOT EXISTS(SELECT 1 FROM audit_events a WHERE a.event_type='AUTO_COMMENT_ROOT_REQUALIFIED' AND a.entity_id=d.id)
       OR (j.state='FAILED_BEFORE_CLICK' AND j.reason='CLIENT_CLOSING'))
-    AND (j.reason='COMMENT_REPLY_ROOT_NOT_UNIQUE' OR (j.reason='CLIENT_CLOSING' AND EXISTS
+    AND (j.reason IN ('COMMENT_REPLY_ROOT_NOT_UNIQUE','COMMENT_REPLY_CLOCK_UNVERIFIED') OR (j.reason='CLIENT_CLOSING' AND EXISTS
       (SELECT 1 FROM audit_events a WHERE a.event_type='AUTO_COMMENT_ROOT_REQUALIFIED' AND a.entity_id=d.id))
       OR (SELECT count(*) FROM audit_events a WHERE a.event_type='AUTO_DRAFT_RESUMED' AND a.entity_id=j.event_id)<2
       OR (j.state='FAILED_BEFORE_CLICK' AND j.reason='TARGET_CHANGED_REAPPROVE'
@@ -35,7 +35,8 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
     const event=store.event(job.event_id),draft=authority.draftFor(event.id);
     if(!draft||!auto.policyMatches(grant,event,'DRAFT')||authority.contextVersion(event)!==job.context_version)continue;
     const marker=store.db.prepare("SELECT id FROM audit_events WHERE event_type='AUTO_COMMENT_ROOT_REQUALIFIED' AND entity_id=?").get(draft.id);
-    const commentRoot=job.reason==='COMMENT_REPLY_ROOT_NOT_UNIQUE',rootClose=!!marker&&job.reason==='CLIENT_CLOSING';
+    // Root and clock failures share the original one-time comment preparation contract, not separate retry budgets.
+    const commentRoot=['COMMENT_REPLY_ROOT_NOT_UNIQUE','COMMENT_REPLY_CLOCK_UNVERIFIED'].includes(job.reason),rootClose=!!marker&&job.reason==='CLIENT_CLOSING';
     let priorCommand:{params:string;params_digest:string}|undefined;
     if(commentRoot||rootClose){
       if(event.payload.channel!=='COMMENT_NOTIFICATION')continue;

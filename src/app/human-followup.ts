@@ -30,7 +30,7 @@ export class HumanFollowups {
   view(eventId:string){
     if(!this.present())return null;
     const row=this.currentDraft(eventId),turn=this.latest(eventId),confirmed=this.originalConfirmed(eventId),key=targetKey(this.store.event(eventId).payload);
-    const blocked=!!this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND status IN ('PREPARING','APPROVED','INTENT_RECORDED','UNCERTAIN') LIMIT 1").get(key);
+    const blocked=!!this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1").get(key);
     const frozen=this.store.sendFrozen(eventId),paused=(this.store.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as {paused:number}|undefined)?.paused;
     return {eligible:confirmed&&!blocked&&!frozen&&!paused,reason:!confirmed?'FOLLOWUP_REQUIRES_CONFIRMED_REPLY':blocked?'FOLLOWUP_REPLY_UNRESOLVED':frozen?'TARGET_FROZEN':paused?'TARGET_PAUSED':null,
       draft:row?{id:row.id,eventId,text:row.text,version:row.version,model:'human',status:'DRAFT' as const,approval:null,origin:'HUMAN_TYPED'}:null,
@@ -41,7 +41,7 @@ export class HumanFollowups {
     const event=this.store.event(eventId);this.authority.requireOwner(token,event,generation);
     requireSafe(this.authority.mode()!=='OBSERVE','OBSERVE_READ_ONLY');
     requireSafe(this.originalConfirmed(eventId),'FOLLOWUP_REQUIRES_CONFIRMED_REPLY');
-    requireSafe(!this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND status IN ('PREPARING','APPROVED','INTENT_RECORDED','UNCERTAIN') LIMIT 1").get(targetKey(event.payload)),
+    requireSafe(!this.store.sendFrozen(eventId)&&!this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1").get(targetKey(event.payload)),
       'FOLLOWUP_REPLY_UNRESOLVED');
     return event;
   }
@@ -86,7 +86,7 @@ export class HumanFollowups {
     requireSafe(this.originalConfirmed(event.id),'FOLLOWUP_REQUIRES_CONFIRMED_REPLY');
     requireSafe(!this.store.sendFrozen(event.id),'TARGET_FROZEN');
     requireSafe(!(this.store.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(turn.target_key) as {paused:number}|undefined)?.paused,'TARGET_PAUSED');
-    requireSafe(!this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND command_id<>? AND status IN ('PREPARING','APPROVED','INTENT_RECORDED','UNCERTAIN') LIMIT 1").get(turn.target_key,id),'COMMAND_ALREADY_QUEUED');
+    requireSafe(!this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND command_id<>? AND status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1").get(turn.target_key,id),'COMMAND_ALREADY_QUEUED');
     requireSafe(this.authority.contextVersion(event)===input.contextVersion,'CONTEXT_VERSION_CONFLICT');
     requireSafe(humanReplyEligibility(this.store,event).eligible,'TARGET_NEEDS_REVIEW');
     if(approved)requireSafe(this.authority.capability(event.payload.channel,this.browser.identity(event.payload.channel)).state==='SEND_AVAILABLE','CHANNEL_NOT_SENDABLE');
@@ -173,8 +173,6 @@ export class HumanFollowups {
         .run(randomUUID(),new Date().toISOString(),'HUMAN_FOLLOWUP_PROOF',id,JSON.stringify({
           submission:proof.submission,clockSkew:proof.clockSkew?{...proof.clockSkew,refreshedId:undefined}:undefined,
           nativeIdDigest:digest(proof.id),proofDigest:digest(proof)}));
-      // Compatibility stop. Older code needs followup-aware resume logic before rollback can clear this target.
-      if(result==='UNCERTAIN')this.store.db.prepare('INSERT INTO pauses VALUES(?,1) ON CONFLICT(target_key) DO UPDATE SET paused=1').run(row.target_key);
       this.store.audit('HUMAN_FOLLOWUP_'+result,id);
     }).immediate();
   }

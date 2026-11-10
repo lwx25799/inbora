@@ -286,7 +286,7 @@ test.each([
       await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
       await expect.poll(()=>controlTrace.filter(item=>item.command==='openHumanDialog').at(-1)?.isMine).toBe(true);
       await expect.poll(()=>page.getByRole('textbox',{name:'人工回复草稿'}).inputValue()).toBe('');
-      expect(controlTrace.filter(item=>item.command==='openHumanDialog').at(-1)?.eventId).toBe(followup);
+      await expect.poll(()=>controlTrace.filter(item=>item.command==='openHumanDialog').at(-1)?.eventId).toBe(followup);
       expect(service.authority.draftFor(followup)).toBeNull();expect(store.event(dm).status).toBe('CONFIRMED');expect(clicks).toBe(1);
       expect(await page.getByRole('region',{name:'逐条发送确认'}).count()).toBe(0);
       const output=resolve('.local/desktop-ui');await mkdir(output,{recursive:true});

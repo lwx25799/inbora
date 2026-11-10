@@ -272,10 +272,11 @@ export class EventStore {
   }
   sendFrozen(eventId:string):boolean {
     const event=this.event(eventId),next=event.payload;
-    if(this.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get()&&
-      this.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN') LIMIT 1").get(targetKey(next)))return true;
     const unresolved=this.db.prepare("SELECT event_id,status,attempt_started_at FROM send_intents WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')")
-      .all(targetKey(next)) as {event_id:string;status:string;attempt_started_at:string}[];
+      .all(targetKey(next)) as {event_id:string;status:string;attempt_started_at:string|null}[];
+    if(this.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get())
+      unresolved.push(...this.db.prepare("SELECT event_id,status,attempt_started_at FROM human_reply_turns WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')")
+        .all(targetKey(next)) as typeof unresolved);
     if(!unresolved.length)return false;
     // A legacy DM outcome belongs to its original inbound. It must not stop distinct later messages forever.
     if(next.channel!=='DIRECT_MESSAGE'||!isStrong(next)||next.direction!=='INCOMING'||next.kind!=='DM')return true;
@@ -283,7 +284,7 @@ export class EventStore {
     if(!Number.isFinite(at)||at>Date.now())return true;
     return unresolved.some(intent=>{
       if(intent.event_id===eventId||intent.status==='INTENT_RECORDED')return true;
-      const prior=this.event(intent.event_id).payload,boundary=Date.parse(intent.attempt_started_at);
+      const prior=this.event(intent.event_id).payload,boundary=Date.parse(intent.attempt_started_at??'');
       return !isStrong(prior)||prior.actorId!==next.actorId||prior.accountId!==next.accountId||prior.channel!==next.channel||
         prior.platformEventId===next.platformEventId||!Number.isFinite(boundary)||at<=boundary+dmClockToleranceMs||
         !prior.occurredAt||!Number.isFinite(Date.parse(prior.occurredAt))||at<=Date.parse(prior.occurredAt)||

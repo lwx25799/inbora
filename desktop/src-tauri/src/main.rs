@@ -152,6 +152,8 @@ async fn client_request(
         "openHumanDialog",
         "closeHumanDialog",
         "sendHumanReply",
+        "saveHumanFollowupDraft",
+        "sendHumanFollowup",
         "setKeyStorage",
     ];
     if !ALLOWED.contains(&command) || body.to_string().len() > 90_000 {

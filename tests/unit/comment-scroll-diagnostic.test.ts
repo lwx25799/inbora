@@ -6,10 +6,14 @@ afterEach(()=>vi.unstubAllGlobals());
 function fixture(length=9,scrollDepth=6){
   let writes=0,human=false;
   const nodes=Array.from({length},(_,depth)=>({tagName:depth===length-1?'BODY':'DIV',isConnected:true,parentElement:null as unknown,
-    clientHeight:depth===scrollDepth?240:800,scrollHeight:depth===scrollDepth?1600:800,_top:depth===scrollDepth?120:0,
+    clientTop:0,clientHeight:depth===scrollDepth?240:800,scrollHeight:depth===scrollDepth?1600:800,_top:depth===scrollDepth?120:0,
     style:{display:'block',visibility:'visible',opacity:'1',overflowY:depth===scrollDepth?'auto':'visible'},
     get scrollTop(){return this._top;},set scrollTop(value:number){writes++;this._top=value;},
-    getClientRects(){return [{}];},getBoundingClientRect(){return {top:0,left:0,right:800,bottom:800,width:800,height:800};},
+    getClientRects(){return [{}];},getBoundingClientRect():{top:number;left:number;right:number;bottom:number;width:number;height:number}{
+      const parent=nodes.find(node=>['auto','scroll'].includes(node.style.overflowY)&&node.scrollHeight>node.clientHeight);
+      const top=depth===0&&parent?-parent.scrollTop:0,height=depth===0&&parent?parent.scrollHeight:this.clientHeight;
+      return {top,left:0,right:800,bottom:top+height,width:800,height};
+    },
     querySelectorAll(){return [] as unknown[];},querySelector(){return null;},matches(){return false;},contains(node:unknown){return nodes.indexOf(node as typeof nodes[number])<=depth;}}));
   nodes.forEach((node,index)=>node.parentElement=nodes[index+1]??null);
   const avatar={...nodes[0],__reactFiber$fixture:{return:{memoizedProps:{uid:'100',secUid:'self-sec'}}}};
