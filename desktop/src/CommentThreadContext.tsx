@@ -6,7 +6,7 @@ type Context=NonNullable<Thread['commentContext']>;
 type Item=Context['items'][number];
 const order=(a:Item,b:Item)=>Number(b.isRoot)-Number(a.isRoot)||(Date.parse(a.occurredAt??'')||0)-(Date.parse(b.occurredAt??'')||0)||a.id.localeCompare(b.id);
 
-export function CommentThreadContext({thread}:{thread:Thread}){
+export function CommentThreadContext({thread,choose}:{thread:Thread;choose:(id:string)=>void}){
   const context=thread.commentContext,key=`${thread.event.id}:${context?.projectionRevision??''}`;
   const [view,setView]=useState({key,context}),[loading,setLoading]=useState(false),[error,setError]=useState('');
   const current=useRef(key);current.current=key;
@@ -35,6 +35,8 @@ export function CommentThreadContext({thread}:{thread:Thread}){
       <small>{message.isRoot?'一级根评论':message.direction==='OUTGOING'?'我方已回复':message.payload.actorName||'对方'}
         {message.direction==='INCOMING'&&message.payload.commentId===thread.event.payload.commentId?' · 当前回复目标':''} · {time(message.occurredAt)}</small>
       <p>{message.text}</p>
+      {message.direction==='INCOMING'&&!message.historical&&message.eventId!==thread.event.id&&
+        <button onClick={()=>choose(message.eventId)}>查看这条评论</button>}
     </article>)}
     {!shown.items.some(item=>item.direction==='INCOMING'&&item.payload.commentId===thread.event.payload.commentId)&&<article>
       <small>当前回复目标 · {thread.event.payload.actorName||'对方'} · {time(thread.event.payload.occurredAt)}</small>

@@ -3,6 +3,7 @@ import {createServer} from 'vite';
 import {chromium,type Page} from 'playwright';
 import {join,resolve} from 'node:path';
 import {writeFile} from 'node:fs/promises';
+import {randomUUID} from 'node:crypto';
 import {ClientService} from '../../src/app/service.js';
 import {BrowserService} from '../../src/app/browser-service.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
@@ -100,6 +101,7 @@ async function setup(viewport={width:1240,height:800},weakMedia=false,nested=fal
 
 test.each([{width:900,height:640},{width:1240,height:800}])('nested comment context starts at the first root at $width x $height',async viewport=>{
   const f=await setup(viewport,false,true);try{
+    expect(await f.page.locator('.task').count()).toBe(4);
     await f.page.locator('.task').filter({hasText:'这条楼中楼需要前面的上下文'}).click();
     const context=f.page.getByRole('region',{name:'评论完整上下文'}).first();await context.getByText('从最初根评论开始的合成问题',{exact:true}).waitFor();
     expect(await context.locator('article').first().innerText()).toContain('一级根评论');
@@ -113,14 +115,46 @@ test.each([{width:900,height:640},{width:1240,height:800}])('nested comment cont
     expect(await dialog.locator('article').first().innerText()).toContain('一级根评论');
     expect((await f.service.dispatch(f.token,{command:'getThread',eventId:f.nestedId!}) as Thread).event.payload.commentId).toBe('1102');
     await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
-    await f.page.getByRole('button',{name:'下一页',exact:true}).click();
-    await f.page.locator('.task').filter({hasText:'较早同串回复00'}).click();
+    await context.locator('article').filter({hasText:'较早同串回复00'}).getByRole('button',{name:'查看这条评论',exact:true}).click();
     const olderTarget=f.page.getByRole('region',{name:'评论完整上下文'}).first();
     await olderTarget.getByText('较早同串回复00',{exact:true}).waitFor();
     expect(await olderTarget.locator('article').first().innerText()).toContain('一级根评论');
     expect(await olderTarget.getByText('较早同串回复00',{exact:true}).count()).toBe(1);
+    await expect.poll(()=>f.calls.filter(call=>call.command==='selectTarget').at(-1)?.eventId)
+      .toBe(f.store.events().find(event=>event.payload.commentId==='1200')!.id);
+    expect(await olderTarget.locator('article').filter({hasText:'较早同串回复00'}).innerText()).toContain('当前回复目标');
+    expect(await f.page.locator('.task[aria-pressed=true]').count()).toBe(1);
+    await f.page.screenshot({path:join(f.root,`comment-thread-group-${viewport.width}.png`)});
     expect(await f.page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     expect(f.calls.some(call=>call.command==='sendHumanReply'||call.command==='generateSuggestion')).toBe(false);
+  }finally{await f.close();}
+});
+
+test('grouped unknown comment children remain readable with sending disabled, including exact root navigation',async()=>{
+  const f=await setup({width:900,height:640},false,true);try{
+    const source=f.store.event(f.nestedId!),draft=randomUUID(),intent=randomUUID();
+    f.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,'human',1,'APPROVED',NULL,NULL)").run(draft,source.id,'保留的未知回复');
+    f.store.db.prepare('INSERT INTO send_intents VALUES(?,?,?,?,?,?,?,?)').run(intent,source.id,draft,
+      'comment:1001:1102','synthetic-target','synthetic-text','UNCERTAIN',new Date().toISOString());
+    f.store.db.prepare("UPDATE inbound_events SET status='UNCERTAIN' WHERE id=?").run(source.id);
+    await f.page.locator('.task').filter({hasText:'这条楼中楼需要前面的上下文'}).click();
+    await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+    const dialog=f.page.getByRole('dialog',{name:'人工回复对话框'});await dialog.waitFor();
+    expect(await dialog.getByRole('button',{name:'发送',exact:true}).isDisabled()).toBe(true);
+    expect(await editor(f.page).getAttribute('readonly')).not.toBeNull();
+    await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
+    const context=f.page.getByRole('region',{name:'评论完整上下文'}).first();
+    await context.locator('article').filter({hasText:'从最初根评论开始的合成问题'})
+      .getByRole('button',{name:'查看这条评论',exact:true}).click();
+    await expect.poll(()=>f.calls.filter(call=>call.command==='selectTarget').at(-1)?.eventId)
+      .toBe(f.store.events().find(event=>event.payload.commentId==='1101')!.id);
+    await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();await dialog.waitFor();
+    expect(await dialog.getByRole('button',{name:'发送',exact:true}).isDisabled()).toBe(true);
+    expect(await dialog.getByText('这条楼中楼需要前面的上下文',{exact:true}).count()).toBe(1);
+    expect(f.store.sendFrozen(source.id)).toBe(true);
+    expect(f.store.db.prepare('SELECT status FROM send_intents WHERE id=?').get(intent)).toEqual({status:'UNCERTAIN'});
+    expect(f.calls.some(call=>['sendHumanReply','generateSuggestion'].includes(call.command as string))).toBe(false);
+    expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
 

@@ -1,5 +1,6 @@
 import {digest,isManualMediaCandidate,isStrong,type Draft,type StoredEvent} from '../core/contracts.js';
 import {decodeEventRow,type EventRow,type EventStore} from '../storage/store.js';
+import {commentThreadGroupKey} from '../storage/comment-thread-context.js';
 
 export type ReplyStatus='WAITING'|'REPLIED';
 interface OrderedRow extends EventRow {ordinal:number;scope:string}
@@ -9,8 +10,8 @@ export interface InboxGroup {selected:StoredEvent;latest:StoredEvent;members:Sto
 
 export function inboxGroupKey(event:StoredEvent):string {
   const e=event.payload;
-  return digest(e.channel==='DIRECT_MESSAGE'&&e.conversationId?[e.accountId,e.channel,e.conversationId]:
-    [e.accountId,e.channel,e.videoId,e.commentId,event.id]);
+  if(e.channel==='DIRECT_MESSAGE'&&e.conversationId)return digest([e.accountId,e.channel,e.conversationId]);
+  return commentThreadGroupKey(e)??digest([e.accountId,e.channel,e.videoId,e.commentId,event.id]);
 }
 
 /** One read-transaction snapshot. Approval/coverage rules stay in JavaScript, never in a second SQL state machine. */
@@ -56,6 +57,10 @@ export class InboxProjection {
     const time=(event:StoredEvent)=>Date.parse(event.payload.occurredAt??'')||0;
     members.sort((a,b)=>time(a)-time(b));
     const latest=members.at(-1)!,replies:{event:StoredEvent;at:number;ownId:string}[]=[];let repliedAt=-Infinity;
+    if(latest.payload.channel==='COMMENT_NOTIFICATION'){
+      const waiting=members.filter(event=>this.replyStatus(event)==='WAITING');
+      return {selected:waiting.at(-1)??latest,latest,members,replyStatus:waiting.length?'WAITING':'REPLIED'};
+    }
     if(latest.payload.channel==='DIRECT_MESSAGE')for(const event of members){
       if(this.replyStatus(event)!=='REPLIED')continue;
       const intent=this.intents.get(event.id);if(!intent)continue;
@@ -87,7 +92,13 @@ export class InboxProjection {
     return {selected:waiting.at(-1)??latest,latest,members,replyStatus:waiting.length?'WAITING':'REPLIED'};
   }
   resumeEvent(members:StoredEvent[],status:ReplyStatus):string|null {
-    if(status!=='WAITING'||members[0]?.payload.channel!=='DIRECT_MESSAGE')return null;
+    if(status!=='WAITING')return null;
+    if(members[0]?.payload.channel==='COMMENT_NOTIFICATION'){
+      const drafts=members.filter(event=>this.replyStatus(event)==='WAITING').flatMap(event=>{
+        const draft=this.drafts.get(event.id);return draft&&draft.text.trim()?[draft]:[];
+      }).sort((a,b)=>b.saved_at-a.saved_at||b.ordinal-a.ordinal);
+      return drafts[0]?.event_id??null;
+    }
     let confirmedAt=-Infinity;
     for(const event of members){
       if(this.replyStatus(event)!=='REPLIED')continue;

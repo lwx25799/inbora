@@ -8,7 +8,7 @@ import type {ReplyViewProps} from './reply-view-types';
 export function ReplyDetail(props:ReplyViewProps) {
   const {detailElement,dialogElement,thread,status,selected,busy,act,setNotice,openDialog,closeDialog}=props;
   if(thread?.event.payload.channel==='DIRECT_MESSAGE')return <DirectMessageChat {...props} thread={thread}/>;
-  return <section ref={detailElement} className="detail scroll" aria-label="消息详情">
+  return <section ref={detailElement} className="detail scroll" aria-label="消息详情" data-channel="COMMENT_NOTIFICATION">
     {!thread?<div className="empty detail-empty">
       <span className="detail-mark">i</span>
       <h2>{selected?'正在读取准确目标':'从左侧选择一条会话或评论'}</h2>
@@ -35,17 +35,17 @@ export function ReplyDetail(props:ReplyViewProps) {
       {status.browser.mode==='headed'&&!status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('打开准确原对象',async()=>{
         await request({command:'openTarget',eventId:thread.event.id});setNotice('已在专属浏览器中定位，未填写或发送');
       })}>在专属浏览器查看原对象</button>}
-      {thread.event.payload.kind==='REPLY'?<CommentThreadContext thread={thread}/>:<section className="original">
+      {thread.commentContext?<CommentThreadContext thread={thread} choose={props.choose}/>:<section className="original">
         <h3>原父评论</h3><p>{thread.event.payload.text}</p>
         {thread.event.payload.observationIssue&&<p className="hint">{reasons[thread.event.payload.observationIssue]??thread.event.payload.observationIssue}</p>}
         <small>{time(thread.event.payload.occurredAt)}</small>
       </section>}
-      {thread.event.payload.kind!=='REPLY'&&!!thread.timeline?.items.some(message=>message.direction==='OUTGOING')&&<section className="original" aria-label="我的回复">
+      {!thread.commentContext&&!!thread.timeline?.items.some(message=>message.direction==='OUTGOING')&&<section className="original" aria-label="我的回复">
         <h3>我的回复</h3>{thread.timeline.items.filter(message=>message.direction==='OUTGOING').map(message=><article key={message.id}>
           <p>{message.text}</p><small>已回复 · {time(message.occurredAt)}</small>
         </article>)}
       </section>}
-      {thread.event.payload.kind!=='REPLY'&&<details className="history"><summary>有限上下文 · {thread.history.length} 条</summary>
+      {!thread.commentContext&&<details className="history"><summary>有限上下文 · {thread.history.length} 条</summary>
         {thread.history.map((message,index)=><article key={index} className={message.direction==='OUTGOING'?'outgoing':''}>
           <small>{message.direction==='OUTGOING'?'我方已确认回复':'入站观察'} · {time(message.occurredAt)}</small><p>{message.text}</p>
         </article>)}
@@ -59,9 +59,9 @@ export function ReplyDetail(props:ReplyViewProps) {
           <p>本人：{status.account?.identity} · 对方：{thread.event.payload.actorId}<br/>作品：{thread.event.payload.videoId} · 当前评论：{thread.event.payload.commentId}
             {thread.event.payload.rootCommentId&&<> · 所属根评论：{thread.event.payload.rootCommentId}</>}</p>
         </details>
-        {thread.event.payload.kind==='REPLY'?<CommentThreadContext thread={thread}/>:<blockquote>{thread.event.payload.text}</blockquote>}
+        {thread.commentContext?<CommentThreadContext thread={thread} choose={props.choose}/>:<blockquote>{thread.event.payload.text}</blockquote>}
         {thread.event.payload.observationIssue&&<p className="hint">{reasons[thread.event.payload.observationIssue]??thread.event.payload.observationIssue}</p>}
-        {thread.event.payload.kind!=='REPLY'&&<details><summary>上下文 · {thread.history.length} 条</summary>{thread.history.map((message,index)=><p key={index}>{message.direction==='OUTGOING'?'我方：':'对方：'}{message.text}</p>)}</details>}
+        {!thread.commentContext&&<details><summary>上下文 · {thread.history.length} 条</summary>{thread.history.map((message,index)=><p key={index}>{message.direction==='OUTGOING'?'我方：':'对方：'}{message.text}</p>)}</details>}
         <ReplyComposer {...props} thread={thread}/>
       </dialog>
     </>}

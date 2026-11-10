@@ -7,7 +7,7 @@ import type { AiSettings, InboxSync, ClientCommand } from './contracts.js';
 import type { CollectionScheduler } from './collection-scheduler.js';
 import {InboxQueries,inboxGroupKey} from './inbox-queries.js';
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
-import {readCommentThreadContext,commentThreadPage} from '../storage/comment-thread-context.js';
+import {readCommentThreadContext,commentThreadPage,commentThreadGroupKey} from '../storage/comment-thread-context.js';
 
 interface ViewState {
   settings: AiSettings;
@@ -57,10 +57,10 @@ export class WorkbenchQueries {
     return {
       event: e,
       groupKey:inboxGroupKey(e),
-      timeline:new InboxQueries(this.store,this.browser.root,(id,status)=>this.replyStatus(id,status)).timeline(e,e.payload.kind==='REPLY'?undefined:timelineBefore),
+      timeline:new InboxQueries(this.store,this.browser.root,(id,status)=>this.replyStatus(id,status)).timeline(e,commentThreadGroupKey(e.payload)?undefined:timelineBefore),
       draft,
       history: this.store.history(e.payload),
-      ...(e.payload.channel==='COMMENT_NOTIFICATION'&&e.payload.kind==='REPLY'?{
+      ...(e.payload.channel==='COMMENT_NOTIFICATION'&&(e.payload.kind==='REPLY'||commentThreadGroupKey(e.payload))?{
         commentContext:commentThreadPage(readCommentThreadContext(this.store,e.payload),timelineBefore)}:{}),
       ownership: { ...owner, isMine: owner.operator_id === op.id },
       contextVersion: this.authority.contextVersion(e),

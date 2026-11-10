@@ -60,6 +60,8 @@ export class InboxQueries {
         author:row.latest.payload.actorName,preview:row.latest.payload.text,time:row.latest.payload.occurredAt,
         source:row.latest.payload.discovery??(row.latest.payload.channel==='DIRECT_MESSAGE'?'DIRECT_MESSAGE':'NOTIFICATION'),
         groupKey:row.groupKey,latestEventId:row.latest.id,messageCount:row.members.length,
+        ...(row.latest.payload.channel==='COMMENT_NOTIFICATION'?{commentCount:row.members.length,
+          waitingCount:row.members.filter(event=>projection.replyStatus(event)==='WAITING').length}:{}),
         resumeEventId:projection.resumeEvent(row.members,row.replyStatus),previewEventId:row.latest.id,
         attachments:!share&&own?previews.list(row.latest.payload,own):[],...(share?{share}:{}),
       };

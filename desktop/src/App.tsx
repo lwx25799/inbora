@@ -649,6 +649,7 @@ export function App() {
               status={status}
               setStatus={setStatus}
               selected={selected}
+              choose={choose}
               busy={busy}
               act={act}
               setNotice={setNotice}

@@ -8,6 +8,7 @@ export interface ReplyViewProps {
   status:Status;
   setStatus:(status:Status)=>void;
   selected:string|null;
+  choose:(id:string)=>void;
   busy:string;
   act:(label:string,action:()=>Promise<void>)=>Promise<void>;
   setNotice:(text:string)=>void;

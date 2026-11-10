@@ -20,6 +20,10 @@ function identity(event:InboundEvent):ThreadIdentity|null {
     return {accountId:event.accountId,workId:event.videoId,rootId:event.rootCommentId};
   return null;
 }
+export function commentThreadGroupKey(event:InboundEvent):string|null {
+  const thread=identity(event);
+  return thread?digest([thread.accountId,event.channel,thread.workId,thread.rootId]):null;
+}
 export function sameCommentThread(left:InboundEvent,right:InboundEvent):boolean {
   const a=identity(left),b=identity(right);
   return !!a&&!!b&&a.accountId===b.accountId&&a.workId===b.workId&&a.rootId===b.rootId;

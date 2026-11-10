@@ -71,6 +71,8 @@ export interface Inbox {
     groupKey?:string;
     latestEventId?:string;
     messageCount?:number;
+    commentCount?:number;
+    waitingCount?:number;
     resumeEventId?:string|null;
     previewEventId?:string;
     attachments?:TimelineItem['attachments'];
