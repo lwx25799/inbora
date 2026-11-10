@@ -60,14 +60,14 @@ test.each(['DIRECT_MESSAGE','COMMENT_NOTIFICATION'] as const)('%s confirms two i
   }finally{await f.close();}
 });
 
-test.each(['DIRECT_MESSAGE','COMMENT_NOTIFICATION'] as const)('%s unknown followup keeps its immutable original and freezes new turns without replay after restart',async channel=>{
+test.each(['DIRECT_MESSAGE','COMMENT_NOTIFICATION'] as const)('%s unknown followup retains its old intent and blocks repeating that unresolved text after restart',async channel=>{
   const f=await setup(channel);try{
     const before=f.originalRows();f.browser.uncertain=true;const commandId=randomUUID(),input=f.nextInput();
     await f.service.dispatch(f.token,{command:'sendHumanFollowup',commandId,input});await f.service.drain();
     expect(await f.service.dispatch(f.token,{command:'getSendResult',commandId})).toMatchObject({status:'UNCERTAIN'});
     expect(f.store.sendFrozen(f.eventId)).toBe(true);expect(f.followups.view(f.eventId)?.eligible).toBe(false);
     expect(await f.service.dispatch(f.token,{command:'getInbox',channel:'ALL',status:'PENDING',page:0})).toMatchObject({total:1,items:[{replyStatus:'WAITING'}]});
-    await expect(f.service.dispatch(f.token,{command:'sendHumanFollowup',commandId:randomUUID(),input:f.nextInput('must not submit')})).rejects.toThrow('FOLLOWUP_REPLY_UNRESOLVED');
+    await expect(f.service.dispatch(f.token,{command:'sendHumanFollowup',commandId:randomUUID(),input:f.nextInput(input.text)})).rejects.toThrow('HUMAN_REPLY_DUPLICATE_UNRESOLVED');
     f.followups.recover();expect(f.browser.clicks).toBe(2);expect(f.originalRows()).toEqual(before);
   }finally{await f.close();}
 });

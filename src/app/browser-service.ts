@@ -25,6 +25,7 @@ import { InboxCollector } from "./inbox-collector.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type { CollectionSource } from "./collection-scheduler.js";
 import {MessagePreviewStore} from '../storage/message-previews.js';
+import type {PreviewDisplayTarget} from './media-preview-request.js';
 
 export interface AdapterHandle {
   adapter: ReplyAdapter;
@@ -41,7 +42,7 @@ export class BrowserService {
   private epoch = 0;
   private collector: InboxCollector | undefined;
   private collectorMapping = "";
-  private previewHint:{ownId:string;conversationId:string;eventId?:string}|undefined;
+  private previewHint:{ownId:string;conversationId:string;eventId?:string|PreviewDisplayTarget}|undefined;
   private recoveringLogin=false;
   private autoFinishLogin=true;
   private loginGeneration=0;
@@ -484,6 +485,13 @@ export class BrowserService {
       new MessagePreviewStore(this.root).list(event,collection.ownId).some(item=>item.state==='READY'))return;
     if(this.collector)this.collector.prioritize(collection.ownId,event.conversationId,eventId,'SELECTION');
     else this.previewHint={ownId:collection.ownId,conversationId:event.conversationId,...(eventId?{eventId}:{})};
+  }
+  prioritizeDisplayPreview(data:AutomationStore,event:InboundEvent,target:PreviewDisplayTarget):boolean {
+    const state=data.state(),collection=state.collection;
+    if(state.emergencyStopped||!collection?.inbox||!event.conversationId||this.previewHint)return false;
+    data.requireAccount(collection.ownId);
+    if(this.collector)return this.collector.prioritize(collection.ownId,event.conversationId,target,'SELECTION');
+    this.previewHint={ownId:collection.ownId,conversationId:event.conversationId,eventId:target};return true;
   }
   async verifyExisting(
     store: EventStore,

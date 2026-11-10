@@ -1,16 +1,19 @@
 import type {Thread} from './api';
 
-export interface SubmittedReply {text:string;suggestionId:string|null;editVersion:number}
+export interface SubmittedReply {text:string;suggestionId:string|null;editVersion:number;cleared?:boolean;restored?:boolean}
 interface LocalReply {text:string;suggestionId:string|null;editVersion?:number;submitted?:SubmittedReply}
+export interface ReplyCommandResult {commandId:string;status:string;reason:string|null;accepted?:boolean;intentId?:string|null}
 
-export function replyDraft(thread:Thread){return thread.intent&&thread.followup?thread.followup.draft:thread.draft;}
+export function hasReplyHistory(thread:Thread){return !!thread.intent||!!thread.followup?.latestTurn||!!thread.followup?.queueReady;}
+export function canContinueReply(thread:Thread){return !hasReplyHistory(thread)||(thread.followup?.queueReady??thread.followup?.eligible??false);}
+export function replyDraft(thread:Thread){return hasReplyHistory(thread)&&thread.followup?thread.followup.draft:thread.draft;}
 export function submittedReplyText(thread:Thread){return thread.followup?.latestTurn?.text??thread.draft?.text??'';}
 export function hasSubmittedReply(thread:Thread):boolean {
   return thread.followup?.latestTurn?!!thread.followup.latestTurn.intentId:!!thread.intent;
 }
 
 export function hasLocalReplyDraft(thread:Thread,input:LocalReply):boolean {
-  if(!thread.intent)return true;
+  if(!hasReplyHistory(thread))return true;
   if(completedReply(thread)&&!input.text&&input.suggestionId===null)return false;
   if(input.submitted)return input.editVersion!==input.submitted.editVersion;
   return input.text.replace(/\r\n?/gu,'\n')!==(thread.draft?.text??'').replace(/\r\n?/gu,'\n')||input.suggestionId!==null;
@@ -33,7 +36,17 @@ export function matchesSentDraft(thread:Thread,input:LocalReply):boolean {
 export function replyEditorDraft(thread:Thread,buffer?:LocalReply):LocalReply {
   const draft=replyDraft(thread);
   if(buffer&&!matchesSentDraft(thread,buffer))return buffer;
-  if(thread.intent&&thread.followup&&draft?.status==='DRAFT')return {text:draft.text,suggestionId:null};
-  if(thread.intent)return {text:'',suggestionId:null};
+  if(hasReplyHistory(thread)&&thread.followup&&draft?.status==='DRAFT')return {text:draft.text,suggestionId:null};
+  if(hasReplyHistory(thread))return {text:'',suggestionId:null};
   return buffer??{text:thread.draft?.text??'',suggestionId:null};
+}
+
+/** A durable command acknowledgement retires only the exact submitted editor revision. */
+export function submissionEditorUpdate(input:LocalReply,submitted:SubmittedReply,result:ReplyCommandResult,commandId:string){
+  if(result.commandId!==commandId||submitted.restored)return null;
+  const sameVersion=input.editVersion===submitted.editVersion;
+  if(result.status==='FAILED_BEFORE_CLICK')return submitted.cleared&&sameVersion&&input.text===''&&input.suggestionId===null
+    ?{text:submitted.text,suggestionId:submitted.suggestionId,submitted:{...submitted,restored:true}}:null;
+  if(submitted.cleared||!(result.accepted===true||result.intentId)||!sameVersion||input.text!==submitted.text||input.suggestionId!==submitted.suggestionId)return null;
+  return {text:'',suggestionId:null,submitted:{...submitted,cleared:true}};
 }

@@ -107,7 +107,7 @@ export interface Thread {
   followup?:{
     draft:(Draft & {origin:string})|null;
     latestTurn:{commandId:string;status:string;text:string;reason:string|null;intentId:string|null;verifiedAt:string|null}|null;
-    eligible:boolean;reason:string|null;
+    eligible:boolean;queueReady?:boolean;reason:string|null;
   };
   receipt: { result: string; verified_at: string; proof_ref: string } | null;
   suggestions: {

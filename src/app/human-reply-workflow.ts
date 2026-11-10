@@ -5,6 +5,7 @@ import type {WorkbenchAuthority} from './authority.js';
 import type {BrowserService} from './browser-service.js';
 import {humanReplySchema,type SendParams} from './contracts.js';
 import type {z} from 'zod';
+import {captureHumanQueueContext,recordHumanQueueContext} from './human-queue-context.js';
 
 /** One explicit human request, durable latest text, backend qualification, then the shared send coordinator. */
 export class HumanReplyWorkflow {
@@ -31,6 +32,7 @@ export class HumanReplyWorkflow {
       this.store.db.prepare('INSERT INTO manual_send_inputs VALUES(?,?)').run(id,digest(input));
       this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
       this.store.audit('HUMAN_SEND_REQUESTED',id);
+      recordHumanQueueContext(this.store,id,event.id,captureHumanQueueContext(this.store,this.authority,event,this.authority.operator(token).id));
       return true;
     }).immediate();
   }

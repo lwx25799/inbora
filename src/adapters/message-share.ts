@@ -118,6 +118,29 @@ export function inspectMessageShare(input:ShareInput):ShareInspection {
           typeValue:check.number(type.value),itemMatchesSnake:check.equal(item.value,snake.value),awemeMatchesSnake:check.equal(awemeId.value,snake.value)},
         identityConflict:new Set(ids).size>1};
     },
+    modernRoute(parsed:unknown,native:unknown,visible:MessageShare|null):{detected:boolean;share:MessageShare|null;conflict:boolean}{
+      if(dom.field(native,'type').value!==110)return {detected:false,share:null,conflict:false};
+      const info=dom.field(parsed,'aweme_info'),schema=dom.field(parsed,'schema'),measured=dom.modernShare(parsed);
+      const fields=[dom.field(parsed,'itemId'),dom.field(parsed,'item_id'),dom.field(info.value,'item_id'),dom.field(info.value,'aweme_id')];
+      const ids=fields.filter(field=>field.shape.digitId).map(field=>field.value as string),id=ids[0];
+      const invalid=fields.some(field=>!['ABSENT','NULL'].includes(field.shape.type)&&!field.shape.digitId)||
+        !['ABSENT','NULL','OBJECT'].includes(info.shape.type)||measured.identityConflict||!!visible&&ids.some(value=>value!==visible.workId);
+      const types=[dom.field(parsed,'awemeType'),dom.field(info.value,'aweme_type')],slides=dom.field(parsed,'is_slides');
+      const known=types.filter(field=>field.shape.type!=='ABSENT').map(field=>field.value),badType=known.some(value=>![0,55,68].includes(value as number));
+      const typeRoutes=new Set<string>(known.map(value=>value===68?'note':'video'));
+      const slideRoute=slides.shape.type==='ABSENT'||slides.value===false?null:slides.value===true?'note':'INVALID';
+      if(slideRoute&&slideRoute!=='INVALID')typeRoutes.add(slideRoute);
+      const invalidRoute=badType||slideRoute==='INVALID'||typeRoutes.size>1;
+      let route=measured.schema.kind==='WEB_VIDEO'?'video':measured.schema.kind==='WEB_NOTE'?'note':null;
+      if(route&&typeRoutes.size&& !typeRoutes.has(route))return {detected:true,share:null,conflict:true};
+      if(!route&&measured.schema.kind==='AWEME_DETAIL'&&[0,55,68].includes(dom.field(info.value,'aweme_type').value as number)&&typeRoutes.size===1&&!badType)route=[...typeRoutes][0]!;
+      if(invalid||invalidRoute)return {detected:true,share:null,conflict:true};
+      if(!id||!route||schema.shape.type!=='STRING'||!['WEB_VIDEO','WEB_NOTE','AWEME_DETAIL'].includes(measured.schema.kind))return {detected:true,share:null,conflict:false};
+      // The measured schema ID must agree with at least one exact fixed native ID; no title or nested URL is consumed.
+      if(![measured.schema.itemMatchesCamel,measured.schema.itemMatchesSnake,measured.schema.itemMatchesAwemeItem,measured.schema.itemMatchesAwemeId].includes(true))
+        return {detected:true,share:null,conflict:false};
+      return {detected:true,share:{kind:'DOUYIN_WORK',url:'https://www.douyin.com/'+route+'/'+id,workId:id},conflict:false};
+    },
     ownershipPath(node:Element,row:Element):OwnershipPath{
       const result:OwnershipPath={steps:[],reachedRow:false,truncated:false};let current:Element|null=node;
       for(let depth=0;current&&current!==row&&depth<6;depth++,current=current.parentElement){
@@ -249,7 +272,9 @@ export function inspectMessageShare(input:ShareInput):ShareInspection {
   const nativeShare=dom.data(native,'type')===8&&!!nativeItemId&&/^[1-9]\d{0,63}$/u.test(nativeItemId)&&
     typeof event.platformEventId==='string'&&/^[1-9]\d{0,63}$/u.test(event.platformEventId)&&(secondType===undefined||awemeType!==null)&&!!route;
   if(candidates.size===0&&(cardMarkers===1||nativeShare)&&nativeItemId&&route)candidate={kind:'DOUYIN_WORK',url:'https://www.douyin.com/'+route+'/'+nativeItemId,workId:nativeItemId};
-  const nativeItemIdConflict=!!nativeItemId&&!!candidate&&nativeItemId!==candidate.workId;
+  const modern=dom.modernRoute(parsed,native,candidate);
+  const nativeItemIdConflict=!!nativeItemId&&!!candidate&&nativeItemId!==candidate.workId||modern.conflict||modern.detected&&candidates.size>1||!!modern.share&&!!candidate&&modern.share.url!==candidate.url;
+  if(!candidate&&modern.share)candidate=modern.share;
   let calibration:ShareCalibration|undefined;
   try{
     const kind=dom.field(native,'type').value;
@@ -266,6 +291,6 @@ export function inspectMessageShare(input:ShareInput):ShareInspection {
   const measured=calibration?.text;
   const display=calibration?.nativeMessageKind===7&&measured?.bodyReconstructed&&measured.bodyNonEmpty&&nativeUsable?
     {displayText:measured.bodyMatchesNative?nativeValue as string:null}:{};
-  return {share:nativeItemIdConflict?null:candidate,detected:cardMarkers>0||candidates.size>0||nativeShare,...display,
+  return {share:nativeItemIdConflict?null:candidate,detected:cardMarkers>0||candidates.size>0||nativeShare||modern.detected,...display,
     diagnostic:{anchors:anchors.length,cardMarkers,nativeItemIdPresent:!!nativeItemId,nativeItemIdConflict,nativeKinds,shareInfo,urlKinds,parsedFields:fields,...(calibration?{calibration}:{})}};
 }

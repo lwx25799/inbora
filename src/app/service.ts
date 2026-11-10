@@ -23,8 +23,7 @@ import {migrateFollowups} from '../storage/followup-migration.js';
 import {BrowserDraftRecovery} from './browser-draft-recovery.js';
 import { WorkbenchQueries } from "./workbench-queries.js";
 import {ensureQueryIndexes} from '../storage/query-indexes.js';
-import {MessagePreviewStore} from '../storage/message-previews.js';
-import {ChatMessageStore} from '../storage/chat-messages.js';
+import {readOrRefreshPreview} from './media-preview-request.js';
 import { WorkbenchAuthority } from "./authority.js";
 import { BrowserService } from "./browser-service.js";
 import { DeepSeekProvider } from "../ai/deepseek.js";
@@ -71,6 +70,7 @@ export class ClientService {
   private verification:VerificationScheduler|null=null;
   private autoTimer:ReturnType<typeof setInterval>|undefined;
   private autoTask:Promise<void>|null=null;
+  private humanQueue:Promise<void>=Promise.resolve();
   private keyStored=false;
   private keyStorageError:string|null=null;
   private keyGeneration=0;
@@ -312,7 +312,7 @@ export class ClientService {
         this.authority.select(token,c.eventId,c.selectionId);
         this.closeOtherDialogs(token,c.eventId);
         const event=this.store.event(c.eventId);
-        if(c.editing!==false&&(!this.store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(c.eventId)||this.followups.view(c.eventId)?.eligible)) {
+        if(c.editing!==false&&(!this.store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(c.eventId)||this.followups.view(c.eventId)?.queueReady)) {
           const current=this.authority.ownership(event);
           const owner=current.operator_id===this.authority.operator(token).id&&current.lease_expires_at>this.authority.now()?current:
             this.authority.claim(token,c.eventId,current.generation);
@@ -327,14 +327,14 @@ export class ClientService {
         requireSafe(this.automation,'AUTOMATION_NOT_READY');
         const input={...c.input,text:c.input.text.replace(/\r\n?/gu,'\n')};
         const fresh=this.humanReplies.queue(token,c.commandId,input);
-        if(fresh)this.track(this.humanReplies.prepare(token,c.commandId));
+        if(fresh)this.track(this.enqueueHuman(()=>this.humanReplies.prepare(token,c.commandId)));
         return this.result(token,c.commandId);
       }
       case 'saveHumanFollowupDraft':
         return this.followups.save(token,c.eventId,c.generation,c.expectedVersion,c.text,c.suggestionId);
       case 'sendHumanFollowup': {
         const fresh=this.followups.queue(token,c.commandId,c.input);
-        if(fresh)this.track(this.followups.prepare(token,c.commandId));
+        if(fresh)this.track(this.enqueueHuman(()=>this.followups.prepare(token,c.commandId)));
         return this.followups.result(token,c.commandId);
       }
       case 'configureCollection':
@@ -406,10 +406,7 @@ export class ClientService {
           ),
         };
       case 'getMessagePreview': {
-        const observed=new ChatMessageStore(this.store).get(c.eventId),event=observed??this.store.event(c.eventId),own=this.store.db.prepare('SELECT own_id FROM accounts WHERE id=?')
-          .get(event.payload.accountId) as {own_id:string}|undefined;
-        requireSafe(own,'MESSAGE_PREVIEW_UNAVAILABLE');
-        return new MessagePreviewStore(this.browser.root).read(event.payload,own.own_id,c.previewId);
+        return readOrRefreshPreview(this.store,this.browser,this.automation,()=>{this.authority.operator(token,'CONTROL');},c);
       }
       case "openTarget": {
         this.authority.operator(token, "CONTROL");
@@ -692,7 +689,11 @@ export class ClientService {
       status: row.status,
       intentId: row.intent_id,
       reason: row.reason,
+      accepted:row.status!=='FAILED_BEFORE_CLICK'&&!!this.store.db.prepare('SELECT command_id FROM manual_send_inputs WHERE command_id=?').get(id),
     };
+  }
+  private enqueueHuman(operation:()=>Promise<void>):Promise<void>{
+    const task=this.humanQueue.then(operation);this.humanQueue=task.catch(()=>{});return task;
   }
   private closeOtherDialogs(token:string,current:string|null):void {
     for(const [id,dialog]of this.dialogs)if(id!==current&&dialog.token===token) {

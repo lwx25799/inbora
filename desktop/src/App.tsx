@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Settings } from './Settings';
 import { ReplyDetail } from './ReplyDetail';
 import {InboxList} from './InboxList';
-import {matchesSentDraft,replyEditorDraft,hasLocalReplyDraft,replyDraft,type SubmittedReply} from './reply-editor-draft';
+import {matchesSentDraft,replyEditorDraft,hasLocalReplyDraft,replyDraft,hasReplyHistory,canContinueReply,submissionEditorUpdate,type SubmittedReply,type ReplyCommandResult} from './reply-editor-draft';
 import { modes, time, browserState } from './presentation';
 import { useDevelopmentReconnect } from './useDevelopmentReconnect';
 import {useWorkbenchRefresh,type AuditRow} from './useWorkbenchRefresh';
@@ -59,6 +59,8 @@ export function App() {
     eventId: string;
     selectionId: string;
     submitted?: SubmittedReply;
+    accepted?:boolean;
+    intentId?:string|null;
     status: string;
     reason: string | null;
   } | null>(null);
@@ -83,7 +85,7 @@ export function App() {
   const localDraft=!!thread&&thread.event.id===selected&&hasLocalReplyDraft(thread,{...latestEditor.current,
     submitted:buffers.current.get(thread.event.id)?.submitted??(send?.eventId===thread.event.id?send.submitted:undefined)});
   const dirty =
-    !!thread && (text !== replyEditorDraft(thread).text || suggestionId !== null || !!thread.intent&&!thread.followup?.eligible&&localDraft);
+    !!thread && (text !== replyEditorDraft(thread).text || suggestionId !== null || hasReplyHistory(thread)&&!canContinueReply(thread)&&localDraft);
   const devRecovery=useDevelopmentReconnect({
     selectedRef,selection,detailRequest,latestEditor,dialogOpen,
     setStatus,setThread,setReview,setSend,setError,setNotice,
@@ -159,15 +161,15 @@ export function App() {
     };
   }, [connected, selected]);
   useEffect(()=>{
-    if(devRecovery.blockAutosave||!dialogOpen||!dirty||!thread?.ownership.isMine||(thread.intent&&!thread.followup?.eligible)||saving||sending.current||
-      send&&['PREPARING','QUEUED','PREFLIGHT','SENDING'].includes(send.status))return;
+    if(devRecovery.blockAutosave||!dialogOpen||!dirty||!thread?.ownership.isMine||!canContinueReply(thread)||saving||sending.current||
+      send&&['PREPARING','QUEUED','PREFLIGHT','SENDING'].includes(send.status)&&!thread.followup?.queueReady)return;
     const id=setTimeout(()=>{void saveDraft().catch(e=>setError(explain(e)));},500);
     return()=>clearTimeout(id);
-  },[devRecovery.blockAutosave,dialogOpen,dirty,text,suggestionId,thread?.ownership.isMine,thread?.draft?.version,thread?.followup?.draft?.version,thread?.intent,saving,send?.status]);
+  },[devRecovery.blockAutosave,dialogOpen,dirty,text,suggestionId,thread?.ownership.isMine,thread?.draft?.version,thread?.followup?.draft?.version,thread?.followup?.queueReady,thread?.intent,saving,send?.status]);
   useEffect(()=>{
-    if(!devRecovery.restoring&&dialogOpen&&dirty&&thread&&!thread.ownership.isMine&&(!thread.intent||thread.followup?.eligible))
+    if(!devRecovery.restoring&&dialogOpen&&dirty&&thread&&!thread.ownership.isMine&&canContinueReply(thread))
       void openDialog().catch(e=>setError(explain(e)));
-  },[devRecovery.restoring,dialogOpen,dirty,thread?.ownership.isMine,thread?.ownership.generation,thread?.intent,thread?.followup?.eligible]);
+  },[devRecovery.restoring,dialogOpen,dirty,thread?.ownership.isMine,thread?.ownership.generation,thread?.intent,thread?.followup?.eligible,thread?.followup?.queueReady]);
   useEffect(() => {
     if (!connected || !thread?.ownership.isMine || !selected) return;
     const generation = thread.ownership.generation,
@@ -202,15 +204,18 @@ export function App() {
   useEffect(() => {
     if (!send || !["PREPARING", "QUEUED", "PREFLIGHT", "SENDING"].includes(send.status))
       return;
-    const {commandId,eventId,selectionId,submitted}=send;
+    const {commandId,eventId,selectionId}=send;
+    let submitted=send.submitted;
     if(!eventId||!selectionId){setSend(null);return;}
     let ignore = false, timer:ReturnType<typeof setTimeout>;
     const current=()=>!ignore&&selectedRef.current===eventId&&selection.current===selectionId;
     const poll=async()=>{
       if(!current())return;
       try{
-        const result=await request<{commandId:string;status:string;reason:string|null}>({command:'getSendResult',commandId});
+        const result=await request<ReplyCommandResult>({command:'getSendResult',commandId});
         if(!current())return;
+        if(result.commandId!==commandId)throw Error('COMMAND_NOT_FOUND');
+        submitted=applySubmission(result,commandId,submitted);
         setSend({...result,eventId,selectionId,submitted});
         if(!['PREPARING','QUEUED','PREFLIGHT','SENDING'].includes(result.status)){
           await refreshThread(eventId);return;
@@ -278,7 +283,7 @@ export function App() {
         editVersion:latestEditor.current.editVersion,
         submitted:buffers.current.get(thread.event.id)?.submitted,
       });
-    const leaving=thread&&dirty&&thread.event.payload.channel==='DIRECT_MESSAGE'&&thread.ownership.isMine&&(!thread.intent||thread.followup?.eligible);
+    const leaving=thread&&dirty&&thread.event.payload.channel==='DIRECT_MESSAGE'&&thread.ownership.isMine&&canContinueReply(thread);
     if(leaving){
       void (async()=>{
         do{await saveDraft();}while(latestEditor.current.eventId===thread.event.id&&latestEditor.current.text!==replyEditorDraft(thread).text&&
@@ -308,14 +313,14 @@ export function App() {
     const task=request<NonNullable<Thread["draft"]>>({
       eventId: thread.event.id,
       generation: thread.ownership.generation,
-      expectedVersion: Math.max(replyDraft(thread)?.version??0,localDraftVersions.current.get(`${eventId}:${!!thread.intent}`)??0),
+      expectedVersion: Math.max(replyDraft(thread)?.version??0,localDraftVersions.current.get(`${eventId}:${hasReplyHistory(thread)}`)??0),
       text:submittedText,
-      ...(thread.intent?{command:'saveHumanFollowupDraft' as const,suggestionId:null}:{command:'saveDraft' as const,suggestionId:submittedSuggestion}),
+      ...(hasReplyHistory(thread)?{command:'saveHumanFollowupDraft' as const,suggestionId:null}:{command:'saveDraft' as const,suggestionId:submittedSuggestion}),
     });
     saveTask.current=task;
     let saved:NonNullable<Thread['draft']>;
     try{saved=await task;}finally{saveTask.current=null;setSaving(false);}
-    localDraftVersions.current.set(`${eventId}:${!!thread.intent}`,saved.version);
+    localDraftVersions.current.set(`${eventId}:${hasReplyHistory(thread)}`,saved.version);
     const buffered = buffers.current.get(eventId);
     if (buffered) {
       if (
@@ -345,12 +350,12 @@ export function App() {
   function sendDisabled() {
     if (!thread || !status) return "请选择一条任务";
     if (devRecovery.restoring) return "开发内核正在恢复连接，人稿已保留";
-    if (thread.intent&&!thread.followup?.eligible)
+    if (hasReplyHistory(thread)&&!canContinueReply(thread))
       return thread.followup?.reason?reasons[thread.followup.reason]??'上一条回复尚未确认，暂不可再次发送'
         :"上一条回复正在确认，可先输入新内容";
-    if(send&&['PREPARING','QUEUED','PREFLIGHT','SENDING'].includes(send.status))
+    if(send&&['PREPARING','QUEUED','PREFLIGHT','SENDING'].includes(send.status)&&!thread.followup?.queueReady)
       return "正在发送这条回复，请勿重复发送";
-    if (thread.frozen) return reasons.TARGET_FROZEN;
+    if (thread.frozen&&!thread.followup?.queueReady) return reasons.TARGET_FROZEN;
     if (status.automation?.emergencyStopped||status.paused) return "已急停，恢复运行后可继续回复";
     if (thread.paused) return reasons.TARGET_PAUSED;
     const human=thread.humanReplyEligibility;
@@ -382,13 +387,13 @@ export function App() {
     autoReplyUpdating.current=true;setPendingAutoReply(enabled);
     try{
       await saveTask.current;
-      if(dirty&&thread?.ownership.isMine&&(!thread.intent||thread.followup?.eligible))await saveDraft();
+      if(dirty&&thread?.ownership.isMine&&canContinueReply(thread))await saveDraft();
       setStatus(await request<Status>({command:'setAutomaticReply',enabled}));
       await refreshThread();
     }finally{autoReplyUpdating.current=false;setPendingAutoReply(null);}
   }
   async function navigatePage(next:typeof page){
-    if(page==='inbox'&&next!=='inbox'&&thread?.ownership.isMine&&(!thread.intent||thread.followup?.eligible))await closeDialog();
+    if(page==='inbox'&&next!=='inbox'&&thread?.ownership.isMine&&canContinueReply(thread))await closeDialog();
     setPage(next);setReview(null);
   }
   async function openDialog(){
@@ -407,9 +412,9 @@ export function App() {
     if(thread&&latestEditor.current.eventId===thread.event.id){
       const detail=await request<Thread>({command:'getThread',eventId:thread.event.id});
       const latest=latestEditor.current;
-      if(detail.ownership.isMine&&(!detail.intent||detail.followup?.eligible)&&latest.text!==replyEditorDraft(detail).text)await request({eventId:detail.event.id,
+      if(detail.ownership.isMine&&canContinueReply(detail)&&latest.text!==replyEditorDraft(detail).text)await request({eventId:detail.event.id,
         generation:detail.ownership.generation,expectedVersion:replyDraft(detail)?.version??0,text:latest.text,
-        ...(detail.intent?{command:'saveHumanFollowupDraft' as const,suggestionId:null}:{command:'saveDraft' as const,suggestionId:latest.suggestionId})});
+        ...(hasReplyHistory(detail)?{command:'saveHumanFollowupDraft' as const,suggestionId:null}:{command:'saveDraft' as const,suggestionId:latest.suggestionId})});
     }
     if(thread?.ownership.isMine)await request({command:'closeHumanDialog',eventId:thread.event.id,generation:thread.ownership.generation});
     setDialogOpen(false);await refreshThread();
@@ -417,6 +422,13 @@ export function App() {
   async function emergencyStop(){
     await request({command:'emergencyStop'});setStatus(s=>s?{...s,paused:true,automation:s.automation?{...s.automation,emergencyStopped:true}:s.automation}:s);setReview(null);
     setNotice('急停已生效；已存意图仍需回读或冻结');await refreshThread();
+  }
+  function applySubmission(result:ReplyCommandResult,commandId:string,submitted:SubmittedReply|undefined){
+    if(!submitted)return submitted;
+    const next=submissionEditorUpdate(latestEditor.current,submitted,result,commandId);if(!next)return submitted;
+    const current={...latestEditor.current,text:next.text,suggestionId:next.suggestionId};latestEditor.current=current;
+    buffers.current.set(current.eventId!,{...current,version:replyDraft(thread!)?.version??0,submitted:next.submitted});
+    setText(next.text);setSuggestionId(next.suggestionId);return next.submitted;
   }
   async function sendCurrentText(){
     if(!thread||sending.current)return;
@@ -430,10 +442,11 @@ export function App() {
       const submitted={text:submittedText,suggestionId:submittedSuggestion,editVersion};
       buffers.current.set(eventId,{...latestEditor.current,version:detail.draft?.version??0,submitted});
       const commandId=crypto.randomUUID();setSend(null);
-      const result=await request<NonNullable<typeof send>>({command:detail.intent?'sendHumanFollowup':'sendHumanReply',commandId,input:{eventId,generation:detail.ownership.generation,
-        expectedVersion:replyDraft(detail)?.version??0,text:submittedText,contextVersion:detail.contextVersion,selectionId,suggestionId:detail.intent?null:submittedSuggestion}});
+      const result=await request<ReplyCommandResult>({command:hasReplyHistory(detail)?'sendHumanFollowup':'sendHumanReply',commandId,input:{eventId,generation:detail.ownership.generation,
+        expectedVersion:replyDraft(detail)?.version??0,text:submittedText,contextVersion:detail.contextVersion,selectionId,suggestionId:hasReplyHistory(detail)?null:submittedSuggestion}});
       if(selectedRef.current!==eventId||selection.current!==selectionId)return;
-      setSend({...result,eventId,selectionId,submitted});await refreshThread(eventId);
+      if(result.commandId!==commandId)throw Error('COMMAND_NOT_FOUND');
+      setSend({...result,eventId,selectionId,submitted:applySubmission(result,commandId,submitted)});await refreshThread(eventId);
     }catch(error){
       if(selectedRef.current===eventId&&selection.current===selectionId){
         await refreshThread(eventId).catch(()=>{});

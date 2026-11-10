@@ -32,7 +32,7 @@ export function InboxList({inbox,selected,selectedGroup,channel,setChannel,filte
         </span></div>
         {item.channel!=='DIRECT_MESSAGE'&&(item.commentCount??0)>0&&<small>评论串 · {item.commentCount} 条留言{item.waitingCount?` · ${item.waitingCount} 条待回复`:''}</small>}
         {(!!item.displayText||!attachmentPreview||!isMediaPlaceholder(item.preview))&&<p><MessageText text={item.displayText??(share?`分享${sharedWorkLabel(share)} · ${share.url}`:item.preview)}/></p>}
-        {attachmentPreview&&item.previewEventId&&item.attachments?<MessageAttachments message={{eventId:item.previewEventId,attachments:item.attachments.slice(0,1)}}/>:null}
+        {attachmentPreview&&item.previewEventId&&item.attachments?<MessageAttachments allowRefresh={false} message={{eventId:item.previewEventId,attachments:item.attachments.slice(0,1)}}/>:null}
         <small><span className="channel-label">{item.channel==='DIRECT_MESSAGE'?'私信':'评论'}</span> · {time(item.time)}
           {item.channel==='DIRECT_MESSAGE'&&item.messageCount?` · ${item.messageCount} 条入站`:''}</small>
       </button>;

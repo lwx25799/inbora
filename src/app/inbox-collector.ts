@@ -24,6 +24,7 @@ import {commentThreadsSchema,collectCommentThread} from './comment-thread-collec
 import {qualifyLateArrivals} from './late-arrival-qualification.js';
 import {retainStoredDmMedia} from './dm-media-representation.js';
 import {locatePreviewTarget,type PreviewTargetResult} from './preview-target.js';
+import {resolvePreviewDisplay,saveDisplayPreview,type PreviewDisplayTarget} from './media-preview-request.js';
 import {recordCommentWindow,type CommentWindowRead} from '../observability/comment-window-diagnostics.js';
 import {CommentListDiagnostics} from '../adapters/comment-list-diagnostics.js';
 
@@ -49,7 +50,7 @@ type DiagnosticPhase='LIST'|'THREAD'|'ADVANCE'|'HINT';
 export class InboxCollector {
   private discovery: OwnWorksDiscovery;
   private diagnosed=new Set<string>();
-  private priority:{conversationId:string;eventId?:string;trigger:'AUTOMATIC'|'SELECTION'}|undefined;
+  private priority:{conversationId:string;eventId?:string;display?:PreviewDisplayTarget;trigger:'AUTOMATIC'|'SELECTION'}|undefined;
   private lastPriority:{id:string;at:number}|undefined;
   private priorityNeedsNormal=false;
   private disposed=false;
@@ -71,7 +72,7 @@ export class InboxCollector {
       await (source==='works'?this.owner.notification:this.owner.dm).bringToFront();
       this.check(source,signal);
       if(source==='dm'){
-        if(preparePreviewRetry(this.data,this.root,!this.priority&&!this.priorityNeedsNormal,(id,eventId)=>this.prioritize(this.mapping.self.uid,id,eventId,'AUTOMATIC')))this.priorityNeedsNormal=true;
+        if(!this.priority?.display&&preparePreviewRetry(this.data,this.root,!this.priority&&!this.priorityNeedsNormal,(id,eventId)=>this.prioritize(this.mapping.self.uid,id,eventId,'AUTOMATIC')))this.priorityNeedsNormal=true;
         if(this.priority&&!this.priorityNeedsNormal)await this.previewPriority(signal);
         else{try{await this.dm(signal);}finally{
           if(!signal.aborted&&!this.disposed){this.priorityNeedsNormal=false;finishPreviewNormalTurn(this.data);}
@@ -82,8 +83,10 @@ export class InboxCollector {
       }
     },'background');
   }
-  prioritize(ownId:string,conversationId:string,eventId?:string,trigger:'AUTOMATIC'|'SELECTION'='SELECTION'):boolean {
+  prioritize(ownId:string,conversationId:string,target?:string|PreviewDisplayTarget,trigger:'AUTOMATIC'|'SELECTION'='SELECTION'):boolean {
     const state=this.data.state();
+    const display=typeof target==='object'?target:undefined,eventId=typeof target==='string'?target:target?.eventId;
+    if(display&&(display.purpose!=='DISPLAY'||trigger!=='SELECTION'||this.priority))return false;
     if(this.disposed||state.emergencyStopped||!state.collection?.inbox||state.collection.ownId!==ownId||ownId!==this.mapping.self.uid||
       this.lastPriority?.id===conversationId&&this.data.now()-this.lastPriority.at<objectRetryMs)return false;
     const own=this.data.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
@@ -92,12 +95,12 @@ export class InboxCollector {
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
     if(own?.own_id!==ownId||peer?.own_id!==ownId||!peer.sec_uid||cursor.deferred.some(item=>item.id===conversationId&&item.until>this.data.now()))return false;
     if(eventId){
-      let event;try{event=this.data.store.event(eventId).payload;}catch{return false;}
-      if(event.accountId!=='account_001'||event.channel!=='DIRECT_MESSAGE'||event.kind!=='DM'||event.direction!=='INCOMING'||
-        event.conversationId!==conversationId||!event.actorId||event.actorId===ownId||!event.platformEventId||
+      let event;try{event=display?resolvePreviewDisplay(this.data.store,eventId,display.source).event:this.data.store.event(eventId).payload;}catch{return false;}
+      if(event.accountId!=='account_001'||event.channel!=='DIRECT_MESSAGE'||event.kind!=='DM'||!display&&event.direction!=='INCOMING'||
+        event.conversationId!==conversationId||!event.actorId||!display&&event.actorId===ownId||!event.platformEventId||
         !/^[1-9]\d{0,63}$/u.test(event.platformEventId)||!event.occurredAt)return false;
     }
-    this.priority={conversationId,...(eventId?{eventId}:{}),trigger};return true;
+    this.priority={conversationId,...(eventId?{eventId}:{}),...(display?{display}:{}),trigger};return true;
   }
   private async previewPriority(signal:AbortSignal):Promise<void> {
     const priority=this.priority!,id=priority.conversationId;this.priority=undefined;this.priorityNeedsNormal=true;this.lastPriority={id,at:this.data.now()};
@@ -115,11 +118,12 @@ export class InboxCollector {
       top=(await reader.conversations()).scroll?.top;canRestore=true;this.check('dm',signal);
       const messages=await reader.dmWindow(peer,undefined,true);this.check('dm',signal);
       if(priority.eventId){
-        const target=this.data.store.event(priority.eventId).payload;
+        const target=priority.display?resolvePreviewDisplay(this.data.store,priority.eventId,priority.display.source).event:this.data.store.event(priority.eventId).payload;
         const anchors=[...(cursor.sweep?[cursor.sweep]:[]),...cursor.parked].filter(item=>item.peer.conversationId===id&&item.anchor)
           .map(item=>({...item.anchor!,phase:item.phase}));
         await locatePreviewTarget({reader,peer,target,initial:messages,anchors,
-          check:()=>this.check('dm',signal),persist:batch=>this.persist('dm',id,batch,signal,peer),
+          check:()=>this.check('dm',signal),persist:batch=>priority.display?saveDisplayPreview({store:this.data.store,root:this.root,page:this.owner.dm,
+            mapping:this.mapping,target:priority.display,batch,peer,signal,check:()=>this.check('dm',signal)}):this.persist('dm',id,batch,signal,peer),
           record:result=>{targetResult=result;}});
       }else await this.persist('dm',id,messages,signal,peer);
       this.check('dm',signal);restoring=true;await reader.conversations(undefined,top);
@@ -136,7 +140,8 @@ export class InboxCollector {
       if(canRestore&&!restoring)try{await reader.conversations(undefined,top);}catch{/* No second return click if restoration itself failed. */}
       throw new DeferredObjectRead(code);
     }finally{
-      if(priority.eventId){const {reason,...counts}=targetResult;this.data.store.audit('MESSAGE_PREVIEW_TARGET_ATTEMPT_'+priority.trigger+'_'+reason,priority.eventId,counts);}
+      if(priority.eventId){const {reason,...counts}=targetResult;this.data.store.audit('MESSAGE_PREVIEW_TARGET_ATTEMPT_'+priority.trigger+'_'+reason,priority.eventId,
+        {...counts,...(priority.display?{displayOnly:true}:{})});}
     }
   }
   private async persist(source:CollectionSource,scope:string,batch:ObservationBatch,signal:AbortSignal,exactPeer?:DiscoveredPeer,window?:CommentWindowRead):Promise<void> {

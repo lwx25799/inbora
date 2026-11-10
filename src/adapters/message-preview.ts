@@ -352,7 +352,10 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
       catch{diagnostics.increment('caught','MESSAGE_PREVIEW_DISPLAY_TEXT_WRITE_FAILED');}
       if(inspected.detected){
         if(inspected.share){try{new MessageShareStore(root).save(event,mapping.self.uid,inspected.share);diagnostics.snapshot.shareLinked++;}catch{diagnostics.increment('caught','SHARE_WRITE');}}
-        else diagnostics.snapshot.shareDetectedNoLink++;
+        else{
+          diagnostics.snapshot.shareDetectedNoLink++;
+          try{store.save(event,mapping.self.uid,[{label:null,reason:'MESSAGE_PREVIEW_SHARE_LINK_UNVERIFIED'}]);}catch{diagnostics.increment('caught','CACHE_WRITE');}
+        }
         continue;
       }
     }catch{

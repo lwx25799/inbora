@@ -4,7 +4,7 @@ import type {DiscoveredPeer,ObservationBatch,ObservedReader} from '../adapters/o
 interface Anchor {top:number;height:number;ids:string[];phase:'MIN'|'MAX'|'PROBE_MIN'|'PROBE_MAX'}
 export type PreviewTargetResult={found:boolean;windows:number;persisted:number;reason:'FOUND'|'NOT_FOUND'|'CANCELLED'|'IDENTITY_CHANGED'|'INTERRUPTED'};
 interface Input {reader:ObservedReader;peer:DiscoveredPeer;target:InboundEvent;initial:ObservationBatch;anchors:Anchor[];
-  check():void;persist(batch:ObservationBatch):Promise<void>;record(result:PreviewTargetResult):void}
+  check():void;persist(batch:ObservationBatch):Promise<void|boolean>;record(result:PreviewTargetResult):void}
 const identity=(event:InboundEvent)=>JSON.stringify([event.accountId,event.channel,event.platformEventId,event.actorId,event.conversationId,
   event.direction,event.kind,event.occurredAt,event.occurredAtPrecisionMs,event.videoId,event.commentId,event.rootCommentId,event.replyToCommentId]);
 
@@ -15,7 +15,7 @@ export async function locatePreviewTarget(input:Input):Promise<{found:boolean;wi
     windows++;input.check();
     const matches=batch.events.filter(event=>event.platformEventId===target.platformEventId);
     requireSafe(matches.length<=1&&matches.every(event=>identity(event)===identity(target)),'OBSERVATION_ROW_IDENTITY_CONFLICT');
-    await input.persist(batch);persisted++;input.check();
+    if(await input.persist(batch)!==false)persisted++;input.check();
     return matches.length===1;
   };
   try{

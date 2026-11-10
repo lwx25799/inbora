@@ -7,8 +7,10 @@ import type {BrowserService} from './browser-service.js';
 import type {z} from 'zod';
 import type {humanReplySchema} from './contracts.js';
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
+import {acceptHumanQueueContext,captureHumanQueueContext,stableHumanQueueContext,recordHumanQueueContext,humanQueueFrozen,requireDistinctHumanText,type HumanQueueContext} from './human-queue-context.js';
 
 type Input=z.infer<typeof humanReplySchema>;
+type QueuedInput=Input&{queueContext?:HumanQueueContext};
 interface Turn {command_id:string;event_id:string;target_key:string;operator_id:string;input_digest:string;params:string;text:string;version:number;
   status:string;approval:string|null;intent_id:string|null;attempt_started_at:string|null;reason:string|null;proof_ref:string|null;
   verified_at:string|null;native_id_digest:string|null;created_at:number}
@@ -27,22 +29,27 @@ export class HumanFollowups {
   turn(id:string):Turn|undefined{return this.present()?this.store.db.prepare('SELECT * FROM human_reply_turns WHERE command_id=?').get(id) as Turn|undefined:undefined;}
   latest(eventId:string){return this.present()?this.store.db.prepare('SELECT * FROM human_reply_turns WHERE event_id=? ORDER BY rowid DESC LIMIT 1').get(eventId) as Turn|undefined:undefined;}
   currentDraft(eventId:string){return this.store.db.prepare('SELECT * FROM human_reply_drafts WHERE event_id=?').get(eventId) as NextDraft|undefined;}
+  private hasOriginal(eventId:string,operatorId:string|null):boolean{
+    return this.originalConfirmed(eventId)||!!operatorId&&!!this.store.db.prepare(`SELECT c.command_id FROM manual_send_commands c JOIN manual_send_inputs i ON i.command_id=c.command_id
+      WHERE c.event_id=? AND c.operator_id=? AND c.status<>'FAILED_BEFORE_CLICK' LIMIT 1`).get(eventId,operatorId);
+  }
   view(eventId:string){
     if(!this.present())return null;
     const row=this.currentDraft(eventId),turn=this.latest(eventId),confirmed=this.originalConfirmed(eventId),key=targetKey(this.store.event(eventId).payload);
     const blocked=!!this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1").get(key);
     const frozen=this.store.sendFrozen(eventId),paused=(this.store.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as {paused:number}|undefined)?.paused;
-    return {eligible:confirmed&&!blocked&&!frozen&&!paused,reason:!confirmed?'FOLLOWUP_REQUIRES_CONFIRMED_REPLY':blocked?'FOLLOWUP_REPLY_UNRESOLVED':frozen?'TARGET_FROZEN':paused?'TARGET_PAUSED':null,
+    const event=this.store.event(eventId),operator=this.authority.ownership(event).operator_id;
+    return {eligible:confirmed&&!blocked&&!frozen&&!paused,queueReady:this.hasOriginal(eventId,operator)&&!humanQueueFrozen(this.store,event,operator)&&!paused&&!this.authority.paused(),
+      reason:!confirmed?'FOLLOWUP_REQUIRES_CONFIRMED_REPLY':blocked?'FOLLOWUP_REPLY_UNRESOLVED':frozen?'TARGET_FROZEN':paused?'TARGET_PAUSED':null,
       draft:row?{id:row.id,eventId,text:row.text,version:row.version,model:'human',status:'DRAFT' as const,approval:null,origin:'HUMAN_TYPED'}:null,
       latestTurn:turn?{commandId:turn.command_id,status:turn.status,reason:turn.reason,intentId:turn.intent_id,verifiedAt:turn.verified_at,text:turn.text}:null};
   }
   private editable(token:string,eventId:string,generation:number){
     requireSafe(this.present(),'FOLLOWUP_NOT_READY');
-    const event=this.store.event(eventId);this.authority.requireOwner(token,event,generation);
+    const event=this.store.event(eventId),op=this.authority.requireOwner(token,event,generation);
     requireSafe(this.authority.mode()!=='OBSERVE','OBSERVE_READ_ONLY');
-    requireSafe(this.originalConfirmed(eventId),'FOLLOWUP_REQUIRES_CONFIRMED_REPLY');
-    requireSafe(!this.store.sendFrozen(eventId)&&!this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1").get(targetKey(event.payload)),
-      'FOLLOWUP_REPLY_UNRESOLVED');
+    requireSafe(this.hasOriginal(eventId,op.id),'FOLLOWUP_REQUIRES_CONFIRMED_REPLY');
+    requireSafe(!humanQueueFrozen(this.store,event,op.id),'FOLLOWUP_REPLY_UNRESOLVED');
     return event;
   }
   save(token:string,eventId:string,generation:number,expectedVersion:number,text:string,suggestionId:string|null){
@@ -63,18 +70,20 @@ export class HumanFollowups {
     return this.store.db.transaction(()=>{
       const event=this.editable(token,input.eventId,input.generation);this.authority.requireSelection(token,event.id,input.selectionId);
       requireSafe(input.suggestionId===null,'FOLLOWUP_HUMAN_TEXT_REQUIRED');validText(input.text);
-      requireSafe(this.authority.contextVersion(event)===input.contextVersion,'CONTEXT_VERSION_CONFLICT');
+      const queueContext=acceptHumanQueueContext(this.store,this.authority,event,op.id,input.contextVersion);
+      requireDistinctHumanText(this.store,event.id,input.text);
       const old=this.currentDraft(event.id);requireSafe((old?.version??0)===input.expectedVersion,'DRAFT_VERSION_CONFLICT');
       const draft=old&&old.text===input.text?old:this.save(token,event.id,input.generation,input.expectedVersion,input.text,null);
-      const params={...input,text:input.text.replace(/\r\n?/gu,'\n')};
+      const params={...input,contextVersion:queueContext.contextVersion,text:input.text.replace(/\r\n?/gu,'\n'),queueContext};
       this.store.db.prepare(`INSERT INTO human_reply_turns VALUES(?,?,?,?,?,?,?,?,'PREPARING',NULL,NULL,NULL,NULL,NULL,NULL,NULL,?)`)
         .run(id,event.id,targetKey(event.payload),op.id,digest(input),JSON.stringify(params),params.text,draft.version,this.authority.now());
-      this.guard(token,id);
+      this.guard(token,id,false,false);
+      recordHumanQueueContext(this.store,id,event.id,captureHumanQueueContext(this.store,this.authority,event,op.id));
       this.store.db.prepare('UPDATE human_reply_drafts SET text=?,version=version+1,saved_at=? WHERE event_id=?').run('',this.authority.now(),event.id);
       this.store.audit('HUMAN_FOLLOWUP_REQUESTED',id);return true;
     }).immediate();
   }
-  guard(token:string,id:string,approved=false):void {
+  guard(token:string,id:string,approved=false,preparing=true):void {
     requireSafe(!this.closing(),'CLIENT_CLOSING');requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
     const turn=this.turn(id);requireSafe(turn,'COMMAND_NOT_FOUND');const input=JSON.parse(turn.params) as Input,event=this.store.event(turn.event_id);
     requireSafe(['PREPARING',...(approved?['APPROVED']:[])].includes(turn.status),'COMMAND_NOT_QUEUED');
@@ -83,17 +92,22 @@ export class HumanFollowups {
     this.authority.requireSelection(token,event.id,input.selectionId);
     requireSafe(!this.authority.paused(),'ACCOUNT_PAUSED');
     requireSafe(['MANUAL','AI_ASSISTED','LIMITED_AUTO'].includes(this.authority.mode()),'MODE_DRAFT_ONLY');
-    requireSafe(this.originalConfirmed(event.id),'FOLLOWUP_REQUIRES_CONFIRMED_REPLY');
-    requireSafe(!this.store.sendFrozen(event.id),'TARGET_FROZEN');
+    requireSafe(this.hasOriginal(event.id,op.id),'FOLLOWUP_REQUIRES_CONFIRMED_REPLY');
+    requireSafe(!humanQueueFrozen(this.store,event,op.id),'TARGET_FROZEN');
     requireSafe(!(this.store.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(turn.target_key) as {paused:number}|undefined)?.paused,'TARGET_PAUSED');
-    requireSafe(!this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND command_id<>? AND status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1").get(turn.target_key,id),'COMMAND_ALREADY_QUEUED');
+    if(preparing){
+      requireSafe(!this.store.db.prepare(`SELECT command_id FROM human_reply_turns WHERE target_key=? AND rowid<(SELECT rowid FROM human_reply_turns WHERE command_id=?)
+        AND status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1`).get(turn.target_key,id),'COMMAND_ALREADY_QUEUED');
+      requireSafe(!this.store.db.prepare("SELECT command_id FROM manual_send_commands WHERE event_id=? AND status IN ('PREPARING','QUEUED','PREFLIGHT','SENDING') LIMIT 1").get(event.id),'COMMAND_ALREADY_QUEUED');
+    }
+    requireDistinctHumanText(this.store,event.id,turn.text,id);
     requireSafe(this.authority.contextVersion(event)===input.contextVersion,'CONTEXT_VERSION_CONFLICT');
     requireSafe(humanReplyEligibility(this.store,event).eligible,'TARGET_NEEDS_REVIEW');
     if(approved)requireSafe(this.authority.capability(event.payload.channel,this.browser.identity(event.payload.channel)).state==='SEND_AVAILABLE','CHANNEL_NOT_SENDABLE');
   }
   result(token:string,id:string){
     const row=this.turn(id);requireSafe(row,'COMMAND_NOT_FOUND');this.authority.operator(token);
-    return {commandId:id,status:row.status==='INTENT_RECORDED'?'SENDING':row.status==='APPROVED'?'QUEUED':row.status,intentId:row.intent_id,reason:row.reason};
+    return {commandId:id,status:row.status==='INTENT_RECORDED'?'SENDING':row.status==='APPROVED'?'QUEUED':row.status,intentId:row.intent_id,reason:row.reason,accepted:row.status!=='FAILED_BEFORE_CLICK'};
   }
   recover(){
     if(!this.present())return;
@@ -110,7 +124,15 @@ export class HumanFollowups {
   async prepare(token:string,id:string){
     let dispose=()=>{};
     try{
-      this.guard(token,id);const row=this.turn(id)!,event=this.store.event(row.event_id);
+      const pending=this.turn(id);requireSafe(pending,'COMMAND_NOT_FOUND');const params=JSON.parse(pending.params) as QueuedInput,event=this.store.event(pending.event_id);
+      if(params.queueContext){
+        requireSafe(stableHumanQueueContext(this.store,event,params.queueContext),'CONTEXT_VERSION_CONFLICT');
+        const current=this.authority.contextVersion(event);if(params.contextVersion!==current){params.contextVersion=current;
+          this.store.db.prepare("UPDATE human_reply_turns SET params=? WHERE command_id=? AND status='PREPARING' AND intent_id IS NULL").run(JSON.stringify(params),id);
+          this.store.audit('HUMAN_QUEUE_CONTEXT_REBOUND',id);
+        }
+      }
+      this.guard(token,id);const row=this.turn(id)!;
       const handle=await this.browser.adapter(event.payload,this.store,undefined,{manualMedia:!isStrong(event.payload)});dispose=handle.dispose;
       await this.browser.refreshIdentity(event.payload.channel);
       await this.browser.actor.run(async()=>{
