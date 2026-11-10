@@ -49,18 +49,28 @@ function modelUsage(db:Database.Database):DiagnosticsSnapshot['model'] {
 }
 function blockers(db:Database.Database):DiagnosticBlocker[] {
   const counts=new Map<string,DiagnosticBlocker>();
+  // Match the inbox's simple per-event result: newest persistent proof wins, then inbound status.
+  // Historical commands and jobs remain append-only even after a later send or proof resolves the event.
+  const hasProofs=exists(db,'verification_results');
+  const outcomes=`WITH ${hasProofs?`latest_proofs AS (SELECT intent_id,max(rowid) AS ordinal FROM verification_results GROUP BY intent_id),`:''}
+    event_outcomes AS (SELECT e.id,coalesce(${hasProofs?'v.verified':'NULL'},CASE WHEN e.status='CONFIRMED' THEN 1 ELSE 0 END) AS replied
+      FROM inbound_events e ${hasProofs?`LEFT JOIN send_intents i ON i.event_id=e.id
+      LEFT JOIN latest_proofs p ON p.intent_id=i.id LEFT JOIN verification_results v ON v.rowid=p.ordinal`:''})`;
   const add=(source:string,reason:unknown,count:number):void=>{
     const safe=code(reason);if(!safe)return;
     const key=source+':'+safe,item=counts.get(key)??{source,code:safe,count:0};item.count+=count;counts.set(key,item);
   };
-  for(const [table,source,column,where] of [
-    ['collection_progress','COLLECTION','last_error','1'],['work_collection_progress','WORK','last_error','1'],
-    ['automation_jobs','AUTOMATION','reason',"state='REVIEW'"],
-    ['verification_jobs','VERIFICATION','last_error',"state IN ('PENDING','RUNNING','REVIEW','EXHAUSTED')"],
-    ['manual_send_commands','MANUAL_SEND','reason',"status IN ('FAILED_BEFORE_CLICK','UNCERTAIN')"],
+  for(const [table,source,column,where,eventScoped] of [
+    ['collection_progress','COLLECTION','last_error','1',false],['work_collection_progress','WORK','last_error','1',false],
+    ['automation_jobs','AUTOMATION','reason',"state='REVIEW'",true],
+    ['verification_jobs','VERIFICATION','last_error',"state IN ('PENDING','RUNNING','REVIEW','EXHAUSTED')",true],
+    ['manual_send_commands','MANUAL_SEND','reason',`status IN ('FAILED_BEFORE_CLICK','UNCERTAIN')
+      AND blocked.rowid IN (SELECT max(rowid) FROM manual_send_commands GROUP BY event_id)`,true],
   ] as const){
     if(!exists(db,table))continue;
-    const rows=db.prepare(`SELECT ${column} AS reason,count(*) AS count FROM ${table} WHERE ${where} AND ${column} IS NOT NULL GROUP BY ${column}`)
+    const unresolved=eventScoped?'AND NOT EXISTS(SELECT 1 FROM event_outcomes e WHERE e.id=blocked.event_id AND e.replied=1)':'';
+    const rows=db.prepare(`${eventScoped?outcomes:''} SELECT blocked.${column} AS reason,count(*) AS count FROM ${table} blocked
+      WHERE ${where} AND blocked.${column} IS NOT NULL ${unresolved} GROUP BY blocked.${column}`)
       .all() as {reason:unknown;count:number}[];
     for(const row of rows)add(source,row.reason,row.count);
   }

@@ -28,19 +28,20 @@ test('diagnostics report only current blocked states and redacted collection pro
   try{
     db.exec(`CREATE TABLE model_calls(id TEXT,model TEXT,status TEXT,input_tokens INTEGER,output_tokens INTEGER,elapsed_ms INTEGER,estimated_cost REAL);
       CREATE TABLE collection_progress(source TEXT,next_at INTEGER,last_success INTEGER,last_error TEXT,failures INTEGER,elapsed_ms INTEGER,cursor_json TEXT);
-      CREATE TABLE automation_jobs(state TEXT,reason TEXT);
-      CREATE TABLE verification_jobs(state TEXT,last_error TEXT);
-      CREATE TABLE manual_send_commands(status TEXT,reason TEXT);
+      CREATE TABLE inbound_events(id TEXT,status TEXT);
+      CREATE TABLE automation_jobs(state TEXT,reason TEXT,event_id TEXT);
+      CREATE TABLE verification_jobs(state TEXT,last_error TEXT,event_id TEXT);
+      CREATE TABLE manual_send_commands(status TEXT,reason TEXT,event_id TEXT);
       CREATE TABLE work_collection_progress(last_error TEXT);
       CREATE TABLE discovered_works(state TEXT);
       CREATE TABLE discovered_conversations(last_read INTEGER);
       INSERT INTO collection_progress VALUES('dm',200,100,'DM_THREAD_READ_FAILED',2,40,'{"private":"body"}');
-      INSERT INTO automation_jobs VALUES('REVIEW','MODEL_FAILED_NO_RETRY'),('CONFIRMED','STALE_ERROR');
-      INSERT INTO verification_jobs VALUES('PENDING','PROOF_INCOMPLETE'),('DONE','STALE_ERROR');
-      INSERT INTO manual_send_commands VALUES('FAILED_BEFORE_CLICK','private message body'),('CONFIRMED','STALE_ERROR');
+      INSERT INTO automation_jobs VALUES('REVIEW','MODEL_FAILED_NO_RETRY','auto'),('CONFIRMED','STALE_ERROR','auto-old');
+      INSERT INTO verification_jobs VALUES('PENDING','PROOF_INCOMPLETE','verify'),('DONE','STALE_ERROR','verify-old');
+      INSERT INTO manual_send_commands VALUES('FAILED_BEFORE_CLICK','private message body','manual'),('CONFIRMED','STALE_ERROR','manual-old');
       INSERT INTO discovered_works VALUES('INCLUDED'),('HISTORICAL'),('REVIEW');
       INSERT INTO discovered_conversations VALUES(0),(100);`);
-    for(let index=0;index<15;index++)db.prepare('INSERT INTO automation_jobs VALUES(?,?)').run('REVIEW','REASON_'+index);
+    for(let index=0;index<15;index++)db.prepare('INSERT INTO automation_jobs VALUES(?,?,?)').run('REVIEW','REASON_'+index,'auto-'+index);
     const result=readDiagnostics({db});
     expect(result.blockers).toHaveLength(10);
     expect(result.blockers.some(item=>item.code==='STALE_ERROR')).toBe(false);
