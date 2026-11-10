@@ -7,18 +7,19 @@ import {BrowserService} from '../../src/app/browser-service.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
 import {database,privateTemp} from '../helpers.js';
 
-test('settings reserves a visible browser for explicit login and offers a headless recovery without changing reply policy',async()=>{
+test('settings keeps an explicit headed browser button and a headless return without changing reply policy',async()=>{
   const root=privateTemp('browser-login-ui-'),store=database();await migrateClient(store,join(root,'backup.sqlite'));
   class LoginBrowser extends BrowserService{
-    recovering=false;
+    recovering=false;manual=false;
     override get loginRecovery(){return this.recovering;}
-    override status(){return {state:this.recovering?'LOGIN_RECOVERY':'CLOSED',mode:this.recovering?'headed' as const:'headless' as const,
+    override status(){return {state:this.recovering?this.manual?'MANUAL_VISIBLE':'LOGIN_RECOVERY':'CLOSED',mode:this.recovering?'headed' as const:'headless' as const,
       loginRecovery:this.recovering,version:null};}
-    override async beginLoginRecovery(){this.recovering=true;}
+    override async beginLoginRecovery(autoFinish=true){this.recovering=true;this.manual=!autoFinish;}
     override async finishLoginRecovery(){this.recovering=false;return true;}
     override async close(){}
   }
   const native=new LoginBrowser(root),service=new ClientService(store,native);await service.loadSettings();const token=service.authority.issueSession();
+  const budgets=store.db.prepare('SELECT * FROM budgets ORDER BY kind').all();
   const server=await createServer({configFile:resolve('desktop/vite.config.ts'),server:{port:0,strictPort:false},logLevel:'error'});
   await server.listen();const browser=await chromium.launch({channel:'msedge',headless:true}),page=await browser.newPage();page.setDefaultTimeout(3000);
   const calls:Record<string,unknown>[]=[],errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));
@@ -34,19 +35,27 @@ test('settings reserves a visible browser for explicit login and offers a headle
     await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
     await expect.poll(()=>calls.filter(body=>body.command==='browser'&&body.action==='inspectSavedDraftRecovery').length).toBe(1);
     expect(await page.getByRole('button',{name:'打开专属浏览器',exact:true}).count()).toBe(0);
-    await page.getByRole('button',{name:'登录或处理验证码',exact:true}).click();
-    await page.getByText('浏览器：等待本人登录，完成后自动恢复无头运行',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'打开有头浏览器',exact:true}).click();
+    await expect.poll(()=>native.manual).toBe(true);
+    await page.getByText('浏览器：有头浏览器已打开，返回无头运行后继续后台处理',{exact:true}).waitFor();
+    expect(await page.getByRole('button',{name:'打开有头浏览器',exact:true}).count()).toBe(1);
+    expect(await page.getByRole('button',{name:'打开有头浏览器',exact:true}).isDisabled()).toBe(true);
+    await page.screenshot({path:join(root,'headed-settings.png')});
     expect(calls.filter(body=>body.command==='browser')).toEqual([
-      {command:'browser',action:'inspectSavedDraftRecovery'},{command:'browser',open:true,mode:'headed',loginRecovery:true},
+      {command:'browser',action:'inspectSavedDraftRecovery'},{command:'browser',open:true,mode:'headed',loginRecovery:true,manualVisible:true},
     ]);
     await page.getByRole('button',{name:'返回无头运行',exact:true}).click();
     await expect.poll(()=>native.loginRecovery).toBe(false);
+    await expect.poll(()=>page.getByRole('button',{name:'打开有头浏览器',exact:true}).isEnabled()).toBe(true);
     expect(calls.filter(body=>body.command==='browser')).toEqual([
       {command:'browser',action:'inspectSavedDraftRecovery'},
-      {command:'browser',open:true,mode:'headed',loginRecovery:true},{command:'browser',open:true,mode:'headless'},
+      {command:'browser',open:true,mode:'headed',loginRecovery:true,manualVisible:true},{command:'browser',open:true,mode:'headless'},
     ]);
     expect(calls.filter(body=>body.command==='browser'&&body.action==='clearSavedDraftRecovery')).toEqual([]);
-    expect(calls.some(body=>['sendHumanReply','generateSuggestion','setAutomaticReply','enableReplyPolicy'].includes(String(body.command)))).toBe(false);
+    expect(calls.some(body=>['sendHumanReply','sendHumanFollowup','generateSuggestion','setAutomaticReply','enableReplyPolicy'].includes(String(body.command)))).toBe(false);
+    expect(store.db.prepare('SELECT * FROM budgets ORDER BY kind').all()).toEqual(budgets);
+    expect(store.db.prepare('SELECT COUNT(*) n FROM model_calls').get()).toEqual({n:0});
+    expect(store.db.prepare('SELECT COUNT(*) n FROM send_intents').get()).toEqual({n:0});
     expect(errors).toEqual([]);
   }finally{await browser.close();await server.close();await service.close();store.close();}
 });

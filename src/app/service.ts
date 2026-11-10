@@ -492,7 +492,7 @@ export class ClientService {
         if(c.open&&c.loginRecovery){
           this.stopSync();this.collector?.suspend(true);this.verification?.suspend(true);
           this.onlineAbort.abort();this.modelAbort.abort();this.stopAutomaticReply();
-          await this.browser.beginLoginRecovery();this.onlineRetryAt=0;
+          await this.browser.beginLoginRecovery(!c.manualVisible);this.onlineRetryAt=0;
         }
         else if(c.open&&this.browser.loginRecovery){if(await this.browser.finishLoginRecovery())this.resumeAfterLogin();}
         else if (c.open) await this.browser.open('headless');

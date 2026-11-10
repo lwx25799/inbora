@@ -45,6 +45,38 @@ async function recoveryFixture(beforeLaunch?:(headless:boolean)=>Promise<void>){
   return {root,browser,launches,owners,sequence};
 }
 
+test('a manual visible window stays open even when the bound account is already verified',async()=>{
+  const f=await recoveryFixture(),guard=vi.spyOn(ObservedReader.prototype,'guard').mockResolvedValue();
+  try{
+    await f.browser.open();await f.browser.beginLoginRecovery(false);
+    expect(await f.browser.completeLoginIfVerified('100')).toBe(false);
+    expect(f.launches).toEqual([true,false]);expect(guard).not.toHaveBeenCalled();
+    expect(f.browser.status()).toMatchObject({mode:'headed',state:'MANUAL_VISIBLE',loginRecovery:true});
+    expect(await f.browser.finishLoginRecovery()).toBe(true);
+    expect(f.launches).toEqual([true,false,true]);
+    expect(f.browser.status()).toMatchObject({mode:'headless',loginRecovery:false});
+  }finally{guard.mockRestore();await f.browser.close();}
+});
+
+test.each([0,1])('returning from a manual visible window preserves webpage input in page %s',async pageIndex=>{
+  const f=await recoveryFixture();
+  try{
+    await f.browser.open();await f.browser.beginLoginRecovery(false);f.owners[1]!.pages[pageIndex]!.dirty=true;
+    await expect(f.browser.finishLoginRecovery()).rejects.toThrow('BROWSER_HAS_HUMAN_INPUT');
+    expect(f.owners[1]!.closed).toBe(false);expect(f.launches).toEqual([true,false]);
+    expect(f.browser.status()).toMatchObject({mode:'headed',state:'MANUAL_VISIBLE',loginRecovery:true});
+  }finally{await f.browser.close();}
+});
+
+test('closing a manual visible window restores verified headless operation without reopening headed',async()=>{
+  const f=await recoveryFixture(),guard=vi.spyOn(ObservedReader.prototype,'guard').mockResolvedValue();
+  try{
+    await f.browser.open();await f.browser.beginLoginRecovery(false);f.owners[1]!.context.emit('close');
+    expect(await f.browser.completeLoginIfVerified('100')).toBe(true);
+    expect(f.launches).toEqual([true,false,true]);expect(f.browser.loginRecovery).toBe(false);
+  }finally{guard.mockRestore();await f.browser.close();}
+});
+
 test.each([0,1])('login recovery never closes a webpage draft in page %s and verified login returns to headless',async pageIndex=>{
   const f=await recoveryFixture(),guard=vi.spyOn(ObservedReader.prototype,'guard').mockResolvedValue();
   try{

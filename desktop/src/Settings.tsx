@@ -67,24 +67,25 @@ export function Settings({
             已选择{modes[status.configuredMode]}；正在自动连接账号，连接后即可继续。
           </p>
         )}
-        <p className="hint">日常收取与回复均使用无头浏览器，正常重启自动恢复。仅需登录或验证码时打开可见窗口，核对本人登录后自动恢复无头运行。</p>
+        <p className="hint">日常默认无头运行。可临时打开有头浏览器查看页面或处理登录；打开期间后台收取与自动回复暂缓，完成后点击“返回无头运行”继续。</p>
         <div className="row">
           <button
-            disabled={!!busy}
+            disabled={!!busy||status.browser.state==='MANUAL_VISIBLE'}
             onClick={() =>
-              void act("处理登录或验证码", async () =>
+              void act("打开有头浏览器", async () =>
                 update(
                   await request<Status>({
                     command: "browser",
                     open: true,
                     mode: 'headed',
                     loginRecovery:true,
+                    manualVisible:true,
                   }),
                 ),
               )
             }
           >
-            登录或处理验证码
+            打开有头浏览器
           </button>
           {status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('恢复无头运行',async()=>update(
             await request<Status>({command:'browser',open:true,mode:'headless'})))}>返回无头运行</button>}

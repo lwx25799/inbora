@@ -48,7 +48,7 @@ export interface BrowserDraftChoice {
   author:string|null;conversationId:string;originalText:string;
 }
 const browserCommandSchema=z.union([
-  z.object({command:z.literal('browser'),open:z.boolean(),mode:z.enum(['headed','headless']),loginRecovery:z.boolean().optional()}).strict(),
+  z.object({command:z.literal('browser'),open:z.boolean(),mode:z.enum(['headed','headless']),loginRecovery:z.boolean().optional(),manualVisible:z.boolean().optional()}).strict(),
   z.object({command:z.literal('browser'),action:z.literal('inspectSavedDraftRecovery')}).strict(),
   z.object({command:z.literal('browser'),action:z.literal('clearSavedDraftRecovery'),...event,draftId:z.uuid(),draftVersion:z.number().int().positive(),
     expectedText:z.string().min(1).max(2000),contextVersion:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true)}).strict(),

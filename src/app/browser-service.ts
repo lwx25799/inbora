@@ -43,6 +43,7 @@ export class BrowserService {
   private collectorMapping = "";
   private previewHint:{ownId:string;conversationId:string}|undefined;
   private recoveringLogin=false;
+  private autoFinishLogin=true;
   private loginGeneration=0;
   private modeTransition:Promise<void>|undefined;
   get loginRecovery(){return this.recoveringLogin;}
@@ -68,7 +69,7 @@ export class BrowserService {
   }
   status():{state:string;mode:'headed'|'headless';loginRecovery?:boolean;version:string|null} {
     return {
-      state: this.recoveringLogin?'LOGIN_RECOVERY':this.state,
+      state: this.recoveringLogin?this.autoFinishLogin?'LOGIN_RECOVERY':this.owner&&this.mode==='headed'?'MANUAL_VISIBLE':'MANUAL_VISIBLE_PENDING':this.state,
       mode: this.mode,
       loginRecovery:this.recoveringLogin,
       version: this.owner?.version() ?? null,
@@ -123,9 +124,10 @@ export class BrowserService {
       if (this.opening === opening) this.opening = undefined;
     }
   }
-  async beginLoginRecovery():Promise<void>{
+  async beginLoginRecovery(autoFinish=true):Promise<void>{
     this.loginGeneration++;
     this.recoveringLogin=true;
+    this.autoFinishLogin=autoFinish;
     await this.changeMode('headed');
   }
   async finishLoginRecovery(generation=this.loginGeneration):Promise<boolean>{
@@ -135,10 +137,12 @@ export class BrowserService {
     for(const channel of ['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as const)await this.readIdentity(channel);
     if(generation!==this.loginGeneration)return false;
     this.recoveringLogin=false;
+    this.autoFinishLogin=true;
     return true;
   }
   async completeLoginIfVerified(ownId:string):Promise<boolean>{
     if(!this.recoveringLogin||this.modeTransition)return false;
+    if(!this.autoFinishLogin&&this.owner)return false;
     const generation=this.loginGeneration;
     if(!this.owner)await this.changeMode('headless');
     if(generation!==this.loginGeneration||!this.owner)return false;
