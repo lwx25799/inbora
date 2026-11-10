@@ -90,6 +90,7 @@ export class VerificationScheduler {
     this.running=task;await task;
   }
   cancel():void {this.abort?.abort();}
-  suspend(value:boolean):void {this.suspended=value;if(value)this.cancel();}
+  suspend(value:boolean,cancelInFlight=true):void {this.suspended=value;if(value&&cancelInFlight)this.cancel();}
+  async drain():Promise<void>{await this.running;}
   async close():Promise<void> {this.closed=true;clearInterval(this.timer);this.cancel();await this.running;}
 }

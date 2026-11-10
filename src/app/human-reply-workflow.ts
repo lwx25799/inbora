@@ -40,17 +40,20 @@ export class HumanReplyWorkflow {
     const row=this.authority.command(id),params=JSON.parse(row.params) as SendParams,event=this.store.event(params.eventId);
     let dispose=()=>{};
     try {
+      requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
       const manualMedia=isManualMediaCandidate(event.payload)&&!!this.store.db.prepare('SELECT command_id FROM manual_send_inputs WHERE command_id=?').get(id)&&
         !this.store.db.prepare('SELECT command_id FROM policy_commands WHERE command_id=?').get(id);
       const handle=await this.browser.adapter(event.payload,this.store,undefined,{manualMedia});dispose=handle.dispose;
       await this.browser.refreshIdentity(event.payload.channel);
       await this.browser.actor.run(async()=>{
+        requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
         requireSafe(!this.isClosing(),'CLIENT_CLOSING');
         requireSafe(this.authority.command(id).status==='PREPARING','COMMAND_NOT_QUEUED');
         this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
         const priorIdentity=digest(this.browser.identity(event.payload.channel));
         const before=digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel));
         const snapshot=await handle.adapter.inspect(event.payload);
+        requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
         requireSafe(!this.isClosing(),'CLIENT_CLOSING');
         requireSafe(this.authority.command(id).status==='PREPARING','COMMAND_NOT_QUEUED');
         this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);

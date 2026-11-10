@@ -201,6 +201,10 @@ export class ClientService {
       AND status IN ('PREPARING','QUEUED','PREFLIGHT','PREVIEW')
       AND NOT EXISTS (SELECT 1 FROM send_intents i WHERE i.event_id=manual_send_commands.event_id)`).run();
   }
+  private suspendForVisible(stopUnsubmitted=true):void{
+    this.stopSync();this.collector?.suspend(true);this.verification?.suspend(true,stopUnsubmitted);
+    this.onlineAbort.abort();this.modelAbort.abort();if(stopUnsubmitted)this.stopAutomaticReply();else this.automaticAbort.abort();
+  }
   private emit(event: string): void {
     this.events.emit("update", { event });
   }
@@ -410,6 +414,11 @@ export class ClientService {
       }
       case "openTarget": {
         this.authority.operator(token, "CONTROL");
+        if(c.visible){let suspended=false;const check=()=>{this.authority.operator(token,'CONTROL');requireSafe(!this.closing&&this.automation?.state().collection?.inbox&&
+          !this.automation.state().emergencyStopped,'COLLECTION_CANCELLED');};check();
+          try{return await this.browser.openStoredMessage(this.store,c.eventId,async()=>{this.suspendForVisible(false);suspended=true;this.onlineAbort=new AbortController();
+            await this.verification?.drain();check();return this.onlineAbort.signal;},check);}
+          catch(error){if(suspended&&!this.browser.loginRecovery&&!this.automation?.state().emergencyStopped)this.resumeAfterLogin();throw error;}finally{this.emit('status_updated');}}
         const event = this.store.event(c.eventId),
           handle = await this.browser.adapter(event.payload,this.store);
         try {
@@ -487,8 +496,7 @@ export class ClientService {
           const result=await recovery.clear(token,c);this.emit('status_updated');return result;
         }
         if(c.open&&c.loginRecovery){
-          this.stopSync();this.collector?.suspend(true);this.verification?.suspend(true);
-          this.onlineAbort.abort();this.modelAbort.abort();this.stopAutomaticReply();
+          this.suspendForVisible();
           await this.browser.beginLoginRecovery(!c.manualVisible);this.onlineRetryAt=0;
         }
         else if(c.open&&this.browser.loginRecovery){if(await this.browser.finishLoginRecovery())this.resumeAfterLogin();}

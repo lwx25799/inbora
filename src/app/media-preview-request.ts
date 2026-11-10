@@ -9,23 +9,13 @@ import type {Page} from 'playwright';
 import type {ObservationMapping} from '../config/site-mapping.js';
 import type {DiscoveredPeer,ObservationBatch} from '../adapters/observed-reader.js';
 import {saveMessagePreviews} from '../adapters/message-preview.js';
+import {resolveStoredDmMessage} from './message-view.js';
 
 export interface PreviewDisplayTarget {eventId:string;source:'INBOUND'|'CHAT';purpose:'DISPLAY'}
 export function resolvePreviewDisplay(store:EventStore,eventId:string,source?:PreviewDisplayTarget['source']){
-  const chat=source!=='INBOUND'?new ChatMessageStore(store).get(eventId):null;
-  requireSafe(source!=='CHAT'||chat,'MESSAGE_PREVIEW_UNAVAILABLE');
-  const saved=chat??store.event(eventId),event=saved.payload;
-  const own=store.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(event.accountId) as {own_id:string}|undefined;
-  const peer=store.db.prepare('SELECT own_id,uid,sec_uid FROM discovered_conversations WHERE id=?').get(event.conversationId) as
-    {own_id:string;uid:string|null;sec_uid:string}|undefined;
-  requireSafe(own&&event.accountId==='account_001'&&event.channel==='DIRECT_MESSAGE'&&event.kind==='DM'&&
-    event.observationIssue==='DM_CONTENT_UNVERIFIED'&&['IMAGE','MIXED'].includes(event.contentType??'')&&
-    event.platformEventId&&/^[1-9]\d{0,63}$/u.test(event.platformEventId)&&event.occurredAt&&Date.parse(event.occurredAt)>=946684800000&&
-    Date.parse(event.occurredAt)<=Date.now()+2000&&
-    peer?.own_id===own.own_id&&peer.sec_uid&&eventBinding(event)===saved.binding&&
-    (chat?event.direction==='OUTGOING'&&event.actorId===own.own_id:
-      event.direction==='INCOMING'&&event.actorId!==own.own_id&&event.actorId===peer.uid),'MESSAGE_PREVIEW_UNAVAILABLE');
-  return {event,ownId:own.own_id,target:{eventId,source:chat?'CHAT':'INBOUND',purpose:'DISPLAY'} as PreviewDisplayTarget};
+  const resolved=resolveStoredDmMessage(store,eventId,source),{event,ownId}=resolved;
+  requireSafe(event.observationIssue==='DM_CONTENT_UNVERIFIED'&&['IMAGE','MIXED'].includes(event.contentType??''),'MESSAGE_PREVIEW_UNAVAILABLE');
+  return {event,ownId,target:{eventId,source:resolved.source,purpose:'DISPLAY'} as PreviewDisplayTarget};
 }
 
 export function readOrRefreshPreview(store:EventStore,browser:BrowserService,data:AutomationStore|null,control:()=>void,

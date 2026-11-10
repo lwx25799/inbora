@@ -26,6 +26,7 @@ import type { AutomationStore } from "../storage/automation-store.js";
 import type { CollectionSource } from "./collection-scheduler.js";
 import {MessagePreviewStore} from '../storage/message-previews.js';
 import type {PreviewDisplayTarget} from './media-preview-request.js';
+import {resolveStoredDmMessage,locateStoredDmMessage} from './message-view.js';
 
 export interface AdapterHandle {
   adapter: ReplyAdapter;
@@ -47,7 +48,9 @@ export class BrowserService {
   private autoFinishLogin=true;
   private loginGeneration=0;
   private modeTransition:Promise<void>|undefined;
-  get loginRecovery(){return this.recoveringLogin;}
+  private viewRequests=0;
+  private latestViewRequest=0;
+  get loginRecovery(){return this.recoveringLogin||this.viewRequests>0;}
   get ownerEpoch() { return this.epoch; }
   constructor(
     readonly root: string,
@@ -125,11 +128,34 @@ export class BrowserService {
       if (this.opening === opening) this.opening = undefined;
     }
   }
-  async beginLoginRecovery(autoFinish=true):Promise<void>{
+  async beginLoginRecovery(autoFinish=true,signal?:AbortSignal,check?:()=>void):Promise<void>{
+    check?.();
     this.loginGeneration++;
     this.recoveringLogin=true;
     this.autoFinishLogin=autoFinish;
-    await this.changeMode('headed');
+    await this.changeMode('headed',signal,check);
+  }
+  async openStoredMessage(store:EventStore,eventId:string,beforeOpen:()=>Promise<AbortSignal>,permitted:()=>void):Promise<{opened:true;located:boolean}>{
+    permitted();
+    const resolved=resolveStoredDmMessage(store,eventId),mapping=await loadObservationMapping(this.root);
+    requireSafe(mapping&&mapping.self.uid===resolved.ownId,'ACCOUNT_CHANGED');
+    permitted();const request=++this.latestViewRequest;this.viewRequests++;
+    try{
+    const signal=AbortSignal.any([await beforeOpen(),AbortSignal.timeout(30_000)]),active=()=>{permitted();requireSafe(!signal.aborted&&request===this.latestViewRequest,'MESSAGE_VIEW_CANCELLED');};
+    active();const previous={owner:this.owner,mode:this.mode,recovering:this.recoveringLogin,autoFinish:this.autoFinishLogin},generation=this.loginGeneration+1;
+    try{await this.beginLoginRecovery(false,signal,active);}catch(error){
+      if(this.loginGeneration===generation&&this.owner===previous.owner&&this.mode===previous.mode){this.recoveringLogin=previous.recovering;this.autoFinishLogin=previous.autoFinish;}
+      if(this.loginGeneration!==generation)requireSafe(false,'MESSAGE_VIEW_CANCELLED');
+      if(signal.aborted){permitted();requireSafe(false,'MESSAGE_VIEW_CANCELLED');}
+      throw error;
+    }
+    const owner=this.owner,epoch=this.epoch;
+    const check=()=>{active();requireSafe(this.owner===owner&&this.epoch===epoch&&this.loginGeneration===generation&&
+      this.recoveringLogin&&!this.autoFinishLogin&&this.mode==='headed','MESSAGE_VIEW_CANCELLED');};
+    check();requireSafe(owner,'BROWSER_NOT_RUNNING');
+    return await owner.actor.run(async()=>{check();requireSafe(digest(resolveStoredDmMessage(store,eventId))===digest(resolved),'MESSAGE_PREVIEW_UNAVAILABLE');
+      return locateStoredDmMessage({store,eventId,page:owner.dm,mapping,signal,check});});
+    }finally{this.viewRequests--;}
   }
   async finishLoginRecovery(generation=this.loginGeneration):Promise<boolean>{
     if(generation!==this.loginGeneration)return false;
@@ -155,14 +181,17 @@ export class BrowserService {
     });
     return this.finishLoginRecovery(generation);
   }
-  private async changeMode(mode:'headed'|'headless'):Promise<void>{
-    if(this.modeTransition)await this.modeTransition;
+  private async changeMode(mode:'headed'|'headless',signal?:AbortSignal,check?:()=>void):Promise<void>{
+    if(this.modeTransition)await this.modeTransition.catch(()=>{});
     const task=(async()=>{
+      check?.();
       if(this.opening)await this.opening;
       if(this.closing)await this.closing;
+      check?.();
       const owner=this.owner;
       if(owner&&this.mode!==mode){
         await owner.actor.run(async()=>{
+          check?.();
           requireSafe(this.owner===owner,'BROWSER_CLOSED');
           for(const page of [owner.notification,owner.dm]){
             const empty=await page.locator('[contenteditable="true"],textarea,input').evaluateAll(editors=>{
@@ -181,12 +210,13 @@ export class BrowserService {
               return true;
             });
             requireSafe(empty,'BROWSER_HAS_HUMAN_INPUT');
+            check?.();
           }
           this.owner=undefined;this.epoch++;this.currentIdentity.clear();this.collector?.dispose();this.collector=undefined;this.state='CLOSED';
           await owner.close();
         });
       }
-      await this.openMode(mode);
+      check?.();await this.openMode(mode,signal);check?.();
     })();
     this.modeTransition=task;
     try{await task;}finally{if(this.modeTransition===task)this.modeTransition=undefined;}
@@ -249,6 +279,7 @@ export class BrowserService {
     }
   }
   async adapter(e: InboundEvent, store?:EventStore, signal?:AbortSignal,options:{manualMedia?:boolean;readonlySignal?:AbortSignal}={}): Promise<AdapterHandle> {
+    requireSafe(!this.viewRequests||options.readonlySignal,'LOGIN_RECOVERY_IN_PROGRESS');
     await this.open(this.mode,signal);
     const owner = this.owner!;
     const native =

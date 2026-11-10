@@ -80,7 +80,7 @@ const ordinaryCommandSchema = z.discriminatedUnion("command", [
   z.object({ command: z.literal("getThread"), ...event,timelineBefore:z.string().min(1).max(300).optional() }).strict(),
   z.object({command:z.literal('getMessagePreview'),...event,previewId:z.string().regex(/^[a-f0-9]{64}$/).optional(),refresh:z.literal(true).optional()})
     .strict().refine(value=>(value.refresh===true)!==(value.previewId!==undefined)),
-  z.object({ command: z.literal("openTarget"), ...event }).strict(),
+  z.object({ command: z.literal("openTarget"), ...event,visible:z.literal(true).optional() }).strict(),
   z
     .object({
       command: z.literal("selectTarget"),

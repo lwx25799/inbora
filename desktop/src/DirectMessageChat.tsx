@@ -19,6 +19,24 @@ function merge(prior:TimelineItem[],next:TimelineItem[]){
   const additions=next.filter(item=>!seen.has(item.id));return [...retained,...additions].sort(compare);
 }
 
+function MessageView({eventId}:{eventId:string}){
+  const [opening,setOpening]=useState(false),[feedback,setFeedback]=useState('');
+  const pending=useRef(false),alive=useRef(true);
+  useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
+  async function open(){
+    if(pending.current)return;pending.current=true;setOpening(true);setFeedback('');
+    try{
+      const result=await request<{opened:boolean;located:boolean}>({command:'openTarget',eventId,visible:true});
+      if(result?.opened!==true||typeof result.located!=='boolean')throw Error('VISIBLE_MESSAGE_NOT_OPENED');
+      if(alive.current)setFeedback('已在浏览器打开会话');
+    }catch{if(alive.current)setFeedback('暂时无法打开这条消息，请稍后再试');}
+    finally{pending.current=false;if(alive.current)setOpening(false);}
+  }
+  return <div className="message-view"><button type="button" aria-label="查看这条消息" disabled={opening}
+    onClick={event=>{event.stopPropagation();void open();}}>{opening?'正在打开…':'查看这条消息'}</button>
+    {feedback&&<small role="status">{feedback}</small>}</div>;
+}
+
 export function DirectMessageChat(props:ReplyViewProps & {thread:Thread}){
   const {thread,status,busy,act,setNotice}=props;
   const group=thread.groupKey??JSON.stringify([thread.event.payload.accountId,thread.event.payload.conversationId]);
@@ -75,9 +93,9 @@ export function DirectMessageChat(props:ReplyViewProps & {thread:Thread}){
         <div className="message-bubble">{(!!message.displayText||!imageReplacesPlaceholder(message))&&<p><MessageText text={message.displayText??message.text}/></p>}
           {validShare(message.share)?<ShareLink key={message.share!.url} share={message.share!}/>:<MessageAttachments message={message}/>}
           {message.observationIssue&&<p className="message-quality">{message.displayText?'此消息的其他内容仍需人工查看，暂不自动回复':reasons[message.observationIssue]??'此消息需人工查看'}</p>}
-          {message.direction==='INCOMING'&&!message.historical&&message.observationIssue==='DM_CONTENT_UNVERIFIED'&&
-            ['IMAGE','MIXED'].includes(message.contentType??'')&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(message.eventId)&&
-            message.eventId!==thread.event.id&&<button onClick={()=>props.choose(message.eventId)}>查看这条消息</button>}
+          {message.origin==='OBSERVED'&&message.observationIssue==='DM_CONTENT_UNVERIFIED'&&
+            ['IMAGE','MIXED','VIDEO','AUDIO'].includes(message.contentType??'')&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(message.eventId)&&
+            <MessageView key={group+':'+thread.event.id+':'+message.id} eventId={message.eventId}/>}
         </div>
       </article>)}
     </div>
