@@ -9,6 +9,7 @@ import {InboxQueries,inboxGroupKey} from './inbox-queries.js';
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
 import {HumanFollowups} from './human-followup.js';
 import {readCommentThreadContext,commentThreadPage,commentThreadGroupKey} from '../storage/comment-thread-context.js';
+import {hasSuggestionAuthorization,suggestionEligibility,type SuggestionState} from './suggestion-eligibility.js';
 
 interface ViewState {
   settings: AiSettings;
@@ -32,7 +33,7 @@ export class WorkbenchQueries {
     return latest?latest.verified===1?'REPLIED':'WAITING':status==='CONFIRMED'?'REPLIED':'WAITING';
   }
 
-  thread(token: string, eventId: string, automation: AutomationStore | null,timelineBefore?:string) {
+  thread(token: string, eventId: string, automation: AutomationStore | null,timelineBefore?:string,aiState?:SuggestionState) {
     const op = this.authority.operator(token),
       e = this.store.event(eventId),
       draft = this.authority.draftFor(eventId);
@@ -57,6 +58,8 @@ export class WorkbenchQueries {
     const frozen = this.store.sendFrozen(e.id);
     return {
       event: e,
+      ...(aiState?{suggestionEligibility:op.permissions.includes('EDIT')?suggestionEligibility(this.store,this.authority,automation,e,aiState):
+        {eligible:false,reason:'OPERATOR_PERMISSION_DENIED'}}:{}),
       groupKey:inboxGroupKey(e),
       timeline:new InboxQueries(this.store,this.browser.root,(id,status)=>this.replyStatus(id,status)).timeline(e,commentThreadGroupKey(e.payload)?undefined:timelineBefore),
       draft,
@@ -141,7 +144,7 @@ export class WorkbenchQueries {
       settings: state.settings,
       keyPresent: state.keyPresent,
       keyStored:state.keyStored,keyStorageError:state.keyStorageError,
-      modelAuthorized: state.modelAuthorized || automation?.active('MODEL')?.scope.model===state.settings.model,
+      modelAuthorized: hasSuggestionAuthorization(automation,state),
       automation:automation?{
         ...automation.state(),modelGrant:automation.active('MODEL'),replyPolicy:automation.active('AUTO_REPLY'),
         collector:state.collector,inboxRevision:state.inboxRevision,

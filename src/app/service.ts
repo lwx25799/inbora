@@ -36,6 +36,7 @@ import {runAutomaticReply} from './automatic-reply.js';
 import {readDiagnostics} from './diagnostics.js';
 import {EvidenceMaintenance} from './evidence-maintenance.js';
 import {runtimePerformance} from '../observability/runtime-performance.js';
+import {generateSuggestion} from './suggestion-generation.js';
 
 export function clientError(error: unknown): string {
   return error instanceof Blocked
@@ -296,8 +297,10 @@ export class ClientService {
     this.track(task);
   }
   private thread(token: string,eventId: string) {
-    return this.queries.thread(token,eventId,this.automation);
+    return this.queries.thread(token,eventId,this.automation,undefined,this.suggestionState());
   }
+  private suggestionState(){return{settings:this.settings,keyPresent:!!this.key,modelAuthorized:this.modelAuthorized,
+    modelBusy:this.modelPending.size>0,recovering:this.browser.loginRecovery};}
   private status(token: string) {
     return this.queries.status(token,{
       settings:this.settings,keyPresent:!!this.key,keyStored:this.keyStored,keyStorageError:this.keyStorageError,
@@ -403,7 +406,7 @@ export class ClientService {
         return {...readDiagnostics(this.store),performance:runtimePerformance.snapshot(),evidence:this.maintenance.status()};
       case "getThread":
         return {
-          ...this.queries.thread(token,c.eventId,this.automation,c.timelineBefore),
+          ...this.queries.thread(token,c.eventId,this.automation,c.timelineBefore,this.suggestionState()),
           workUrl: await this.browser.workUrl(
             this.store.event(c.eventId).payload,
             this.store,
@@ -607,77 +610,9 @@ export class ClientService {
         );
         this.emit('status_updated');return this.status(token);
       case "generateSuggestion": {
-        requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
-        this.authority.operator(token, "EDIT");
-        requireSafe(
-          this.authority.mode() !== "OBSERVE" && !this.authority.paused(),
-          "MODEL_PAUSED",
-        );
-        const e = this.store.event(c.eventId);
-        this.store.assertModelObservation(e.payload);
-        requireSafe(
-          [
-            "AWAITING_DRAFT",
-            "AWAITING_APPROVAL",
-            "APPROVED",
-            "MANUAL_REVIEW",
-          ].includes(e.status),
-          "EVENT_NOT_DRAFTABLE",
-        );
-        requireSafe(
-          (this.authority.draftFor(e.id)?.version ?? 0) === c.draftVersion,
-          "DRAFT_VERSION_CONFLICT",
-        );
-        requireSafe(!this.modelPending.has(e.id), "MODEL_ALREADY_PENDING");
-        const context = this.authority.contextVersion(e);
-        const grant=this.automation?.active('MODEL');
-        if(grant) {
-          this.automation!.requireAccount(grant.scope.ownId);
-          requireSafe(grant.scope.model===this.settings.model&&grant.scope.channels.includes(e.payload.channel),'MODEL_OUTSIDE_GRANT');
-        }
-        this.modelPending.add(e.id);
-        this.emit('status_updated');
-        this.maintenance.cancel();
-        const modelSignal=this.modelAbort.signal;
-        const modelEnd=runtimePerformance.start('MODEL',e.payload.channel);
-        try {
-          const result = await this.provider.generate(
-            this.store,
-            e.payload,
-            this.store.history(e.payload),
-            this.settings,
-            this.key,
-            this.modelAuthorized||!!grant,
-            modelSignal,
-            grant?()=>this.automation!.reserve(grant.version,'MODEL',randomUUID()):undefined,
-          );
-          modelEnd();
-          requireSafe(!modelSignal.aborted&&!this.browser.loginRecovery,'MODEL_PAUSED');
-          const id = randomUUID();
-          this.store.db
-            .prepare("INSERT INTO ai_suggestions VALUES(?,?,?,?,?,?,?,0)")
-            .run(
-              id,
-              e.id,
-              c.draftVersion,
-              context,
-              result.text,
-              result.model,
-              Date.now(),
-            );
-          // Candidate only: a human revision, new context, or new lease is never overwritten.
-          this.emit("suggestion_updated");
-          return {
-            id,
-            ...result,
-            stale:
-              (this.authority.draftFor(e.id)?.version ?? 0) !==
-                c.draftVersion || this.authority.contextVersion(e) !== context,
-          };
-        } catch(error){modelEnd(modelSignal.aborted?'CANCELLED':'FAILED');throw error;} finally {
-          this.modelPending.delete(e.id);
-          this.emit('status_updated');
-        }
+        return generateSuggestion({store:this.store,authority:this.authority,automation:this.automation,provider:this.provider,
+          state:()=>this.suggestionState(),key:()=>this.key,signal:()=>this.modelAbort.signal,pending:this.modelPending,
+          emit:event=>this.emit(event),cancelMaintenance:()=>this.maintenance.cancel()},token,c);
       }
       case "dismissSuggestion":
         this.authority.operator(token, "EDIT");

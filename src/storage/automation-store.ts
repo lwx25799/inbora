@@ -121,6 +121,15 @@ export class AutomationStore {
     // Only an active editing lease pauses a conversation; merely viewing it must not leave a persistent handoff.
     const owner = this.store.db.prepare("SELECT operator_id,lease_expires_at FROM thread_ownership WHERE target_key=?").get(targetKey(e.payload)) as {operator_id: string | null;lease_expires_at:number} | undefined;
     if (paused?.paused || owner?.operator_id&&owner.lease_expires_at>this.now()) return false;
+    return this.policyScopeMatches(grant,e);
+  }
+  /** Authorization scope only; explicit human suggestions do not inherit automatic scheduling gates. */
+  policyScopeMatches(grant:Grant<ReplyPolicy>,e:StoredEvent):boolean {
+    const active=this.active('AUTO_REPLY');
+    if(active?.version!==grant.version||this.state().emergencyStopped||!isStrong(e.payload))return false;
+    const p=active.scope as ReplyPolicy;this.requireAccount(p.ownId);
+    if(!p.channels.includes(e.payload.channel)||e.payload.direction!=='INCOMING'||e.payload.actorId===p.ownId)return false;
+    if(e.payload.channel==='COMMENT_NOTIFICATION'&&e.payload.kind==='REPLY'&&p.replyToNestedComments===false)return false;
     const hour = Number(new Intl.DateTimeFormat("en-GB", {timeZone: "Asia/Shanghai", hour: "2-digit", hourCycle: "h23"}).format(this.now()));
     if (hour < p.startHour || hour >= p.endHour) return false;
     const text = e.payload.text.toLocaleLowerCase();

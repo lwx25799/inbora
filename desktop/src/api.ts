@@ -101,6 +101,7 @@ export interface Thread {
   capability: { state: string; reason: string; evidence: string | null };
   strong: boolean;
   humanReplyEligibility?:{eligible:boolean;reason:string|null};
+  suggestionEligibility?:{eligible:boolean;reason:string|null};
   paused: boolean;
   frozen: boolean;
   intent: { id: string; status: string } | null;

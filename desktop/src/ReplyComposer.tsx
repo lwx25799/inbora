@@ -8,11 +8,26 @@ const draftOrigins = new Map([
   ["AI_ASSISTED_APPROVED", "已引用 AI 建议"],
   ["LEGACY", "历史草稿"],
 ]);
+const suggestionMessages:Record<string,string>={
+  DM_CONTENT_UNVERIFIED:'此消息包含尚未核验的媒体或分享内容，暂不能生成 AI 建议',
+  SUGGESTION_ALREADY_SUBMITTED:'此条已提交，可对新的文字留言生成建议',
+  MODEL_OUTSIDE_GRANT:'当前回复策略未覆盖这条消息，暂不能生成 AI 建议',
+  MODEL_GRANT_EXHAUSTED:'模型额度已用尽，暂不能生成 AI 建议',
+  MODEL_KEY_REQUIRED:'模型 Key 尚未就绪，暂不能生成 AI 建议',
+  LOGIN_RECOVERY_IN_PROGRESS:'专属浏览器正由本人操作，AI 建议暂不可用',
+  REAL_MODEL_AUTHORIZATION_REQUIRED:'尚无覆盖此消息的模型许可，暂不能生成 AI 建议',
+  MODEL_ALREADY_PENDING:'正在生成 AI 建议，请稍候',SUGGESTION_BUSY:'正在处理当前操作，请稍候生成 AI 建议',
+  MODEL_PAUSED:'当前模式或运行状态已暂停 AI 建议',
+};
 
 export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
   const {thread,status,busy,act,setNotice,readOnly,saving,dirty,error,notice,text,setText,setSuggestionId,setReview,refreshThread,block,send,sendCurrentText}=props;
   const completed=completedReply(thread);
   const submitted=hasReplyHistory(thread);
+  const suggestionReason=busy?'SUGGESTION_BUSY':readOnly||status.mode==='OBSERVE'?'MODEL_PAUSED':status.modelBusy?'MODEL_ALREADY_PENDING':
+    submitted?'SUGGESTION_ALREADY_SUBMITTED':!thread.strong||thread.event.status==='MANUAL_REVIEW'?thread.event.payload.observationIssue??'TARGET_NEEDS_REVIEW':
+    thread.suggestionEligibility?(thread.suggestionEligibility.eligible?null:thread.suggestionEligibility.reason??'SUGGESTION_NOT_AVAILABLE'):
+    !status.modelAuthorized?'REAL_MODEL_AUTHORIZATION_REQUIRED':null;
   const turn=thread.followup?.latestTurn;
   const replied=thread.replyStatus==='REPLIED'&&(!turn||turn.status==='CONFIRMED');
   const pending=['PREPARING','APPROVED','INTENT_RECORDED','QUEUED','PREFLIGHT','SENDING'].includes(turn?.status??send?.status??'');
@@ -76,15 +91,8 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
       </button>
     </div>
     <button
-      disabled={
-        !!busy ||
-        status.modelBusy ||
-        !status.modelAuthorized ||
-        !thread.strong ||
-        thread.event.status==='MANUAL_REVIEW' ||
-        submitted ||
-        status.mode === "OBSERVE"
-      }
+      disabled={!!suggestionReason}
+      aria-describedby={suggestionReason?'suggestion-unavailable-'+thread.event.id:undefined}
       onClick={() =>
         void act("生成 AI 建议", async () => {
           await request({
@@ -100,6 +108,9 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
       生成 AI 建议
     </button>
   </div>
+  {suggestionReason&&<p id={'suggestion-unavailable-'+thread.event.id} className="hint" role="status">
+    {suggestionMessages[suggestionReason]??reasons[suggestionReason]??'此消息暂不能生成 AI 建议，请保留人稿稍后查看'}
+  </p>}
   {!submitted&&!status.keyPresent && (
     <p className="hint">
       未配置 Key，人工回复仍可直接发送。

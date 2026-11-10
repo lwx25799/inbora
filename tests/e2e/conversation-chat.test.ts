@@ -41,8 +41,10 @@ async function setup(viewport={width:1240,height:800},weakMedia=false,nested=fal
   new ChatMessageStore(store).observe([candidate({direction:'OUTGOING',actorId:'own-1',conversationId:'conversation-a',
     platformEventId:'phone-observed',text:'手机端我方消息观察',occurredAt:'2026-11-04T01:00:34Z'})],'own-1',Date.UTC(2026,10,4));
   const service=new ClientService(store,new BrowserService(root));await service.loadSettings();const token=service.authority.issueSession();service.authority.setMode(token,'MANUAL');
+  await service.dispatch(token,{command:'setModelGrant',scope:{ownId:'own-1',channels:['DIRECT_MESSAGE','COMMENT_NOTIFICATION'],model:'deepseek-flash',modelLimit:50,expiresAt:null},confirmed:true});
+  await service.dispatch(token,{command:'configureAi',settings:{model:'deepseek-flash',persona:'',business:'',rules:''},key:'synthetic-memory-only'});
   const server=await createServer({configFile:resolve('desktop/vite.config.ts'),server:{port:0,strictPort:false},logLevel:'error'});await server.listen();
-  const browser=await chromium.launch({channel:'msedge',headless:true}),page=await browser.newPage({viewport});
+  const browser=await chromium.launchPersistentContext(resolve('.local/display-witness-smoke/source/profile'),{channel:'msedge',headless:true,args:['--mute-audio'],viewport}),page=await browser.newPage();
   page.setDefaultTimeout(3000);
   const preview=await page.evaluate(()=>{const canvas=document.createElement('canvas');canvas.width=96;canvas.height=64;
     const ctx=canvas.getContext('2d')!;ctx.fillStyle='#e8c269';ctx.fillRect(0,0,96,64);ctx.fillStyle='#226248';ctx.font='24px sans-serif';ctx.fillText('合成',22,42);return canvas.toDataURL('image/png');});
