@@ -8,6 +8,7 @@ import { ClientService } from "../../src/app/service.js";
 import { BrowserService } from "../../src/app/browser-service.js";
 import { AccountActor } from "../../src/browser/account-actor.js";
 import { migrateClient } from "../../src/storage/client-migration.js";
+import type {InboxSync} from '../../src/app/contracts.js';
 import {
   database,
   pending,
@@ -220,9 +221,18 @@ test.each([
       expect(syncCalls).toEqual(['works','dm']); // Reconnecting the renderer must not start another read.
       releaseSyncRead?.();
       await expect.poll(()=>page.getByRole('button',{name:'同步收件箱',exact:true}).isEnabled(),{timeout:5000}).toBe(true);
-      await page.getByText('评论同步完成；私信同步完成',{exact:true}).waitFor();
+      await page.getByText('评论本轮同步完成；私信本轮同步完成',{exact:true}).waitFor();
       await page.getByRole('button',{name:/同步新增任务/}).waitFor();
       expect(syncCalls).toEqual(['works','dm']);expect(clicks).toBe(0);
+      const syncState=(service as unknown as {sync:InboxSync}).sync,savedDmResult=syncState.results[1]!;
+      syncState.results[1]={source:'dm',state:'DEFERRED',error:'OBSERVATION_DM_CONTENT_DOM_NOT_READY'};
+      service.events.emit('update',{event:'inbox_sync_updated'});
+      const syncProgress=page.getByTestId('inbox-sync-progress');
+      await expect.poll(()=>syncProgress.innerText()).toContain('私信后台继续收取');
+      expect(await syncProgress.getAttribute('role')).toBe('status');
+      expect(await syncProgress.innerText()).not.toContain('私信同步失败');
+      expect(await page.getByRole('button',{name:'同步收件箱',exact:true}).isEnabled()).toBe(true);
+      syncState.results[1]=savedDmResult;service.events.emit('update',{event:'inbox_sync_updated'});
       await page.getByRole("button", { name: /合成私信作者/ }).click();
       const dialog=page.getByRole('dialog',{name:'人工回复对话框'}),editor=page.getByRole('textbox',{name:'人工回复草稿'});
       await editor.waitFor();

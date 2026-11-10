@@ -361,21 +361,27 @@ export class BrowserService {
   async observe(
     store: EventStore,
     source: "notifications" | "works" | "dm",
+    signal?:AbortSignal,
   ): Promise<void> {
-    await this.open();
+    requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
+    await this.open('headless',signal);
     const owner = this.owner!,
       observation = await loadObservationMapping(this.root);
     await owner.actor.run(async () => {
+      requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
       if (source !== "notifications" && observation) {
         const reader = new ObservedReader(
           source === "dm" ? owner.dm : owner.notification,
           observation,
+          undefined,signal,
         );
         const count =
           source === "dm" ? observation.peers.length : observation.works.length;
         for (let i = 0; i < count; i++) {
+          requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
           const batch =
             source === "dm" ? await reader.dm(i) : await reader.comments(i);
+          requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
           const evidence = await recordEvidence(join(this.root, "evidence"), {
             caseId: source === "dm" ? "D01" : "N01",
             browserVersion: owner.version(),
@@ -392,6 +398,7 @@ export class BrowserService {
             ],
             proofDigest: digest(batch),
           });
+          requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
           store.observe(
             source === "dm" ? "DIRECT_MESSAGE" : "COMMENT_NOTIFICATION",
             source === "dm"
@@ -413,6 +420,7 @@ export class BrowserService {
         );
         if (source === "notifications") {
           const batch = await adapter.observeNotifications();
+          requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
           store.observe(
             channel,
             "notifications",
@@ -422,10 +430,12 @@ export class BrowserService {
           );
         } else
           for (const conversation of await adapter.conversations()) {
+            requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
             const batch = await adapter.observeDm(
               conversation.id,
               conversation.peerId,
             );
+            requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
             store.observe(
               channel,
               conversation.id,
@@ -435,6 +445,7 @@ export class BrowserService {
             );
           }
       }
+      requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
       requireSafe(this.owner === owner, "BROWSER_CLOSED");
       for (const channel of ["COMMENT_NOTIFICATION", "DIRECT_MESSAGE"] as const)
         await this.refreshIdentity(channel);

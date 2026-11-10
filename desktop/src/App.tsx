@@ -16,7 +16,7 @@ import {
 } from "./api";
 
 const syncNames={works:'评论',dm:'私信'};
-const syncStates={PENDING:'等待同步',RUNNING:'同步中',SUCCEEDED:'同步完成',FAILED:'同步失败',SKIPPED:'未继续同步',CANCELLED:'同步已停止'};
+const syncStates={PENDING:'等待同步',RUNNING:'同步中',SUCCEEDED:'本轮同步完成',DEFERRED:'后台继续收取',FAILED:'同步失败',SKIPPED:'未继续同步',CANCELLED:'同步已停止'};
 interface BufferDraft {
   text: string;
   version: number;

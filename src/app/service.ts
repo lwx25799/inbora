@@ -57,6 +57,7 @@ export class ClientService {
   private pending = new Set<Promise<unknown>>();
   private closing = false;
   private syncTask: Promise<void> | null = null;
+  private syncAbort: AbortController | null = null;
   private observing = false;
   private automation: AutomationStore | null = null;
   private collector: CollectionScheduler | null = null;
@@ -107,8 +108,8 @@ export class ClientService {
       }
       this.store.db.prepare(`UPDATE automation_jobs SET state=COALESCE((SELECT status FROM send_intents WHERE event_id=automation_jobs.event_id),'REVIEW'),
         reason='RESTART_NO_REPLAY',updated_at=? WHERE state IN ('QUALIFYING','GENERATING','PREPARING','QUEUED','PREFLIGHT','SENDING')`).run(this.authority.now());
-      this.collector=new CollectionScheduler(this.automation,async(source,signal)=>{
-        requireSafe(!this.syncTask&&!this.observing,'INBOX_SYNC_IN_PROGRESS');
+      this.collector=new CollectionScheduler(this.automation,async(source,signal,trigger)=>{
+        requireSafe(trigger==='MANUAL'||!this.syncTask&&!this.observing,'COLLECTION_CANCELLED');
         this.maintenance.cancel();
         const end=runtimePerformance.start('COLLECTION',source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION');
         try{await this.browser.collect(this.automation!,source,signal);end();}
@@ -203,6 +204,7 @@ export class ClientService {
   }
   private stopSync(): void {
     if (!this.syncTask) return;
+    this.syncAbort?.abort();
     this.sync.cancelled = true;
     for (const result of this.sync.results)
       if (result.state === "PENDING" || result.state === "RUNNING") result.state = "CANCELLED";
@@ -213,27 +215,41 @@ export class ClientService {
       "LOGIN_REQUIRED", "ACCOUNT_NOT_VERIFIED", "UNEXPECTED_ORIGIN", "OWNER_LOCKED_OR_PORT_UNAVAILABLE",
       "OPERATOR_EXPIRED", "OPERATOR_PERMISSION_DENIED"].includes(code);
   }
-  private async observeSource(source: "works" | "dm" | "notifications"): Promise<void> {
-    try {
-      await this.browser.observe(this.store, source);
-    } catch (error) {
-      const code = clientError(error), mode = this.browser.status().mode;
-      if (code === "BROWSER_CLOSED") { this.emit("status_updated"); throw error; }
-      if (this.syncMustStop(code)) this.store.db.prepare("UPDATE channel_capabilities SET state='BLOCKED'").run();
+  private observationFailed(source:"works"|"dm"|"notifications",error:unknown):never {
+    const code=clientError(error),mode=this.browser.status().mode;
+    if(code!=='BROWSER_CLOSED'){
+      if(this.syncMustStop(code))this.store.db.prepare("UPDATE channel_capabilities SET state='BLOCKED'").run();
       else this.store.db.prepare("UPDATE channel_capabilities SET state='BLOCKED' WHERE channel=? AND browser_mode=?")
-        .run(source === "dm" ? "DIRECT_MESSAGE" : "COMMENT_NOTIFICATION", mode);
-      this.emit("status_updated");
-      throw error;
+        .run(source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION',mode);
+    }
+    this.emit('status_updated');throw error;
+  }
+  private async observeSource(source:"works"|"dm"|"notifications",signal?:AbortSignal):Promise<void> {
+    try{await this.browser.observe(this.store,source,signal);}
+    catch(error){if(signal?.aborted&&!this.syncMustStop(clientError(error)))throw error;this.observationFailed(source,error);}
+  }
+  private async syncSource(source:'works'|'dm',signal:AbortSignal):Promise<string|null> {
+    requireSafe(!signal.aborted,'COLLECTION_CANCELLED');
+    const collection=this.automation?.state().collection;
+    if(!this.collector||!(source==='works'?collection?.comments:collection?.inbox)){
+      await this.observeSource(source,signal);return null;
+    }
+    try{return (await this.collector.runNow(source,signal)).deferredCode;}
+    catch(error){
+      const code=clientError(error);
+      if((signal.aborted||code==='COLLECTION_CANCELLED'||code==='OBSERVATION_CANCELLED')&&!this.syncMustStop(code))throw error;
+      this.observationFailed(source,error);
     }
   }
   private startInboxSync(token: string): void {
     if (this.syncTask) return;
     requireSafe(!this.observing, "INBOX_SYNC_IN_PROGRESS");
+    requireSafe(!this.automation?.state().emergencyStopped,'COLLECTION_CANCELLED');
     this.sync = {
       runId: randomUUID(), running: true, cancelled: false, source: "works",
       results: [{source: "works", state: "RUNNING", error: null}, {source: "dm", state: "PENDING", error: null}],
     };
-    const ownerEpoch = this.browser.ownerEpoch;
+    const ownerEpoch=this.browser.ownerEpoch,abort=new AbortController();this.syncAbort=abort;
     const task = Promise.resolve().then(async () => {
       for (const result of this.sync.results) {
         if (this.closing || this.sync.cancelled) break;
@@ -243,13 +259,15 @@ export class ClientService {
         try {
           this.authority.operator(token, "CONTROL");
           requireSafe(this.browser.ownerEpoch === ownerEpoch, "BROWSER_CLOSED");
-          await this.observeSource(result.source);
-          if (!this.sync.cancelled) result.state = "SUCCEEDED";
+          const deferred=await this.syncSource(result.source,abort.signal);
+          if(!this.sync.cancelled){result.state=deferred?'DEFERRED':'SUCCEEDED';result.error=deferred;}
         } catch (error) {
           if (this.sync.cancelled) break;
           const code = clientError(error);
-          result.state = "FAILED";
+          result.state = code==='COLLECTION_CANCELLED'||code==='OBSERVATION_CANCELLED'?'CANCELLED':'FAILED';
           result.error = code;
+          const safeCode=/^[A-Z][A-Z0-9_]{0,99}$/u.test(code)?code:'PRIVATE_DIAGNOSTICS';
+          this.store.audit(`INBOX_SYNC_${result.source.toUpperCase()}_${result.state}_${safeCode}`,this.sync.runId!);
           if (this.syncMustStop(code)) {
             for (const next of this.sync.results) if (next.state === "PENDING") next.state = "SKIPPED";
             break;
@@ -261,6 +279,7 @@ export class ClientService {
       this.sync.running = false;
       this.sync.source = null;
       this.syncTask = null;
+      if(this.syncAbort===abort)this.syncAbort=null;
       this.emit("inbox_updated");
     });
     this.syncTask = task;

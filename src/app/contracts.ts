@@ -169,7 +169,7 @@ export interface InboxSync {
   source: "works" | "dm" | null;
   results: {
     source: "works" | "dm";
-    state: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "SKIPPED" | "CANCELLED";
+    state: "PENDING" | "RUNNING" | "SUCCEEDED" | "DEFERRED" | "FAILED" | "SKIPPED" | "CANCELLED";
     error: string | null;
   }[];
 }
