@@ -22,6 +22,7 @@ import {dmActivitySchema,readDmActivity} from './dm-activity.js';
 import {previewRetryFields,preparePreviewRetry,finishPreviewNormalTurn} from './preview-retry.js';
 import {commentThreadsSchema,collectCommentThread} from './comment-thread-collection.js';
 import {qualifyLateArrivals} from './late-arrival-qualification.js';
+import {retainStoredDmMedia} from './dm-media-representation.js';
 import {recordCommentWindow,type CommentWindowRead} from '../observability/comment-window-diagnostics.js';
 import {CommentListDiagnostics} from '../adapters/comment-list-diagnostics.js';
 
@@ -123,6 +124,7 @@ export class InboxCollector {
     const end=runtimePerformance.start('PERSIST',source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION');
     try {
     this.check(source,signal);
+    if(source==='dm')batch={...batch,events:retainStoredDmMedia(this.data.store,batch.events)};
     const display=()=>digest(batch.events.filter(event=>event.observationIssue==='DM_CONTENT_UNVERIFIED').map(event=>[
       event.platformEventId,new MessageShareStore(this.root).read(event,this.mapping.self.uid),new MessagePreviewStore(this.root).list(event,this.mapping.self.uid),
       new MessagePreviewStore(this.root).displayText(event,this.mapping.self.uid)]));

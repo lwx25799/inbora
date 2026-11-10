@@ -71,6 +71,30 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       shape.nativeId=typeof value==='string'&&/^[1-9]\d{0,63}$/u.test(value);shape.zero=value==='0';shape.root=value===root;
       shape.self=value===id;shape.child=shape.nativeId&&!shape.self&&children.has(value as string);return shape;
     },
+    // Bounded text and inline emoji reconstruction; exact native text is required by the caller.
+    dmText(content:Element,row:Element):string|null {
+      let visited=0,images=0,length=0;
+      const traversal={
+        append(value:string):string|null{length+=value.length;return length<=10_000?value:null;},
+        walk(node:Node):string|null{
+          if(++visited>180)return null;if(node.nodeType===Node.TEXT_NODE)return traversal.append(node.nodeValue??'');
+          if(!(node instanceof Element)||node.closest(s.messages)!==row||!['SPAN','DIV','P','B','I','EM','STRONG','A','BR','IMG'].includes(node.tagName))return null;
+          const style=getComputedStyle(node);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return '';
+          if(node.tagName==='BR')return traversal.append('\n');
+          if(node.tagName==='IMG'){
+            if(++images>8||node.childNodes.length||node.closest('a[href]'))return null;
+            const alt=Element.prototype.getAttribute.call(node,'alt'),source=Element.prototype.getAttribute.call(node,'src');
+            if(!alt||alt.length>32||/[\x00-\x1f\x7f]/u.test(alt)||
+              !/(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[0-9#*]\uFE0F?\u20E3)/u.test(alt)&&!/^\[[^\[\]\r\n]{1,20}\]$/u.test(alt)||!source)return null;
+            try{const url=new URL(source,location.origin);if(url.username||url.password||url.protocol!=='https:'&&!(m.environment==='fixture'&&url.origin===location.origin))return null;}catch{return null;}
+            return traversal.append(alt);
+          }
+          let value='';for(const child of node.childNodes){const part=traversal.walk(child);if(part===null)return null;value+=part;}return value;
+        },
+      };
+      return traversal.walk(content);
+    },
     visible(element: Element): boolean {
       if(!element.isConnected||!element.getClientRects().length)return false;
       for(let n:Element|null=element;n;n=n.parentElement){const style=getComputedStyle(n);
@@ -564,7 +588,11 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
         nativeShare=typeof itemId==='string'&&/^[1-9]\d{0,63}$/u.test(itemId)&&route&&
           typeof serverId==='string'&&/^[1-9]\d{0,63}$/u.test(serverId)&&!!dom.time(dom.data(message,'createdAt'),false);
       }
-      if(media.length) {
+      const inlineText=media.length>0&&media.length<=8&&dom.data(message,'type')===7&&texts.length===1&&dom.visible(texts[0]!)&&
+        media.every(node=>node.tagName==='IMG'&&texts[0]!.contains(node))?dom.dmText(texts[0]!,row):null;
+      const exactInline=inlineText!==null&&inlineText.length>0&&inlineText===dom.data(dom.data(message,'_parsedContent'),'text');
+      if(exactInline){text=inlineText;}
+      else if(media.length) {
         const types=new Set(media.map(node=>node.tagName));
         contentType=texts.some(node=>dom.visible(node)&&(node.textContent??'').length>0)||types.size>1?'MIXED':
           types.has('VIDEO')?'VIDEO':types.has('AUDIO')?'AUDIO':'IMAGE';

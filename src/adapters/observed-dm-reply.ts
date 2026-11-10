@@ -49,6 +49,30 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
       dom.check(!own||!inherited||own.value===inherited.value,'NATIVE_REPLY_FIELD_CONFLICT');
       return own?own.value:inherited?.value;
     },
+    // Bounded text and inline emoji reconstruction; exact native text is required by the caller.
+    dmText(content:Element,row:Element):string|null {
+      let visited=0,images=0,length=0;
+      const traversal={
+        append(value:string):string|null{length+=value.length;return length<=10_000?value:null;},
+        walk(node:Node):string|null{
+          if(++visited>180)return null;if(node.nodeType===Node.TEXT_NODE)return traversal.append(node.nodeValue??'');
+          if(!(node instanceof Element)||node.closest(s.messages)!==row||!['SPAN','DIV','P','B','I','EM','STRONG','A','BR','IMG'].includes(node.tagName))return null;
+          const style=getComputedStyle(node);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return '';
+          if(node.tagName==='BR')return traversal.append('\n');
+          if(node.tagName==='IMG'){
+            if(++images>8||node.childNodes.length||node.closest('a[href]'))return null;
+            const alt=Element.prototype.getAttribute.call(node,'alt'),source=Element.prototype.getAttribute.call(node,'src');
+            if(!alt||alt.length>32||/[\x00-\x1f\x7f]/u.test(alt)||
+              !/(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[0-9#*]\uFE0F?\u20E3)/u.test(alt)&&!/^\[[^\[\]\r\n]{1,20}\]$/u.test(alt)||!source)return null;
+            try{const url=new URL(source,location.origin);if(url.username||url.password||url.protocol!=='https:'&&!(o.environment==='fixture'&&url.origin===location.origin))return null;}catch{return null;}
+            return traversal.append(alt);
+          }
+          let value='';for(const child of node.childNodes){const part=traversal.walk(child);if(part===null)return null;value+=part;}return value;
+        },
+      };
+      return traversal.walk(content);
+    },
     visible(element: Element): boolean {
       if(!element.isConnected||!element.getClientRects().length)return false;
       for(let node:Element|null=element;node;node=node.parentElement) {
@@ -236,14 +260,18 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
         if(row.closest(m.latestIndexAncestor)?.getAttribute('data-index')==='0')latestId=nativeId;
         if(nativeId){dom.check(!seen.has(nativeId),'NATIVE_REPLY_MESSAGE_ID_COLLISION');seen.add(nativeId);}
         const sentAt=dom.time(dom.data(message,'createdAt')),parsed=dom.data(message,'_parsedContent'),parsedText=dom.data(parsed,'text');
-        const texts=row.querySelectorAll(s.messageText);
-        const body=texts.length===1&&dom.visible(texts[0]!)&&!texts[0]!.querySelector('img,video,audio')?texts[0]!.textContent:null;
+        const texts=Array.from(row.querySelectorAll(s.messageText)).filter(node=>node.closest(s.messages)===row),
+          ownedMedia=Array.from(row.querySelectorAll('img,video,audio')).filter(node=>node.closest(s.messages)===row&&dom.visible(node));
+        const inlineText=dom.data(message,'type')===m.textMessageType&&ownedMedia.length>0&&ownedMedia.length<=8&&texts.length===1&&dom.visible(texts[0]!)&&
+          ownedMedia.every(node=>node.tagName==='IMG'&&texts[0]!.contains(node))?dom.dmText(texts[0]!,row):null;
+        const exactInline=inlineText!==null&&inlineText.length>0&&inlineText===parsedText;
+        const body=exactInline?inlineText:texts.length===1&&dom.visible(texts[0]!)&&!texts[0]!.querySelector('img,video,audio')?texts[0]!.textContent:null;
         if(body!==null)dom.check(body===parsedText,'NATIVE_REPLY_MESSAGE_TEXT_CONFLICT');
         const pending=dom.flagged(box!,m.pending),failed=dom.flagged(box!,m.failed);
         const status=dom.data(message,'serverStatus'),type=dom.data(message,'type');
         dom.check(typeof status==='number'&&Number.isFinite(status)&&typeof type==='number'&&Number.isFinite(type),'NATIVE_REPLY_MESSAGE_STATE_MISSING');
         if(input.action!=='proofs')dom.check(nativeId&&sentAt,'NATIVE_REPLY_WINDOW_UNVERIFIED');
-        const visibleMedia=manualMedia&&Array.from(row.querySelectorAll('img,video,audio,[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]'))
+        const visibleMedia=manualMedia&&(!exactInline||nativeId===expected.platformEventId)&&Array.from(row.querySelectorAll('img,video,audio,[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]'))
           .some(node=>node.closest(s.messages)===row&&dom.visible(node));
         const nativeShare=manualMedia&&texts.length===0?dom.nativeShare(parsed,type):null;
         const media=nativeShare?{contentType:'IMAGE' as const,witness:[nativeShare]}:
