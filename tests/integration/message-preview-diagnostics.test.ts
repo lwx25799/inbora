@@ -7,6 +7,7 @@ import {MessagePreviewStore} from '../../src/storage/message-previews.js';
 import type {ObservationBatch} from '../../src/adapters/observed-reader.js';
 import {observedMapping} from '../fixtures/observed-site.js';
 import {candidate,privateTemp} from '../helpers.js';
+import {eventBinding} from '../../src/core/contracts.js';
 
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jntkAAAAASUVORK5CYII=','base64');
 test.each(['READY','INSPECT_FAILURE','CAPTURE_FAILURE'] as const)('normal preview batches overwrite a bounded body-free diagnostic and preserve failures (%s)',async outcome=>{
@@ -35,4 +36,25 @@ test.each(['READY','INSPECT_FAILURE','CAPTURE_FAILURE'] as const)('normal previe
   expect(JSON.parse(readFileSync(file,'utf8'))).toMatchObject({batchDMcount:0,eligibleCount:0,inspected:0,ready:0,caught:{}});
   expect(JSON.parse(readFileSync(join(root,'evidence','message-preview-last-nonempty.json'),'utf8'))).toEqual(diagnostic);
   expect(readdirSync(join(root,'evidence')).filter(name=>name!=='message-previews').sort()).toEqual(['message-preview-last-nonempty.json','message-preview-latest.json']);
+});
+
+test('normal obstruction diagnostics bind each before image to its exact opaque event and retain the eight-sample cap',async()=>{
+  const root=privateTemp('preview-bound-diagnostic-'),mapping=observedMapping('http://fixture.invalid');
+  const events=Array.from({length:3},(_,index)=>candidate({platformEventId:'private-native-'+index,actorId:'200',conversationId:'conv-a',
+    text:'private body '+index,observationIssue:'DM_CONTENT_UNVERIFIED',contentType:'IMAGE'}));
+  const batch:ObservationBatch={events,evidenceId:'synthetic-private-evidence',unsupported:3,loaded:3,
+    bindings:[{targetKey:'dm:conv-a',uid:'200',secUid:'private-peer',title:'private-title',conversationId:'conv-a'}]};
+  const screenshot=vi.fn(),evaluate=vi.fn(async(fn:unknown)=>fn===inspectMessageImage?{
+    count:4,label:'private-alt',reason:'MESSAGE_PREVIEW_OBSCURED',sourceFingerprint:'',clip:null,
+    obstruction:{stage:'OVERLAP',imagePointerEvents:'auto',tag:'DIV',ancestor:false,pointerEvents:'none',position:'static',zIndex:'auto'},
+  }:{detected:false});
+  await saveMessagePreviews({screenshot,evaluate} as unknown as Page,mapping,batch,root,new AbortController().signal);
+  const raw=readFileSync(join(root,'evidence','message-preview-latest.json'),'utf8'),report=JSON.parse(raw);
+  expect(report.imageObstructions).toHaveLength(8);
+  expect(report.imageObstructions.map((sample:{eventBinding:string;imageIndex:number;phase:string})=>[sample.eventBinding,sample.imageIndex,sample.phase]))
+    .toEqual(events.slice(0,2).flatMap(event=>Array.from({length:4},(_,imageIndex)=>[eventBinding(event),imageIndex,'BEFORE'])));
+  expect(report.imageObstructions.every((sample:{eventBinding:string})=>/^[a-f0-9]{64}$/u.test(sample.eventBinding))).toBe(true);
+  expect(raw).not.toMatch(/private|conv-a|https?:\/\//u);expect(screenshot).not.toHaveBeenCalled();
+  expect(evaluate).toHaveBeenCalledTimes(15);
+  expect(report.unavailable).toEqual({MESSAGE_PREVIEW_OBSCURED:12});
 });

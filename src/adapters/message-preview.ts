@@ -12,11 +12,22 @@ interface ImageClipping {
   ancestors:{index:number;x:boolean;y:boolean;containsX:boolean;containsY:boolean;pointsOutside:boolean[];hitIsAncestor:boolean[];
     sameMessage:boolean;insideChat:boolean;transformed:boolean}[];
 }
+interface ImageStackDiagnostic {
+  foreignDepth:number;imageDepth:number;commonPrefix:number|null;truncated:boolean;
+  relation:'SAME'|'FOREIGN_PREFIX'|'IMAGE_PREFIX'|'DIVERGENT'|'TRUNCATED';
+  foreignFirst:ImageStackContext|null;imageFirst:ImageStackContext|null;
+  order:'SAME'|'FOREIGN_BEFORE'|'FOREIGN_AFTER'|'UNRELATED'|'MISSING'|'TRUNCATED';
+  sameParent:boolean|null;zOrder:'LESS'|'EQUAL'|'GREATER'|'MISSING'|'TRUNCATED';foreign3D:boolean;image3D:boolean;
+}
+interface ImageStackContext {
+  z:'NEGATIVE'|'ZERO'|'POSITIVE';parentLayout:'BLOCK'|'FLEX'|'GRID'|'OTHER';threeD:boolean;
+  reasons:('ROOT'|'POSITIONED_Z'|'FLEX_GRID_Z'|'FIXED'|'STICKY'|'OPACITY'|'TRANSFORM'|'FILTER'|'BACKDROP'|'PERSPECTIVE'|'ISOLATION'|'BLEND'|'CONTAIN'|'WILL_CHANGE')[];
+}
 interface ImageInspection {
   count:number;label:string|null;reason:string|null;sourceFingerprint:string;clip:{x:number;y:number;width:number;height:number}|null;
   canvas?:{dataUrl:string|null;width:number;height:number};canvasTainted?:boolean;
   obstruction?:{stage:'HIT'|'OVERLAP'|'LIMIT';imagePointerEvents:string;tag:string|null;ancestor:boolean;pointerEvents:string|null;position:string|null;zIndex:string|null;
-    flow?:{sameStack:boolean;reason:'NOT_CANDIDATE'|'STACK'|'PAINT'|'FLOW'|'LIMIT'|'PROVEN';branchPositioned:boolean;branchGrouped:boolean;parentGrouped:boolean};
+    flow?:{sameStack:boolean;reason:'NOT_CANDIDATE'|'STACK'|'PAINT'|'FLOW'|'LIMIT'|'PROVEN';branchPositioned:boolean;branchGrouped:boolean;parentGrouped:boolean};stack?:ImageStackDiagnostic;
     hits?:('IMAGE'|'ANCESTOR'|'OTHER'|'NONE')[];borderRadius?:string;clipPath?:boolean;clipping?:ImageClipping;
     paint?:{backgroundTransparent:boolean;backgroundImage:boolean;borderWidths:boolean;borderStyles:boolean;shadow:boolean;outline:boolean;filter:boolean;backdrop:boolean;
       mask:boolean;directText:boolean;pseudo:boolean;childCount:number;insideImage:boolean;coversImage:boolean;beforeImage:boolean;
@@ -69,10 +80,30 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
       }
       return path;
     },
+    plainStack(node:Element):boolean{
+      const style=getComputedStyle(node);
+      return style.display==='block'&&style.cssFloat==='none'&&style.order==='0'&&style.transformStyle==='flat'&&
+        style.perspective==='none'&&style.backdropFilter==='none'&&style.filter==='none'&&style.mixBlendMode==='normal'&&
+        (style.transform==='none'||/^matrix\([^()]+\)$/u.test(style.transform))&&
+        !node.closest('dialog,[popover]')&&!document.fullscreenElement;
+    },
     below(node:Element,image:Element):boolean{
       const foreign=dom.stack(node),target=dom.stack(image);let index=0;
       while(index<foreign.length&&index<target.length&&foreign[index]!.node===target[index]!.node)index++;
-      return (foreign[index]?.z??0)<(target[index]?.z??0);
+      if((foreign[index]?.z??0)<(target[index]?.z??0))return true;
+      const before=foreign[index],after=target[index],common=foreign[index-1]?.node;
+      if(!before||!after||!common||before.z!==after.z||!before.node.isConnected||!after.node.isConnected||
+        before.node.ownerDocument!==document||after.node.ownerDocument!==document||
+        before.node.parentElement!==after.node.parentElement||before.node.compareDocumentPosition(after.node)!==Node.DOCUMENT_POSITION_FOLLOWING)return false;
+      // CSS2 Appendix E orders equal-level atomic contexts in tree order. Flex/grid item order,
+      // 3D rendering and top-layer promotion do not provide that proof, so keep them untrusted.
+      if(!dom.plainStack(before.node)||!dom.plainStack(after.node))return false;
+      let current=before.node.parentElement,depth=0;
+      for(;current&&depth<64;current=current.parentElement,depth++){
+        if(!dom.plainStack(current))return false;
+        if(current===common)return true;
+      }
+      return false;
     },
     ownedVisual(node:Element,image:Element,row:Element):boolean{
       // The calibrated message selector is the native body, separate from the outer author/direction box.
@@ -171,10 +202,50 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
         hitSameMessage:hits.map(hit=>hit?.closest(s.messages)===row),hitInChat:hits.map(hit=>!!hit&&chat.contains(hit)),
         overflowAncestorCount,truncated:overflowAncestorCount>ancestors.length||!!node,ancestors};
     },
+    stackDiagnostic(node:Element,image:Element):ImageStackDiagnostic|undefined{
+      // Diagnostic-only bounded reads; the existing unbounded gate stack remains unchanged.
+      try{
+        const diagnostic={inspect(element:Element){
+          const path:{node:Element;z:number;summary:ImageStackContext}[]=[];let current:Element|null=element,depth=0,threeD=false;
+          for(;current&&depth<256;current=current.parentElement,depth++){
+            const style=getComputedStyle(current),parent=current.parentElement?getComputedStyle(current.parentElement):null;
+            const explicit=/^-?\d+$/u.test(style.zIndex)&&(style.position!=='static'||!!parent&&/^(?:inline-)?(?:flex|grid)$/u.test(parent.display));
+            const reasons:ImageStackContext['reasons']=[];
+            if(current===document.documentElement)reasons.push('ROOT');
+            if(explicit)reasons.push(style.position!=='static'?'POSITIONED_Z':'FLEX_GRID_Z');
+            if(style.position==='fixed')reasons.push('FIXED');if(style.position==='sticky')reasons.push('STICKY');
+            if(Number(style.opacity)<1)reasons.push('OPACITY');if(style.transform!=='none')reasons.push('TRANSFORM');
+            if(style.filter!=='none')reasons.push('FILTER');if(style.backdropFilter!=='none')reasons.push('BACKDROP');
+            if(style.perspective!=='none')reasons.push('PERSPECTIVE');if(style.isolation==='isolate')reasons.push('ISOLATION');
+            if(style.mixBlendMode!=='normal')reasons.push('BLEND');if(/paint|layout|strict|content/u.test(style.contain))reasons.push('CONTAIN');
+            if(/transform|opacity|filter|perspective/u.test(style.willChange))reasons.push('WILL_CHANGE');
+            const current3D=style.transformStyle==='preserve-3d'||style.perspective!=='none'||/^matrix3d\(/u.test(style.transform);threeD||=current3D;
+            const parentLayout:ImageStackContext['parentLayout']=parent?.display==='block'?'BLOCK':
+              parent&&/^(?:inline-)?flex$/u.test(parent.display)?'FLEX':parent&&/^(?:inline-)?grid$/u.test(parent.display)?'GRID':'OTHER';
+            if(reasons.length){const z=explicit?Number(style.zIndex):0;path.unshift({node:current,z,summary:{z:z<0?'NEGATIVE':z>0?'POSITIVE':'ZERO',reasons,parentLayout,threeD:current3D}});}
+          }
+          return {path,truncated:!!current,threeD};
+        }};
+        const foreign=diagnostic.inspect(node),target=diagnostic.inspect(image),truncated=foreign.truncated||target.truncated;
+        let common=0;while(common<foreign.path.length&&common<target.path.length&&foreign.path[common]!.node===target.path[common]!.node)common++;
+        const foreignFirst=truncated?undefined:foreign.path[common],imageFirst=truncated?undefined:target.path[common];
+        let order:ImageStackDiagnostic['order']=truncated?'TRUNCATED':'MISSING';
+        if(foreignFirst&&imageFirst){const position=foreignFirst.node.compareDocumentPosition(imageFirst.node);
+          order=position&Node.DOCUMENT_POSITION_DISCONNECTED?'UNRELATED':position&Node.DOCUMENT_POSITION_FOLLOWING?'FOREIGN_BEFORE':
+            position&Node.DOCUMENT_POSITION_PRECEDING?'FOREIGN_AFTER':'SAME';}
+        return {foreignDepth:foreign.path.length,imageDepth:target.path.length,commonPrefix:truncated?null:common,truncated,
+          relation:truncated?'TRUNCATED':common===foreign.path.length&&common===target.path.length?'SAME':
+            common===foreign.path.length?'FOREIGN_PREFIX':common===target.path.length?'IMAGE_PREFIX':'DIVERGENT',
+          foreignFirst:foreignFirst?.summary??null,imageFirst:imageFirst?.summary??null,order,
+          sameParent:foreignFirst&&imageFirst?foreignFirst.node.parentElement===imageFirst.node.parentElement:null,
+          zOrder:truncated?'TRUNCATED':!foreignFirst||!imageFirst?'MISSING':foreignFirst.z<imageFirst.z?'LESS':foreignFirst.z>imageFirst.z?'GREATER':'EQUAL',
+          foreign3D:foreign.threeD,image3D:target.threeD};
+      }catch{return undefined;}
+    },
     obstruction(stage:'HIT'|'OVERLAP'|'LIMIT',node:Element|null,image:Element):NonNullable<ImageInspection['obstruction']>{
-      const style=node?getComputedStyle(node):null,paint=node?dom.paint(node,image):undefined;
+      const style=node?getComputedStyle(node):null,paint=node?dom.paint(node,image):undefined,stack=node?dom.stackDiagnostic(node,image):undefined;
       return {stage,imagePointerEvents:getComputedStyle(image).pointerEvents,tag:node?.tagName??null,ancestor:!!node?.contains(image),
-        pointerEvents:style?.pointerEvents??null,position:style?.position??null,zIndex:style?.zIndex??null,...(paint?{paint}:{}),...(node?{flow:dom.flowEvidence(node,image)}:{})};
+        pointerEvents:style?.pointerEvents??null,position:style?.position??null,zIndex:style?.zIndex??null,...(paint?{paint}:{}),...(node?{flow:dom.flowEvidence(node,image)}:{}),...(stack?{stack}:{})};
     },
   };
   dom.check(location.origin===m.origin&&!/验证码|安全验证/u.test(document.title));
@@ -300,7 +371,7 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
         diagnostics.increment('caught','INSPECT_BEFORE');images.push({label:null,reason:reason??'MESSAGE_PREVIEW_INSPECT_FAILED'});break;
       }
       if(before.canvasTainted)diagnostics.increment('caught','MESSAGE_PREVIEW_CANVAS_TAINTED');
-      if(before.obstruction&&diagnostics.snapshot.imageObstructions.length<8)diagnostics.snapshot.imageObstructions.push(before.obstruction);
+      if(before.obstruction&&diagnostics.snapshot.imageObstructions.length<8)diagnostics.snapshot.imageObstructions.push({...before.obstruction,eventBinding:eventBinding(event),imageIndex,phase:'BEFORE'});
       if(imageIndex>=before.count){if(imageIndex===0)images.push({label:null,reason:'MESSAGE_PREVIEW_NOT_AVAILABLE'});break;}
       if(before.reason||!before.clip&&!before.canvas?.dataUrl){images.push({label:before.label,reason:before.reason??'MESSAGE_PREVIEW_CAPTURE_FAILED'});continue;}
       let stage:'CAPTURE'|'INSPECT_AFTER'|'VERIFY_BINDING'='CAPTURE';

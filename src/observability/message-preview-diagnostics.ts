@@ -8,7 +8,7 @@ import type {inspectMessageImage} from '../adapters/message-preview.js';
 export class MessagePreviewDiagnostics {
   readonly snapshot={at:new Date().toISOString(),batchDMcount:0,eligibleCount:0,inspected:0,ready:0,reusedReady:0,
     shareInspected:0,shareLinked:0,shareDetectedNoLink:0,shareSamples:[] as ShareInspection['diagnostic'][],
-    imageObstructions:[] as NonNullable<Awaited<ReturnType<typeof inspectMessageImage>>['obstruction']>[],
+    imageObstructions:[] as (NonNullable<Awaited<ReturnType<typeof inspectMessageImage>>['obstruction']>&{eventBinding:string;imageIndex:number;phase:'BEFORE'})[],
     unavailable:{} as Record<string,number>,caught:{} as Record<string,number>,skipped:{} as Record<string,number>,cancelled:false};
   increment(group:'unavailable'|'caught'|'skipped',code:string):void {
     const safe=/^(?:MESSAGE_PREVIEW_[A-Z_]+|INSPECT_BEFORE|CAPTURE|INSPECT_AFTER|VERIFY_BINDING|CACHE_WRITE|SHARE_INSPECT|SHARE_WRITE|BINDING_MISSING|BINDING_CONFLICT)$/u.test(code)?code:'MESSAGE_PREVIEW_UNKNOWN_FAILURE';
