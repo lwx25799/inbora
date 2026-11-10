@@ -25,7 +25,7 @@ export function InboxList({inbox,selected,selectedGroup,channel,setChannel,filte
       const active=selected===item.id||!!selectedGroup&&item.groupKey===selectedGroup;
       const share=validShare(item.share);
       const attachmentPreview=!share&&item.previewEventId&&item.attachments?.length;
-      return <button key={item.groupKey??item.id} data-channel={item.channel} className={'task '+(active?'selected':'')} aria-pressed={active} onClick={()=>{if(!active)choose(item.resumeEventId??item.id);}}>
+      return <button key={item.groupKey??item.id} data-channel={item.channel} className={'task '+(active?'selected':'')} aria-pressed={active} onClick={()=>{const target=item.resumeEventId??item.id;if(selected!==target)choose(target);}}>
         <div><strong>{item.author||'当前联系人'}</strong><span className={'badge '+(['UNCERTAIN','MANUAL_REVIEW'].includes(item.status)?'warn':'')}>
           {item.replyStatus==='REPLIED'?'已回复':'等待回复'}
         </span></div>

@@ -12,7 +12,7 @@ const draftOrigins = new Map([
 export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
   const {thread,status,busy,act,setNotice,readOnly,saving,dirty,error,notice,text,setText,setSuggestionId,setReview,refreshThread,block,send,sendCurrentText}=props;
   const replied=thread.replyStatus==='REPLIED';
-  const completed=completedReply(thread),showEditor=!completed||!!text;
+  const completed=completedReply(thread),showEditor=!thread.intent||props.localDraft;
   const pending=['PREPARING','QUEUED','PREFLIGHT','SENDING'].includes(send?.status??'');
   const reviewing=thread.verification?.state==='REVIEW';
   const failed=send?.status==='FAILED_BEFORE_CLICK';
@@ -25,13 +25,17 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
     :'正在后台确认送达，请勿重复发送';
   return <div className="reply-composer">
     {thread.event.payload.channel!=='DIRECT_MESSAGE'&&(error||notice||busy)&&<p role={error?'alert':'status'} className={error?'error':'hint'}>{error||busy||notice}</p>}
+{thread.intent&&!completed&&<section className="original" aria-label="已提交回复">
+  <h3>已提交回复</h3><p>{thread.draft?.text}</p>
+</section>}
 {showEditor&&<>
-    <p className="composer-status hint">{completed?'未发送内容已保留':thread.ownership.isMine?saving?'正在保存':dirty?'正在自动保存':'修改已保存':'正在准备回复输入'}</p>
+    <p className="composer-status hint">{thread.intent?'未发送内容仅在当前窗口保留':thread.ownership.isMine?saving?'正在保存':dirty?'正在自动保存':'修改已保存':'正在准备回复输入'}</p>
+    {readOnly&&<p role="status" className="hint">{status.mode==='OBSERVE'?'当前为观察模式，切换工作模式后可编辑':'正在恢复连接，请稍候继续编辑'}</p>}
 <section className="editor">
   <div className="editor-title">
-    <h3>回复草稿</h3>
+    <h3>{thread.intent?'未发送的新内容':'回复草稿'}</h3>
     <small>
-      {!completed&&<>版本 {thread.draft?.version ?? 0} ·{" "}
+      {!thread.intent&&<>版本 {thread.draft?.version ?? 0} ·{" "}
       {thread.draft
         ? draftOrigins.get(thread.draft.origin) ?? "来源待核对"
         : "尚未保存"}{" "}
@@ -95,14 +99,14 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
       生成 AI 建议
     </button>
   </div>
-  {!completed&&!status.keyPresent && (
+  {!thread.intent&&!status.keyPresent && (
     <p className="hint">
       未配置 Key，人工回复仍可直接发送。
     </p>
   )}
 </section>
 </>}
-{!completed&&thread.suggestions.map((s) => (
+{!thread.intent&&thread.suggestions.map((s) => (
   <section className="suggestion" key={s.id}>
     <h3>
       AI 建议{" "}
@@ -147,7 +151,7 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
   </section>
 )}
 {!replied&&thread.automationJob?.reason&&<p className="hint">自动回复暂未完成：{reasons[thread.automationJob.reason]??'后台处理遇到问题，消息和草稿已保留'}</p>}
-  {!completed&&<div className="send-footer">
+  {!thread.intent&&<div className="send-footer">
     {!hasResult&&<p className="hint">{block || "输入回复后点击发送，系统自动完成其余步骤。"}</p>}
     <div>
       <small>Ctrl+Enter 也可发送当前全文</small>

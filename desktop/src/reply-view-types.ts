@@ -15,6 +15,7 @@ export interface ReplyViewProps {
   openDialog:()=>Promise<void>;
   closeDialog:()=>Promise<void>;
   readOnly:boolean;
+  localDraft:boolean;
   saving:boolean;
   dirty:boolean;
   error:string;

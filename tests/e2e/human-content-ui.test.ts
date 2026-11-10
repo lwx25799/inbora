@@ -94,7 +94,10 @@ test('unknown results remain disabled after the single human media reply and nev
   const f=await setup({unknown:true});try{
     await f.page.getByRole('textbox',{name:'人工回复草稿'}).fill('未知结果只提交这一次的人工回复');
     const send=f.page.getByRole('button',{name:'发送',exact:true});await expect.poll(()=>send.isEnabled()).toBe(true);await send.click();await f.service.drain();
-    await expect.poll(()=>f.store.event(f.id).status).toBe('UNCERTAIN');expect(await send.isDisabled()).toBe(true);
+    await expect.poll(()=>f.store.event(f.id).status).toBe('UNCERTAIN');
+    await f.page.locator('[aria-label="已提交回复"]').getByText('未知结果只提交这一次的人工回复',{exact:true}).waitFor();
+    expect(await send.count()?await send.isDisabled():true).toBe(true);
+    expect(await f.page.getByRole('textbox',{name:'人工回复草稿'}).count()).toBe(0);
     await new Promise(resolve=>setTimeout(resolve,550));expect(f.native.clicks).toBe(1);
     expect(f.calls.filter(call=>call.command==='sendHumanReply')).toHaveLength(1);expect(f.errors).toEqual([]);
   }finally{await f.close();}

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Settings } from './Settings';
 import { ReplyDetail } from './ReplyDetail';
 import {InboxList} from './InboxList';
-import {completedReply,matchesSentDraft,replyEditorDraft,type SubmittedReply} from './reply-editor-draft';
+import {completedReply,matchesSentDraft,replyEditorDraft,hasLocalReplyDraft,type SubmittedReply} from './reply-editor-draft';
 import { modes, time, browserState } from './presentation';
 import { useDevelopmentReconnect } from './useDevelopmentReconnect';
 import {useWorkbenchRefresh,type AuditRow} from './useWorkbenchRefresh';
@@ -78,10 +78,12 @@ export function App() {
   const navigation=useRef(0);
   const opening=useRef<{id:string;selectionId:string;task:Promise<void>}|null>(null);
   const localDraftVersions=useRef(new Map<string,number>());
-  const dirty =
-    !!thread && (text !== replyEditorDraft(thread).text || suggestionId !== null);
   const latestEditor = useRef({ eventId: selected, text, suggestionId,editVersion:0 });
   latestEditor.current = { eventId: selected, text, suggestionId,editVersion:latestEditor.current.editVersion??0 };
+  const localDraft=!!thread&&thread.event.id===selected&&hasLocalReplyDraft(thread,{...latestEditor.current,
+    submitted:buffers.current.get(thread.event.id)?.submitted??(send?.eventId===thread.event.id?send.submitted:undefined)});
+  const dirty =
+    !!thread && (text !== replyEditorDraft(thread).text || suggestionId !== null || !!thread.intent&&localDraft);
   const devRecovery=useDevelopmentReconnect({
     selectedRef,selection,detailRequest,latestEditor,dialogOpen,
     setStatus,setThread,setReview,setSend,setError,setNotice,
@@ -507,7 +509,7 @@ export function App() {
     );
   const block = sendDisabled(),
     readOnly =
-      devRecovery.restoring || !!thread?.intent ||
+      devRecovery.restoring || !!thread?.intent&&!localDraft ||
       status.mode === "OBSERVE";
   return (
     <div className="app">
@@ -685,6 +687,7 @@ export function App() {
               openDialog={openDialog}
               closeDialog={closeDialog}
               readOnly={readOnly}
+              localDraft={localDraft}
               saving={saving}
               dirty={dirty}
               error={error}

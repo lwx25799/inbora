@@ -3,12 +3,14 @@ import {createServer} from 'vite';
 import {chromium,type Page} from 'playwright';
 import {join,resolve} from 'node:path';
 import {writeFile} from 'node:fs/promises';
+import {randomUUID} from 'node:crypto';
 import {ClientService} from '../../src/app/service.js';
 import {BrowserService} from '../../src/app/browser-service.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
 import {migrateAutomation} from '../../src/storage/automation-migration.js';
 import {candidate,database,pending,privateTemp} from '../helpers.js';
 import type {Thread} from '../../desktop/src/api.js';
+import {targetKey,digest} from '../../src/core/contracts.js';
 
 interface SendResult {commandId:string;status:string;reason:string|null}
 const editor=(page:Page)=>page.getByRole('textbox',{name:'人工回复草稿'});
@@ -30,6 +32,7 @@ async function setup(viewport={width:1240,height:800},comment=false){
   const calls:Record<string,unknown>[]=[],errors:string[]=[],commands=new Map<string,{eventId:string;text:string;result:SendResult}>();
   const delays=new Map<string,{entered:boolean;release?:()=>void}>();
   let suggestions:{id:string;text:string}[]=[];
+  let durableUncertain=false;
   let nextStatus='CONFIRMED',nextReason:string|null=null,rejectSend:string|null=null,polls=0,maxPolls=0;
   page.on('pageerror',error=>errors.push(error.message));
   async function wait(command:string){
@@ -44,7 +47,16 @@ async function setup(viewport={width:1240,height:800},comment=false){
     if(body.command==='sendHumanReply'){
       await wait('sendHumanReply');if(rejectSend)throw Error(rejectSend);
       const result={commandId:body.commandId as string,status:nextStatus,reason:nextReason};
-      const input=body.input as {eventId:string;text:string};commands.set(result.commandId,{eventId:input.eventId,text:input.text,result});return result;
+      const input=body.input as {eventId:string;text:string;generation:number;expectedVersion:number;suggestionId:string|null};
+      if(durableUncertain){
+        const draft=service.authority.save(token,input.eventId,input.generation,input.expectedVersion,input.text,input.suggestionId),event=store.event(input.eventId),intent=randomUUID();
+        store.db.prepare("UPDATE reply_drafts SET status='APPROVED' WHERE id=?").run(draft.id);
+        store.db.prepare('INSERT INTO send_intents VALUES(?,?,?,?,?,?,?,?)').run(intent,event.id,draft.id,targetKey(event.payload),
+          'synthetic-target',digest(input.text),'UNCERTAIN',new Date().toISOString());
+        store.db.prepare('INSERT INTO delivery_receipts VALUES(?,?,?,?,?)').run(randomUUID(),intent,'UNCERTAIN','synthetic-proof',new Date().toISOString());
+        store.db.prepare("UPDATE inbound_events SET status='UNCERTAIN' WHERE id=?").run(event.id);
+      }
+      commands.set(result.commandId,{eventId:input.eventId,text:input.text,result});return result;
     }
     if(body.command==='getSendResult'){
       const row=commands.get(body.commandId as string);if(!row)throw Error('COMMAND_NOT_FOUND');
@@ -57,12 +69,15 @@ async function setup(viewport={width:1240,height:800},comment=false){
     if(body.command==='getThread'||body.command==='openHumanDialog'){
       const thread=result as Thread;thread.strong=true;thread.capability={state:'SEND_AVAILABLE',reason:'',evidence:'synthetic-only'};
       thread.suggestions=suggestions.map(value=>({...value,model:'synthetic',draft_version:thread.draft?.version??0,context_version:thread.contextVersion}));
-      const sent=[...commands.values()].find(row=>row.eventId===body.eventId&&row.result.status==='CONFIRMED');
+      const sent=[...commands.values()].find(row=>row.eventId===body.eventId&&['CONFIRMED','UNCERTAIN','SENDING'].includes(row.result.status));
       if(sent){
-        thread.replyStatus='REPLIED';thread.conversationReplyStatus='REPLIED';thread.intent={id:'synthetic-confirmed-intent',status:'CONFIRMED'};
-        thread.draft={id:'synthetic-saved-draft',eventId:thread.event.id,text:sent.text,model:'human',version:1,status:'APPROVED',approval:null,origin:'HUMAN_TYPED'};
-        thread.receipt={result:'CONFIRMED',verified_at:'2026-11-10T04:35:35Z',proof_ref:'synthetic-only'};
-        thread.verification={state:'PENDING',attempts:0,last_error:null,verified:null,checked_at:null};
+        thread.intent??={id:'synthetic-intent',status:sent.result.status};
+        if(!durableUncertain)thread.draft={id:'synthetic-saved-draft',eventId:thread.event.id,text:sent.text,model:'human',version:1,status:'APPROVED',approval:null,origin:'HUMAN_TYPED'};
+        if(sent.result.status==='CONFIRMED'){
+          thread.replyStatus='REPLIED';thread.conversationReplyStatus='REPLIED';
+          thread.receipt={result:'CONFIRMED',verified_at:'2026-11-10T04:35:35Z',proof_ref:'synthetic-only'};
+        }
+        thread.verification={state:sent.result.status==='UNCERTAIN'?'REVIEW':'PENDING',attempts:0,last_error:null,verified:null,checked_at:null};
       }
     }
     return result;
@@ -84,6 +99,7 @@ async function setup(viewport={width:1240,height:800},comment=false){
   await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
   await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
   return {root,page,a,b,calls,errors,commands,store,
+    durableUncertain:()=>{durableUncertain=true;},
     status:(value:string,reason:string|null=null)=>{nextStatus=value;nextReason=reason;},reject:(value:string)=>{rejectSend=value;},
     suggestions:(values:{id:string;text:string}[])=>{
       suggestions=values;
@@ -181,12 +197,13 @@ test('a confirmed draft stays retired across target reopening, explicit reconnec
   }finally{await f.close();}
 });
 
-test('uncertain delivery preserves the submitted draft while waiting for reliable confirmation',async()=>{
+test('uncertain delivery shows its submitted text as a preview instead of an editable draft',async()=>{
   const f=await setup();try{
     f.status('UNCERTAIN');await f.page.getByRole('button',{name:/反馈目标A/}).click();await editor(f.page).fill('结果未知时必须保留的草稿');
     await f.page.getByRole('button',{name:'发送',exact:true}).click();
     await f.page.getByTestId('reply-send-result').getByText('等待确认',{exact:true}).waitFor();
-    expect(await editor(f.page).inputValue()).toBe('结果未知时必须保留的草稿');
+    await f.page.locator('[aria-label="已提交回复"]').getByText('结果未知时必须保留的草稿',{exact:true}).waitFor();
+    expect(await editor(f.page).count()).toBe(0);
     expect(f.calls.filter(call=>call.command==='sendHumanReply')).toHaveLength(1);expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
@@ -214,12 +231,40 @@ test('confirmation retires only the submitted text and preserves newer human inp
     await editor(f.page).fill('等待确认期间继续输入的新文字');f.complete();f.release('getSendResult');
     await f.page.getByTestId('reply-send-result').getByText('已回复',{exact:true}).waitFor();
     expect(await editor(f.page).inputValue()).toBe('等待确认期间继续输入的新文字');
-    expect(await f.page.locator('.reply-composer').innerText()).toContain('未发送内容已保留');
+    expect(await editor(f.page).isEditable()).toBe(true);
+    expect(await f.page.locator('.reply-composer').innerText()).toContain('未发送内容仅在当前窗口保留');
     await f.page.getByRole('button',{name:'重新连接内核',exact:true}).click();
     await f.page.getByText('已读取内核权威状态，未重放发送；未保存人稿保留',{exact:true}).waitFor();
     expect(await editor(f.page).inputValue()).toBe('等待确认期间继续输入的新文字');
     await f.emit('backend_restarted');await f.page.getByText('开发内核已恢复；人稿保留，未重放模型、保存或发送',{exact:true}).waitFor();
     expect(await editor(f.page).inputValue()).toBe('等待确认期间继续输入的新文字');
+    expect(await editor(f.page).isEditable()).toBe(true);
+    const saves=f.calls.filter(call=>call.command==='saveDraft').length;
+    await editor(f.page).fill('确认后仍能修改本地未发送内容');
+    await f.page.getByRole('button',{name:'清空',exact:true}).click();
+    await expect.poll(async()=>await editor(f.page).count()?await editor(f.page).inputValue():'').toBe('');
+    expect(f.calls.filter(call=>call.command==='saveDraft')).toHaveLength(saves);
+    expect(f.calls.filter(call=>call.command==='sendHumanReply')).toHaveLength(1);expect(f.errors).toEqual([]);
+  }finally{await f.close();}
+});
+
+test('new local input can be edited and cleared while the original uncertain send ledger remains unchanged',async()=>{
+  const f=await setup();try{
+    f.durableUncertain();f.status('UNCERTAIN');f.hold('sendHumanReply');
+    await f.page.getByRole('button',{name:/反馈目标A/}).click();await editor(f.page).fill('只提交一次的原全文');
+    await f.page.getByRole('button',{name:'发送',exact:true}).click();await expect.poll(()=>f.held('sendHumanReply')).toBe(true);
+    await editor(f.page).fill('这是之后新写的未发送内容');f.release('sendHumanReply');
+    await f.page.getByTestId('reply-send-result').getByText('等待确认',{exact:true}).waitFor();
+    expect(await editor(f.page).isEditable()).toBe(true);
+    const preview=f.page.locator('[aria-label="已提交回复"]');await preview.getByText('只提交一次的原全文',{exact:true}).waitFor();
+    const saves=f.calls.filter(call=>call.command==='saveDraft').length;
+    const ledger=()=>['reply_drafts','send_intents','delivery_receipts'].map(table=>f.store.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const before=ledger();await editor(f.page).fill('接管后修改本地内容');
+    await f.page.getByRole('button',{name:'清空',exact:true}).click();
+    await expect.poll(async()=>await editor(f.page).count()?await editor(f.page).inputValue():'').toBe('');
+    await new Promise(resolve=>setTimeout(resolve,650));
+    expect(ledger()).toEqual(before);expect(f.calls.filter(call=>call.command==='saveDraft')).toHaveLength(saves);
+    const send=f.page.getByRole('button',{name:'发送',exact:true});expect(await send.count()?await send.isDisabled():true).toBe(true);
     expect(f.calls.filter(call=>call.command==='sendHumanReply')).toHaveLength(1);expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
@@ -232,7 +277,7 @@ test('confirmation preserves text that the human deliberately clears and retypes
     await editor(f.page).fill('');await editor(f.page).fill(text);f.complete();f.release('getSendResult');
     await f.page.getByTestId('reply-send-result').getByText('已回复',{exact:true}).waitFor();
     expect(await editor(f.page).inputValue()).toBe(text);
-    expect(await f.page.locator('.reply-composer').innerText()).toContain('未发送内容已保留');
+    expect(await f.page.locator('.reply-composer').innerText()).toContain('未发送内容仅在当前窗口保留');
     await f.page.getByRole('button',{name:'重新连接内核',exact:true}).click();
     await f.page.getByText('已读取内核权威状态，未重放发送；未保存人稿保留',{exact:true}).waitFor();
     expect(await editor(f.page).inputValue()).toBe(text);
@@ -281,7 +326,7 @@ test.each([false,true])('confirmation clears the submitted AI source and preserv
     }
     f.complete();f.release('getSendResult');if(!newer)await f.emit('status_updated');
     await f.page.getByTestId('reply-send-result').getByText('已回复',{exact:true}).waitFor();
-    if(newer){expect(await editor(f.page).inputValue()).toBe(text);expect(await f.page.locator('.reply-composer').innerText()).toContain('未发送内容已保留');}
+    if(newer){expect(await editor(f.page).inputValue()).toBe(text);expect(await f.page.locator('.reply-composer').innerText()).toContain('未发送内容仅在当前窗口保留');}
     else await expectSentDraftCleared(f.page);
     const sent=f.calls.filter(call=>call.command==='sendHumanReply');expect(sent).toHaveLength(1);
     expect((sent[0]!.input as {suggestionId:string}).suggestionId).toBe(first);

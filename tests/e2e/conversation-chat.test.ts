@@ -140,8 +140,9 @@ test('grouped unknown comment children remain readable with sending disabled, in
     await f.page.locator('.task').filter({hasText:'这条楼中楼需要前面的上下文'}).click();
     await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();
     const dialog=f.page.getByRole('dialog',{name:'人工回复对话框'});await dialog.waitFor();
-    expect(await dialog.getByRole('button',{name:'发送',exact:true}).isDisabled()).toBe(true);
-    expect(await editor(f.page).getAttribute('readonly')).not.toBeNull();
+    const send=dialog.getByRole('button',{name:'发送',exact:true});expect(await send.count()?await send.isDisabled():true).toBe(true);
+    expect(await editor(f.page).count()).toBe(0);
+    await dialog.locator('[aria-label="已提交回复"]').getByText('保留的未知回复',{exact:true}).waitFor();
     await dialog.getByRole('button',{name:'关闭并保留草稿',exact:true}).click();
     const context=f.page.getByRole('region',{name:'评论完整上下文'}).first();
     await context.locator('article').filter({hasText:'从最初根评论开始的合成问题'})
@@ -169,6 +170,35 @@ test('the DM heading uses the authoritative conversation status while retaining 
     f.conversationStatus('WAITING');await f.page.getByRole('button',{name:'重新连接内核',exact:true}).click();
     await expect.poll(()=>f.page.locator('.chat-heading .badge').textContent()).toBe('等待回复');
     expect(f.calls.some(call=>call.command==='sendHumanReply'||call.command==='generateSuggestion')).toBe(false);
+  }finally{await f.close();}
+});
+
+test('an active unknown conversation row can select its new message and edit a separate draft',async()=>{
+  const f=await setup();try{
+    const source=f.store.event(f.a),draft=randomUUID(),intent=randomUUID();
+    f.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,'human',1,'APPROVED',NULL,NULL)").run(draft,source.id,'旧消息只提交一次');
+    f.store.db.prepare('INSERT INTO send_intents VALUES(?,?,?,?,?,?,?,?)').run(intent,source.id,draft,
+      'dm:conversation-a','synthetic-target','synthetic-text','UNCERTAIN',new Date().toISOString());
+    f.store.db.prepare('INSERT INTO delivery_receipts VALUES(?,?,?,?,?)').run(randomUUID(),intent,'UNCERTAIN','synthetic-proof',new Date().toISOString());
+    f.store.db.prepare("UPDATE inbound_events SET status='UNCERTAIN' WHERE id=?").run(source.id);
+    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();
+    await f.page.locator('[aria-label="已提交回复"]').getByText('旧消息只提交一次',{exact:true}).waitFor();
+    const unchanged={draft:f.store.db.prepare('SELECT * FROM reply_drafts WHERE id=?').get(draft),
+      intent:f.store.db.prepare('SELECT * FROM send_intents WHERE id=?').get(intent)};
+    const next=pending(f.store,candidate({platformEventId:'chat-a-new-after-unknown',conversationId:'conversation-a',actorName:'合成同名联系人',
+      text:'同一会话新的普通待回复消息',occurredAt:'2026-11-04T01:10:00Z'}));
+    f.service.events.emit('update',{event:'inbox_updated'});
+    const row=f.page.locator('.task').filter({hasText:'同一会话新的普通待回复消息'});await row.waitFor();
+    expect(await row.getAttribute('aria-pressed')).toBe('true');await row.click();
+    await expect.poll(()=>f.calls.filter(call=>call.command==='selectTarget').at(-1)?.eventId).toBe(next);
+    await expect.poll(()=>editor(f.page).isEditable()).toBe(true);await editor(f.page).fill('新消息独立保存的人工草稿');
+    await f.page.getByText('此前回复尚未确认送达；可以编辑草稿，发送暂不可用',{exact:true}).waitFor();
+    await expect.poll(()=>f.service.authority.draftFor(next)?.text).toBe('新消息独立保存的人工草稿');
+    await f.page.getByRole('button',{name:'清空',exact:true}).click();await expect.poll(()=>f.service.authority.draftFor(next)?.text).toBe('');
+    expect({draft:f.store.db.prepare('SELECT * FROM reply_drafts WHERE id=?').get(draft),
+      intent:f.store.db.prepare('SELECT * FROM send_intents WHERE id=?').get(intent)}).toEqual(unchanged);
+    expect(f.calls.some(call=>['sendHumanReply','generateSuggestion'].includes(call.command as string))).toBe(false);
+    expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
 

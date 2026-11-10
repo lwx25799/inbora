@@ -224,7 +224,7 @@ export const reasons: Record<string, string> = {
   MODE_DRAFT_ONLY: "当前模式仅允许保存草稿",
   ACCOUNT_PAUSED: "账号已暂停",
   TARGET_PAUSED: "此目标已暂停",
-  TARGET_FROZEN: "这条消息曾提交过，系统不会重复发送；独立新消息继续处理",
+  TARGET_FROZEN: "此前回复尚未确认送达；可以编辑草稿，发送暂不可用",
   LEASE_EXPIRED_OR_CHANGED: "接管已过期或代际已变化，请重新接管",
   DRAFT_VERSION_CONFLICT: "草稿版本已变化，请重新读取并核对",
   CONTEXT_VERSION_CONFLICT: "上下文已变化，请重新核对",
