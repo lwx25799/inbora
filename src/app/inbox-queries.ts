@@ -113,7 +113,13 @@ export class InboxQueries {
         json_extract(payload,'$.occurredAt') AS occurred_at,${timeSql("json_extract(payload,'$.occurredAt')")} AS at,historical
       FROM chat_messages WHERE account_id=? AND conversation_id=? AND own_id=(SELECT own_id FROM accounts WHERE id=?) AND conflicted=0
     ) ${bound} ORDER BY at DESC,id DESC LIMIT ?`).all(e.accountId,e.conversationId,e.accountId,...boundArgs,pageSize+1) as MessageRow[]:[];
-    const messages=[...incoming,...observed,...[...sent,...retried].filter(row=>digest(row.text)===row.text_digest)]
+    const followups=this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get()?this.store.db.prepare(`SELECT * FROM (
+      SELECT 'followup:'||t.command_id AS id,t.event_id,t.text,t.attempt_started_at AS occurred_at,
+      ${timeSql('t.attempt_started_at')} AS at,0 AS historical FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
+      WHERE ${where} AND t.status='CONFIRMED' ${hasChat?`AND NOT EXISTS(SELECT 1 FROM chat_messages m WHERE m.account_id=e.account_id
+        AND m.conversation_id=json_extract(e.payload,'$.conversationId') AND m.conflicted=0 AND m.native_id_digest=t.native_id_digest)`:''})
+      ${bound} ORDER BY at DESC,id DESC LIMIT ?`).all(...args,...boundArgs,pageSize+1) as MessageRow[]:[];
+    const messages=[...incoming,...observed,...followups,...[...sent,...retried].filter(row=>digest(row.text)===row.text_digest)]
       .sort((a,b)=>b.at-a.at||b.id.localeCompare(a.id));
     const selected=messages.slice(0,pageSize),hasMore=messages.length>pageSize;
     const own=this.store.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(e.accountId) as {own_id:string}|undefined;
@@ -154,14 +160,16 @@ export class InboxQueries {
       AND i.event_type='MANUAL_RETRY_INTENT' ORDER BY i.id,r.rowid`).all(...args);
     const display=this.store.db.prepare("SELECT id FROM audit_events WHERE event_type='MESSAGE_DISPLAY_CHANGED' AND entity_id=? ORDER BY rowid DESC LIMIT 1")
       .get(digest([e.accountId,targetKey(e)]));
-    return digest([inboxGroupKey(event),intents,receipts,verifications,observed,links,nativeProofs,retries,display??null]);
+    const followups=table('human_reply_turns')?this.store.db.prepare(`SELECT t.command_id,t.status,t.native_id_digest FROM human_reply_turns t
+      JOIN inbound_events e ON e.id=t.event_id WHERE ${where} ORDER BY t.rowid`).all(...args):[];
+    return digest([inboxGroupKey(event),intents,receipts,verifications,observed,links,nativeProofs,retries,followups,display??null]);
   }
 
   private cursor(group:string,before?:string):TimelineCursor|null {
     if(before===undefined)return null;
     let value:unknown;try{value=JSON.parse(Buffer.from(before,'base64url').toString('utf8'));}catch{requireSafe(false,'TIMELINE_CURSOR_INVALID');}
     const c=value as Partial<TimelineCursor>|null;
-    requireSafe(c&&c.group===group&&Number.isSafeInteger(c.at)&&typeof c.order==='string'&&/^(in|out|retry|observed):[a-f0-9-]{36}$/iu.test(c.order),
+    requireSafe(c&&c.group===group&&Number.isSafeInteger(c.at)&&typeof c.order==='string'&&/^(in|out|retry|observed|followup):[a-f0-9-]{36}$/iu.test(c.order),
       'TIMELINE_CURSOR_INVALID');
     return c as TimelineCursor;
   }

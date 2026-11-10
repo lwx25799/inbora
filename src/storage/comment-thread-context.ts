@@ -61,6 +61,11 @@ export function readCommentThreadContext(store:EventStore,event:InboundEvent):Co
   };
   const hasVerification=present(store,'verification_results');
   for(const source of sources.values()){
+    if(present(store,'human_reply_turns')){
+      const turns=store.db.prepare("SELECT command_id,text,attempt_started_at FROM human_reply_turns WHERE event_id=? AND status='CONFIRMED' ORDER BY rowid")
+        .all(source.id) as {command_id:string;text:string;attempt_started_at:string}[];
+      for(const turn of turns)outgoing('followup:'+turn.command_id,source,turn.text,turn.attempt_started_at);
+    }
     const intents=store.db.prepare(`SELECT i.id,i.status,i.target_key,i.text_digest,i.attempt_started_at,d.text FROM send_intents i
       JOIN reply_drafts d ON d.id=i.draft_id AND d.event_id=i.event_id WHERE i.event_id=?`).all(source.id) as {
         id:string;status:string;target_key:string;text_digest:string;attempt_started_at:string;text:string}[];

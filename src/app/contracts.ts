@@ -57,6 +57,8 @@ const ordinaryCommandSchema = z.discriminatedUnion("command", [
   z.object({command:z.literal('openHumanDialog'),...event,selectionId:z.uuid(),editing:z.boolean().optional()}).strict(),
   z.object({command:z.literal('closeHumanDialog'),...owned}).strict(),
   z.object({command:z.literal('sendHumanReply'),commandId:z.uuid(),input:humanReplySchema}).strict(),
+  z.object({command:z.literal('sendHumanFollowup'),commandId:z.uuid(),input:humanReplySchema}).strict(),
+  z.object({command:z.literal('saveHumanFollowupDraft'),...owned,expectedVersion:z.number().int().nonnegative(),text:z.string().max(2000),suggestionId:z.null()}).strict(),
   z.object({command:z.literal("configureCollection"),settings:collectionSchema}).strict(),
   z.object({command:z.literal("setModelGrant"),scope:modelGrantSchema.nullable(),confirmed:z.literal(true)}).strict(),
   z.object({command:z.literal("setReplyPolicy"),policy:replyPolicySchema.nullable(),confirmed:z.literal(true)}).strict(),

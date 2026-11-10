@@ -7,6 +7,7 @@ import type { AiSettings, InboxSync, ClientCommand } from './contracts.js';
 import type { CollectionScheduler } from './collection-scheduler.js';
 import {InboxQueries,inboxGroupKey} from './inbox-queries.js';
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
+import {HumanFollowups} from './human-followup.js';
 import {readCommentThreadContext,commentThreadPage,commentThreadGroupKey} from '../storage/comment-thread-context.js';
 
 interface ViewState {
@@ -59,6 +60,7 @@ export class WorkbenchQueries {
       groupKey:inboxGroupKey(e),
       timeline:new InboxQueries(this.store,this.browser.root,(id,status)=>this.replyStatus(id,status)).timeline(e,commentThreadGroupKey(e.payload)?undefined:timelineBefore),
       draft,
+      followup:new HumanFollowups(this.store,this.authority,this.browser,()=>false,()=>{},()=> 'OPERATION_FAILED_PRIVATE_DIAGNOSTICS').view(eventId),
       history: this.store.history(e.payload),
       ...(e.payload.channel==='COMMENT_NOTIFICATION'&&(e.payload.kind==='REPLY'||commentThreadGroupKey(e.payload))?{
         commentContext:commentThreadPage(readCommentThreadContext(this.store,e.payload),timelineBefore)}:{}),

@@ -21,6 +21,7 @@ export class InboxProjection {
   readonly own:Map<string,string>;
   private readonly intents:Map<string,IntentRow>;
   private readonly verifications:Map<string,number>;
+  private readonly pendingFollowups=new Set<string>();
   private readonly collisions:Set<string>;
   private readonly firstObserved:Map<string,number>;
   private readonly drafts:Map<string,ResumeRow>;
@@ -30,7 +31,7 @@ export class InboxProjection {
     if(target){where.push('e.account_id=?');args.push(target.accountId);
       where.push(target.eventId?'e.id=?':'e.target_key=?');args.push(target.eventId??target.key);}
     const filter=where.join(' AND '),db=store.db;
-    const tables=new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('verification_results','draft_revisions')").all() as {name:string}[]).map(row=>row.name));
+    const tables=new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('verification_results','draft_revisions','human_reply_turns')").all() as {name:string}[]).map(row=>row.name));
     const rows=db.prepare(`SELECT e.rowid AS ordinal,e.id,e.payload,e.binding,e.status,e.scope FROM inbound_events e WHERE ${filter} ORDER BY e.rowid`).all(...args) as OrderedRow[];
     this.events=rows.map(decodeEventRow);this.order=new Map(rows.map(row=>[row.id,row.ordinal]));
     this.intents=new Map((db.prepare(`SELECT i.event_id,i.attempt_started_at,i.target_digest,i.text_digest,d.text,d.approval
@@ -39,6 +40,10 @@ export class InboxProjection {
       JOIN inbound_events e ON e.id=i.event_id JOIN verification_results v ON v.rowid=(SELECT MAX(v2.rowid) FROM verification_results v2 WHERE v2.intent_id=i.id)
       WHERE ${filter}`).all(...args) as {event_id:string;verified:number}[]).map(row=>[row.event_id,row.verified]):[]);
     this.collisions=new Set((db.prepare(`SELECT DISTINCT c.event_id FROM source_collisions c JOIN inbound_events e ON e.id=c.event_id WHERE ${filter}`).all(...args) as {event_id:string}[]).map(row=>row.event_id));
+    if(tables.has('human_reply_turns'))for(const row of db.prepare(`SELECT DISTINCT t.event_id FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
+      WHERE ${filter} AND t.status IN ('PREPARING','APPROVED','INTENT_RECORDED','UNCERTAIN')`).all(...args) as {event_id:string}[]){
+        this.verifications.set(row.event_id,0);this.pendingFollowups.add(row.event_id);
+      }
     this.firstObserved=new Map((db.prepare(`SELECT e.id,o.observed_at FROM inbound_events e JOIN observations o ON o.rowid=(SELECT o2.rowid FROM observations o2
       WHERE o2.channel=e.channel AND o2.scope=e.scope AND o2.evidence_ref=json_extract(e.payload,'$.evidenceId') ORDER BY o2.rowid LIMIT 1)
       WHERE ${filter}`).all(...args) as {id:string;observed_at:string}[]).map(row=>[row.id,Date.parse(row.observed_at)]));
@@ -71,6 +76,7 @@ export class InboxProjection {
       }
     }
     const waiting=members.filter(event=>{
+      if(this.pendingFollowups.has(event.id))return true;
       if(this.replyStatus(event)!=='WAITING')return false;
       const laterObserved=(this.order.get(event.id)??0)>(this.order.get(latest.id)??0);
       if(event.payload.channel==='DIRECT_MESSAGE'&&Number.isFinite(repliedAt)){

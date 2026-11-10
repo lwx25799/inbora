@@ -18,6 +18,8 @@ import {
   type InboxSync,
 } from "./contracts.js";
 import {HumanReplyWorkflow} from './human-reply-workflow.js';
+import {HumanFollowups} from './human-followup.js';
+import {migrateFollowups} from '../storage/followup-migration.js';
 import {BrowserDraftRecovery} from './browser-draft-recovery.js';
 import { WorkbenchQueries } from "./workbench-queries.js";
 import {ensureQueryIndexes} from '../storage/query-indexes.js';
@@ -44,6 +46,7 @@ export function clientError(error: unknown): string {
 
 /** Transport-neutral application service. Short controls never wait behind browser/model operations. */
 export class ClientService {
+  private readonly followups:HumanFollowups;
   private readonly queries: WorkbenchQueries;
   readonly events = new EventEmitter();
   readonly authority: WorkbenchAuthority;
@@ -91,6 +94,7 @@ export class ClientService {
     this.maintenance=new EvidenceMaintenance(store,browser.root);
     this.authority = new WorkbenchAuthority(store, now);
     this.authority.recover();
+    this.followups=new HumanFollowups(store,this.authority,browser,()=>this.closing,()=>this.emit('send_status_updated'),clientError);
     this.humanReplies=new HumanReplyWorkflow(store,this.authority,browser,()=>this.closing,(token,id,params)=>this.deliver(token,id,params),event=>this.emit(event),clientError);
     this.queries = new WorkbenchQueries(store,this.authority,browser);
   }
@@ -98,6 +102,8 @@ export class ClientService {
     if(!this.automation) {
       await migrateAutomation(this.store,join(this.browser.root,"backups",`automation-${randomUUID()}.sqlite`));
       await ensureQueryIndexes(this.store,join(this.browser.root,'backups',`query-indexes-${randomUUID()}.sqlite`));
+      await migrateFollowups(this.store,join(this.browser.root,'backups',`human-followups-${randomUUID()}.sqlite`));
+      this.followups.recover();
       this.automation=new AutomationStore(this.store,this.authority.now);
       this.automation.initialize(this.startedAt);
       this.recoveryDiagnosticPending=new BrowserDraftRecovery(this.store,this.authority,this.browser).hasStartupCandidate();
@@ -306,7 +312,7 @@ export class ClientService {
         this.authority.select(token,c.eventId,c.selectionId);
         this.closeOtherDialogs(token,c.eventId);
         const event=this.store.event(c.eventId);
-        if(c.editing!==false&&!this.store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(c.eventId)) {
+        if(c.editing!==false&&(!this.store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(c.eventId)||this.followups.view(c.eventId)?.eligible)) {
           const current=this.authority.ownership(event);
           const owner=current.operator_id===this.authority.operator(token).id&&current.lease_expires_at>this.authority.now()?current:
             this.authority.claim(token,c.eventId,current.generation);
@@ -323,6 +329,13 @@ export class ClientService {
         const fresh=this.humanReplies.queue(token,c.commandId,input);
         if(fresh)this.track(this.humanReplies.prepare(token,c.commandId));
         return this.result(token,c.commandId);
+      }
+      case 'saveHumanFollowupDraft':
+        return this.followups.save(token,c.eventId,c.generation,c.expectedVersion,c.text,c.suggestionId);
+      case 'sendHumanFollowup': {
+        const fresh=this.followups.queue(token,c.commandId,c.input);
+        if(fresh)this.track(this.followups.prepare(token,c.commandId));
+        return this.followups.result(token,c.commandId);
       }
       case 'configureCollection':
         this.authority.operator(token,'CONTROL');requireSafe(this.automation,'AUTOMATION_NOT_READY');
@@ -671,6 +684,7 @@ export class ClientService {
     }
   }
   private result(token: string, id: string) {
+    if(this.followups.turn(id))return this.followups.result(token,id);
     const row = this.authority.command(id);
     this.authority.operator(token);
     return {

@@ -272,6 +272,8 @@ export class EventStore {
   }
   sendFrozen(eventId:string):boolean {
     const event=this.event(eventId),next=event.payload;
+    if(this.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get()&&
+      this.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN') LIMIT 1").get(targetKey(next)))return true;
     const unresolved=this.db.prepare("SELECT event_id,status,attempt_started_at FROM send_intents WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')")
       .all(targetKey(next)) as {event_id:string;status:string;attempt_started_at:string}[];
     if(!unresolved.length)return false;
@@ -294,6 +296,9 @@ export class EventStore {
     requireSafe(e.status === 'APPROVED', 'EVENT_NOT_APPROVED');
     requireSafe(!this.sendFrozen(eventId), 'TARGET_FROZEN');
     requireSafe(!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(eventId), 'INTENT_EXISTS');
+  }
+  hasIntentForDraft(draftId:string):boolean {
+    return !!this.db.prepare('SELECT id FROM send_intents WHERE draft_id=?').get(draftId);
   }
   consumeBudget(kind: 'MODEL' | 'SEND'): void {
     const extended=!!this.db.prepare("SELECT name FROM sqlite_master WHERE name='budget_limits' AND type='table'").get();
@@ -463,7 +468,10 @@ export class EventStore {
       JOIN reply_drafts d ON d.id=json_extract(i.detail_redacted,'$.draftId')
       WHERE i.event_type='MANUAL_RETRY_INTENT' AND json_extract(r.detail_redacted,'$.result')='CONFIRMED' AND e.target_key=?
       ORDER BY r.rowid DESC LIMIT 6`).all(targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[];
-    const combined = [...incoming,...[...outgoing,...retried].map(row => ({...eventSchema.parse(JSON.parse(row.payload)),text:row.text,
+    const followups=this.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get()?this.db.prepare(`SELECT e.payload,t.text,t.command_id AS id,t.verified_at
+      FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id WHERE t.target_key=? AND t.status='CONFIRMED' ORDER BY t.rowid DESC LIMIT 6`)
+      .all(targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[]:[];
+    const combined = [...incoming,...[...outgoing,...retried,...followups].map(row => ({...eventSchema.parse(JSON.parse(row.payload)),text:row.text,
       direction:'OUTGOING' as const,platformEventId:row.id,occurredAt:row.verified_at}))]
       .sort((a,b) => a.occurredAt.localeCompare(b.occurredAt));
     // Reserve bounded context for confirmed outgoing replies even during incoming bursts.
