@@ -149,7 +149,8 @@ test('grouped unknown comment children remain readable with sending disabled, in
     await expect.poll(()=>f.calls.filter(call=>call.command==='selectTarget').at(-1)?.eventId)
       .toBe(f.store.events().find(event=>event.payload.commentId==='1101')!.id);
     await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();await dialog.waitFor();
-    expect(await dialog.getByRole('button',{name:'发送',exact:true}).isDisabled()).toBe(true);
+    expect(await dialog.getByRole('button',{name:'发送',exact:true}).count()).toBe(0);
+    expect(await dialog.getByRole('textbox',{name:'人工回复草稿'}).count()).toBe(0);
     expect(await dialog.getByText('这条楼中楼需要前面的上下文',{exact:true}).count()).toBe(1);
     expect(f.store.sendFrozen(source.id)).toBe(true);
     expect(f.store.db.prepare('SELECT status FROM send_intents WHERE id=?').get(intent)).toEqual({status:'UNCERTAIN'});
