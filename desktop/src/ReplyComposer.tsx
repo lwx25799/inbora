@@ -6,6 +6,7 @@ import type {ReplyViewProps} from './reply-view-types';
 const draftOrigins = new Map([
   ["HUMAN_TYPED", "人工输入"],
   ["AI_ASSISTED_APPROVED", "已引用 AI 建议"],
+  ["MCP_ASSISTED", "本机助手编辑"],
   ["LEGACY", "历史草稿"],
 ]);
 const suggestionMessages:Record<string,string>={

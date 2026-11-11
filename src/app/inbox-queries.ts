@@ -3,7 +3,7 @@ import type {EventStore} from '../storage/store.js';
 import type {ClientCommand} from './contracts.js';
 import {MessagePreviewStore,type MessagePreviewAttachment} from '../storage/message-previews.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
-import {inboxReadBoundary} from './inbox-read-state.js';
+import {inboxReadBoundary,scopedReadEventIds} from './inbox-read-state.js';
 import {MessageShareStore,type MessageShare} from '../storage/message-shares.js';
 import {InboxProjection,inboxGroupKey,type ReplyStatus} from './inbox-projection.js';
 export {inboxGroupKey} from './inbox-projection.js';
@@ -49,8 +49,9 @@ export class InboxQueries {
     }
     const time=(event:StoredEvent)=>Date.parse(event.payload.occurredAt??'')||0;
     const boundary=inboxReadBoundary(this.store);
+    const scoped=scopedReadEventIds(this.store,boundary);
     const groupsWithRead=[...groups.entries()].map(([groupKey,members])=>({...projection.group(members),groupKey,
-      unread:members.some(event=>(projection.order.get(event.id)??0)>boundary)}));
+      unread:members.some(event=>(projection.order.get(event.id)??0)>boundary&&!scoped.has(event.id))}));
     const unreadTotal=groupsWithRead.filter(row=>row.unread).length;
     const rows=groupsWithRead
       .filter(row=>c.status==='UNREAD'?row.unread:c.status==='PENDING'?row.replyStatus==='WAITING':c.status==='MANUAL_ONLY'?row.replyStatus==='MANUAL_ONLY':c.status==='CONFIRMED'?row.replyStatus==='REPLIED':

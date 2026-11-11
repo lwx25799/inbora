@@ -1,0 +1,188 @@
+.settings.settings-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 22px 24px;
+}
+
+.settings-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 24px;
+}
+
+.settings-column {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.settings-compact .settings-section {
+  min-width: 0;
+  padding: 0;
+}
+
+.settings-column > .settings-section + .settings-section {
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.settings-compact .settings-section h2 {
+  font-size: 17px;
+  margin-bottom: 8px;
+}
+
+.settings-compact label {
+  margin: 8px 0;
+  gap: 4px;
+}
+
+.settings-compact input,
+.settings-compact select,
+.settings-compact .settings-section textarea {
+  padding: 7px 9px;
+  min-width: 0;
+}
+
+.settings-compact .check input {
+  padding: 0;
+}
+
+.settings-compact textarea {
+  min-height: 64px;
+  line-height: 1.5;
+}
+
+.settings-compact .settings-rule textarea {
+  min-height: 96px;
+}
+
+.settings-compact .hint {
+  margin-top: 6px;
+  line-height: 1.55;
+}
+
+.settings-compact .row {
+  margin: 8px 0;
+}
+
+.settings-compact .policy-fields,
+.policy-targets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.policy-targets > div {
+  min-width: 0;
+}
+
+.settings-options {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 16px;
+}
+
+.settings-compact .settings-subtitle {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-compact .settings-daily {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-compact .settings-daily h2,
+.settings-compact .settings-daily label,
+.settings-compact .settings-daily .hint {
+  margin: 0;
+}
+
+.settings-daily .hint {
+  flex: 1 1 280px;
+}
+
+.settings-compact .settings-section dl {
+  margin: 8px 0;
+}
+
+.settings-compact .settings-section dl > div {
+  padding: 3px 0;
+}
+
+.settings-compact .budget {
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.settings-disclosure,
+.settings-diagnostics {
+  margin: 10px 0;
+}
+
+.settings-disclosure summary,
+.settings-diagnostics > summary {
+  cursor: pointer;
+  color: var(--green);
+}
+
+.settings-diagnostics {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.settings-diagnostics[open] > summary {
+  margin-bottom: 14px;
+}
+
+.settings-rule-summary {
+  margin: 12px 0;
+}
+
+.settings-rule-summary button {
+  margin-top: 6px;
+}
+
+.settings-dialog {
+  width: min(700px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #202b27;
+  background: #f9faf7;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.settings-dialog::backdrop {
+  background: rgba(26, 43, 35, .32);
+}
+
+.settings-dialog .dialog-heading {
+  margin-bottom: 12px;
+}
+
+.settings-dialog .settings-rule textarea {
+  min-height: 240px;
+  max-height: 50vh;
+}
+
+@media (max-width: 1050px) {
+  .settings.settings-compact {
+    padding: 16px 18px 22px;
+  }
+
+  .settings-columns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+  }
+}

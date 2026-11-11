@@ -43,3 +43,11 @@ test('global busy or restoring state temporarily disables but never changes the 
   const f=fixture(null);f.props.busy='正在处理';expect(f.button()).toContain('disabled');expect(f.html()).toContain('正在处理当前操作，请稍候生成 AI 建议');
   f.props.busy='';f.props.readOnly=true;expect(f.button()).toContain('disabled');expect(f.props.text).toBe('new human text');
 });
+
+test('an assistant-authored draft is visibly distinct from human input',()=>{
+  const f=fixture(null);
+  f.thread.draft={id:'841459e3-490a-4d02-858a-d498b55f004c',eventId:f.thread.event.id,text:'助手合成草稿',model:'assistant',
+    version:1,status:'DRAFT',approval:null,origin:'MCP_ASSISTED'};
+  expect(f.html()).toContain('本机助手编辑');
+  expect(f.html()).not.toContain('·<!-- -->人工输入');
+});

@@ -44,6 +44,7 @@ export class DeepSeekProvider {
     authorized: boolean,
     signal?: AbortSignal,
     reserve?: () => void,
+    validateContext?: (event:InboundEvent,history:InboundEvent[]) => void,
   ): Promise<{ text: string; model: string }> {
     requireSafe(
       authorized && key.length > 0,
@@ -51,6 +52,7 @@ export class DeepSeekProvider {
     );
     requireSafe(!/[\r\n]/u.test(key), "INVALID_MODEL_KEY");
     if(event.channel==='COMMENT_NOTIFICATION'&&event.kind==='REPLY')history=commentThreadModelHistory(readCommentThreadContext(store,event),event);
+    validateContext?.(event,history);
     requireSafe(
       !sensitive(event) &&
         !history.some(sensitive) &&

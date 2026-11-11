@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Settings } from './Settings';
 import { ReplyDetail } from './ReplyDetail';
 import {InboxList} from './InboxList';
+import {remoteDraftUpdate,remoteDraftConflict,mayAdvanceReplySelection,type RemoteDraftEditor} from './remote-draft';
 import {matchesSentDraft,replyEditorDraft,hasLocalReplyDraft,replyDraft,hasReplyHistory,canContinueReply,submissionEditorUpdate,type SubmittedReply,type ReplyCommandResult} from './reply-editor-draft';
 import { modes, time, browserState } from './presentation';
 import { useDevelopmentReconnect } from './useDevelopmentReconnect';
@@ -80,7 +81,9 @@ export function App() {
   const navigation=useRef(0);
   const opening=useRef<{id:string;selectionId:string;task:Promise<void>}|null>(null);
   const localDraftVersions=useRef(new Map<string,number>());
+  const remoteConflicts=useRef(new Set<string>());
   const latestEditor = useRef({ eventId: selected, text, suggestionId,editVersion:0 });
+  const latestThread=useRef(thread);latestThread.current=thread;
   latestEditor.current = { eventId: selected, text, suggestionId,editVersion:latestEditor.current.editVersion??0 };
   const localDraft=!!thread&&thread.event.id===selected&&hasLocalReplyDraft(thread,{...latestEditor.current,
     submitted:buffers.current.get(thread.event.id)?.submitted??(send?.eventId===thread.event.id?send.submitted:undefined)});
@@ -121,6 +124,7 @@ export function App() {
       }
     }
     if(!thread?.intent||thread.replyStatus!=='REPLIED'||thread.event.payload.channel!=='DIRECT_MESSAGE'||dirty||sending.current)return;
+    if(!mayAdvanceReplySelection(thread,send?.eventId,send?.intentId))return;
     const next=inbox.items.find(item=>item.groupKey===thread.groupKey&&item.replyStatus==='WAITING'&&item.id!==selected);
     if(next)choose(next.resumeEventId??next.id);
   },[inbox.items,thread,dirty,selected,send]);
@@ -141,16 +145,24 @@ export function App() {
         const requestId=++detailRequest.current;
         const detail=await request<Thread>({command:'getThread',eventId:selected});
         if(!ignore&&selectedRef.current===selected&&selection.current===selectionId&&detailRequest.current===requestId){
-          detailRequest.current++;setThread(detail);editorLoaded.current=true;
-          const editor=replyEditorDraft(detail,buffers.current.get(selected));latestEditor.current.editVersion=editor.editVersion??0;
+          detailRequest.current++;latestThread.current=detail;setThread(detail);editorLoaded.current=true;
+          const editor=replyEditorDraft(detail,buffers.current.get(selected));
+          latestEditor.current={eventId:selected,text:editor.text,suggestionId:editor.suggestionId,editVersion:editor.editVersion??0};
           setText(editor.text);setSuggestionId(editor.suggestionId);
+          const saved=buffers.current.get(selected);
+          if(saved&&saved.version!==(detail.draft?.version??0)&&detail.draft?.origin==='MCP_ASSISTED'&&editor.text!==detail.draft.text){
+            remoteConflicts.current.add(selected);setError(reasons.MCP_DRAFT_VERSION_CHANGED!);
+          }
         }
         if(ignore||!detail||detail.event.payload.channel!=='DIRECT_MESSAGE')return;
         setDialogOpen(status?.configuredMode!=='LIMITED_AUTO');
         if(detail.intent)return;
         if(status?.configuredMode==='LIMITED_AUTO')return;
+        const before={...latestEditor.current},previous=latestThread.current;
         const claimed=await request<Thread>({command:'openHumanDialog',eventId:selected,selectionId});
-        if(!ignore&&selectedRef.current===selected&&selection.current===selectionId){detailRequest.current++;setThread(claimed);}
+        if(!ignore&&selectedRef.current===selected&&selection.current===selectionId){
+          detailRequest.current++;reconcileRemoteDraft(previous,claimed,before);latestThread.current=claimed;setThread(claimed);
+        }
       })
       .catch((e) => {
         if (!ignore) setError(explain(e));
@@ -161,7 +173,7 @@ export function App() {
     };
   }, [connected, selected]);
   useEffect(()=>{
-    if(devRecovery.blockAutosave||!dialogOpen||!dirty||!thread?.ownership.isMine||!canContinueReply(thread)||saving||sending.current||
+    if(devRecovery.blockAutosave||!dialogOpen||!dirty||!thread?.ownership.isMine||remoteConflicts.current.has(thread.event.id)||!canContinueReply(thread)||saving||sending.current||
       send&&['PREPARING','QUEUED','PREFLIGHT','SENDING'].includes(send.status)&&!thread.followup?.queueReady)return;
     const id=setTimeout(()=>{void saveDraft().catch(e=>setError(explain(e)));},500);
     return()=>clearTimeout(id);
@@ -246,6 +258,7 @@ export function App() {
     if (eventId && eventId === selectedRef.current) {
       const requestId = ++detailRequest.current,
         selectionId = selection.current;
+      const previous=latestThread.current,before={...latestEditor.current};
       const t = await request<Thread>({ command: "getThread", eventId });
       if (
         alive()&&
@@ -253,13 +266,15 @@ export function App() {
         selection.current === selectionId &&
         detailRequest.current === requestId
       ) {
+        if(editorLoaded.current)reconcileRemoteDraft(previous,t,before);
+        latestThread.current=t;
         setThread(t);
         if(t.replyStatus==='REPLIED')setError(current=>current==='COMMAND_NOT_FOUND'?'':current);
         if (!editorLoaded.current) {
           editorLoaded.current = true;
           const saved = buffers.current.get(eventId);
           const editor=replyEditorDraft(t,saved);
-          latestEditor.current.editVersion=editor.editVersion??0;
+          latestEditor.current={eventId,text:editor.text,suggestionId:editor.suggestionId,editVersion:editor.editVersion??0};
           setText(editor.text);
           setSuggestionId(editor.suggestionId);
           if (saved && editor.text && saved.version !== (t.draft?.version ?? 0))
@@ -272,6 +287,21 @@ export function App() {
     }
     return null;
   }
+  function reconcileRemoteDraft(previous:Thread|null,next:Thread,before:RemoteDraftEditor):void {
+    const changed=remoteDraftUpdate(previous,next,before,latestEditor.current);
+    if(!changed){
+      if(remoteDraftConflict(previous,next,latestEditor.current)){
+        remoteConflicts.current.add(next.event.id);
+        buffers.current.set(next.event.id,{...latestEditor.current,version:previous?.draft?.version??0});
+        setError(reasons.MCP_DRAFT_VERSION_CHANGED!);
+      }
+      return;
+    }
+    const buffered=buffers.current.get(next.event.id);
+    if(buffered?.text===before.text&&buffered.suggestionId===before.suggestionId)buffers.current.delete(next.event.id);
+    latestEditor.current=changed;
+    setText(changed.text);setSuggestionId(changed.suggestionId);
+  }
   function choose(id: string) {
     if (selected === id) return;
     const version=++navigation.current;
@@ -283,7 +313,7 @@ export function App() {
         editVersion:latestEditor.current.editVersion,
         submitted:buffers.current.get(thread.event.id)?.submitted,
       });
-    const leaving=thread&&dirty&&thread.event.payload.channel==='DIRECT_MESSAGE'&&thread.ownership.isMine&&canContinueReply(thread);
+    const leaving=thread&&dirty&&!remoteConflicts.current.has(thread.event.id)&&thread.event.payload.channel==='DIRECT_MESSAGE'&&thread.ownership.isMine&&canContinueReply(thread);
     if(leaving){
       void (async()=>{
         do{await saveDraft();}while(latestEditor.current.eventId===thread.event.id&&latestEditor.current.text!==replyEditorDraft(thread).text&&
@@ -305,6 +335,7 @@ export function App() {
   async function saveDraft() {
     if(saveTask.current){await saveTask.current;return;}
     if (!thread) return;
+    if(remoteConflicts.current.has(thread.event.id))throw Error('MCP_DRAFT_VERSION_CHANGED');
     const eventId = thread.event.id,
       submittedText = latestEditor.current.text,
       submittedSuggestion = latestEditor.current.suggestionId;
@@ -348,6 +379,7 @@ export function App() {
     await request({command:'selectTarget',eventId,selectionId});await refreshThread(eventId);setNotice('已读取内核权威状态，未重放发送；未保存人稿保留');
   }
   function sendDisabled() {
+    if(thread&&remoteConflicts.current.has(thread.event.id))return reasons.MCP_DRAFT_VERSION_CHANGED;
     if (!thread || !status) return "请选择一条任务";
     if (devRecovery.restoring) return "开发内核正在恢复连接，人稿已保留";
     if (hasReplyHistory(thread)&&!canContinueReply(thread))
@@ -400,9 +432,12 @@ export function App() {
     if(!thread)return;
     const id=thread.event.id,selectionId=selection.current;
     if(opening.current?.id===id&&opening.current.selectionId===selectionId)return opening.current.task;
+    const previous=latestThread.current,before={...latestEditor.current};
     const task=(async()=>{
       const detail=await request<Thread>({command:'openHumanDialog',eventId:id,selectionId});
-      if(selectedRef.current===id&&selection.current===selectionId){detailRequest.current++;setThread(detail);setDialogOpen(true);}
+      if(selectedRef.current===id&&selection.current===selectionId){
+        detailRequest.current++;reconcileRemoteDraft(previous,detail,before);latestThread.current=detail;setThread(detail);setDialogOpen(true);
+      }
     })();
     opening.current={id,selectionId,task};
     try{await task;}finally{if(opening.current?.task===task)opening.current=null;}
@@ -410,9 +445,11 @@ export function App() {
   async function closeDialog(){
     await saveTask.current;
     if(thread&&latestEditor.current.eventId===thread.event.id){
+      const previous=latestThread.current,before={...latestEditor.current};
       const detail=await request<Thread>({command:'getThread',eventId:thread.event.id});
+      reconcileRemoteDraft(previous,detail,before);
       const latest=latestEditor.current;
-      if(detail.ownership.isMine&&canContinueReply(detail)&&latest.text!==replyEditorDraft(detail).text)await request({eventId:detail.event.id,
+      if(!remoteConflicts.current.has(detail.event.id)&&detail.ownership.isMine&&canContinueReply(detail)&&latest.text!==replyEditorDraft(detail).text)await request({eventId:detail.event.id,
         generation:detail.ownership.generation,expectedVersion:replyDraft(detail)?.version??0,text:latest.text,
         ...(hasReplyHistory(detail)?{command:'saveHumanFollowupDraft' as const,suggestionId:null}:{command:'saveDraft' as const,suggestionId:latest.suggestionId})});
     }
@@ -432,6 +469,7 @@ export function App() {
   }
   async function sendCurrentText(){
     if(!thread||sending.current)return;
+    if(remoteConflicts.current.has(thread.event.id))throw Error('MCP_DRAFT_VERSION_CHANGED');
     sending.current=true;
     const eventId=thread.event.id,selectionId=selection.current;
     const submittedText=latestEditor.current.text,submittedSuggestion=latestEditor.current.suggestionId,editVersion=latestEditor.current.editVersion;
@@ -706,8 +744,8 @@ export function App() {
               error={error}
               notice={notice}
               text={text}
-              setText={value=>{latestEditor.current.editVersion++;setText(value);}}
-              setSuggestionId={value=>{latestEditor.current.editVersion++;setSuggestionId(value);}}
+              setText={value=>{if(selected)remoteConflicts.current.delete(selected);if(error===reasons.MCP_DRAFT_VERSION_CHANGED)setError('');latestEditor.current.editVersion++;setText(value);}}
+              setSuggestionId={value=>{if(selected)remoteConflicts.current.delete(selected);if(error===reasons.MCP_DRAFT_VERSION_CHANGED)setError('');latestEditor.current.editVersion++;setSuggestionId(value);}}
               setReview={setReview}
               refreshThread={()=>refreshThread()}
               block={block}

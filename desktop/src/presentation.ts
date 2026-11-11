@@ -1,4 +1,4 @@
-import type {ReplyStatus} from './api.js';
+import type {ReplyStatus} from './api';
 
 export function replyStatusLabel(status:ReplyStatus):string {
   return status==='REPLIED'?'已回复':status==='NOT_REQUIRED'?'无需自动回复':status==='MANUAL_ONLY'?'需人工查看':'等待回复';

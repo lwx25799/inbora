@@ -1,5 +1,18 @@
 # 来源与许可
 
+## 2026-11-11：本机 inbora MCP
+
+采用官方 [TypeScript SDK v2.4.0](https://github.com/modelcontextprotocol/typescript-sdk/tree/951fe5603a7ec0b2dcb6a0b95d92cd86f93ad9e5)，固定提交 `951fe5603a7ec0b2dcb6a0b95d92cd86f93ad9e5`；直接依赖 `@modelcontextprotocol/server` 精确 `2.4.0`，传递依赖 `@modelcontextprotocol/core` 同为 `2.4.0`，包完整性由 `pnpm-lock.yaml` 固定。核对源码 `packages/server/src/server/{mcp,stdio,serveStdio}.ts`、`docs/serving/stdio.md`、`docs/servers/tools.md` 和 `docs/migration/support-2026-07-28.md`，使用官方 `McpServer.registerTool`、Zod 4 输入/输出校验、`StdioServerTransport` 和 `serveStdio`；由 SDK 选择旧 `initialize` 或新发现协议，没有自制 MCP 服务端协议。
+
+保留包内 Apache-2.0 及所含 MIT 过渡声明于 `third_party/modelcontextprotocol/LICENSE`，文件 SHA256 `0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a`。SDK 包声明 Node >=20、Zod ^4.2.0；本项目使用 Node 26.13.0、Zod 4.6.7、TypeScript 7.0.2。新增依赖只有上述 server 及其 core 传递包，不引入模型 SDK、浏览器持有者或第三方云服务。
+
+依照 [pnpm 官方设置说明](https://pnpm.io/settings)，11.x 的缓存与 store 设置写入 `pnpm-workspace.yaml`，本项目使用 `.local/pnpm-cache`、`.local/pnpm-store`；保留现有原生包安装脚本限制。干净依赖安装、实际 Windows Node-API SQLite 写入及关闭重开验证在隔离检出完成，普通开发入口继续复用这些项目内缓存。
+
+MCP stdio 只做严格工具适配，通过随机凭据访问现 Sidecar 的回环入口。凭据与模型 Key、桌面管道 nonce 分离，以 Windows CurrentUser DPAPI 加密，绑定真实运行目录、实例和进程；不会放入 Codex 配置或命令行。业务仍走现 `ClientService`、账号队列、持久命令/意图、单次发送协调器与回读，`LOCAL_ASSISTANT` 独立解析授权，不修改历史 MODEL/AUTO_REPLY 摘要。草稿来源 `MCP_ASSISTED` 不取得人工媒体资格。连接协议复用不代表页面字段、真实账号发送或 GUI 视觉已经验收。
+
+Codex 安装字段依据[官方 MCP 配置文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)：绝对 Node 路径、stdio 参数、cwd、非必需服务及启动/工具超时。安装只变更 `mcp_servers.inbora`，先保留相关原配置。按用户最终要求，可信本机连接直接控制当前客户端，不另设分项权限或独立额度/期限；首次鉴权后持久绑定当前本人账号与既有收取范围，GUI 只保留启停，停用不得由重连恢复。模型许可及应用累计额度保持。
+
+
 ## 2026-11-11：表情预览、分享待办分类与全部已读
 
 修复前复读 MIT DSH 固定 `7989640e340f0fd79e2de9874880d5197546e755` 的 `chat-browser.mjs:398–459,1110–1140`、`message-tracker.mjs:37–124` 与许可，采用准确原生消息、媒体与文字分离及完整身份绑定的原则。旧弱媒体与当前已证实文字的展示兼容只允许同一完整身份元组，采图前后仍核对当前完整绑定，不改存量事件、审批或发送资格。旧实现新载体回归 4 失败／9 通过，修复后 13 项通过。

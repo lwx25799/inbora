@@ -207,7 +207,7 @@ test.each([
         commentTone=await commentRow.locator('.channel-label').evaluate(node=>getComputedStyle(node).color);
       expect(dmTone).not.toBe(commentTone);
       expect(await dmRow.evaluate(node=>getComputedStyle(node).backgroundColor)).not.toBe(await commentRow.evaluate(node=>getComputedStyle(node).backgroundColor));
-      expect(await page.getByRole('combobox',{name:'任务状态'}).locator('option').allTextContents()).toEqual(['等待回复','已回复']);
+      expect(await page.getByRole('combobox',{name:'任务状态'}).locator('option').allTextContents()).toEqual(['未读','等待回复','需人工查看','已回复','全部消息']);
       expect(await page.getByRole('button',{name:'同步私信',exact:true}).count()).toBe(0);
       expect(await page.getByRole('button',{name:'同步作品评论',exact:true}).count()).toBe(0);
       await page.getByRole('button',{name:'同步收件箱',exact:true}).click();
@@ -354,7 +354,9 @@ test.each([
       await page.getByRole('textbox',{name:'允许回复的作品原生 ID（逗号或换行分隔）',exact:true}).fill('ui-sync-work');
       await page.getByRole('textbox',{name:'允许回复的私信原生会话 ID',exact:true}).fill('conversation-1');
       await page.getByRole('textbox',{name:'屏蔽词（命中后不自动回复）',exact:true}).fill('NEVER-FIXTURE-MATCH');
+      await page.getByRole('button',{name:'编辑自动回复规则',exact:true}).click();
       await page.getByRole('textbox',{name:'自动回复规则',exact:true}).fill('Only answer the specified synthetic marker.');
+      await page.getByRole('button',{name:'完成编辑',exact:true}).click();
       expect(await page.getByRole('checkbox',{name:/我确认当前本人账号、所选通道、模型/}).count()).toBe(0);
       await page.getByRole('button',{name:'按此范围启用规则自动回复',exact:true}).click();
       await expect.poll(()=>service.authority.mode()).toBe('LIMITED_AUTO');
@@ -371,6 +373,7 @@ test.each([
       await page.getByRole('button',{name:'撤销自动回复策略',exact:true}).click();
       await expect.poll(async()=>((await service.dispatch(token,{command:'getStatus'})) as {automation:{replyPolicy:unknown}}).automation.replyPolicy).toBe(null);
       await page.getByRole('combobox',{name:'工作模式',exact:true}).selectOption('MANUAL');
+      await page.getByRole('button',{name:'模型详细配置',exact:true}).click();
       await page
         .getByRole("textbox", { name: "本次 API Key" })
         .fill("synthetic-ui-memory-key");
@@ -382,6 +385,7 @@ test.each([
           page.getByRole("textbox", { name: "本次 API Key" }).inputValue(),
         )
         .toBe("");
+      await page.getByRole('dialog',{name:'模型详细配置',exact:true}).getByRole('button',{name:'关闭并保留输入',exact:true}).click();
       await page.getByText('故障处理',{exact:true}).click();
       await page.getByRole("button", { name: "全局急停", exact: true }).click();
       await expect.poll(() => service.authority.paused()).toBe(true);

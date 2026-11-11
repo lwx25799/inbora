@@ -54,6 +54,7 @@ const browserCommandSchema=z.union([
     expectedText:z.string().min(1).max(2000),contextVersion:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true)}).strict(),
 ]);
 const ordinaryCommandSchema = z.discriminatedUnion("command", [
+  z.object({command:z.literal('setLocalAssistantGrant'),enabled:z.boolean(),confirmed:z.literal(true)}).strict(),
   z.object({command:z.literal('openHumanDialog'),...event,selectionId:z.uuid(),editing:z.boolean().optional()}).strict(),
   z.object({command:z.literal('closeHumanDialog'),...owned}).strict(),
   z.object({command:z.literal('sendHumanReply'),commandId:z.uuid(),input:humanReplySchema}).strict(),
