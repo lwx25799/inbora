@@ -13,3 +13,16 @@ test-results/
 *.tsbuildinfo
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
+
+# Local project instructions and development material.
+AGENTS.md
+AGENTS.override.md
+/Inbora_*.md
+/desktop/DESIGN.md
+/tests/manual/
+/docs/*
+!/docs/AUTOMATION-OPERATIONS.md
+!/docs/MODEL-CONTRACT.md
+!/docs/UPSTREAM-REUSE-DIAGNOSTICS.md
+/Inbora_UI_效果图合集/
+/宣传片/
