@@ -1,4 +1,4 @@
-import type {Thread} from './api';
+import type {Thread} from './api.js';
 
 export interface SubmittedReply {text:string;suggestionId:string|null;editVersion:number;cleared?:boolean;restored?:boolean}
 interface LocalReply {text:string;suggestionId:string|null;editVersion?:number;submitted?:SubmittedReply}
@@ -16,6 +16,7 @@ export function hasLocalReplyDraft(thread:Thread,input:LocalReply):boolean {
   if(!hasReplyHistory(thread))return true;
   if(completedReply(thread)&&!input.text&&input.suggestionId===null)return false;
   if(input.submitted)return input.editVersion!==input.submitted.editVersion;
+  if(thread.draft?.origin==='MCP_ASSISTED'&&!thread.followup?.latestTurn)return true;
   return input.text.replace(/\r\n?/gu,'\n')!==(thread.draft?.text??'').replace(/\r\n?/gu,'\n')||input.suggestionId!==null;
 }
 
@@ -26,6 +27,8 @@ export function completedReply(thread:Thread):boolean {
 export function matchesSentDraft(thread:Thread,input:LocalReply):boolean {
   const sent=submittedReplyText(thread);
   if(thread.intent&&thread.followup?.draft?.status==='DRAFT'&&!input.submitted)return false;
+  // Only this GUI's submitted revision can retire human text after an assistant send.
+  if(thread.draft?.origin==='MCP_ASSISTED'&&!thread.followup?.latestTurn&&!input.submitted)return false;
   return hasSubmittedReply(thread)&&
     (input.submitted?input.editVersion===input.submitted.editVersion&&
       input.submitted.text.replace(/\r\n?/gu,'\n')===sent.replace(/\r\n?/gu,'\n'):input.suggestionId===null)&&

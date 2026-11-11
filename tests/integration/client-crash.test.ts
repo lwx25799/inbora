@@ -24,6 +24,7 @@ import {AccountActor} from './src/browser/account-actor.ts';
 import {snapshot} from './tests/helpers.ts';
 import {digest} from './src/core/contracts.ts';
 import {randomUUID} from 'node:crypto';
+import {dirname} from 'node:path';
 const [file,eventId,phase]=process.argv.slice(1);
 const s=new EventStore(file);
 class CrashBrowser extends BrowserService{
@@ -34,7 +35,8 @@ class CrashBrowser extends BrowserService{
     verifyPrepared:async()=>{if(++count===2&&phase==='before-intent')process.exit(90);return snapshot(e);},
     clickOnce:async()=>{process.exit(91);},readback:async()=>null},dispose(){}};}
 }
-const b=new CrashBrowser('.local'),app=new ClientService(s,b),token=app.authority.issueSession();
+const b=new CrashBrowser(dirname(file)),app=new ClientService(s,b);await app.loadSettings();
+const token=app.authority.issueSession();
 app.authority.attest('DIRECT_MESSAGE','SEND_AVAILABLE',b.identity(),'synthetic-crash-evidence');app.authority.setMode(token,'MANUAL');
 const generation=app.authority.claim(token,eventId,0).generation,d=app.authority.save(token,eventId,generation,0,'crash fixture reply'),selectionId=randomUUID();
 app.authority.select(token,eventId,selectionId);
@@ -66,6 +68,7 @@ await app.dispatch(token,{command:'submitManualSend',commandId:review.commandId,
     const restored = new EventStore(file),
       app = new ClientService(restored, new BrowserService(root));
     try {
+      await app.loadSettings();
       const command = restored.db
         .prepare("SELECT status,intent_id,reason FROM manual_send_commands")
         .get() as { status: string; intent_id: string | null; reason: string };

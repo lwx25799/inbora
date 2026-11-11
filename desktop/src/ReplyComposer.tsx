@@ -1,11 +1,13 @@
 import {request,reasons,type Thread} from './api';
 import {time} from './presentation';
 import {completedReply,submittedReplyText,hasReplyHistory,canContinueReply} from './reply-editor-draft';
+import {replyResultPresentation} from './reply-result-presentation';
 import type {ReplyViewProps} from './reply-view-types';
 
 const draftOrigins = new Map([
   ["HUMAN_TYPED", "人工输入"],
   ["AI_ASSISTED_APPROVED", "已引用 AI 建议"],
+  ["MCP_ASSISTED", "本机助手编辑"],
   ["LEGACY", "历史草稿"],
 ]);
 const suggestionMessages:Record<string,string>={
@@ -29,23 +31,16 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
     thread.suggestionEligibility?(thread.suggestionEligibility.eligible?null:thread.suggestionEligibility.reason??'SUGGESTION_NOT_AVAILABLE'):
     !status.modelAuthorized?'REAL_MODEL_AUTHORIZATION_REQUIRED':null;
   const turn=thread.followup?.latestTurn;
-  const replied=thread.replyStatus==='REPLIED'&&(!turn||turn.status==='CONFIRMED');
-  const pending=['PREPARING','APPROVED','INTENT_RECORDED','QUEUED','PREFLIGHT','SENDING'].includes(turn?.status??send?.status??'');
-  const reviewing=turn?.status==='UNCERTAIN'||thread.verification?.state==='REVIEW';
-  const failed=(turn?.status??send?.status)==='FAILED_BEFORE_CLICK';
-  const hasResult=replied||submitted||!!thread.verification||!!send;
-  const resultTitle=replied?'已回复':failed?'尚未发送':pending?'正在发送':'等待确认';
-  const resultDetail=replied?null:failed
-    ?reasons[turn?.reason??send?.reason??'']??'本次未发送，草稿已保留'
-    :pending?thread.followup?.queueReady?'上一条正在处理；新内容可独立排队发送':'正在处理，请勿重复发送'
-    :reviewing?'暂时无法确认送达，草稿和记录已保留，请勿重复发送'
-    :'正在后台确认送达，请勿重复发送';
+  const result=replyResultPresentation(thread,send);
+  const replied=result.state==='CONFIRMED';
+  const confirmedAt=turn?turn.verifiedAt:thread.verification?.verified===1?thread.verification.checked_at:
+    thread.receipt?.result==='CONFIRMED'?thread.receipt.verified_at:null;
   return <div className="reply-composer">
     {thread.event.payload.channel!=='DIRECT_MESSAGE'&&(error||notice||busy)&&<p role={error?'alert':'status'} className={error?'error':'hint'}>{error||busy||notice}</p>}
 {submitted&&!completed&&<section className="original" aria-label="已提交回复">
   <h3>已提交回复</h3><p>{submittedReplyText(thread)}</p>
 </section>}
-    <p className="composer-status hint">{submitted?completed?'继续输入下一条回复':thread.followup?.queueReady?saving?'正在保存下一条回复':dirty?'下一条回复正在自动保存':'可继续输入并发送下一条回复':'上一条回复正在确认，可先输入新内容':thread.ownership.isMine?saving?'正在保存':dirty?'正在自动保存':'修改已保存':'正在准备回复输入'}</p>
+    {(submitted||thread.ownership.isMine)&&<p className="composer-status hint">{submitted?completed?'继续输入下一条回复':thread.followup?.queueReady?saving?'正在保存下一条回复':dirty?'下一条回复正在自动保存':'可继续输入并发送下一条回复':result.state==='CHECKING'?'上一条回复正在核对，可先输入新内容':'上一条回复的发送结果尚未确认，可先输入新内容':saving?'正在保存':dirty?'正在自动保存':'修改已保存'}</p>}
     {readOnly&&<p role="status" className="hint">{status.mode==='OBSERVE'?'当前为观察模式，切换工作模式后可编辑':'正在恢复连接，请稍候继续编辑'}</p>}
 <section className="editor">
   <div className="editor-title">
@@ -154,11 +149,11 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
     </button>
   </section>
 ))}
-{hasResult && (
+{result.state!=='NONE' && (
   <section className="receipt" role="status" aria-label="发送结果" data-testid="reply-send-result">
-    <strong>{resultTitle}</strong>
-    {resultDetail&&<p>{resultDetail}</p>}
-    {replied&&(turn?.verifiedAt||thread.receipt)&&<small>确认于 {time(turn?.verifiedAt??thread.receipt?.verified_at??null)}</small>}
+    <strong>{result.title}</strong>
+    {result.detail&&<p>{result.detail}</p>}
+    {replied&&confirmedAt&&<small>确认于 {time(confirmedAt)}</small>}
   </section>
 )}
 {!replied&&thread.automationJob?.reason&&<p className="hint">自动回复暂未完成：{reasons[thread.automationJob.reason]??'后台处理遇到问题，消息和草稿已保留'}</p>}

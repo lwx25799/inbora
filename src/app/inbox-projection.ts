@@ -149,7 +149,7 @@ export class InboxProjection {
     return {selected:waiting.at(-1)??latest,latest,members,replyStatus:waiting.length?'WAITING':'REPLIED'};
   }
   resumeEvent(members:StoredEvent[],status:ReplyStatus):string|null {
-    if(status==='NOT_REQUIRED'||status!=='WAITING'&&members[0]?.payload.channel!=='DIRECT_MESSAGE')return null;
+    if(status!=='WAITING'&&members[0]?.payload.channel!=='DIRECT_MESSAGE')return null;
     if(members[0]?.payload.channel==='COMMENT_NOTIFICATION'){
       const drafts=members.filter(event=>this.replyStatus(event)==='WAITING').flatMap(event=>{
         const draft=this.drafts.get(event.id);return draft&&draft.text.trim()?[draft]:[];

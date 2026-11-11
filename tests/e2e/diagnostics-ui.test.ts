@@ -48,6 +48,7 @@ test('settings shows cumulative diagnostics, combines events and rejects results
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
     await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();expect(calls).not.toContain('getDiagnostics');
     await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.getByText('运行诊断与用量详情',{exact:true}).click();
     await page.getByRole('heading',{name:'运行诊断',exact:true}).waitFor({timeout:1000});
     const panel=page.getByRole('region',{name:'运行诊断'});await panel.getByText('已知输入 500 / 输出 80 Token',{exact:true}).waitFor();
     expect(await panel.innerText()).toContain('用量未知 1 次');expect(await panel.innerText()).toContain('125 ms');

@@ -1,9 +1,12 @@
 import { useState } from 'react';
 import { AutomationSettings } from './AutomationSettings';
+import {LocalAssistantSettings} from './LocalAssistantSettings';
 import { BrowserDraftRecovery } from './BrowserDraftRecovery';
 import {DiagnosticsPanel} from './DiagnosticsPanel';
 import { request, closeDesktop, reasons, capabilityNames, type Status } from './api';
 import { modes } from './presentation';
+import {SettingsDialog} from './SettingsDialog';
+import './settings.css';
 
 export function Settings({
   status,
@@ -26,15 +29,113 @@ export function Settings({
 }) {
   const [settings, setSettings] = useState(status.settings),
     [key, setKey] = useState("");
+  const [modelOpen,setModelOpen]=useState(false);
   return (
-    <section className="settings scroll">
-      <div className="settings-section"><h2>自动回复</h2>
+    <section className="settings scroll settings-compact">
+      <div className="settings-section settings-daily"><h2>自动回复</h2>
         <label className="check"><input type="checkbox" role="switch" aria-label="设置中的自动回复" disabled={pendingAutoReply!==null||!!busy||!status.automation?.replyPolicy}
           checked={pendingAutoReply??(status.configuredMode==='LIMITED_AUTO'&&!!status.automation?.replyPolicy)} onChange={e=>{const enabled=e.target.checked;void act('更新自动回复',()=>toggleAuto(enabled));}}/>
           {pendingAutoReply!==null?pendingAutoReply?'正在开启自动回复…':'正在关闭自动回复…':`自动回复：${status.configuredMode==='LIMITED_AUTO'&&status.automation?.replyPolicy?'开':'关'}`}</label>
-        <p className="hint">统一控制已保存策略范围，无需逐个会话交接。查看消息不暂停自动回复；正在编辑和已保存的人稿保留。关闭后收取继续。</p>
+        <p className="hint">按已保存策略运行。关闭仅暂停自动回复，账号在线、收取和人稿保留。</p>
       </div>
+      <div className="settings-columns">
+        <div className="settings-column">
       {status.automation&&<AutomationSettings status={status} busy={busy} act={act} update={update}/>}
+        </div>
+        <div className="settings-column">
+      <LocalAssistantSettings key={`${status.account?.identity??'none'}:${status.localAssistant?.grant?.version??'none'}`}
+        status={status} busy={busy} act={act} update={update}/>
+      <div className="settings-section">
+        <h2>DeepSeek 辅助回复</h2>
+        <p>{status.settings.model} · {status.modelAuthorized?'模型许可有效':'模型未授权'}</p>
+        <p className="hint">Key：{status.keyPresent?status.keyStored?'本机安全保存':'仅内存持有':'未配置'}。普通保存保留现有 Key 与授权。</p>
+        <div className="row"><button onClick={()=>setModelOpen(true)}>模型详细配置</button></div>
+        <SettingsDialog title="模型详细配置" open={modelOpen} onClose={()=>setModelOpen(false)}>
+        <p className="hint">关闭会保留当前输入；保存配置后才生效。Key 默认仅留后端内存。</p>
+        <label>
+          模型
+          <input
+            value={settings.model}
+            onChange={(e) =>
+              setSettings({ ...settings, model: e.target.value })
+            }
+          />
+        </label>
+        <small>官方接口：https://api.deepseek.com/chat/completions</small>
+        {(["persona", "business", "rules"] as const).map((field, i) => (
+          <label key={field}>
+            {["账号人设", "业务说明", "回复规则"][i]}
+            <textarea
+              value={settings[field]}
+              onChange={(e) =>
+                setSettings({ ...settings, [field]: e.target.value })
+              }
+            />
+          </label>
+        ))}
+        <label>
+          本次 API Key
+          <input
+            type="password"
+            value={key}
+            autoComplete="off"
+            onChange={(e) => setKey(e.target.value)}
+            placeholder={
+              status.keyPresent
+                ? "已持有 Key，留空保存可保留"
+                : "不填写也可人工回复"
+            }
+          />
+        </label>
+        <button
+          disabled={!!busy}
+          onClick={() =>
+            void act("保存 AI 配置", async () => {
+              const submitted = key;
+              setKey("");
+              update(
+                await request<Status>({
+                  command: "configureAi",
+                  settings,
+                  key: submitted,
+                }),
+              );
+            })
+          }
+        >
+          保存配置并清空 Key 输入
+        </button>
+        <p>
+          模型：{status.modelAuthorized ? "持续授权有效" : "未授权"} · Key：
+          {status.keyPresent ? status.keyStored?'当前用户 DPAPI 安全保存':'仅后端内存持有' : "未配置"}
+        </p>
+        <label className="check"><input type="checkbox" checked={!!status.keyStored} disabled={!status.keyPresent||!!busy}
+          onChange={e=>void act('更新安全保存',async()=>update(await request<Status>({command:'setKeyStorage',storage:e.target.checked?'DPAPI':'MEMORY'})))}/>
+          在本机安全保存 Key（Windows 当前用户 DPAPI，默认关闭）</label>
+        {status.keyStorageError&&<p className="error">{reasons[status.keyStorageError]??status.keyStorageError}</p>}
+        <button disabled={!status.keyPresent&&!status.keyStored&&!status.keyStorageError} onClick={()=>void act('删除 Key',async()=>update(await request<Status>({command:'setKeyStorage',storage:'DELETE'})))}>删除已保存 Key 并清除内存</button>
+        </SettingsDialog>
+        <div className="budget">
+          {status.budgets.map((b) => (
+            <p key={b.kind}>
+              {b.kind === "MODEL" ? "累计模型预占" : "累计发送意图"}{" "}
+              <strong>
+                {b.used} / {b.maximum===null?'无上限':b.maximum}
+              </strong>
+            </p>
+          ))}
+          <p>
+            已记录 Token{" "}
+            <strong>
+              {status.usage.inputTokens} 输入 / {status.usage.outputTokens} 输出
+            </strong>
+          </p>
+        </div>
+        <p className="hint">
+          预算上限不代替授权。超时或失败不自动重试，未返回 usage 时不推算
+          Token。
+        </p>
+      </div>
       <div className="settings-section">
         <h2>回复模式与运行</h2>
         <label>
@@ -149,95 +250,9 @@ export function Settings({
         </button>
         </details>
       </div>
-      <div className="settings-section">
-        <h2>DeepSeek 辅助回复</h2>
-        <p>
-          手工建议与规则自动回复分别受已启用授权约束。Key 默认只留后端内存，普通配置保存保留现有 Key 与持续授权。
-        </p>
-        <label>
-          模型
-          <input
-            value={settings.model}
-            onChange={(e) =>
-              setSettings({ ...settings, model: e.target.value })
-            }
-          />
-        </label>
-        <small>官方接口：https://api.deepseek.com/chat/completions</small>
-        {(["persona", "business", "rules"] as const).map((field, i) => (
-          <label key={field}>
-            {["账号人设", "业务说明", "回复规则"][i]}
-            <textarea
-              value={settings[field]}
-              onChange={(e) =>
-                setSettings({ ...settings, [field]: e.target.value })
-              }
-            />
-          </label>
-        ))}
-        <label>
-          本次 API Key
-          <input
-            type="password"
-            value={key}
-            autoComplete="off"
-            onChange={(e) => setKey(e.target.value)}
-            placeholder={
-              status.keyPresent
-                ? "已持有 Key，留空保存可保留"
-                : "不填写也可人工回复"
-            }
-          />
-        </label>
-        <button
-          disabled={!!busy}
-          onClick={() =>
-            void act("保存 AI 配置", async () => {
-              const submitted = key;
-              setKey("");
-              update(
-                await request<Status>({
-                  command: "configureAi",
-                  settings,
-                  key: submitted,
-                }),
-              );
-            })
-          }
-        >
-          保存配置并清空 Key 输入
-        </button>
-        <p>
-          模型：{status.modelAuthorized ? "持续授权有效" : "未授权"} · Key：
-          {status.keyPresent ? status.keyStored?'当前用户 DPAPI 安全保存':'仅后端内存持有' : "未配置"}
-        </p>
-        <label className="check"><input type="checkbox" checked={!!status.keyStored} disabled={!status.keyPresent||!!busy}
-          onChange={e=>void act('更新安全保存',async()=>update(await request<Status>({command:'setKeyStorage',storage:e.target.checked?'DPAPI':'MEMORY'})))}/>
-          在本机安全保存 Key（Windows 当前用户 DPAPI，默认关闭）</label>
-        {status.keyStorageError&&<p className="error">{reasons[status.keyStorageError]??status.keyStorageError}</p>}
-        <button disabled={!status.keyPresent&&!status.keyStored&&!status.keyStorageError} onClick={()=>void act('删除 Key',async()=>update(await request<Status>({command:'setKeyStorage',storage:'DELETE'})))}>删除已保存 Key 并清除内存</button>
-        <div className="budget">
-          {status.budgets.map((b) => (
-            <p key={b.kind}>
-              {b.kind === "MODEL" ? "累计模型预占" : "累计发送意图"}{" "}
-              <strong>
-                {b.used} / {b.maximum===null?'无上限':b.maximum}
-              </strong>
-            </p>
-          ))}
-          <p>
-            已记录 Token{" "}
-            <strong>
-              {status.usage.inputTokens} 输入 / {status.usage.outputTokens} 输出
-            </strong>
-          </p>
         </div>
-        <p className="hint">
-          预算上限不代替授权。超时或失败不自动重试，未返回 usage 时不推算
-          Token。
-        </p>
       </div>
-      <DiagnosticsPanel/>
+      <details className="settings-diagnostics"><summary>运行诊断与用量详情</summary><DiagnosticsPanel/></details>
     </section>
   );
 }

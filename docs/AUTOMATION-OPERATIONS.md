@@ -1,5 +1,40 @@
 # inbora 0.3.x 自动化迭代操作与恢复
 
+## 本机 Codex 助手连接
+
+inbora MCP 是可信本机 stdio 控制入口。安装后连接正在运行的客户端即可查询、同步、编辑草稿和发送文字，无需另设读取/草稿/发送权限、独立助手额度或到期时间。首次通过 DPAPI 连接鉴权的有效工具调用，由后端绑定当前本人账号及已保存收取范围，沿用应用已有累计额度和模型许可。不会初始化新库、启动第二后端或浏览器持有者；客户端未运行时返回 `APP_NOT_RUNNING`，工具发现仍可用。
+
+前端从左侧收件箱下方进入“AI 与设置”，查看“本机助手连接（MCP）”。此区域显示连接状态、运行目录、后端实例、stdio/16 个工具和应用累计用量，只提供“停用助手连接／启用助手连接”。停用持久阻止新的助手业务，重连或重启不能恢复；显式启用按当前客户端范围接入，不清零历史消费。入口就绪、Codex 配置成功和实际工具调用分别记录。
+
+| 工具 | 用途 |
+| --- | --- |
+| `inbora_get_status` | 无正文的运行目录、后端实例、浏览器、同步、预算和连接摘要 |
+| `inbora_list_inbox` | 按现有筛选分页查询已收取范围，每页 20 条 |
+| `inbora_get_thread` | 按准确 eventId 读取有限详情，时间线每页最多 30 条 |
+| `inbora_get_diagnostics` | 聚合数量和安全原因码，无正文、目标标识或原始日志 |
+| `inbora_inspect_preview` | 准确消息的预览状态、尺寸和原因，不返回图片、文件路径或 URL |
+| `inbora_sync_inbox` | 复用现有同步，返回 runId，从状态查询进度 |
+| `inbora_mark_all_read` | 仅标记当前范围已存在记录，新入站仍未读，不改变回复状态 |
+| `inbora_set_automatic_reply` | 开关现有自动回复政策，不创建政策或提高应用额度 |
+| `inbora_refresh_preview` | 对准确媒体记录排队刷新，结果仍用预览诊断查询 |
+| `inbora_emergency_stop` | 持久全局急停；MCP 没有恢复急停的工具 |
+| `inbora_open_reply` | 取得准确文字目标、selectionId、接管代际、草稿及上下文版本 |
+| `inbora_save_draft` | 按准确版本保存为 MCP_ASSISTED |
+| `inbora_generate_suggestion` | 依已有模型许可、Key 和应用额度生成一次建议 |
+| `inbora_send_reply` | 沿用唯一发送协调器、持久意图及送达核验，提交一次 |
+| `inbora_get_operation` | 查询已接收的 operationId，断线/重启不重放；停用后隐藏旧正文 |
+| `inbora_close_reply` | 释放助手自己的准确接管，保留草稿 |
+
+所有写工具使用调用前保留的 UUID `operationId`。先打开回复取得版本，保存后用返回的新草稿版本继续。GUI 正在编辑时助手不能抢占；上下文、版本、接管或运行范围改变会拒绝旧操作。状态事件更新现有 GUI，不切换所选目标，不覆盖人稿。首版仅代发完整且可靠的文字事件，媒体/分享人工资格不向助手开放，预览图片不提交模型。
+
+写请求超时或断线后，只调用 `inbora_get_operation` 查询原 ID；不要换新 ID 重发。`RUNNING` 表示已接收，`UNKNOWN` 保留不确定结果并禁止重发。已提交消息继续必要回读，停用也不撤回、不重发，不改写原意图、收据和已消费额度。
+
+本机安装只新增 `C:\Users\Administrator\.codex\config.toml` 的 `mcp_servers.inbora`，使用已验证的绝对 Node 路径、`D:\Inbora\dist\mcp\stdio.js` 和 `--runtime D:\Inbora\.local\real-acceptance`。服务为可选，不阻断其他 Codex 工作。连接资料在原运行目录内以 Windows CurrentUser DPAPI 加密，绑定目录及实例，重启轮换、退出失效；配置和命令行不保存连接凭据。
+
+若当前聊天未加载新工具，在 Codex 重载 inbora MCP 后继续；必要时在同项目新聊天读取 `.local/mcp-evidence/CONTINUE.md` 接续。必须从实际 Codex 工具入口调用 `inbora_get_status` 核对 runtime/instanceId，再做最小读取与控制，不能以 CLI list/get、SDK 夹具或接口成功代替实际调用和 GUI 视觉验收。人工仅确认新增 MCP 区域布局、状态同步和预览实图，复用未受影响的旧证据。
+
+卸载或回退：先在 MCP 区域点击“停用助手连接”，再执行 `codex mcp remove inbora` 或仅设该服务 `enabled = false`，保留其他 MCP 配置。退出客户端后连接资料失效；保留消息、草稿、助手附加表、命令、意图、收据和累计消费，不恢复旧库掩盖新外发历史。原配置备份及脱敏记录在 `.local/mcp-evidence`，真实资料及备份不上传仓库。
+
 本轮继续使用已打开的开发版，不运行候选安装包或要求换包。源码修复通过前端热更新、后端安全重载应用；此前已生成但未安装的候选不作为本轮交付。最新作品漏收评论已由正常后台补收、复用保存的AI稿并单次发送确认，当前证据及仍未知的其他楼中楼见验收表。
 
 楼中楼评论详情及人工回复框从最初一级根评论开始展示同串对话，再按时序展示后续已收内容与已确认我方回复；内容较长可加载较早回复，当前准确回复目标始终保留。AI也保留一级根评论及最近有限上下文；根内容缺失时后台补收后再生成，不凭子评论猜根。手机/网页端从未被本地收取保存的旧我方评论不会被补造。

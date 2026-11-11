@@ -11,6 +11,8 @@ import { requireSafe } from "../core/contracts.js";
 import { BrowserService } from "./browser-service.js";
 import { ClientService, clientError } from "./service.js";
 import { protocolVersion,commandSchema } from "./contracts.js";
+import {AssistantFacade} from '../mcp/assistant-facade.js';
+import {startAssistantControl} from '../mcp/control-server.js';
 
 const pipeSchema = z
   .object({
@@ -36,6 +38,8 @@ let service: ClientService | undefined,
   token = "",
   lock: OwnerLock | undefined,
   store: EventStore | undefined;
+let assistant:AssistantFacade|undefined;
+let control:Awaited<ReturnType<typeof startAssistantControl>>|undefined;
 let connecting = false,
   closing = false;
 let connectionSettled: Promise<void> | undefined;
@@ -90,6 +94,12 @@ async function connect(raw: unknown): Promise<unknown> {
     service = new ClientService(store, new BrowserService(root), undefined, Date.now, firstRunAt);
     await service.loadSettings();
     requireSafe(!closing, 'CLIENT_CLOSING');
+    assistant=new AssistantFacade(service);
+    const facade=assistant;
+    control=await startAssistantControl({root,dispatch:(sessionId,tool,args)=>facade.dispatch(sessionId,tool,args)});
+    facade.instanceId=control.instanceId;
+    service.setAssistantConnection(control.instanceId);
+    requireSafe(!closing,'CLIENT_CLOSING');
     token = service.authority.issueSession();
     service.events.on("update", (event) => output({ protocol: 1, event }));
     service.startOnline();
@@ -99,7 +109,7 @@ async function connect(raw: unknown): Promise<unknown> {
       ...((await service.dispatch(token, { command: "getStatus" })) as object),
     };
   } catch (error) {
-    await service?.close();
+    await closeServices();
     service = undefined;
     store?.close();
     store = undefined;
@@ -114,13 +124,22 @@ async function connect(raw: unknown): Promise<unknown> {
     connectionSettled = undefined;
   }
 }
+async function closeServices():Promise<void>{
+  const controlClosed=control?.close();
+  service?.setAssistantConnection(null);
+  // Service cancellation stops unsubmitted work; accepted submissions keep their existing readback.
+  await service?.close();
+  await assistant?.close();
+  await controlClosed;
+  assistant=undefined;control=undefined;
+}
 async function close(): Promise<void> {
   if (closing) return;
   closing = true;
   // A connection can still create/load its service; let its cancellation cleanup finish first.
   // Other active requests remain cancellable by service.close(), so do not drain all requests here.
   await connectionSettled;
-  await service?.close();
+  await closeServices();
   await Promise.allSettled([...active]);
   store?.close();
   await lock?.close();
@@ -148,7 +167,7 @@ input.on("line", (line) => {
       if (raw.command === "connect") result = await connect(raw);
       else if (raw.command === "disconnect") {
         requireSafe(service, "CONNECT_RUNTIME_FIRST");
-        await service.close();
+        await closeServices();
         store!.close();
         await lock!.close();
         service = undefined;

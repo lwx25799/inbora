@@ -1,5 +1,31 @@
 # 来源与许可
 
+## 2026-11-11：本机 inbora MCP
+
+采用官方 [TypeScript SDK v2.4.0](https://github.com/modelcontextprotocol/typescript-sdk/tree/951fe5603a7ec0b2dcb6a0b95d92cd86f93ad9e5)，固定提交 `951fe5603a7ec0b2dcb6a0b95d92cd86f93ad9e5`；直接依赖 `@modelcontextprotocol/server` 精确 `2.4.0`，传递依赖 `@modelcontextprotocol/core` 同为 `2.4.0`，包完整性由 `pnpm-lock.yaml` 固定。核对源码 `packages/server/src/server/{mcp,stdio,serveStdio}.ts`、`docs/serving/stdio.md`、`docs/servers/tools.md` 和 `docs/migration/support-2026-07-28.md`，使用官方 `McpServer.registerTool`、Zod 4 输入/输出校验、`StdioServerTransport` 和 `serveStdio`；由 SDK 选择旧 `initialize` 或新发现协议，没有自制 MCP 服务端协议。
+
+保留包内 Apache-2.0 及所含 MIT 过渡声明于 `third_party/modelcontextprotocol/LICENSE`，文件 SHA256 `0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a`。SDK 包声明 Node >=20、Zod ^4.2.0；本项目使用 Node 26.13.0、Zod 4.6.7、TypeScript 7.0.2。新增依赖只有上述 server 及其 core 传递包，不引入模型 SDK、浏览器持有者或第三方云服务。
+
+依照 [pnpm 官方设置说明](https://pnpm.io/settings)，11.x 的缓存与 store 设置写入 `pnpm-workspace.yaml`，本项目使用 `.local/pnpm-cache`、`.local/pnpm-store`；保留现有原生包安装脚本限制。干净依赖安装、实际 Windows Node-API SQLite 写入及关闭重开验证在隔离检出完成，普通开发入口继续复用这些项目内缓存。
+
+MCP stdio 只做严格工具适配，通过随机凭据访问现 Sidecar 的回环入口。凭据与模型 Key、桌面管道 nonce 分离，以 Windows CurrentUser DPAPI 加密，绑定真实运行目录、实例和进程；不会放入 Codex 配置或命令行。业务仍走现 `ClientService`、账号队列、持久命令/意图、单次发送协调器与回读，`LOCAL_ASSISTANT` 独立解析授权，不修改历史 MODEL/AUTO_REPLY 摘要。草稿来源 `MCP_ASSISTED` 不取得人工媒体资格。连接协议复用不代表页面字段、真实账号发送或 GUI 视觉已经验收。
+
+Codex 安装字段依据[官方 MCP 配置文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)：绝对 Node 路径、stdio 参数、cwd、非必需服务及启动/工具超时。安装只变更 `mcp_servers.inbora`，先保留相关原配置。按用户最终要求，可信本机连接直接控制当前客户端，不另设分项权限或独立额度/期限；首次鉴权后持久绑定当前本人账号与既有收取范围，GUI 只保留启停，停用不得由重连恢复。模型许可及应用累计额度保持。
+
+## 2026-11-11：完整审查后的草稿恢复与补证轮转
+
+修复前复读既有 MIT Expat Chatwoot 固定 `625d5964e3cb3f1d917b43c3b8332219e525a4b8` 的 `conversations/actions.js:235–279` 和许可，以及 MIT DSH 固定 `7989640e340f0fd79e2de9874880d5197546e755` 的 `tree/message-tracker.mjs:36–96` 和许可。沿用显示状态与人工草稿分离、按准确身份推进的组织方式，独立修复纯分享会话的已存人工草稿恢复；无需自动回复的分类不再阻断人工续写。
+
+旧补证先截取最旧 100 条再判断资格，不合格记录会永久遮住后续项。当前每个 Store 保留瞬态 rowid 扫描位置，每轮至多检查 100 条，向后并环绕；跳过不消费资格，后续证据齐全时仍可再检查。持久 V6 claim、批准全文、准确目标及异步再核验均保留，重启只复扫，不重放已消费补证。没有增加依赖、数据库迁移、发送路线或安装包。两项正式回归在原实现下分别失败、修复后通过；详细证据与本地诊断日志脱敏边界保存在私有运行目录的本轮修复报告。
+
+## 2026-11-11：跨会话回执补证与评论分页证据
+
+修复前复读 MIT `Yht20927/douyin-cli` 固定 `4073159bea585de6d33a4747a475669440737932` 的 `lib/commands/get.js:107–119,150–194` 及 LICENSE：根评论分页与具体父评论的子回复分页分别定位。独立修改本项目被动响应观察器，正常同作品分页未包含目标父评论时不覆盖已有准确子回复证据；尚未归属的请求先隐藏证据，准确空响应、反证、请求失败、导航和目标变化仍撤销。未复制 Bridge 或主动接口调用。
+
+补证与状态显示复读 MIT DSH 固定 `7989640e340f0fd79e2de9874880d5197546e755` 的 `receipt-baseline.mjs:62–91`、`comment-browser.mjs:344–373`，以及 Chatwoot 非 enterprise MIT Expat 固定 `625d5964e3cb3f1d917b43c3b8332219e525a4b8` 的 `app/models/message.rb:104`、`conversations/actions.js:406–435` 及各自许可。采用保持原基线、结果与处理状态分离的原则；本项目独立实现按每条意图的一次有界只读补证，继续使用准确账号、目标、批准全文、原生 ID 和现有回读证明。没有重建点击前基线、改写原收据或新增提交路线。
+
+实机根评论正文中的 SVG 路径图标暴露原有 DOM 正文重建限制。沿用既有 MIT 适配来源，独立支持准确正文内无文字、无外链、至多八个 g/path、尺寸不超过 32px 的 SVG；正常命名空间不作为资源 URL。带文字、标签、外部引用、未知元素和正文不一致仍拒绝。收取与发送前核验采用相同规则，源码 tsx 和构建 Node 各九项浏览器断言通过。实机只读补证共恢复七条记录；原业务账本摘要保持。详细证据与剩余边界见 [回执差异验收](docs/REPLY-RECEIPT-FIX-2026-11-11.zh-CN.md)。无新增依赖、版本号或安装包。
+
 ## 2026-11-11：表情预览、分享待办分类与全部已读
 
 修复前复读 MIT DSH 固定 `7989640e340f0fd79e2de9874880d5197546e755` 的 `chat-browser.mjs:398–459,1110–1140`、`message-tracker.mjs:37–124` 与许可，采用准确原生消息、媒体与文字分离及完整身份绑定的原则。旧弱媒体与当前已证实文字的展示兼容只允许同一完整身份元组，采图前后仍核对当前完整绑定，不改存量事件、审批或发送资格。旧实现新载体回归 4 失败／9 通过，修复后 13 项通过。
@@ -600,3 +626,13 @@ UI 独立按准确存量 eventId 查看 IMAGE／MIXED／VIDEO／AUDIO，不扩�
 修复前核对既有 Tauri 固定提交 `993038c49185307dfc895ab7657d77ca0d5ed7c7` 的 `tauri-dev.rs:150–180` 及 MIT／Apache-2.0 声明：Windows 的 beforeDevCommand 通过 `cmd /S /C` 并继承传入环境启动。文件 SHA256 为 `58fce9328970b12d085cfe06e0f579ddc574e22796ed5ab19eaa2b753bfd8a1f`。实际锁定的 npm CLI 2.12.4 另核 `tauri.js`、`main.js` 和随包双许可证，前两文件 SHA256 分别为 `d06dd9b4585c22d61af175b5a02fd7c8553ca1ac0bba2c76f25fa6e85054b8ac`、`49df414a16784e3711d5582d55c5c9e537aceb1108c5ecfc6a17cdc2f5259b4d`；不把 Rust 提交冒充 npm 包的源码 SHA。现有 pnpm 11.25.0 与其 MIT 许可一并核对，未下载、复制上游代码或新增依赖。
 
 真实 Windows 用户／系统 PATH 找不到 pnpm，Codex 开发终端却有本进程注入路径；因此原入口在双击环境失败，而开发终端曾成功。只修根启动脚本：保留已有 pnpm 优先级，缺失时为本次启动及子进程加入本机已存在、已核版本的 shim 目录，供 Tauri 与其前端命令继承；不改全局 PATH，不改业务范围、Key、库或 Profile。失败保留说明与退出码，窗口不再静默消失。最终隔离夹具在旧脚本两项有效失败／一项正例通过，修复后同组 3/3、类型、307 文件行数及差异检查通过；本人再次双击后已确认原生启动。正常开发启动重编的原生外壳与旧外壳分别记哈希，没有构建安装包或把定向检查写成完整全绿。
+
+### 2026-11-11：媒体人工回复边界与双向最新预览
+
+修复前复读本地已核对 MIT DSH 固定提交 7989640e340f0fd79e2de9874880d5197546e755 的 message-tracker.mjs:36–96、outbound-send.mjs:70–96、chat-service.mjs:65–69、desktop/ui-api/src/use-auto-save.jsx:9–32 及 LICENSE；另复读非 enterprise、MIT Expat Chatwoot 固定提交 625d5964e3cb3f1d917b43c3b8332219e525a4b8 的 app/javascript/dashboard/store/modules/conversations/actions.js:235–279 及 LICENSE。采用原生消息身份与内容能力分离、持久账本不覆盖、双方消息按 created_at 合并排序、后台保存只反馈实际进展的原则。DSH 的 unansweredPreview 仅取入站待办，不能直接承担本项目双向会话预览；不复制上游宿主、乐观成功、请求或发送实现，无新依赖。
+
+本机只读确认旧媒体发送已有独立补证，但 sendFrozen 对新旧两端使用 isStrong，误把内容不能供 AI 理解当成原生身份不可靠。复用既有 isManualMediaCandidate 只扩展独立消息时间边界；同原消息、在途提交、两秒重叠、身份缺失、来源冲突及暂停继续阻断，准确媒体人工证明和唯一发送协调器不变，自动模型仍拒绝弱媒体。旧意图、收据和补证不修改。
+
+收件箱复用同一 timelinePage，合并准确原生我方消息与已确认原始／后续发送，预览、时间和排序取双方最后一条；点击和草稿仍绑定原入站。未确认提交、变更草稿及反证不成为已发预览，未读只由入站推进。MCP 的入站任务合同保持原入站正文／时间，防止 GUI 我方预览被当成待回复来信。分享消息显示“可人工回复”，当前分享详情不借较早文字的等待状态描述；保留实际较早文字待办。删除“正在准备回复输入”，保留真实保存／发送状态。
+
+隔离原实现先出现17项有效失败、14项通过；自动文字恢复及 MCP 入站合同分别补一项有效红测。最终定向33/33、既有相关11文件112/112、另6文件92/92分别通过（集合有重叠，不累加）；会话UI按双方新预览调整定位后17/17，人工发送反馈18项通过。首次UI 13项失败为旧入站预览定位及既有评论按钮名称失配，保留日志；未删除业务断言。主目录类型、Node／Web构建及371代码文件行数通过，最大772行。开发版原生进程保留并安全重载，准确原事件 frozen:false、人工资格true；六表原有245条逐行摘要不变，MODEL37／SEND53保持，没有代理真实模型或发送。真实点击发送由本人继续操作，不能以合成确认冒称本轮实机送达。精简证据位于本机私有运行目录 evidence/inbox-reply-fix-20261111。

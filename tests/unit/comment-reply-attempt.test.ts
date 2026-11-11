@@ -40,9 +40,9 @@ test('an uncertain automatic comment reply is visible before opening the human d
 
 test('active readback and exhausted evidence show distinct truthful explanations',()=>{
   const f=fixture();f.thread.verification!.state='PENDING';
-  expect(f.visible()).toContain('正在后台确认送达');
+  expect(f.visible()).toContain('正在后台核对发送结果');
   f.thread.verification!.state='REVIEW';
-  expect(f.visible()).toContain('暂时无法确认送达');
+  expect(f.visible()).toContain('后台核对已结束');
 });
 
 test('an unsent draft and a confirmed reply do not appear as unconfirmed attempts',()=>{

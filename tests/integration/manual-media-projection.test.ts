@@ -74,6 +74,29 @@ test.each([false,true])('manual media drafts remain the resume target with a lat
   }finally{await f.close();}
 });
 
+test('a share-only conversation resumes its saved human draft after another share arrives',async()=>{
+  const f=await setup();try{
+    const first=f.add(1,'IMAGE'),draft=randomUUID(),text='unfinished response to the first share';
+    const classify=f.store.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?)');
+    classify.run(randomUUID(),new Date().toISOString(),'INBOUND_DISPLAY_CLASSIFIED',first.id,
+      JSON.stringify({binding:first.binding,eventType:'DOUYIN_WORK_SHARE'}));
+    f.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,'human',1,'DRAFT',NULL,NULL)").run(draft,first.id,text);
+    f.store.db.prepare('INSERT INTO draft_revisions VALUES(?,?,?,?,?,?)').run(draft,1,'HUMAN_TYPED',text,'fixture',Date.now());
+    const second=f.add(2,'IMAGE');
+    classify.run(randomUUID(),new Date().toISOString(),'INBOUND_DISPLAY_CLASSIFIED',second.id,
+      JSON.stringify({binding:second.binding,eventType:'DOUYIN_WORK_SHARE'}));
+    const before={events:f.store.events(),budgets:f.store.budgets(),draft:f.store.draft(draft)};
+    const inbox=await f.read() as {items:{id:string;resumeEventId:string|null}[]};
+    expect(inbox).toMatchObject({items:[{id:second.id,latestEventId:second.id,replyStatus:'NOT_REQUIRED',resumeEventId:first.id}]});
+    const target=inbox.items[0]!.resumeEventId??inbox.items[0]!.id;
+    expect(await f.service.dispatch(f.token,{command:'getThread',eventId:target})).toMatchObject({
+      event:{id:first.id},draft:{text,origin:'HUMAN_TYPED'},humanReplyEligibility:{eligible:true},conversationReplyStatus:'NOT_REQUIRED',
+    });
+    expect(await f.read('PENDING')).toMatchObject({total:0});
+    expect({events:f.store.events(),budgets:f.store.budgets(),draft:f.store.draft(draft)}).toEqual(before);
+  }finally{await f.close();}
+});
+
 test('manual-view filter selects only manual-only conversation groups and still finds them after marking read',async()=>{
   const f=await setup();try{
     const media=f.add(1,'IMAGE',{conversationId:'manual-image'}),voice=f.add(2,'AUDIO',{conversationId:'manual-voice'});

@@ -140,7 +140,7 @@ test('grouped unknown comment children remain readable with sending disabled, in
       'comment:1001:1102','synthetic-target','synthetic-text','UNCERTAIN',new Date().toISOString());
     f.store.db.prepare("UPDATE inbound_events SET status='UNCERTAIN' WHERE id=?").run(source.id);
     await f.page.locator('.task').filter({hasText:'这条楼中楼需要前面的上下文'}).click();
-    await f.page.getByRole('button',{name:'打开人工回复',exact:true}).click();
+    await f.page.getByRole('button',{name:'查看回复详情',exact:true}).click();
     const dialog=f.page.getByRole('dialog',{name:'人工回复对话框'});await dialog.waitFor();
     const send=dialog.getByRole('button',{name:'发送',exact:true});expect(await send.count()?await send.isDisabled():true).toBe(true);
     await editor(f.page).waitFor();expect(await editor(f.page).inputValue()).toBe('');
@@ -168,7 +168,7 @@ test('grouped unknown comment children remain readable with sending disabled, in
 test('the DM heading uses the authoritative conversation status while retaining the selected event status',async()=>{
   const f=await setup();try{
     f.conversationStatus('REPLIED');
-    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();
+    await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();
     await editor(f.page).waitFor();
     expect(await f.page.locator('.chat-heading .badge').textContent()).toBe('已回复');
     expect((await f.service.dispatch(f.token,{command:'getThread',eventId:f.a}) as Thread).replyStatus).toBe('WAITING');
@@ -186,7 +186,7 @@ test('an active unknown conversation row can select its new message and edit a s
       'dm:conversation-a','synthetic-target','synthetic-text','UNCERTAIN',new Date().toISOString());
     f.store.db.prepare('INSERT INTO delivery_receipts VALUES(?,?,?,?,?)').run(randomUUID(),intent,'UNCERTAIN','synthetic-proof',new Date().toISOString());
     f.store.db.prepare("UPDATE inbound_events SET status='UNCERTAIN' WHERE id=?").run(source.id);
-    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();
+    await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();
     await f.page.locator('[aria-label="已提交回复"]').getByText('旧消息只提交一次',{exact:true}).waitFor();
     const unchanged={draft:f.store.db.prepare('SELECT * FROM reply_drafts WHERE id=?').get(draft),
       intent:f.store.db.prepare('SELECT * FROM send_intents WHERE id=?').get(intent)};
@@ -212,7 +212,7 @@ test.each([{width:900,height:640},{width:1240,height:800}])('DM conversation str
     await f.page.getByRole('button',{name:'私信',exact:true}).click();
     expect(await f.page.locator('.runtime-status').innerText()).toContain('浏览器：已打开');
     await expect.poll(()=>f.page.locator('.task').count()).toBe(2);
-    const row=f.page.locator('.task').filter({hasText:'会话A消息33'});await row.click();
+    const row=f.page.locator('.task').filter({hasText:'手机端我方消息观察'});await row.click();
     await editor(f.page).waitFor({timeout:2500});expect(await editor(f.page).isEditable()).toBe(true);
     expect(await f.page.getByRole('button',{name:'打开人工回复',exact:true}).count()).toBe(0);
     expect(f.calls.filter(call=>call.command==='openHumanDialog')).toHaveLength(1);
@@ -239,7 +239,7 @@ test.each([{width:900,height:640},{width:1240,height:800}])('DM conversation str
 
 test('same-conversation new messages and late details preserve the current draft and its exact reply binding',async()=>{
   const f=await setup();try{
-    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();await editor(f.page).waitFor({timeout:2500});
+    await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();await editor(f.page).waitFor({timeout:2500});
     await editor(f.page).fill('正在输入的A人稿');
     pending(f.store,candidate({platformEventId:'chat-a-new',conversationId:'conversation-a',actorName:'合成同名联系人',text:'后台新收入的A消息',occurredAt:'2026-11-04T01:02:00Z'}));
     await f.page.getByRole('button',{name:'重新连接内核',exact:true}).click();
@@ -264,7 +264,7 @@ test('the settings switch controls all conversations while viewing stays passive
       containsAny:['never-match'],excludesAny:[],instructions:'Synthetic test',startHour:0,endHour:24}});
     await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:true});
     await expect.poll(()=>f.page.getByRole('switch',{name:'自动回复',exact:true}).isChecked(),{timeout:3000}).toBe(true);
-    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();await editor(f.page).waitFor();
+    await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();await editor(f.page).waitFor();
     expect(f.calls.filter(call=>call.command==='openHumanDialog')).toHaveLength(0);
     expect(f.service.authority.ownership(f.store.event(f.a)).operator_id).toBeNull();
     expect(await f.page.getByRole('button',{name:'交回自动回复',exact:true}).count()).toBe(0);
@@ -311,7 +311,7 @@ test('inline send submits once with the latest human text and an uncertain resul
 
 test('switching before autosave keeps the old exact draft while a late save cannot overwrite the new conversation',async()=>{
   const f=await setup();try{
-    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();await editor(f.page).waitFor();
+    await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();await editor(f.page).waitFor();
     f.hold('saveDraft');await editor(f.page).fill('不足五百毫秒即切换的A人稿');
     await f.page.locator('.task').filter({hasText:'会话B独立消息'}).click();await expect.poll(f.held).toBe(true);
     await editor(f.page).fill('等待旧保存时继续输入的A全文');f.release();
@@ -325,12 +325,12 @@ test('switching before autosave keeps the old exact draft while a late save cann
 
 test('late media and AI callbacks from the previous conversation cannot replace the selected messages or human draft',async()=>{
   const f=await setup();try{
-    f.hold('getMessagePreview');await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();await expect.poll(f.held).toBe(true);
+    f.hold('getMessagePreview');await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();await expect.poll(f.held).toBe(true);
     await f.page.locator('.task').filter({hasText:'会话B独立消息'}).click();await editor(f.page).fill('图片迟到时仍属于B的人稿');f.release();
     await new Promise(resolve=>setTimeout(resolve,100));expect(await f.page.getByRole('img',{name:'合成图片'}).count()).toBe(0);
     expect(await editor(f.page).inputValue()).toBe('图片迟到时仍属于B的人稿');
     f.hold('generateSuggestion');await f.page.getByRole('button',{name:'生成 AI 建议',exact:true}).click();await expect.poll(f.held).toBe(true);
-    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();
+    await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();
     await f.page.getByRole('log').getByText('会话A消息33',{exact:true}).waitFor();await editor(f.page).fill('建议迟到时属于A的新输入');f.release();
     await new Promise(resolve=>setTimeout(resolve,650));expect(await editor(f.page).inputValue()).toBe('建议迟到时属于A的新输入');
     expect(f.calls.filter(call=>call.command==='generateSuggestion')).toEqual([{command:'generateSuggestion',eventId:f.b,draftVersion:expect.any(Number)}]);
@@ -340,7 +340,7 @@ test('late media and AI callbacks from the previous conversation cannot replace 
 
 test('returning to a conversation after newer inbound restores its original saved draft event rather than copying it',async()=>{
   const f=await setup();try{
-    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();await editor(f.page).fill('新入站以前已保存的A人稿');
+    await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();await editor(f.page).fill('新入站以前已保存的A人稿');
     await expect.poll(()=>f.service.authority.draftFor(f.a)?.text).toBe('新入站以前已保存的A人稿');
     const newest=pending(f.store,candidate({platformEventId:'chat-a-after-draft',conversationId:'conversation-a',actorName:'合成同名联系人',
       text:'A会话新的入站预览',occurredAt:'2026-11-04T01:03:00Z'}));
@@ -359,7 +359,7 @@ test('a fresh authoritative timeline removes superseded confirmed or contradicte
     const incoming={id:'in:fixture',eventId:f.a,direction:'INCOMING' as const,text:'权威入站消息',occurredAt:'2026-11-04T01:00:33Z',historical:false,origin:'OBSERVED' as const,attachments:[]};
     const sent={id:'out:fixture',eventId:f.a,direction:'OUTGOING' as const,text:'同一原生我方消息',occurredAt:'2026-11-04T01:00:34Z',historical:false,origin:'CONFIRMED' as const,attachments:[]};
     f.timeline({items:[incoming,sent],pageSize:30,hasMore:false,before:null});
-    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();await editor(f.page).fill('权威流更新时保留的人稿');
+    await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();await editor(f.page).fill('权威流更新时保留的人稿');
     await f.page.getByRole('log').getByText('同一原生我方消息',{exact:true}).waitFor();
     f.timeline({items:[incoming,{...sent,id:'observed:fixture',origin:'OBSERVED'}],pageSize:30,hasMore:false,before:null});
     await f.page.getByRole('button',{name:'重新连接内核',exact:true}).click();
@@ -377,7 +377,7 @@ test('a group projection change invalidates a revoked confirmed bubble in an exp
     const sent={id:'out:older',eventId:f.a,direction:'OUTGOING' as const,text:'早页已被反证的我方消息',occurredAt:'2026-11-04T01:00:01Z',historical:false,origin:'CONFIRMED' as const,attachments:[]};
     const latest={items:[incoming],pageSize:30,hasMore:true,before:'synthetic-older-cursor',projectionRevision:'revision-before'};
     f.timeline(latest,{items:[sent],pageSize:30,hasMore:false,before:null,projectionRevision:'revision-before'});
-    await f.page.locator('.task').filter({hasText:'会话A消息33'}).click();await editor(f.page).fill('早页反证不影响当前输入');
+    await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();await editor(f.page).fill('早页反证不影响当前输入');
     await f.page.getByRole('button',{name:'加载更早消息',exact:true}).click();await f.page.getByRole('log').getByText(sent.text,{exact:true}).waitFor();
     f.timeline({...latest,projectionRevision:'revision-after'});
     await f.page.getByRole('button',{name:'重新连接内核',exact:true}).click();
@@ -388,7 +388,7 @@ test('a group projection change invalidates a revoked confirmed bubble in an exp
 
 test('an actual weak image message shows its preview and human composer while AI stays disabled at minimum size',async()=>{
   const f=await setup({width:900,height:640},true);try{
-    await f.page.locator('.task').filter({hasText:'[图片或表情消息，需人工查看]'}).click();await editor(f.page).waitFor();
+    await f.page.locator('.task').filter({hasText:'手机端我方消息观察'}).click();await editor(f.page).waitFor();
     const image=f.page.getByRole('log').getByRole('img',{name:'合成图片'});await image.waitFor();
     expect(await image.evaluate(node=>(node as HTMLImageElement).naturalWidth)).toBe(96);
     expect(await f.page.getByRole('log').getByText('[图片或表情消息，需人工查看]',{exact:true}).count()).toBe(0);

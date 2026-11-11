@@ -5,7 +5,7 @@ import { dirname } from 'node:path';
 import { z } from 'zod';
 import {readCommentThreadContext} from './comment-thread-context.js';
 import {
-  digest, dmClockToleranceMs, eventBinding, eventSchema, isEligible, isStrong, requireSafe, targetKey, validText,
+  digest, dmClockToleranceMs, eventBinding, eventSchema, isEligible, isManualMediaCandidate, isStrong, requireSafe, targetKey, validText,
   validManualMediaProof,
   type Channel, type Draft, type InboundEvent, type StoredEvent, type TargetSnapshot,type SendProof,
 } from '../core/contracts.js';
@@ -279,13 +279,13 @@ export class EventStore {
         .all(targetKey(next)) as typeof unresolved);
     if(!unresolved.length)return false;
     // A legacy DM outcome belongs to its original inbound. It must not stop distinct later messages forever.
-    if(next.channel!=='DIRECT_MESSAGE'||!isStrong(next)||next.direction!=='INCOMING'||next.kind!=='DM')return true;
+    if(next.channel!=='DIRECT_MESSAGE'||!(isStrong(next)||isManualMediaCandidate(next))||next.direction!=='INCOMING'||next.kind!=='DM')return true;
     const at=next.occurredAt?Date.parse(next.occurredAt):NaN;
     if(!Number.isFinite(at)||at>Date.now())return true;
     return unresolved.some(intent=>{
       if(intent.event_id===eventId||intent.status==='INTENT_RECORDED')return true;
       const prior=this.event(intent.event_id).payload,boundary=Date.parse(intent.attempt_started_at??'');
-      return !isStrong(prior)||prior.actorId!==next.actorId||prior.accountId!==next.accountId||prior.channel!==next.channel||
+      return !(isStrong(prior)||isManualMediaCandidate(prior))||prior.actorId!==next.actorId||prior.accountId!==next.accountId||prior.channel!==next.channel||
         prior.platformEventId===next.platformEventId||!Number.isFinite(boundary)||at<=boundary+dmClockToleranceMs||
         !prior.occurredAt||!Number.isFinite(Date.parse(prior.occurredAt))||at<=Date.parse(prior.occurredAt)||
         !!this.db.prepare('SELECT event_id FROM source_collisions WHERE event_id IN (?,?) LIMIT 1').get(eventId,intent.event_id);

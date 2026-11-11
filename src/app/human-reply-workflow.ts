@@ -24,14 +24,17 @@ export class HumanReplyWorkflow {
       requireSafe(this.authority.contextVersion(event)===input.contextVersion,'CONTEXT_VERSION_CONFLICT');
       const old=this.authority.draftFor(input.eventId);
       requireSafe((old?.version??0)===input.expectedVersion,'DRAFT_VERSION_CONFLICT');
-      const draft=old&&old.text===input.text&&!input.suggestionId?old:this.authority.save(token,input.eventId,input.generation,input.expectedVersion,input.text,input.suggestionId);
+      const assistant=this.authority.assistantVersion(token)!==null;
+      const draft=old&&old.text===input.text&&!input.suggestionId&&(!assistant||old.origin==='MCP_ASSISTED')?old:
+        this.authority.save(token,input.eventId,input.generation,input.expectedVersion,input.text,input.suggestionId);
       const params:SendParams={eventId:input.eventId,generation:input.generation,draftId:draft.id,draftVersion:draft.version,
         text:draft.text,contextVersion:input.contextVersion,selectionId:input.selectionId};
       this.store.db.prepare('INSERT INTO manual_send_commands VALUES(?,?,?,?,?,?,?,?,?)').run(id,event.id,this.authority.operator(token).id,
         digest(params),JSON.stringify(params),'PREPARING',null,null,this.authority.now());
       this.store.db.prepare('INSERT INTO manual_send_inputs VALUES(?,?)').run(id,digest(input));
+      this.authority.assistant.bindCommand(this.authority.operator(token).id,id);
       this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
-      this.store.audit('HUMAN_SEND_REQUESTED',id);
+      this.store.audit(this.authority.assistantVersion(token)===null?'HUMAN_SEND_REQUESTED':'ASSISTANT_SEND_REQUESTED',id);
       recordHumanQueueContext(this.store,id,event.id,captureHumanQueueContext(this.store,this.authority,event,this.authority.operator(token).id));
       return true;
     }).immediate();

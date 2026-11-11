@@ -13,11 +13,14 @@ import type {
 } from "../../src/core/contracts.js";
 import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../src/app/automation-contracts.js';
 import type { TimelineItem } from '../../src/app/inbox-queries.js';
+import type {LocalAssistantState} from '../../src/app/local-assistant-contracts.js';
 export type { TimelineItem };
 
 export type { SendParams, AiSettings, BrowserDraftChoice };
 export type ReplyStatus='WAITING'|'REPLIED'|'NOT_REQUIRED'|'MANUAL_ONLY';
 export interface Status {
+  localAssistant?:LocalAssistantState;
+  localAssistantConnection?:{ready:boolean;instanceId:string|null;transport:'stdio';tools:16};
   runtime: string;
   account: { id: string; identity: string } | null;
   operator: { id: string; permissions: string[]; expiresAt: number };
@@ -69,6 +72,7 @@ export interface Inbox {
     channel: string;
     author: string | null;
     preview: string;
+    previewDirection?:'INCOMING'|'OUTGOING';
     displayText?: string;
     time: string | null;
     source: string;
@@ -174,6 +178,11 @@ export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
 export const reasons: Record<string, string> = {
+  MCP_DRAFT_VERSION_CHANGED:'助手已保存新版本，你的未保存内容已保留，暂不自动覆盖。核对后继续编辑即可按当前版本保存。',
+  ASSISTANT_PERMISSION_REQUIRED:'助手暂不可执行此操作，请核对连接状态和当前账号。',
+  ASSISTANT_SCOPE_CHANGED:'账号或收取范围已变化，请核对应用当前的后台收取范围。',
+  ASSISTANT_LIMIT_BELOW_USED:'助手累计额度不能低于已用次数，历史消耗保留',
+  ASSISTANT_SEND_PERMISSIONS_REQUIRED:'文字发送需要正文读取、草稿及日常控制权限和可用发送额度',
   BROWSER_DRAFT_NOT_RECOVERABLE:'当前没有可安全清理的已保存自动回复稿，网页输入已保留',
   BROWSER_DRAFT_NOT_MATCHED:'网页输入与已保存的自动回复稿不一致，未清理',
   BROWSER_DRAFT_CHANGED:'应用回复稿或会话已变化，未清理，请重新检查',

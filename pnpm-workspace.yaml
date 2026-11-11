@@ -1,3 +1,6 @@
+storeDir: .local/pnpm-store
+cacheDir: .local/pnpm-cache
+
 allowBuilds:
   # v13 ships the Windows Node-API binary; avoid pnpm's implicit node-gyp path.
   better-sqlite3: false

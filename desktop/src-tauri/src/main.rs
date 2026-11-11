@@ -145,6 +145,7 @@ async fn client_request(
         "authorizeAi",
         "configureCollection",
         "setModelGrant",
+        "setLocalAssistantGrant",
         "setReplyPolicy",
         "enableReplyPolicy",
         "setAutomaticReply",

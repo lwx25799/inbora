@@ -11,6 +11,7 @@ import {humanReplyEligibility} from './manual-reply-eligibility.js';
 import {HumanFollowups} from './human-followup.js';
 import {readCommentThreadContext,commentThreadPage,commentThreadGroupKey} from '../storage/comment-thread-context.js';
 import {hasSuggestionAuthorization,suggestionEligibility,type SuggestionState} from './suggestion-eligibility.js';
+import {readVerificationView} from './verification-view.js';
 
 interface ViewState {
   settings: AiSettings;
@@ -35,7 +36,8 @@ export class WorkbenchQueries {
       .replyStatus(event);
   }
 
-  thread(token: string, eventId: string, automation: AutomationStore | null,timelineBefore?:string,aiState?:SuggestionState) {
+  thread(token: string, eventId: string, automation: AutomationStore | null,timelineBefore?:string,aiState?:SuggestionState,
+    activeVerificationEventId?:string|null) {
     const op = this.authority.operator(token),
       e = this.store.event(eventId),
       draft = this.authority.draftFor(eventId);
@@ -90,8 +92,7 @@ export class WorkbenchQueries {
       intent,
       receipt: this.store.receiptForEvent(eventId) ?? null,
       suggestions,
-      verification:automation?this.store.db.prepare(`SELECT j.state,j.attempts,j.last_error,r.verified,r.evidence_ref,r.checked_at FROM verification_jobs j
-        LEFT JOIN verification_results r ON r.intent_id=j.intent_id WHERE j.event_id=? ORDER BY r.rowid DESC LIMIT 1`).get(eventId)??null:null,
+      verification:automation?readVerificationView(this.store,e,activeVerificationEventId):null,
       automationJob:automation?this.store.db.prepare('SELECT state,reason,grant_version FROM automation_jobs WHERE event_id=?').get(eventId)??null:null,
     };
   }

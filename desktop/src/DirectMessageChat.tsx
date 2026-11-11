@@ -76,7 +76,7 @@ export function DirectMessageChat(props:ReplyViewProps & {thread:Thread}){
   return <section className="detail chat-detail" aria-label="私信会话">
     <header className="chat-heading">
       <div><p className="eyebrow">私信会话</p><h2>{thread.event.payload.actorName||'当前联系人'}</h2></div>
-      <span className="badge">{replyStatusLabel(thread.conversationReplyStatus??thread.replyStatus)}</span>
+      <span className="badge">{replyStatusLabel(['NOT_REQUIRED','MANUAL_ONLY'].includes(thread.replyStatus)?thread.replyStatus:thread.conversationReplyStatus??thread.replyStatus)}</span>
       <details className="chat-information"><summary>会话信息</summary>
         <p>本人：{status.account?.identity??'已绑定账号'}<br/>对方：{thread.event.payload.actorId??'身份待核对'}<br/>会话：{thread.event.payload.conversationId}</p>
         {status.browser.mode==='headed'&&!status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('打开准确会话',async()=>{await request({command:'openTarget',eventId:thread.event.id});setNotice('已在专属浏览器中定位，未填写或发送');})}>在专属浏览器查看原对象</button>}

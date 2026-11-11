@@ -9,7 +9,7 @@ import {candidate} from '../helpers.js';
 function inboxProps(replyStatus:Inbox['items'][number]['replyStatus']){
   return {inbox:{total:1,unreadTotal:0,page:0,pageSize:20,items:[{id:'synthetic-share',status:'MANUAL_REVIEW',replyStatus,unread:false,
     channel:'DIRECT_MESSAGE',author:'合成联系人',preview:'[分享图集]',time:null,source:'DIRECT_MESSAGE',
-    share:{kind:'DOUYIN_WORK' as const,url:'https://www.douyin.com/note/123',workId:'123'}}]},
+    share:{kind:'DOUYIN_WORK' as const,url:'https://www.douyin.com/note/123',workId:'123'}}]} as Inbox,
   selected:null,channel:'ALL' as const,setChannel:()=>{},filter:'UNREAD' as const,setFilter:()=>{},pageNumber:0,setPageNumber:()=>{},
   choose:()=>{},markRead:()=>{},markingRead:false};
 }
@@ -17,10 +17,10 @@ const inboxPath='../../desktop/src/InboxList.tsx',chatPath='../../desktop/src/Di
 const {InboxList}=await import(inboxPath) as {InboxList:ComponentType<ReturnType<typeof inboxProps>>};
 const {DirectMessageChat}=await import(chatPath) as {DirectMessageChat:ComponentType<ReturnType<typeof chatFixture>['props']>};
 
-test('a shared work is labelled no automatic reply and remains reachable from all messages',()=>{
+test('a shared work offers manual reply and remains reachable from all messages',()=>{
   const render=(replyStatus:Inbox['items'][number]['replyStatus'])=>renderToStaticMarkup(createElement(InboxList,inboxProps(replyStatus)));
   const html=render('NOT_REQUIRED' as Inbox['items'][number]['replyStatus']);
-  expect(html).toContain('>无需自动回复</span>');
+  expect(html).toContain('>可人工回复</span>');
   expect(html).not.toContain('badge warn');
   expect(html).toContain('<option value="ALL">全部消息</option>');
   expect(html).toContain('分享图集');expect(html).toContain('https://www.douyin.com/note/123');
@@ -47,12 +47,14 @@ function chatFixture(){
   return {thread,props,render};
 }
 
-test('the message detail uses the authoritative conversation state without claiming the share was sent a reply',()=>{
+test('a current share offers manual reply even when an earlier message has a different conversation state',()=>{
   const {thread,render}=chatFixture();
-  expect(render()).toContain('>无需自动回复</span>');
+  expect(render()).toContain('>可人工回复</span>');
   expect(render()).not.toContain('>已回复</span>');
-  thread.conversationReplyStatus='REPLIED';expect(render()).toContain('>已回复</span>');
-  thread.conversationReplyStatus='WAITING';expect(render()).toContain('>等待回复</span>');
+  thread.conversationReplyStatus='REPLIED';expect(render()).toContain('>可人工回复</span>');
+  thread.conversationReplyStatus='WAITING';expect(render()).toContain('>可人工回复</span>');
+  thread.replyStatus='WAITING';expect(render()).toContain('>等待回复</span>');
+  thread.replyStatus='REPLIED';thread.conversationReplyStatus='REPLIED';expect(render()).toContain('>已回复</span>');
 });
 
 test('unclassified media requires manual viewing rather than waiting for an automatic reply',()=>{
@@ -73,4 +75,20 @@ test('unclassified media requires manual viewing rather than waiting for an auto
   thread.timeline={items:[incoming],pageSize:30,hasMore:false,before:null};
   const detail=render();expect(detail).toContain('>需人工查看</span>');expect(detail).toContain('当前查看消息');
   expect(detail).toContain('人工回复草稿');expect(detail).not.toContain('>已回复</span>');
+});
+
+test('the conversation preview identifies the last outgoing message',()=>{
+  const props=inboxProps('REPLIED');
+  const item={...props.inbox.items[0]!,preview:'是的',previewDirection:'OUTGOING' as const};
+  const {share:_share,...outgoing}=item;
+  const html=renderToStaticMarkup(createElement(InboxList,{...props,inbox:{...props.inbox,items:[outgoing]}}));
+  expect(html).toContain('我：是的');expect(html).not.toContain('分享图集');
+  const incoming=renderToStaticMarkup(createElement(InboxList,{...props,inbox:{...props.inbox,items:[{...outgoing,previewDirection:'INCOMING'}]}}));
+  expect(incoming).toContain('是的');expect(incoming).not.toContain('我：是的');
+});
+
+test('idle background ownership preparation adds no composer message while saving still reports progress',()=>{
+  const {thread,props,render}=chatFixture();
+  expect(render()).not.toContain('正在准备回复输入');
+  thread.ownership.isMine=true;props.saving=true;expect(render()).toContain('正在保存');
 });
