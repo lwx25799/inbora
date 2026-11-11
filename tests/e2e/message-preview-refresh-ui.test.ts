@@ -46,7 +46,7 @@ test('current, historical and own cached media refresh independently without sel
     const selectedBefore=calls.filter(c=>c.command==='selectTarget').length;
     const unverified=rows.filter({hasText:'消息身份暂不可核对，无法更新预览'});
     expect(await unverified.count()).toBe(1);expect(await unverified.getByRole('button',{name:'更新预览',exact:true}).count()).toBe(0);
-    const cases=[{id:saved.id,row:rows.filter({hasText:'当前回复消息'})},
+    const cases=[{id:saved.id,row:rows.filter({hasText:'当前查看消息'})},
       {id:historicalId,row:page.getByRole('log').locator('.chat-message.incoming').filter({hasText:'历史消息'})},
       {id:ownId,row:page.getByRole('log').locator('.chat-message.outgoing').filter({hasNotText:'消息身份暂不可核对'})}];
     for(const [index,{id,row}] of cases.entries()){
