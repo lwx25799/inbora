@@ -1,3 +1,9 @@
+import type {ReplyStatus} from './api.js';
+
+export function replyStatusLabel(status:ReplyStatus):string {
+  return status==='REPLIED'?'已回复':status==='NOT_REQUIRED'?'无需自动回复':status==='MANUAL_ONLY'?'需人工查看':'等待回复';
+}
+
 export function time(value: string | number | null | undefined) {
   return value
     ? new Date(value).toLocaleString("zh-CN", { hour12: false })

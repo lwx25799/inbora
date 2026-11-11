@@ -3,11 +3,11 @@ import type {EventStore} from '../storage/store.js';
 import type {ClientCommand} from './contracts.js';
 import {MessagePreviewStore,type MessagePreviewAttachment} from '../storage/message-previews.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
+import {inboxReadBoundary} from './inbox-read-state.js';
 import {MessageShareStore,type MessageShare} from '../storage/message-shares.js';
-import {InboxProjection,inboxGroupKey} from './inbox-projection.js';
+import {InboxProjection,inboxGroupKey,type ReplyStatus} from './inbox-projection.js';
 export {inboxGroupKey} from './inbox-projection.js';
 
-type ReplyStatus='WAITING'|'REPLIED';
 export interface TimelineItem {
   id:string;
   eventId:string;
@@ -48,16 +48,20 @@ export class InboxQueries {
       const key=inboxGroupKey(event),members=groups.get(key)??[];members.push(event);groups.set(key,members);
     }
     const time=(event:StoredEvent)=>Date.parse(event.payload.occurredAt??'')||0;
-    const rows=[...groups.entries()].map(([groupKey,members])=>({...projection.group(members),groupKey}))
-      .filter(row=>c.status==='PENDING'?row.replyStatus==='WAITING':c.status==='CONFIRMED'?row.replyStatus==='REPLIED':
+    const boundary=inboxReadBoundary(this.store);
+    const groupsWithRead=[...groups.entries()].map(([groupKey,members])=>({...projection.group(members),groupKey,
+      unread:members.some(event=>(projection.order.get(event.id)??0)>boundary)}));
+    const unreadTotal=groupsWithRead.filter(row=>row.unread).length;
+    const rows=groupsWithRead
+      .filter(row=>c.status==='UNREAD'?row.unread:c.status==='PENDING'?row.replyStatus==='WAITING':c.status==='MANUAL_ONLY'?row.replyStatus==='MANUAL_ONLY':c.status==='CONFIRMED'?row.replyStatus==='REPLIED':
         c.status==='REVIEW'?row.members.some(e=>e.status==='MANUAL_REVIEW'):
           c.status==='UNCERTAIN'?row.members.some(e=>e.status==='UNCERTAIN'||e.status==='INTENT_RECORDED'):true)
       .sort((a,b)=>time(b.latest)-time(a.latest)||(projection.order.get(b.latest.id)??0)-(projection.order.get(a.latest.id)??0));
     const own=projection.own.get('account_001'),previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
-    return {total:rows.length,page:c.page,pageSize:20,items:rows.slice(c.page*20,c.page*20+20).map(row=>{
+    return {total:rows.length,unreadTotal,page:c.page,pageSize:20,items:rows.slice(c.page*20,c.page*20+20).map(row=>{
       const share=own?shares.read(row.latest.payload,own):null,displayText=own?previews.displayText(row.latest.payload,own):null;
       return {
-        id:row.selected.id,status:row.selected.status,replyStatus:row.replyStatus,channel:row.latest.payload.channel,
+        id:row.selected.id,status:row.selected.status,replyStatus:row.replyStatus,unread:row.unread,channel:row.latest.payload.channel,
         author:row.latest.payload.actorName,preview:row.latest.payload.text,time:row.latest.payload.occurredAt,
         ...(displayText!==null?{displayText}:{}),
         source:row.latest.payload.discovery??(row.latest.payload.channel==='DIRECT_MESSAGE'?'DIRECT_MESSAGE':'NOTIFICATION'),

@@ -16,6 +16,7 @@ import type { TimelineItem } from '../../src/app/inbox-queries.js';
 export type { TimelineItem };
 
 export type { SendParams, AiSettings, BrowserDraftChoice };
+export type ReplyStatus='WAITING'|'REPLIED'|'NOT_REQUIRED'|'MANUAL_ONLY';
 export interface Status {
   runtime: string;
   account: { id: string; identity: string } | null;
@@ -57,12 +58,14 @@ export interface Status {
 }
 export interface Inbox {
   total: number;
+  unreadTotal?:number;
   page: number;
   pageSize: number;
   items: {
     id: string;
     status: string;
-    replyStatus: 'WAITING'|'REPLIED';
+    replyStatus: ReplyStatus;
+    unread?:boolean;
     channel: string;
     author: string | null;
     preview: string;
@@ -83,8 +86,8 @@ export interface Inbox {
 export interface Thread {
   groupKey?:string;
   timeline?:{items:TimelineItem[];pageSize:number;hasMore:boolean;before:string|null;projectionRevision?:string};
-  replyStatus: 'WAITING'|'REPLIED';
-  conversationReplyStatus?: 'WAITING'|'REPLIED';
+  replyStatus: ReplyStatus;
+  conversationReplyStatus?: ReplyStatus;
   commentContext?: ReturnType<typeof import('../../src/storage/comment-thread-context.js').commentThreadPage>;
   controlledTrial: boolean;
   workUrl: string | null;

@@ -14,6 +14,7 @@ import type { CollectionSource } from "./collection-scheduler.js";
 import { collectionStops, DeferredObjectRead } from "./collection-scheduler.js";
 import { Blocked } from "../core/contracts.js";
 import { saveMessagePreviews } from '../adapters/message-preview.js';
+import {classifyStoredShares} from './message-disposition.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
 import {MessageShareStore} from '../storage/message-shares.js';
 import {MessagePreviewStore} from '../storage/message-previews.js';
@@ -177,6 +178,7 @@ export class InboxCollector {
       if(source==='dm')new ChatMessageStore(this.data.store).observe(batch.events,this.mapping.self.uid,this.data.state().startedAt,this.data.now());
       if(displayChanged)this.data.store.audit('MESSAGE_DISPLAY_CHANGED',digest(['account_001','dm:'+scope]));
     }).immediate();
+    if(source==='dm')classifyStoredShares(this.data.store,this.root,scope);
     requireSafe(!batch.incomplete||!!dmWindowCoverage(batch,this.data.state().startedAt),'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
     if(source==='works'){
       const workId=scope.slice('work:'.length),work=this.data.store.db.prepare('SELECT state FROM discovered_works WHERE id=? AND own_id=?').get(workId,this.mapping.self.uid) as {state:string}|undefined;

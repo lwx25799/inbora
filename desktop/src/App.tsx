@@ -37,8 +37,8 @@ export function App() {
     "ALL" | "COMMENT_NOTIFICATION" | "DIRECT_MESSAGE"
   >("ALL");
   const [filter, setFilter] = useState<
-      "PENDING" | "CONFIRMED"
-    >("PENDING"),
+      "ALL" | "UNREAD" | "PENDING" | "MANUAL_ONLY" | "CONFIRMED"
+    >("UNREAD"),
     [pageNumber, setPageNumber] = useState(0);
   const [inbox, setInbox] = useState<Inbox>({
       items: [],
@@ -684,7 +684,8 @@ export function App() {
           <div className="inbox-layout">
             <InboxList inbox={inbox} selected={selected} selectedGroup={thread?.event.id===selected?thread.groupKey:undefined}
               channel={channel} setChannel={setChannel} filter={filter} setFilter={setFilter}
-              pageNumber={pageNumber} setPageNumber={setPageNumber} choose={choose}/>
+              pageNumber={pageNumber} setPageNumber={setPageNumber} choose={choose} markingRead={!!busy}
+              markRead={()=>void act('正在标记已读…',async()=>{await request({command:'markInboxRead'});setPageNumber(0);setNotice('已全部标为已读。消息和回复记录仍保留。');})}/>
             <ReplyDetail
               detailElement={detailElement}
               dialogElement={dialogElement}

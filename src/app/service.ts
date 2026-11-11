@@ -34,6 +34,8 @@ import { VerificationScheduler } from "./verification-scheduler.js";
 import { CredentialStore } from "./credentials.js";
 import {runAutomaticReply} from './automatic-reply.js';
 import {readDiagnostics} from './diagnostics.js';
+import {markInboxRead} from './inbox-read-state.js';
+import {classifyStoredShares} from './message-disposition.js';
 import {EvidenceMaintenance} from './evidence-maintenance.js';
 import {runtimePerformance} from '../observability/runtime-performance.js';
 import {generateSuggestion} from './suggestion-generation.js';
@@ -107,6 +109,7 @@ export class ClientService {
       this.followups.recover();
       this.automation=new AutomationStore(this.store,this.authority.now);
       this.automation.initialize(this.startedAt);
+      classifyStoredShares(this.store,this.browser.root);
       this.recoveryDiagnosticPending=new BrowserDraftRecovery(this.store,this.authority,this.browser).hasStartupCandidate();
       if(this.authority.mode()==='LIMITED_AUTO')this.authority.resumeIdleAutomation();
       if(!this.automation.state().emergencyStopped&&this.authority.paused()) {
@@ -434,6 +437,10 @@ export class ClientService {
         }
       }
       case 'getInbox': return this.queries.inbox(c);
+      case 'markInboxRead': {
+        this.authority.operator(token,'EDIT');
+        const result=markInboxRead(this.store);this.inboxRevision++;this.emit('inbox_updated');return result;
+      }
       case "selectTarget":
         this.closeOtherDialogs(token,c.eventId);
         this.authority.select(token, c.eventId, c.selectionId);

@@ -6,7 +6,7 @@ import {ReadRefresh,refreshTargets} from './read-refresh';
 export interface AuditRow {time:string;event_type:string;entity_id:string;detail_redacted:string}
 interface RefreshView {
   connected:boolean;status:Status|null;selected:string|null;
-  channel:'ALL'|'COMMENT_NOTIFICATION'|'DIRECT_MESSAGE';filter:'PENDING'|'CONFIRMED';pageNumber:number;
+  channel:'ALL'|'COMMENT_NOTIFICATION'|'DIRECT_MESSAGE';filter:'ALL'|'UNREAD'|'PENDING'|'MANUAL_ONLY'|'CONFIRMED';pageNumber:number;
   page:'inbox'|'settings'|'audit';auditPage:number;notice:string;sendStatus:string|undefined;
   readThread:(alive:()=>boolean)=>Promise<unknown>;
   setStatus:Dispatch<SetStateAction<Status|null>>;setInbox:Dispatch<SetStateAction<Inbox>>;

@@ -118,6 +118,7 @@ async fn client_request(
         "getStatus",
         "getDiagnostics",
         "getInbox",
+        "markInboxRead",
         "getThread",
         "getMessagePreview",
         "openTarget",

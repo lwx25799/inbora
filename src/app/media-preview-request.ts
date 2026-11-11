@@ -10,6 +10,7 @@ import type {ObservationMapping} from '../config/site-mapping.js';
 import type {DiscoveredPeer,ObservationBatch} from '../adapters/observed-reader.js';
 import {saveMessagePreviews} from '../adapters/message-preview.js';
 import {resolveStoredDmMessage} from './message-view.js';
+import {classifyStoredShares} from './message-disposition.js';
 
 export interface PreviewDisplayTarget {eventId:string;source:'INBOUND'|'CHAT';purpose:'DISPLAY'}
 export function resolvePreviewDisplay(store:EventStore,eventId:string,source?:PreviewDisplayTarget['source']){
@@ -39,6 +40,7 @@ export async function saveDisplayPreview(input:{store:EventStore;root:string;pag
   const state=()=>digest([cache.list(event,ownId),cache.displayText(event,ownId),shares.read(event,ownId)]),before=state();
   await saveMessagePreviews(input.page,input.mapping,{...input.batch,events:[event]},input.root,input.signal,input.peer);
   input.check();requireSafe(eventBinding(resolvePreviewDisplay(input.store,input.target.eventId,input.target.source).event)===eventBinding(event),'MESSAGE_PREVIEW_UNAVAILABLE');
+  classifyStoredShares(input.store,input.root,event.conversationId!);
   if(state()!==before)input.store.audit('MESSAGE_DISPLAY_CHANGED',digest([event.accountId,'dm:'+event.conversationId]));
   return true;
 }
