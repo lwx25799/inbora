@@ -47,7 +47,8 @@ test('display projection exposes exact text separately without changing event id
     const cache=new MessagePreviewStore(root),queries=new InboxQueries(store,root,()=>'WAITING');cache.saveDisplayText(event,'100','verified private display text [微笑]');
     const timeline=queries.timeline(saved),item=timeline.items[0]!;
     expect(item).toMatchObject({eventId:saved.id,text:event.text,displayText:'verified private display text [微笑]',contentType:'MIXED',observationIssue:'DM_CONTENT_UNVERIFIED'});
-    const inbox=queries.inbox({command:'getInbox',channel:'DIRECT_MESSAGE',status:'PENDING',page:0});
+    expect(queries.inbox({command:'getInbox',channel:'DIRECT_MESSAGE',status:'PENDING',page:0})).toMatchObject({total:0,items:[]});
+    const inbox=queries.inbox({command:'getInbox',channel:'DIRECT_MESSAGE',status:'MANUAL_ONLY',page:0});
     expect(inbox.items[0]).toMatchObject({preview:event.text,displayText:'verified private display text [微笑]',id:saved.id,messageCount:1});
     expect(store.event(saved.id)).toEqual(saved);expect(isStrong(store.event(saved.id).payload)).toBe(false);expect(store.history(saved.payload)).toEqual(history);expect(snapshot()).toEqual(before);
     cache.saveDisplayText(event,'100',null);expect(queries.timeline(saved).items[0]?.displayText).toBeUndefined();

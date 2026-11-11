@@ -5,9 +5,9 @@ import {readNoReplyEventIds} from './message-disposition.js';
 
 export type ReplyStatus='WAITING'|'REPLIED'|'NOT_REQUIRED'|'MANUAL_ONLY';
 interface OrderedRow extends EventRow {ordinal:number;scope:string}
-interface IntentRow {event_id:string;attempt_started_at:string;target_digest:string;text_digest:string;text:string;approval:string|null}
+interface IntentRow {event_id:string;attempt_started_at:string;target_digest:string;text_digest:string;text:string;approval:string|null;verified:number|null}
 interface ResumeRow {event_id:string;text:string;ordinal:number;saved_at:number}
-interface FollowupRow {event_id:string;target_key:string;text:string;version:number;approval:string|null;params:string;
+interface FollowupRow {event_id:string;target_key:string;text:string;version:number;approval:string|null;params:string;status:string;
   intent_id:string|null;attempt_started_at:string|null;verified_at:string|null;proof_ref:string|null;native_id_digest:string|null}
 export interface InboxGroup {selected:StoredEvent;latest:StoredEvent;members:StoredEvent[];replyStatus:ReplyStatus}
 
@@ -22,6 +22,7 @@ export class InboxProjection {
   readonly events:StoredEvent[];
   readonly order:Map<string,number>;
   readonly own:Map<string,string>;
+  readonly tables:Set<string>;
   private readonly intents:Map<string,IntentRow>;
   private readonly verifications:Map<string,number>;
   private readonly pendingFollowups=new Set<string>();
@@ -37,19 +38,21 @@ export class InboxProjection {
     if(target){where.push('e.account_id=?');args.push(target.accountId);
       where.push(target.eventId?'e.id=?':'e.target_key=?');args.push(target.eventId??target.key);}
     const filter=where.join(' AND '),db=store.db;
-    const tables=new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('verification_results','draft_revisions','human_reply_turns')").all() as {name:string}[]).map(row=>row.name));
+    const tables=this.tables=new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('verification_results','draft_revisions','human_reply_turns','chat_messages','chat_delivery_links')").all() as {name:string}[]).map(row=>row.name));
     const rows=db.prepare(`SELECT e.rowid AS ordinal,e.id,e.payload,e.binding,e.status,e.scope FROM inbound_events e WHERE ${filter} ORDER BY e.rowid`).all(...args) as OrderedRow[];
     this.events=rows.map(decodeEventRow);this.order=new Map(rows.map(row=>[row.id,row.ordinal]));
-    this.intents=new Map((db.prepare(`SELECT i.event_id,i.attempt_started_at,i.target_digest,i.text_digest,d.text,d.approval
+    this.intents=new Map((db.prepare(`SELECT i.event_id,i.attempt_started_at,i.target_digest,i.text_digest,d.text,d.approval,
+      ${tables.has('verification_results')?'(SELECT v.verified FROM verification_results v WHERE v.intent_id=i.id ORDER BY v.rowid DESC LIMIT 1)':'NULL'} AS verified
       FROM send_intents i JOIN inbound_events e ON e.id=i.event_id JOIN reply_drafts d ON d.id=i.draft_id WHERE ${filter}`).all(...args) as IntentRow[]).map(row=>[row.event_id,row]));
-    this.verifications=new Map(tables.has('verification_results')?(db.prepare(`SELECT i.event_id,v.verified FROM send_intents i
-      JOIN inbound_events e ON e.id=i.event_id JOIN verification_results v ON v.rowid=(SELECT MAX(v2.rowid) FROM verification_results v2 WHERE v2.intent_id=i.id)
-      WHERE ${filter}`).all(...args) as {event_id:string;verified:number}[]).map(row=>[row.event_id,row.verified]):[]);
+    this.verifications=new Map([...this.intents.values()].flatMap(row=>row.verified===null?[]:[[row.event_id,row.verified] as const]));
     this.collisions=new Set((db.prepare(`SELECT DISTINCT c.event_id FROM source_collisions c JOIN inbound_events e ON e.id=c.event_id WHERE ${filter}`).all(...args) as {event_id:string}[]).map(row=>row.event_id));
-    if(tables.has('human_reply_turns'))for(const row of db.prepare(`SELECT DISTINCT t.event_id FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
-      WHERE ${filter} AND t.status IN ('PREPARING','APPROVED','INTENT_RECORDED','UNCERTAIN')`).all(...args) as {event_id:string}[]){
-        this.verifications.set(row.event_id,0);this.pendingFollowups.add(row.event_id);
-      }
+    const turns=tables.has('human_reply_turns')?db.prepare(`SELECT t.event_id,t.target_key,t.text,t.version,t.approval,t.params,t.intent_id,
+      t.attempt_started_at,t.verified_at,t.proof_ref,t.native_id_digest,t.status FROM human_reply_turns t
+      JOIN inbound_events e ON e.id=t.event_id WHERE ${filter}
+      AND t.status IN ('CONFIRMED','PREPARING','APPROVED','INTENT_RECORDED','UNCERTAIN')`).all(...args) as FollowupRow[]:[];
+    for(const turn of turns)if(turn.status!=='CONFIRMED'){
+      this.verifications.set(turn.event_id,0);this.pendingFollowups.add(turn.event_id);
+    }
     this.firstObserved=new Map((db.prepare(`SELECT e.id,o.observed_at FROM inbound_events e JOIN observations o ON o.rowid=(SELECT o2.rowid FROM observations o2
       WHERE o2.channel=e.channel AND o2.scope=e.scope AND o2.evidence_ref=json_extract(e.payload,'$.evidenceId') ORDER BY o2.rowid LIMIT 1)
       WHERE ${filter}`).all(...args) as {id:string;observed_at:string}[]).map(row=>[row.id,Date.parse(row.observed_at)]));
@@ -59,7 +62,7 @@ export class InboxProjection {
       WHERE ${filter} AND d.status IN ('DRAFT','APPROVED') AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=d.event_id)`)
       .all(...args) as ResumeRow[]).map(row=>[row.event_id,row]));
     this.own=new Map((db.prepare('SELECT id,own_id FROM accounts').all() as {id:string;own_id:string}[]).map(row=>[row.id,row.own_id]));
-    this.noReply=readNoReplyEventIds(store);
+    this.noReply=readNoReplyEventIds(store,this.own.get('account_001')??null);
     const peers=new Map<string,string>();
     for(const event of this.events){
       if(event.payload.channel!=='DIRECT_MESSAGE'||!event.payload.conversationId)continue;
@@ -71,10 +74,7 @@ export class InboxProjection {
     }
     if(tables.has('human_reply_turns')){
       const sources=new Map(this.events.map(event=>[event.id,event]));
-      const turns=db.prepare(`SELECT t.event_id,t.target_key,t.text,t.version,t.approval,t.params,t.intent_id,
-        t.attempt_started_at,t.verified_at,t.proof_ref,t.native_id_digest FROM human_reply_turns t
-        JOIN inbound_events e ON e.id=t.event_id WHERE ${filter} AND t.status='CONFIRMED'`).all(...args) as FollowupRow[];
-      for(const turn of turns)try{
+      for(const turn of turns.filter(row=>row.status==='CONFIRMED'))try{
         const event=sources.get(turn.event_id);if(!event||this.replyStatus(event)!=='REPLIED'||this.collisions.has(event.id))continue;
         const e=event.payload,approval=turn.approval?JSON.parse(turn.approval) as Draft['approval']:null,snapshot=approval?.snapshot;
         const params=JSON.parse(turn.params) as {eventId?:string;text?:string},own=this.own.get(e.accountId);

@@ -13,13 +13,13 @@ function incomingMedia(event:StoredEvent,ownId:string):boolean {
 }
 
 /** Message kind outlives rebuildable previews. It is not a delivery receipt or permission to send. */
-export function readNoReplyEventIds(store:EventStore):Set<string> {
-  const own=store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
-  if(!own)return new Set();
+export function readNoReplyEventIds(store:EventStore,knownOwnId?:string|null):Set<string> {
+  const ownId=knownOwnId===undefined?(store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined)?.own_id:knownOwnId;
+  if(!ownId)return new Set();
   const rows=store.db.prepare(`SELECT DISTINCT e.id,e.payload,e.binding,e.status FROM inbound_events e JOIN audit_events a ON a.entity_id=e.id
     WHERE a.event_type='INBOUND_DISPLAY_CLASSIFIED' AND json_extract(a.detail_redacted,'$.eventType')='DOUYIN_WORK_SHARE'
       AND json_extract(a.detail_redacted,'$.binding')=e.binding`).all() as EventRow[];
-  return new Set(rows.map(decodeEventRow).filter(event=>incomingMedia(event,own.own_id)).map(event=>event.id));
+  return new Set(rows.map(decodeEventRow).filter(event=>incomingMedia(event,ownId)).map(event=>event.id));
 }
 
 /** Backfill the bounded recent inbox at startup; refresh the current conversation after normal collection. */

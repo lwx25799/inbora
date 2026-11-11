@@ -6,6 +6,7 @@ import {ChatMessageStore} from '../storage/chat-messages.js';
 import {inboxReadBoundary,scopedReadEventIds} from './inbox-read-state.js';
 import {MessageShareStore,type MessageShare} from '../storage/message-shares.js';
 import {InboxProjection,inboxGroupKey,type ReplyStatus} from './inbox-projection.js';
+import {readInboxPreviews,inboxPreviewKey} from './inbox-preview.js';
 export {inboxGroupKey} from './inbox-projection.js';
 
 export interface TimelineItem {
@@ -50,9 +51,10 @@ export class InboxQueries {
     const time=(event:StoredEvent)=>Date.parse(event.payload.occurredAt??'')||0;
     const boundary=inboxReadBoundary(this.store);
     const scoped=scopedReadEventIds(this.store,boundary);
+    const latestPreviews=c.channel==='COMMENT_NOTIFICATION'?new Map():readInboxPreviews(this.store,projection.tables,projection.own);
     const groupsWithRead=[...groups.entries()].map(([groupKey,members])=>{
       const group=projection.group(members);
-      const latestMessage=group.latest.payload.channel==='DIRECT_MESSAGE'?this.timelinePage(group.latest,undefined,1).items.at(-1):undefined;
+      const latestMessage=group.latest.payload.channel==='DIRECT_MESSAGE'?latestPreviews.get(inboxPreviewKey(group.latest)):undefined;
       return {...group,groupKey,latestMessage,
         unread:members.some(event=>(projection.order.get(event.id)??0)>boundary&&!scoped.has(event.id))};
     });
@@ -66,8 +68,9 @@ export class InboxQueries {
     const own=projection.own.get('account_001'),previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
     return {total:rows.length,unreadTotal,page:c.page,pageSize:20,items:rows.slice(c.page*20,c.page*20+20).map(row=>{
       const message=row.latestMessage;
-      const share=message?message.share:own?shares.read(row.latest.payload,own):null;
-      const displayText=message?message.displayText:own?previews.displayText(row.latest.payload,own):null;
+      const payload=message?message.payload:row.latest.payload;
+      const share=payload&&own?shares.read(payload,own):null;
+      const displayText=payload&&own?previews.displayText(payload,own):null;
       return {
         id:row.selected.id,status:row.selected.status,replyStatus:row.replyStatus,unread:row.unread,channel:row.latest.payload.channel,
         author:row.latest.payload.actorName,preview:message?.text??row.latest.payload.text,time:message?.occurredAt??row.latest.payload.occurredAt,
@@ -78,7 +81,7 @@ export class InboxQueries {
         ...(row.latest.payload.channel==='COMMENT_NOTIFICATION'?{commentCount:row.members.length,
           waitingCount:row.members.filter(event=>projection.replyStatus(event)==='WAITING').length}:{}),
         resumeEventId:projection.resumeEvent(row.members,row.replyStatus),previewEventId:message?.eventId??row.latest.id,
-        attachments:message?message.attachments:!share&&own?previews.list(row.latest.payload,own):[],...(share?{share}:{}),
+        attachments:!share&&payload&&own?previews.list(payload,own):[],...(share?{share}:{}),
       };
     })};
   }
