@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="740" viewBox="0 0 1200 740" role="img" aria-labelledby="title desc">
+  <title id="title">inbora 双通道收件箱与回复流程</title>
+  <desc id="desc">作品评论与私信汇入统一收件箱，经人工回复或规则自动回复，共用同一个单次提交与回读通道。此图为工作流程示意，不是应用截图。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 1 1 L 8 5 L 1 9" fill="none" stroke="#226248" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="740" rx="18" fill="#f4f3ef"/>
+  <g fill="none" stroke="#226248" stroke-width="3" marker-end="url(#arrow)">
+    <path d="M 300 156 V 200 Q 300 220 320 220 H 340"/>
+    <path d="M 900 156 V 200 Q 900 220 880 220 H 860"/>
+    <path d="M 480 340 V 380 Q 480 396 464 396 H 316 Q 300 396 300 412 V 442"/>
+    <path d="M 720 340 V 380 Q 720 396 736 396 H 884 Q 900 396 900 412 V 442"/>
+    <path d="M 300 548 V 584 Q 300 604 320 604 H 340"/>
+    <path d="M 900 548 V 584 Q 900 604 880 604 H 860"/>
+  </g>
+  <g font-family="Segoe UI, Microsoft YaHei UI, PingFang SC, sans-serif" text-anchor="middle">
+    <g id="inbound-channels" fill="#202b27">
+      <rect x="80" y="56" width="440" height="100" rx="10" fill="#fff" stroke="#d9ded9" stroke-width="2"/>
+      <rect x="680" y="56" width="440" height="100" rx="10" fill="#fff" stroke="#d9ded9" stroke-width="2"/>
+      <text x="300" y="124" font-size="48" font-weight="600">作品评论</text>
+      <text x="900" y="124" font-size="48" font-weight="600">私信</text>
+    </g>
+    <g id="shared-inbox">
+      <rect x="340" y="196" width="520" height="144" rx="12" fill="#226248"/>
+      <text x="600" y="254" font-size="50" font-weight="700" fill="#fff">统一收件箱</text>
+      <text x="600" y="308" font-size="34" fill="#fff">等待回复 · 已回复</text>
+    </g>
+    <g id="reply-paths" fill="#202b27">
+      <rect x="80" y="442" width="440" height="106" rx="10" fill="#fff" stroke="#d9ded9" stroke-width="2"/>
+      <rect x="680" y="442" width="440" height="106" rx="10" fill="#fff" stroke="#d9ded9" stroke-width="2"/>
+      <text x="300" y="512" font-size="48" font-weight="600">人工回复</text>
+      <text x="900" y="512" font-size="48" font-weight="600">规则自动回复</text>
+    </g>
+    <g id="single-send-coordinator">
+      <rect x="340" y="578" width="520" height="100" rx="10" fill="#e3ece5"/>
+      <text x="600" y="644" font-size="46" font-weight="600" fill="#226248">单次提交与回读</text>
+    </g>
+    <text x="600" y="718" font-size="22" fill="#606d66">inbora / 工作流程示意</text>
+  </g>
+</svg>
