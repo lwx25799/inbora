@@ -1,0 +1,48 @@
+.emergency-stop-notice {
+  flex-shrink: 0;
+  padding: 12px 24px;
+  border-bottom: 1px solid #dfc9ad;
+  color: #65451f;
+  background: #fbf4e9;
+  font-size: 13px;
+}
+
+.emergency-stop-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+}
+
+.emergency-stop-heading strong {
+  font-size: 15px;
+}
+
+.emergency-stop-heading span,
+.emergency-stop-meta,
+.emergency-stop-help {
+  font-size: 12px;
+}
+
+.emergency-stop-notice p {
+  margin: 4px 0;
+}
+
+.emergency-stop-notice .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.emergency-stop-notice button:first-child {
+  border-color: var(--green);
+  color: white;
+  background: var(--green);
+}
+
+@media (max-width: 1050px) {
+  .emergency-stop-notice {
+    padding: 10px 18px;
+  }
+}

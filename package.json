@@ -30,6 +30,7 @@
     "check:source-size": "node scripts/check-source-size.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
     "@tauri-apps/api": "2.12.4",
     "better-sqlite3": "13.0.3",
     "pino": "10.4.0",

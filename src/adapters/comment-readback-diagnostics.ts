@@ -1,5 +1,6 @@
 const domKeys=['visibleChildren','strongChildren','ownChildren','receiptCandidates','uniqueReceipt','serverRoot','serverChild','serverAuthor','serverText','serverTime',
-  'serverConfirmed','domStatusConfirmed','tooltipBound','nativeConsistent','bodyMatches','authorMatches','notFlagged','proofs'] as const;
+  'serverConfirmed','domStatusConfirmed','tooltipBound','nativeConsistent','bodyMatches','bodyCandidates','bodyRawMatches','bodyRenderedMatches',
+  'bodyRebuilt','bodyCommentNodes','bodyOtherTags','bodyTagKinds','bodySvgHidden','bodySvgEmpty','bodySvgIssue','authorMatches','notFlagged','proofs'] as const;
 const pollKeys=['snapshots','rawProofs','newProofs','sameText','afterBoundary','notFuture','ackMatches','eligibleProofs','stableSnapshots'] as const;
 const responseStages=['NONE','REQUEST','HTTP','SERVICE_WORKER','CONCURRENCY','SIZE','JSON','STALE','TARGET','SCHEMA','DUPLICATE','ROOT','ACCEPTED'] as const;
 const failures=['NONE','NO_ACK','OLD_ACK','EMPTY','FILTERED','UNSTABLE','VERIFIED','GUARD_ERROR'] as const;

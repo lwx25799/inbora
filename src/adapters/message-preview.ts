@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import type { ObservationMapping } from '../config/site-mapping.js';
-import { eventBinding,type InboundEvent } from '../core/contracts.js';
+import { eventBinding,isStrong,type InboundEvent } from '../core/contracts.js';
 import { captureObserved,type ObservationBatch,type DiscoveredPeer } from './observed-reader.js';
 import { MessagePreviewStore,maximumPreviewBytes,type CapturedMessageImage } from '../storage/message-previews.js';
 import {MessagePreviewDiagnostics} from '../observability/message-preview-diagnostics.js';
@@ -18,6 +18,11 @@ interface ImageStackDiagnostic {
   foreignFirst:ImageStackContext|null;imageFirst:ImageStackContext|null;
   order:'SAME'|'FOREIGN_BEFORE'|'FOREIGN_AFTER'|'UNRELATED'|'MISSING'|'TRUNCATED';
   sameParent:boolean|null;zOrder:'LESS'|'EQUAL'|'GREATER'|'MISSING'|'TRUNCATED';foreign3D:boolean;image3D:boolean;
+  treeOrder?:{foreign:PlainStackDiagnostic;image:PlainStackDiagnostic;ancestor:{depth:number;result:PlainStackDiagnostic}|null;reachedCommon:boolean};
+}
+interface PlainStackDiagnostic {
+  display:'BLOCK'|'FLEX'|'GRID'|'OTHER';
+  failures:('DISPLAY'|'FLOAT'|'ORDER'|'TRANSFORM_STYLE'|'PERSPECTIVE'|'BACKDROP'|'FILTER'|'BLEND'|'TRANSFORM'|'TOP_LAYER')[];
 }
 interface ImageStackContext {
   z:'NEGATIVE'|'ZERO'|'POSITIVE';parentLayout:'BLOCK'|'FLEX'|'GRID'|'OTHER';threeD:boolean;
@@ -80,9 +85,9 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
       }
       return path;
     },
-    plainStack(node:Element):boolean{
+    plainStack(node:Element,allowLayout=false):boolean{
       const style=getComputedStyle(node);
-      return style.display==='block'&&style.cssFloat==='none'&&style.order==='0'&&style.transformStyle==='flat'&&
+      return (style.display==='block'||allowLayout&&['flex','grid'].includes(style.display))&&style.cssFloat==='none'&&style.order==='0'&&style.transformStyle==='flat'&&
         style.perspective==='none'&&style.backdropFilter==='none'&&style.filter==='none'&&style.mixBlendMode==='normal'&&
         (style.transform==='none'||/^matrix\([^()]+\)$/u.test(style.transform))&&
         !node.closest('dialog,[popover]')&&!document.fullscreenElement;
@@ -95,12 +100,13 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
       if(!before||!after||!common||before.z!==after.z||!before.node.isConnected||!after.node.isConnected||
         before.node.ownerDocument!==document||after.node.ownerDocument!==document||
         before.node.parentElement!==after.node.parentElement||before.node.compareDocumentPosition(after.node)!==Node.DOCUMENT_POSITION_FOLLOWING)return false;
-      // CSS2 Appendix E orders equal-level atomic contexts in tree order. Flex/grid item order,
-      // 3D rendering and top-layer promotion do not provide that proof, so keep them untrusted.
-      if(!dom.plainStack(before.node)||!dom.plainStack(after.node))return false;
+      // Equal-level atomic contexts follow their shared block parent's tree order. Their own
+      // content layout and a shared ancestor's layout do not reorder these siblings.
+      if(!dom.plainStack(before.node,true)||!dom.plainStack(after.node,true))return false;
       let current=before.node.parentElement,depth=0;
       for(;current&&depth<64;current=current.parentElement,depth++){
-        if(!dom.plainStack(current))return false;
+        // Direct flex/grid item ordering, 3D rendering and top-layer promotion stay unproven.
+        if(!dom.plainStack(current,depth>0))return false;
         if(current===common)return true;
       }
       return false;
@@ -205,7 +211,17 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
     stackDiagnostic(node:Element,image:Element):ImageStackDiagnostic|undefined{
       // Diagnostic-only bounded reads; the existing unbounded gate stack remains unchanged.
       try{
-        const diagnostic={inspect(element:Element){
+        const diagnostic={plain(element:Element,allowLayout=false):PlainStackDiagnostic{
+          const style=getComputedStyle(element),failures:PlainStackDiagnostic['failures']=[];
+          const display=style.display==='block'?'BLOCK':/^(?:inline-)?flex$/u.test(style.display)?'FLEX':/^(?:inline-)?grid$/u.test(style.display)?'GRID':'OTHER';
+          if(style.display!=='block'&&!(allowLayout&&['flex','grid'].includes(style.display)))failures.push('DISPLAY');
+          if(style.cssFloat!=='none')failures.push('FLOAT');if(style.order!=='0')failures.push('ORDER');
+          if(style.transformStyle!=='flat')failures.push('TRANSFORM_STYLE');if(style.perspective!=='none')failures.push('PERSPECTIVE');
+          if(style.backdropFilter!=='none')failures.push('BACKDROP');if(style.filter!=='none')failures.push('FILTER');if(style.mixBlendMode!=='normal')failures.push('BLEND');
+          if(style.transform!=='none'&&!/^matrix\([^()]+\)$/u.test(style.transform))failures.push('TRANSFORM');
+          if(element.closest('dialog,[popover]')||document.fullscreenElement)failures.push('TOP_LAYER');
+          return {display,failures};
+        },inspect(element:Element){
           const path:{node:Element;z:number;summary:ImageStackContext}[]=[];let current:Element|null=element,depth=0,threeD=false;
           for(;current&&depth<256;current=current.parentElement,depth++){
             const style=getComputedStyle(current),parent=current.parentElement?getComputedStyle(current.parentElement):null;
@@ -233,13 +249,22 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
         if(foreignFirst&&imageFirst){const position=foreignFirst.node.compareDocumentPosition(imageFirst.node);
           order=position&Node.DOCUMENT_POSITION_DISCONNECTED?'UNRELATED':position&Node.DOCUMENT_POSITION_FOLLOWING?'FOREIGN_BEFORE':
             position&Node.DOCUMENT_POSITION_PRECEDING?'FOREIGN_AFTER':'SAME';}
+        let treeOrder:ImageStackDiagnostic['treeOrder'];
+        if(foreignFirst&&imageFirst){
+          treeOrder={foreign:diagnostic.plain(foreignFirst.node,true),image:diagnostic.plain(imageFirst.node,true),ancestor:null,reachedCommon:false};
+          let ancestor=foreignFirst.node.parentElement,depth=0;
+          for(;ancestor&&depth<64;ancestor=ancestor.parentElement,depth++){
+            const result=diagnostic.plain(ancestor,depth>0);if(!treeOrder.ancestor&&result.failures.length)treeOrder.ancestor={depth,result};
+            if(ancestor===foreign.path[common-1]?.node){treeOrder.reachedCommon=true;break;}
+          }
+        }
         return {foreignDepth:foreign.path.length,imageDepth:target.path.length,commonPrefix:truncated?null:common,truncated,
           relation:truncated?'TRUNCATED':common===foreign.path.length&&common===target.path.length?'SAME':
             common===foreign.path.length?'FOREIGN_PREFIX':common===target.path.length?'IMAGE_PREFIX':'DIVERGENT',
           foreignFirst:foreignFirst?.summary??null,imageFirst:imageFirst?.summary??null,order,
           sameParent:foreignFirst&&imageFirst?foreignFirst.node.parentElement===imageFirst.node.parentElement:null,
           zOrder:truncated?'TRUNCATED':!foreignFirst||!imageFirst?'MISSING':foreignFirst.z<imageFirst.z?'LESS':foreignFirst.z>imageFirst.z?'GREATER':'EQUAL',
-          foreign3D:foreign.threeD,image3D:target.threeD};
+          foreign3D:foreign.threeD,image3D:target.threeD,...(treeOrder?{treeOrder}:{})};
       }catch{return undefined;}
     },
     obstruction(stage:'HIT'|'OVERLAP'|'LIMIT',node:Element|null,image:Element):NonNullable<ImageInspection['obstruction']>{
@@ -345,6 +370,8 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
     const peer:DiscoveredPeer|undefined=binding?{uid:binding.uid,secUid:binding.secUid,conversationId:event.conversationId!,title:binding.title}:
       exactPeer?.conversationId===event.conversationId&&(event.direction==='OUTGOING'&&event.actorId===mapping.self.uid||exactPeer.uid===event.actorId)?exactPeer:undefined;
     if(!peer){diagnostics.increment('skipped','BINDING_MISSING');continue;}
+    let observedBinding=eventBinding(event);
+    let inspectionStage:'SHARE_INSPECT'|'VERIFY_BINDING'='SHARE_INSPECT';
     try{
       const inspected=await page.evaluate(inspectMessageShare,{mapping,event,peer});diagnostics.snapshot.shareInspected++;
       if(inspected.diagnostic&&diagnostics.snapshot.shareSamples.length<8)diagnostics.snapshot.shareSamples.push({...inspected.diagnostic,eventBinding:eventBinding(event),phase:'SHARE'});
@@ -358,9 +385,28 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
         }
         continue;
       }
+      if(typeof inspected.displayText==='string'){
+        inspectionStage='VERIFY_BINDING';
+        const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'message-preview-only',dmWindow:true,peer};
+        const current=await page.evaluate(captureObserved,input),matching=current.events.filter(item=>item.platformEventId===event.platformEventId);
+        const fresh=matching.length===1?matching[0]:undefined;
+        const identity=(item:InboundEvent)=>JSON.stringify([item.accountId,item.channel,item.platformEventId,item.actorId,item.conversationId,
+          item.direction,item.kind,item.occurredAt,item.occurredAtPrecisionMs,item.videoId,item.commentId,item.rootCommentId,item.replyToCommentId]);
+        const placeholder=event.contentType==='IMAGE'?'[图片或表情消息，需人工查看]':'[含媒体的消息，需人工查看]';
+        const compatible=fresh&&isStrong(fresh)&&fresh.kind==='DM'&&['INCOMING','OUTGOING'].includes(fresh.direction)&&
+          /^[1-9]\d{0,63}$/u.test(fresh.platformEventId??'')&&fresh.occurredAt&&event.text===placeholder&&identity(fresh)===identity(event);
+        if(!fresh||eventBinding(fresh)!==eventBinding(event)&&!compatible){
+          diagnostics.increment('unavailable','MESSAGE_PREVIEW_TARGET_CHANGED');
+          try{store.save(event,mapping.self.uid,[{label:null,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'}]);}catch{diagnostics.increment('caught','CACHE_WRITE');}
+          continue;
+        }
+        // Keep the persisted weak carrier; compare the complete current body again after capture.
+        observedBinding=eventBinding(fresh);
+      }
     }catch{
-      diagnostics.increment('caught','SHARE_INSPECT');
-      try{store.save(event,mapping.self.uid,[{label:null,reason:'MESSAGE_PREVIEW_SHARE_INSPECT_FAILED'}]);}catch{diagnostics.increment('caught','CACHE_WRITE');}
+      diagnostics.increment('caught',inspectionStage);
+      const reason=inspectionStage==='SHARE_INSPECT'?'MESSAGE_PREVIEW_SHARE_INSPECT_FAILED':'MESSAGE_PREVIEW_TARGET_CHANGED';
+      try{store.save(event,mapping.self.uid,[{label:null,reason}]);}catch{diagnostics.increment('caught','CACHE_WRITE');}
       continue;
     }
     const previous=store.list(event,mapping.self.uid);if(previous.length&&previous.every(item=>item.state==='READY')){
@@ -393,7 +439,8 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
         stage='VERIFY_BINDING';
         const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'message-preview-only',dmWindow:true,peer};
         const final=await page.evaluate(captureObserved,input);
-        if(!final.events.some(item=>eventBinding(item)===eventBinding(event))){images.push({label:before.label,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'});break;}
+        const matching=final.events.filter(item=>item.platformEventId===event.platformEventId);
+        if(matching.length!==1||eventBinding(matching[0]!)!==observedBinding){images.push({label:before.label,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'});break;}
         images.push(bytes.length<=maximumPreviewBytes?{label:before.label,png:bytes,width:before.canvas?.width??Math.round(before.clip!.width),height:before.canvas?.height??Math.round(before.clip!.height)}:
           {label:before.label,reason:'MESSAGE_PREVIEW_TOO_LARGE'});
       }catch{diagnostics.increment('caught',stage);images.push({label:before.label,reason:'MESSAGE_PREVIEW_CAPTURE_FAILED'});break;}

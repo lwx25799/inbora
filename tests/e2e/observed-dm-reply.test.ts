@@ -125,8 +125,8 @@ test.each(['within','too-old','changed-context','not-latest'] as const)('small n
 test('native SMS verification blocks both direct-message reading and reply inspection',async()=>{
   const f=await setup();try{
     await f.owner.dm.evaluate(()=>{const n=document.createElement('div');n.className='uc-ui-verify-new_header-title';n.textContent='接收短信验证码';document.body.append(n);});
-    await expect(new ObservedReader(f.owner.dm,f.mapping.observation).dm(0)).rejects.toThrow('OBSERVATION_PAGE_BLOCKED');
-    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('PAGE_BLOCKED');
+    await expect(new ObservedReader(f.owner.dm,f.mapping.observation).dm(0)).rejects.toThrow('OBSERVATION_SECURITY_COMPONENT');
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('OBSERVATION_SECURITY_COMPONENT');
     expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
     await f.owner.dm.locator('.uc-ui-verify-new_header-title').evaluate(n=>(n as HTMLElement).style.display='none');
     expect(await f.adapter.inspect(f.event.payload)).toHaveProperty('ownId','100');

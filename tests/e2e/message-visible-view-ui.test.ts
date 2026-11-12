@@ -50,7 +50,7 @@ test('explicit visible viewing covers exact current, historical and own media wi
     await expect.poll(()=>view.count()).toBe(5);const selections=calls.filter(row=>row.command==='selectTarget').length;
     expect(await messages.filter({hasText:'[视频消息，需人工查看]'}).getByRole('button',{name:'查看这条消息',exact:true}).count()).toBe(1);
     expect(await messages.filter({hasText:'[音频消息，需人工查看]'}).getByRole('button',{name:'查看这条消息',exact:true}).count()).toBe(1);
-    const current=messages.filter({hasText:'当前回复消息'}),history=page.getByRole('log').locator('.incoming').filter({hasText:'历史消息'});
+    const current=messages.filter({hasText:'当前查看消息'}),history=page.getByRole('log').locator('.incoming').filter({hasText:'历史消息'});
     const ownRow=page.getByRole('log').locator('.outgoing').filter({hasText:'历史消息'});
     for(const [index,{row,id,result}]of [{row:current,id:a,result:{opened:true,located:true}},
       {row:history,id:historical,result:{opened:true,located:false}},{row:ownRow,id:own,result:null}].entries()){

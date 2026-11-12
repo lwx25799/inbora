@@ -54,6 +54,7 @@ const browserCommandSchema=z.union([
     expectedText:z.string().min(1).max(2000),contextVersion:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true)}).strict(),
 ]);
 const ordinaryCommandSchema = z.discriminatedUnion("command", [
+  z.object({command:z.literal('setLocalAssistantGrant'),enabled:z.boolean(),confirmed:z.literal(true)}).strict(),
   z.object({command:z.literal('openHumanDialog'),...event,selectionId:z.uuid(),editing:z.boolean().optional()}).strict(),
   z.object({command:z.literal('closeHumanDialog'),...owned}).strict(),
   z.object({command:z.literal('sendHumanReply'),commandId:z.uuid(),input:humanReplySchema}).strict(),
@@ -73,10 +74,11 @@ const ordinaryCommandSchema = z.discriminatedUnion("command", [
     .object({
       command: z.literal("getInbox"),
       channel: z.enum(["ALL", "COMMENT_NOTIFICATION", "DIRECT_MESSAGE"]),
-      status: z.enum(["ALL", "PENDING", "REVIEW", "UNCERTAIN", "CONFIRMED"]),
+      status: z.enum(["ALL", "UNREAD", "PENDING", "MANUAL_ONLY", "REVIEW", "UNCERTAIN", "CONFIRMED"]),
       page: z.number().int().min(0).max(100000),
     })
     .strict(),
+  z.object({command:z.literal('markInboxRead')}).strict(),
   z.object({ command: z.literal("getThread"), ...event,timelineBefore:z.string().min(1).max(300).optional() }).strict(),
   z.object({command:z.literal('getMessagePreview'),...event,previewId:z.string().regex(/^[a-f0-9]{64}$/).optional(),refresh:z.literal(true).optional()})
     .strict().refine(value=>(value.refresh===true)!==(value.previewId!==undefined)),

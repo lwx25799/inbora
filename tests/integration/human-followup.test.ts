@@ -72,6 +72,22 @@ test.each(['DIRECT_MESSAGE','COMMENT_NOTIFICATION'] as const)('%s unknown follow
   }finally{await f.close();}
 });
 
+test('a confirmed followup through the shared sender covers already observed later DM text in the inbox',async()=>{
+  const f=await setup();try{
+    const now=Date.now();
+    f.store.db.prepare('UPDATE send_intents SET attempt_started_at=? WHERE event_id=?').run(new Date(now-10_000).toISOString(),f.eventId);
+    const incoming=candidate({platformEventId:'post-original-incoming',occurredAt:new Date(now-5000).toISOString(),evidenceId:'post-original-incoming'});
+    const next=f.store.observe('DIRECT_MESSAGE',incoming.conversationId!,[incoming],'own-1',incoming.evidenceId,new Date(now-4000).toISOString())[0]!;
+    expect(await f.service.dispatch(f.token,{command:'getInbox',channel:'DIRECT_MESSAGE',status:'PENDING',page:0}))
+      .toMatchObject({total:1,items:[{id:next,replyStatus:'WAITING'}]});
+    await f.service.dispatch(f.token,{command:'sendHumanFollowup',commandId:randomUUID(),input:f.nextInput()});await f.service.drain();
+    expect(f.followups.latest(f.eventId)?.status).toBe('CONFIRMED');
+    expect(await f.service.dispatch(f.token,{command:'getInbox',channel:'DIRECT_MESSAGE',status:'CONFIRMED',page:0}))
+      .toMatchObject({total:1,items:[{replyStatus:'REPLIED'}]});
+    expect(f.store.event(next).status).toBe('AWAITING_DRAFT');expect(f.browser.clicks).toBe(2);
+  }finally{await f.close();}
+});
+
 test('an unknown followup does not permanently freeze a distinct later inbound in the same DM conversation',async()=>{
   const f=await setup();try{
     f.browser.uncertain=true;const unknown=randomUUID();

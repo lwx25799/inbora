@@ -54,6 +54,24 @@ export function captureCommentReply(input:Input):Frame{
     owned(root:Element,selector:string):Element[]{
       return Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root);
     },
+    commentIconIssue(node:Element):number {
+      const shapes=Array.from(node.querySelectorAll('*')),box=node.getBoundingClientRect();let issue=0;
+      if(node.textContent!=='')issue|=1;
+      if(shapes.length<1||shapes.length>8)issue|=2;
+      if(box.width<1||box.height<1||box.width>32||box.height>32)issue|=4;
+      if(!shapes.every(shape=>shape.namespaceURI===node.namespaceURI&&['g','path'].includes(shape.tagName)))issue|=8;
+      if(!shapes.some(shape=>shape.tagName==='path'))issue|=16;
+      for(const shape of [node,...shapes].slice(0,10))for(const attr of shape.attributes){
+        // An XML namespace identifies SVG; it is not an external resource reference.
+        if(attr.name==='xmlns'&&attr.value==='http://www.w3.org/2000/svg')continue;
+        if(/^on/i.test(attr.name))issue|=32;
+        if(/(?:^|:)(?:href|src)$/.test(attr.name))issue|=64;
+        if(['aria-label','aria-labelledby'].includes(attr.name))issue|=128;
+        if(attr.name==='role'&&!['none','presentation'].includes(attr.value))issue|=256;
+        if(/url\s*\(|(?:https?|data|javascript):/i.test(attr.value))issue|=512;
+      }
+      return issue;
+    },
     // Adapted from LockyBee readOwnedCommentText (MIT, fixed SHA in UPSTREAM).
     // Kept inside each serialized capture so tsx and built Node need no module closure.
     commentText(content:Element,row:Element,rowSelector:string,fixture:boolean):string|null {
@@ -65,9 +83,12 @@ export function captureCommentReply(input:Input):Frame{
           if(++visited>180)return null;
           if(node.nodeType===Node.TEXT_NODE)return traversal.append(node.nodeValue??'');
           if(!(node instanceof Element)||node.closest(rowSelector)!==row||
-            node.closest('[data-e2e="im-dialog"]')||!tags.has(node.tagName))return null;
+            node.closest('[data-e2e="im-dialog"]'))return null;
+          const icon=node.namespaceURI==='http://www.w3.org/2000/svg'&&node.tagName==='svg';
+          if(!icon&&!tags.has(node.tagName))return null;
           const style=getComputedStyle(node);
           if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return '';
+          if(icon)return dom.commentIconIssue(node)===0?'':null;
           if(node.tagName==='BR')return traversal.append('\n');
           if(node.tagName==='IMG'){
             if(++images>8||node.childNodes.length||node.closest('a[href]'))return null;
@@ -134,7 +155,8 @@ export function captureCommentReply(input:Input):Frame{
       dom.check(children.length<=100,'COMMENT_REPLY_WINDOW_TOO_LARGE');
       const readbackCounts:CommentProofCounts={visibleChildren:children.length,strongChildren:0,ownChildren:0,receiptCandidates:0,uniqueReceipt:0,
         serverRoot:0,serverChild:0,serverAuthor:0,serverText:0,serverTime:0,serverConfirmed:0,domStatusConfirmed:0,tooltipBound:0,
-        nativeConsistent:0,bodyMatches:0,authorMatches:0,notFlagged:0,proofs:0};
+        nativeConsistent:0,bodyMatches:0,bodyCandidates:0,bodyRawMatches:0,bodyRenderedMatches:0,bodyRebuilt:0,bodyCommentNodes:0,
+        bodyOtherTags:0,bodyTagKinds:0,bodySvgHidden:0,bodySvgEmpty:0,bodySvgIssue:0,authorMatches:0,notFlagged:0,proofs:0};
       const childIds=new Set<string>();
       for(const child of children){
         const childProps=dom.props(child,s.commentFiberDepth),native=dom.data(childProps,'commentInfo'),nativeUser=dom.data(native,'user');
@@ -181,7 +203,29 @@ export function captureCommentReply(input:Input):Frame{
           return url.origin===o.origin&&url.pathname===`/user/${o.self.secUid}`;});
         const authorUrl=authors.length===1?new URL(authors[0]!.getAttribute('href')??'',location.origin):null;
         const flagged=Array.from(child.querySelectorAll(`${m.pending},${m.failed}`)).some(dom.visible)||child.matches(`${m.pending},${m.failed}`);
-        const bodyMatches=bodies.length===1&&dom.commentText(bodies[0]!,child,s.commentRows,o.environment==='fixture')===text,
+        const rebuilt=bodies.length===1?dom.commentText(bodies[0]!,child,s.commentRows,o.environment==='fixture'):null;
+        readbackCounts.bodyCandidates+=bodies.length;
+        if(bodies.length===1){const body=bodies[0]!;
+          if(body.textContent===text)readbackCounts.bodyRawMatches++;
+          if(body instanceof HTMLElement&&body.innerText===text)readbackCounts.bodyRenderedMatches++;
+          if(rebuilt!==null)readbackCounts.bodyRebuilt++;
+          const nodes:Node[]=[body];let visited=0;
+          while(nodes.length&&visited++<180){const node=nodes.pop()!;
+            if(node.nodeType===Node.COMMENT_NODE)readbackCounts.bodyCommentNodes++;
+            if(node instanceof Element&&!['SPAN','DIV','P','B','I','EM','STRONG','A','BR','IMG'].includes(node.tagName)){
+              readbackCounts.bodyOtherTags++;
+              const index=['SVG','PATH','G','USE','FONT','CODE','LABEL','WBR','BUTTON'].indexOf(node.tagName.toUpperCase());
+              readbackCounts.bodyTagKinds|=1<<(index<0?9:index);
+              if(node.tagName.toLowerCase()==='svg'){
+                readbackCounts.bodySvgIssue|=dom.commentIconIssue(node);
+                if(node.getAttribute('aria-hidden')==='true')readbackCounts.bodySvgHidden++;
+                if(!node.textContent)readbackCounts.bodySvgEmpty++;
+              }
+            }
+            nodes.push(...Array.from(node.childNodes).slice(0,180-visited));
+          }
+        }
+        const bodyMatches=bodies.length===1&&rebuilt===text,
           authorMatches=authorUrl?.origin===o.origin&&!authorUrl.username&&!authorUrl.password&&authorUrl.pathname===`/user/${o.self.secUid}`;
         if(bodyMatches)readbackCounts.bodyMatches++;if(authorMatches)readbackCounts.authorMatches++;if(!flagged)readbackCounts.notFlagged++;
         if(bodyMatches&&authorMatches&&!flagged)

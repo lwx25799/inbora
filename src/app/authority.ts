@@ -16,6 +16,7 @@ import type { SendParams, Mode } from "./contracts.js";
 import { AutomationStore } from "../storage/automation-store.js";
 import type { Grant, ReplyPolicy } from "./automation-contracts.js";
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
+import {LocalAssistantStore} from '../storage/local-assistant-store.js';
 
 export type Permission = "READ" | "EDIT" | "APPROVE" | "SEND" | "CONTROL";
 interface Operator {
@@ -43,6 +44,7 @@ export interface CommandRow {
 /** Shared authority for CLI and desktop. Only trusted local entrypoints issue sessions or attest capability. */
 export class WorkbenchAuthority {
   private readonly channels: ChannelAuthority;
+  readonly assistant:LocalAssistantStore;
   private selection = new Map<
     string,
     { eventId: string | null; selectionId: string }
@@ -52,6 +54,7 @@ export class WorkbenchAuthority {
     readonly now: () => number = Date.now,
   ) {
     this.channels = new ChannelAuthority(store,now);
+    this.assistant=new LocalAssistantStore(store,now);
     requireSafe(
       store.db.pragma("user_version", { simple: true }) === 3,
       "CLIENT_MIGRATION_REQUIRED",
@@ -71,6 +74,24 @@ export class WorkbenchAuthority {
         this.now() + 8 * 3600_000,
       );
     return token;
+  }
+  issueAssistantSession(grantVersion:number):string {
+    return this.store.db.transaction(()=>{
+      const token=this.issueSession();this.assistant.bindSession(this.operator(token).id,grantVersion);return token;
+    }).immediate();
+  }
+  assistantVersion(token:string):number|null {return this.assistant.session(this.operator(token).id);}
+  checkAssistantModel(token:string,event:StoredEvent,checkAllowance=true):void {
+    const version=this.assistantVersion(token);if(version===null)return;
+    this.assistant.requireEvent('read',event,version);this.assistant.requireEvent('editControl',event,version);this.assistant.requireText(event);
+    if(checkAllowance)requireSafe(this.assistant.allowance(version,'MODEL'),'ASSISTANT_MODEL_EXHAUSTED');
+  }
+  reserveAssistantModel(token:string,event:StoredEvent,jobKey:string):void {
+    const version=this.assistantVersion(token);if(version!==null)this.assistant.reserve(version,'MODEL',jobKey,event);
+  }
+  private checkAssistantEdit(token:string,event:StoredEvent):void {
+    const version=this.assistantVersion(token);if(version===null)return;
+    this.assistant.requireEvent('read',event,version);this.assistant.requireEvent('editControl',event,version);
   }
   operator(token: string, permission: Permission = "READ"): Operator {
     const row = this.store.db
@@ -145,6 +166,10 @@ export class WorkbenchAuthority {
     const selection=this.selection.get(digest(token));
     requireSafe(selection?.eventId===eventId&&selection.selectionId===selectionId,'TARGET_SELECTION_CHANGED');
   }
+  selectionId(token:string,eventId:string):string {
+    this.operator(token);const selected=this.selection.get(digest(token));
+    requireSafe(selected?.eventId===eventId,'TARGET_SELECTION_CHANGED');return selected.selectionId;
+  }
   private writeOwner(
     e: StoredEvent,
     operator: string | null,
@@ -177,6 +202,7 @@ export class WorkbenchAuthority {
   claim(token: string, eventId: string, expected: number): Ownership {
     const op = this.operator(token, "EDIT"),
       e = this.store.event(eventId);
+    this.checkAssistantEdit(token,e);
     return this.store.db
       .transaction(() => {
         const old = this.ownership(e);
@@ -213,6 +239,7 @@ export class WorkbenchAuthority {
   renew(token: string, eventId: string, generation: number): Ownership {
     const e = this.store.event(eventId),
       op = this.operator(token, "EDIT");
+    this.checkAssistantEdit(token,e);
     return this.store.db
       .transaction(() => {
         const updated = this.store.db
@@ -306,6 +333,8 @@ export class WorkbenchAuthority {
     if (text) validText(text);
     const e = this.store.event(eventId),
       op = this.requireOwner(token, e, generation);
+    const assistantVersion=this.assistant.session(op.id);
+    if(assistantVersion!==null){this.assistant.requireEvent('read',e,assistantVersion);this.assistant.requireEvent('editControl',e,assistantVersion);}
     requireSafe(this.mode() !== "OBSERVE", "OBSERVE_READ_ONLY");
     return this.store.db
       .transaction(() => {
@@ -330,7 +359,7 @@ export class WorkbenchAuthority {
             .get(eventId),
           "INTENT_EXISTS",
         );
-        let origin = "HUMAN_TYPED";
+        let origin = assistantVersion===null?"HUMAN_TYPED":"MCP_ASSISTED";
         if (suggestionId) {
           const suggestion = this.store.db
             .prepare("SELECT event_id,dismissed FROM ai_suggestions WHERE id=?")
@@ -340,7 +369,7 @@ export class WorkbenchAuthority {
             suggestion?.event_id === eventId && !suggestion.dismissed,
             "SUGGESTION_NOT_AVAILABLE",
           );
-          origin = "AI_ASSISTED_APPROVED";
+          if(assistantVersion===null)origin = "AI_ASSISTED_APPROVED";
         }
         const id = old?.id ?? randomUUID(),
           version = expectedVersion + 1;
@@ -360,7 +389,7 @@ export class WorkbenchAuthority {
         this.store.db
           .prepare("INSERT INTO draft_revisions VALUES(?,?,?,?,?,?)")
           .run(id, version, origin, text, op.id, this.now());
-        this.store.audit("HUMAN_DRAFT_SAVED", id, { version });
+        this.store.audit(assistantVersion===null?"HUMAN_DRAFT_SAVED":"ASSISTANT_DRAFT_SAVED", id, { version });
         return this.draftFor(eventId)!;
       })
       .immediate();
@@ -450,6 +479,7 @@ export class WorkbenchAuthority {
     this.operator(token, "APPROVE");
     this.operator(token, "SEND");
     const e = this.store.event(p.eventId);
+    this.assistant.requireSend(this.operator(token).id,e);
     const policy=this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='policy_commands'").get()&&commandId?
       this.store.db.prepare('SELECT grant_version,ownership_generation FROM policy_commands WHERE command_id=?').get(commandId) as {grant_version:number;ownership_generation:number}|undefined:null;
     if(policy) {
@@ -682,6 +712,7 @@ export class WorkbenchAuthority {
           .run(id);
       },
       committed: (intentId: string) => {
+        this.assistant.commitCommand(id,this.store.event(this.command(id).event_id));
         if(this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='policy_commands'").get()) {
           const policy=this.store.db.prepare('SELECT grant_version FROM policy_commands WHERE command_id=?').get(id) as {grant_version:number}|undefined;
           if(policy)new AutomationStore(this.store,this.now).reserve(policy.grant_version,'SEND',this.command(id).event_id);

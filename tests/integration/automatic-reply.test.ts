@@ -59,9 +59,15 @@ test('a missing nested root resumes automatically only after context arrives, wi
 
 test('both channels automatically generate, backend approve, single submit and confirm within one persistent policy',async()=>{
   const f=await setup();try{
+    const updates:string[]=[];f.service.events.on('update',(message:{event:string})=>updates.push(message.event));
     await f.service.runAutomaticReply();await f.service.runAutomaticReply();await f.service.runAutomaticReply();
     expect(f.models()).toBe(2);expect(f.browser.clicks).toBe(2);
     expect(f.store.events().map(e=>e.status)).toEqual(['CONFIRMED','CONFIRMED']);
+    expect(updates.at(-1)).toBe('inbox_updated');
+    expect(await f.service.dispatch(f.token,{command:'getInbox',channel:'ALL',status:'CONFIRMED',page:0})).toMatchObject({
+      total:2,items:expect.arrayContaining([expect.objectContaining({id:f.dm,replyStatus:'REPLIED'}),expect.objectContaining({id:f.comment,replyStatus:'REPLIED'})]),
+    });
+    expect(await f.service.dispatch(f.token,{command:'getInbox',channel:'ALL',status:'PENDING',page:0})).toMatchObject({total:0});
     expect(f.store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:2},{used:2}]);
     expect(f.store.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type='AUTO_POLICY_APPROVED'").get()).toEqual({n:2});
     expect(f.store.db.prepare("SELECT count(*) AS n FROM grant_reservations WHERE kind='SEND'").get()).toEqual({n:2});

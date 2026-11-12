@@ -1,14 +1,18 @@
 import {request,reasons,sourceNames} from './api';
-import {time} from './presentation';
+import {time,replyStatusLabel} from './presentation';
 import {ReplyComposer} from './ReplyComposer';
 import {DirectMessageChat} from './DirectMessageChat';
 import {CommentThreadContext} from './CommentThreadContext';
 import {MessageText} from './MessageText';
+import {completedReply,hasSubmittedReply,submittedReplyText} from './reply-editor-draft';
+import {replyResultPresentation} from './reply-result-presentation';
 import type {ReplyViewProps} from './reply-view-types';
 
 export function ReplyDetail(props:ReplyViewProps) {
   const {detailElement,dialogElement,thread,status,selected,busy,act,setNotice,openDialog,closeDialog}=props;
   if(thread?.event.payload.channel==='DIRECT_MESSAGE')return <DirectMessageChat {...props} thread={thread}/>;
+  const unresolved=!!thread&&hasSubmittedReply(thread)&&!completedReply(thread);
+  const replyAction=unresolved?'查看回复详情':'打开人工回复';
   return <section ref={detailElement} className="detail scroll" aria-label="消息详情" data-channel="COMMENT_NOTIFICATION">
     {!thread?<div className="empty detail-empty">
       <span className="detail-mark">i</span>
@@ -18,7 +22,7 @@ export function ReplyDetail(props:ReplyViewProps) {
       <div className="detail-heading">
         <div><p className="eyebrow">{thread.event.payload.kind==='REPLY'?'楼中楼评论':'作品评论'} · {sourceNames[thread.event.payload.discovery??'NOTIFICATION']}</p>
           <h2>{thread.event.payload.actorName||'当前联系人'}</h2></div>
-        <span className="badge">{thread.replyStatus==='REPLIED'?'已回复':'等待回复'}</span>
+        <span className="badge">{replyStatusLabel(thread.replyStatus)}</span>
       </div>
       <details key={thread.event.id} className="identity">
         <summary>消息信息</summary>
@@ -46,12 +50,16 @@ export function ReplyDetail(props:ReplyViewProps) {
           <p><MessageText text={message.text}/></p><small>已回复 · {time(message.occurredAt)}</small>
         </article>)}
       </section>}
+      {unresolved&&<section className="original" aria-label="回复结果待确认">
+        <h3>回复结果待确认</h3><p><MessageText text={submittedReplyText(thread)}/></p>
+        <p className="hint">{replyResultPresentation(thread,props.send).detail}</p>
+      </section>}
       {!thread.commentContext&&<details className="history"><summary>有限上下文 · {thread.history.length} 条</summary>
         {thread.history.map((message,index)=><article key={index} className={message.direction==='OUTGOING'?'outgoing':''}>
           <small>{message.direction==='OUTGOING'?'我方已确认回复':'入站观察'} · {time(message.occurredAt)}</small><p><MessageText text={message.text}/></p>
         </article>)}
       </details>}
-      <button className="primary" onClick={()=>void act('打开人工回复',openDialog)}>打开人工回复</button>
+      <button className="primary" onClick={()=>void act(replyAction,openDialog)}>{replyAction}</button>
       <dialog ref={dialogElement} className="human-dialog" aria-label="人工回复对话框" onCancel={event=>{event.preventDefault();void act('保存并关闭',closeDialog);}}>
         <div className="dialog-heading"><h2>回复 {thread.event.payload.actorName||'当前目标'}</h2>
           <button onClick={()=>void act('保存并关闭',closeDialog)}>关闭并保留草稿</button></div>

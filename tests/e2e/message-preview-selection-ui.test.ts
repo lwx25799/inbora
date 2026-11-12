@@ -43,14 +43,14 @@ test('viewing an older native media message opens its browser conversation witho
     const eligible=page.getByRole('log').locator('.chat-message.incoming').filter({hasNotText:'历史消息'});
     expect(await messages.count()).toBe(4);expect(await history.getByRole('button',{name:'查看这条消息',exact:true}).count()).toBe(1);
     expect(await own.getByRole('button',{name:'查看这条消息',exact:true}).count()).toBe(1);
-    expect(await eligible.nth(1).getByText(/当前回复消息/u).count()).toBe(1);
+    expect(await eligible.nth(1).getByText(/当前查看消息/u).count()).toBe(1);
     const selections=calls.filter(call=>call.command==='selectTarget').length;
     await eligible.nth(0).getByRole('button',{name:'查看这条消息',exact:true}).click();
     await expect.poll(()=>calls.filter(call=>call.command==='openTarget').length).toBe(1);
     expect(calls.filter(call=>call.command==='openTarget').at(-1)).toEqual({command:'openTarget',eventId:oldId,visible:true});
     await eligible.nth(0).getByRole('status').getByText('已在浏览器打开会话',{exact:true}).waitFor();
     expect(calls.filter(call=>call.command==='selectTarget')).toHaveLength(selections);
-    expect(await eligible.nth(1).getByText(/当前回复消息/u).count()).toBe(1);expect(await editor.inputValue()).toBe('查看旧消息时保留的人稿');
+    expect(await eligible.nth(1).getByText(/当前查看消息/u).count()).toBe(1);expect(await editor.inputValue()).toBe('查看旧消息时保留的人稿');
     expect(await eligible.nth(0).getByRole('button',{name:'查看这条消息',exact:true}).count()).toBe(1);
     expect(await eligible.nth(1).getByRole('button',{name:'查看这条消息',exact:true}).count()).toBe(1);
     expect(calls.some(call=>['sendHumanReply','generateSuggestion','syncInbox','getMessagePreview'].includes(call.command))).toBe(false);expect(errors).toEqual([]);

@@ -3,11 +3,12 @@ import type {EventStore} from '../storage/store.js';
 import type {ClientCommand} from './contracts.js';
 import {MessagePreviewStore,type MessagePreviewAttachment} from '../storage/message-previews.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
+import {inboxReadBoundary,scopedReadEventIds} from './inbox-read-state.js';
 import {MessageShareStore,type MessageShare} from '../storage/message-shares.js';
-import {InboxProjection,inboxGroupKey} from './inbox-projection.js';
+import {InboxProjection,inboxGroupKey,type ReplyStatus} from './inbox-projection.js';
+import {readInboxPreviews,inboxPreviewKey} from './inbox-preview.js';
 export {inboxGroupKey} from './inbox-projection.js';
 
-type ReplyStatus='WAITING'|'REPLIED';
 export interface TimelineItem {
   id:string;
   eventId:string;
@@ -48,30 +49,50 @@ export class InboxQueries {
       const key=inboxGroupKey(event),members=groups.get(key)??[];members.push(event);groups.set(key,members);
     }
     const time=(event:StoredEvent)=>Date.parse(event.payload.occurredAt??'')||0;
-    const rows=[...groups.entries()].map(([groupKey,members])=>({...projection.group(members),groupKey}))
-      .filter(row=>c.status==='PENDING'?row.replyStatus==='WAITING':c.status==='CONFIRMED'?row.replyStatus==='REPLIED':
+    const boundary=inboxReadBoundary(this.store);
+    const scoped=scopedReadEventIds(this.store,boundary);
+    const latestPreviews=c.channel==='COMMENT_NOTIFICATION'?new Map():readInboxPreviews(this.store,projection.tables,projection.own);
+    const groupsWithRead=[...groups.entries()].map(([groupKey,members])=>{
+      const group=projection.group(members);
+      const latestMessage=group.latest.payload.channel==='DIRECT_MESSAGE'?latestPreviews.get(inboxPreviewKey(group.latest)):undefined;
+      return {...group,groupKey,latestMessage,
+        unread:members.some(event=>(projection.order.get(event.id)??0)>boundary&&!scoped.has(event.id))};
+    });
+    const unreadTotal=groupsWithRead.filter(row=>row.unread).length;
+    const rows=groupsWithRead
+      .filter(row=>c.status==='UNREAD'?row.unread:c.status==='PENDING'?row.replyStatus==='WAITING':c.status==='MANUAL_ONLY'?row.replyStatus==='MANUAL_ONLY':c.status==='CONFIRMED'?row.replyStatus==='REPLIED':
         c.status==='REVIEW'?row.members.some(e=>e.status==='MANUAL_REVIEW'):
           c.status==='UNCERTAIN'?row.members.some(e=>e.status==='UNCERTAIN'||e.status==='INTENT_RECORDED'):true)
-      .sort((a,b)=>time(b.latest)-time(a.latest)||(projection.order.get(b.latest.id)??0)-(projection.order.get(a.latest.id)??0));
+      .sort((a,b)=>(Date.parse(b.latestMessage?.occurredAt??'')||time(b.latest))-(Date.parse(a.latestMessage?.occurredAt??'')||time(a.latest))||
+        (projection.order.get(b.latest.id)??0)-(projection.order.get(a.latest.id)??0));
     const own=projection.own.get('account_001'),previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
-    return {total:rows.length,page:c.page,pageSize:20,items:rows.slice(c.page*20,c.page*20+20).map(row=>{
-      const share=own?shares.read(row.latest.payload,own):null,displayText=own?previews.displayText(row.latest.payload,own):null;
+    return {total:rows.length,unreadTotal,page:c.page,pageSize:20,items:rows.slice(c.page*20,c.page*20+20).map(row=>{
+      const message=row.latestMessage;
+      const payload=message?message.payload:row.latest.payload;
+      const share=payload&&own?shares.read(payload,own):null;
+      const displayText=payload&&own?previews.displayText(payload,own):null;
       return {
-        id:row.selected.id,status:row.selected.status,replyStatus:row.replyStatus,channel:row.latest.payload.channel,
-        author:row.latest.payload.actorName,preview:row.latest.payload.text,time:row.latest.payload.occurredAt,
+        id:row.selected.id,status:row.selected.status,replyStatus:row.replyStatus,unread:row.unread,channel:row.latest.payload.channel,
+        author:row.latest.payload.actorName,preview:message?.text??row.latest.payload.text,time:message?.occurredAt??row.latest.payload.occurredAt,
+        ...(message?{previewDirection:message.direction}:{}),
         ...(displayText!==null?{displayText}:{}),
         source:row.latest.payload.discovery??(row.latest.payload.channel==='DIRECT_MESSAGE'?'DIRECT_MESSAGE':'NOTIFICATION'),
         groupKey:row.groupKey,latestEventId:row.latest.id,messageCount:row.members.length,
         ...(row.latest.payload.channel==='COMMENT_NOTIFICATION'?{commentCount:row.members.length,
           waitingCount:row.members.filter(event=>projection.replyStatus(event)==='WAITING').length}:{}),
-        resumeEventId:projection.resumeEvent(row.members,row.replyStatus),previewEventId:row.latest.id,
-        attachments:!share&&own?previews.list(row.latest.payload,own):[],...(share?{share}:{}),
+        resumeEventId:projection.resumeEvent(row.members,row.replyStatus),previewEventId:message?.eventId??row.latest.id,
+        attachments:!share&&payload&&own?previews.list(payload,own):[],...(share?{share}:{}),
       };
     })};
   }
 
   timeline(event:StoredEvent,before?:string){
+    return {...this.timelinePage(event,before),projectionRevision:this.projectionRevision(event)};
+  }
+
+  private timelinePage(event:StoredEvent,before?:string,limit=pageSize){
     const group=inboxGroupKey(event),cursor=this.cursor(group,before),e=event.payload;
+    const candidateLimit=Math.max(pageSize,limit)+1;
     // Missing native identity must not merge weak events under a shared '?' target.
     const scope=e.channel==='DIRECT_MESSAGE'?!e.conversationId:!e.videoId||!e.commentId;
     const where=scope?'e.id=?':'e.account_id=? AND e.channel=? AND e.target_key=?';
@@ -83,7 +104,7 @@ export class InboxQueries {
       json_extract(e.payload,'$.text') AS text,json_extract(e.payload,'$.occurredAt') AS occurred_at,
       ${timeSql("json_extract(e.payload,'$.occurredAt')")} AS at,e.status='BASELINE' AS historical
       FROM inbound_events e WHERE ${where}) ${bound} ORDER BY at DESC,id DESC LIMIT ?`)
-      .all(...args,...boundArgs,pageSize+1) as MessageRow[];
+      .all(...args,...boundArgs,candidateLimit) as MessageRow[];
     const hasVerification=!!this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='verification_results'").get();
     const verified=hasVerification?`COALESCE((SELECT verified FROM verification_results v WHERE v.intent_id=i.id ORDER BY v.rowid DESC LIMIT 1),
       CASE i.status WHEN 'CONFIRMED' THEN 1 ELSE 0 END)=1`:"i.status='CONFIRMED'";
@@ -101,7 +122,7 @@ export class InboxQueries {
       i.attempt_started_at AS occurred_at,${timeSql('i.attempt_started_at')} AS at,0 AS historical,i.text_digest
       FROM send_intents i JOIN inbound_events e ON e.id=i.event_id JOIN reply_drafts d ON d.id=i.draft_id
       WHERE ${where} AND ${verified} ${notObserved('i.attempt_started_at')}) ${bound} ORDER BY at DESC,id DESC LIMIT ?`)
-      .all(...args,...boundArgs,pageSize+1) as (MessageRow&{text_digest:string})[];
+      .all(...args,...boundArgs,candidateLimit) as (MessageRow&{text_digest:string})[];
     const retried=this.store.db.prepare(`SELECT * FROM (SELECT 'retry:'||i.id AS id,e.id AS event_id,d.text,
       i.time AS occurred_at,${timeSql('i.time')} AS at,0 AS historical,json_extract(i.detail_redacted,'$.textDigest') AS text_digest
       FROM audit_events i JOIN inbound_events e ON e.id=json_extract(i.detail_redacted,'$.eventId')
@@ -109,21 +130,21 @@ export class InboxQueries {
       WHERE ${where} AND i.event_type='MANUAL_RETRY_INTENT' AND
         (SELECT json_extract(r.detail_redacted,'$.result') FROM audit_events r WHERE r.entity_id=i.id AND r.event_type='MANUAL_RETRY_RECEIPT'
           ORDER BY r.rowid DESC LIMIT 1)='CONFIRMED' ${notObserved('i.time')}) ${bound} ORDER BY at DESC,id DESC LIMIT ?`)
-      .all(...args,...boundArgs,pageSize+1) as (MessageRow&{text_digest:string})[];
+      .all(...args,...boundArgs,candidateLimit) as (MessageRow&{text_digest:string})[];
     const observed=hasChat&&e.channel==='DIRECT_MESSAGE'&&e.conversationId?this.store.db.prepare(`SELECT * FROM (
       SELECT 'observed:'||id AS id,id AS event_id,json_extract(payload,'$.text') AS text,
         json_extract(payload,'$.occurredAt') AS occurred_at,${timeSql("json_extract(payload,'$.occurredAt')")} AS at,historical
       FROM chat_messages WHERE account_id=? AND conversation_id=? AND own_id=(SELECT own_id FROM accounts WHERE id=?) AND conflicted=0
-    ) ${bound} ORDER BY at DESC,id DESC LIMIT ?`).all(e.accountId,e.conversationId,e.accountId,...boundArgs,pageSize+1) as MessageRow[]:[];
+    ) ${bound} ORDER BY at DESC,id DESC LIMIT ?`).all(e.accountId,e.conversationId,e.accountId,...boundArgs,candidateLimit) as MessageRow[]:[];
     const followups=this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get()?this.store.db.prepare(`SELECT * FROM (
       SELECT 'followup:'||t.command_id AS id,t.event_id,t.text,t.attempt_started_at AS occurred_at,
       ${timeSql('t.attempt_started_at')} AS at,0 AS historical FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
       WHERE ${where} AND t.status='CONFIRMED' ${hasChat?`AND NOT EXISTS(SELECT 1 FROM chat_messages m WHERE m.account_id=e.account_id
         AND m.conversation_id=json_extract(e.payload,'$.conversationId') AND m.conflicted=0 AND m.native_id_digest=t.native_id_digest)`:''})
-      ${bound} ORDER BY at DESC,id DESC LIMIT ?`).all(...args,...boundArgs,pageSize+1) as MessageRow[]:[];
+      ${bound} ORDER BY at DESC,id DESC LIMIT ?`).all(...args,...boundArgs,candidateLimit) as MessageRow[]:[];
     const messages=[...incoming,...observed,...followups,...[...sent,...retried].filter(row=>digest(row.text)===row.text_digest)]
       .sort((a,b)=>b.at-a.at||b.id.localeCompare(a.id));
-    const selected=messages.slice(0,pageSize),hasMore=messages.length>pageSize;
+    const selected=messages.slice(0,limit),hasMore=messages.length>limit;
     const own=this.store.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(e.accountId) as {own_id:string}|undefined;
     const previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
     const items=selected.reverse().map((row):TimelineItem=>{
@@ -137,7 +158,7 @@ export class InboxQueries {
         attachments:!share&&payload&&own?previews.list(payload,own.own_id):[],...(share?{share}:{})};
     });
     const oldest=selected[0];
-    return {items,pageSize,hasMore,projectionRevision:this.projectionRevision(event),
+    return {items,pageSize,hasMore,
       before:hasMore&&oldest?Buffer.from(JSON.stringify({group,at:oldest.at,order:oldest.id})).toString('base64url'):null};
   }
 

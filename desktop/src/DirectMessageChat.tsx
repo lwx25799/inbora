@@ -1,6 +1,6 @@
 import {useEffect,useLayoutEffect,useRef,useState} from 'react';
 import {request,reasons,type Thread,type TimelineItem} from './api';
-import {time} from './presentation';
+import {time,replyStatusLabel} from './presentation';
 import {ReplyComposer} from './ReplyComposer';
 import {MessageAttachments,isMediaPlaceholder} from './MessageAttachments';
 import {ShareLink,validShare} from './ShareLink';
@@ -76,7 +76,7 @@ export function DirectMessageChat(props:ReplyViewProps & {thread:Thread}){
   return <section className="detail chat-detail" aria-label="私信会话">
     <header className="chat-heading">
       <div><p className="eyebrow">私信会话</p><h2>{thread.event.payload.actorName||'当前联系人'}</h2></div>
-      <span className="badge">{(thread.conversationReplyStatus??thread.replyStatus)==='REPLIED'?'已回复':'等待回复'}</span>
+      <span className="badge">{replyStatusLabel(['NOT_REQUIRED','MANUAL_ONLY'].includes(thread.replyStatus)?thread.replyStatus:thread.conversationReplyStatus??thread.replyStatus)}</span>
       <details className="chat-information"><summary>会话信息</summary>
         <p>本人：{status.account?.identity??'已绑定账号'}<br/>对方：{thread.event.payload.actorId??'身份待核对'}<br/>会话：{thread.event.payload.conversationId}</p>
         {status.browser.mode==='headed'&&!status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('打开准确会话',async()=>{await request({command:'openTarget',eventId:thread.event.id});setNotice('已在专属浏览器中定位，未填写或发送');})}>在专属浏览器查看原对象</button>}
@@ -89,10 +89,10 @@ export function DirectMessageChat(props:ReplyViewProps & {thread:Thread}){
       {!visible.items.length&&<p className="empty">正在读取会话消息</p>}
       {visible.items.map(message=><article key={message.id} className={'chat-message '+(message.direction==='OUTGOING'?'outgoing':'incoming')}>
         <small>{message.direction==='OUTGOING'?message.origin==='CONFIRMED'?'我方已回复':'我方消息':'对方'} · {time(message.occurredAt)}{message.historical?' · 历史消息':''}
-          {message.direction==='INCOMING'&&message.eventId===thread.event.id?' · 当前回复消息':''}</small>
+          {message.direction==='INCOMING'&&message.eventId===thread.event.id?['NOT_REQUIRED','MANUAL_ONLY'].includes(thread.replyStatus)?' · 当前查看消息':' · 当前回复消息':''}</small>
         <div className="message-bubble">{(!!message.displayText||!imageReplacesPlaceholder(message))&&<p><MessageText text={message.displayText??message.text}/></p>}
           {validShare(message.share)?<ShareLink key={message.share!.url} share={message.share!}/>:<MessageAttachments message={message}/>}
-          {message.observationIssue&&<p className="message-quality">{message.displayText?'此消息的其他内容仍需人工查看，暂不自动回复':reasons[message.observationIssue]??'此消息需人工查看'}</p>}
+          {message.observationIssue&&<p className="message-quality">{validShare(message.share)?'分享内容无需自动回复，可按需人工回复':message.displayText?'此消息的其他内容仍需人工查看，暂不自动回复':reasons[message.observationIssue]??'此消息需人工查看'}</p>}
           {message.origin==='OBSERVED'&&message.observationIssue==='DM_CONTENT_UNVERIFIED'&&
             ['IMAGE','MIXED','VIDEO','AUDIO'].includes(message.contentType??'')&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(message.eventId)&&
             <MessageView key={group+':'+thread.event.id+':'+message.id} eventId={message.eventId}/>}

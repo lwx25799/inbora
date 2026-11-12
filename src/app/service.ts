@@ -34,9 +34,15 @@ import { VerificationScheduler } from "./verification-scheduler.js";
 import { CredentialStore } from "./credentials.js";
 import {runAutomaticReply} from './automatic-reply.js';
 import {readDiagnostics} from './diagnostics.js';
+import {markInboxRead} from './inbox-read-state.js';
+import {classifyStoredShares} from './message-disposition.js';
 import {EvidenceMaintenance} from './evidence-maintenance.js';
 import {runtimePerformance} from '../observability/runtime-performance.js';
 import {generateSuggestion} from './suggestion-generation.js';
+import {migrateLocalAssistant} from '../storage/local-assistant-migration.js';
+import type {ReplyPolicy} from './automation-contracts.js';
+import {configureAssistantConnection} from './local-assistant-connection.js';
+import {recoverEmergency} from './emergency-recovery.js';
 
 export function clientError(error: unknown): string {
   return error instanceof Blocked
@@ -81,6 +87,7 @@ export class ClientService {
   private onlineAbort=new AbortController();
   private recoveryDiagnosticPending=false;
   private readonly maintenance:EvidenceMaintenance;
+  private assistantConnection={ready:false,instanceId:null as string|null,transport:'stdio' as const,tools:16 as const};
   private sync: InboxSync = {
     runId: null, running: false, cancelled: false, source: null, results: [],
   };
@@ -104,9 +111,11 @@ export class ClientService {
       await migrateAutomation(this.store,join(this.browser.root,"backups",`automation-${randomUUID()}.sqlite`));
       await ensureQueryIndexes(this.store,join(this.browser.root,'backups',`query-indexes-${randomUUID()}.sqlite`));
       await migrateFollowups(this.store,join(this.browser.root,'backups',`human-followups-${randomUUID()}.sqlite`));
+      await migrateLocalAssistant(this.store,join(this.browser.root,'backups',`local-assistant-${randomUUID()}.sqlite`));
       this.followups.recover();
       this.automation=new AutomationStore(this.store,this.authority.now);
       this.automation.initialize(this.startedAt);
+      classifyStoredShares(this.store,this.browser.root);
       this.recoveryDiagnosticPending=new BrowserDraftRecovery(this.store,this.authority,this.browser).hasStartupCandidate();
       if(this.authority.mode()==='LIMITED_AUTO')this.authority.resumeIdleAutomation();
       if(!this.automation.state().emergencyStopped&&this.authority.paused()) {
@@ -149,6 +158,14 @@ export class ClientService {
   startOnline():void {
     this.onlineEnabled=true;this.keepOnline();
   }
+  setAssistantConnection(instanceId:string|null):void{
+    this.assistantConnection={ready:instanceId!==null,instanceId,transport:'stdio',tools:16};
+    this.emit('status_updated');
+  }
+  async assistantConnected():Promise<void>{
+    const check=()=>requireSafe(!this.closing,'CLIENT_CLOSING');check();
+    if(await configureAssistantConnection(this.authority.assistant,this.browser.root,'IF_NEW',check))this.emit('status_updated');
+  }
   private maintainEvidence():void {
     const idle=!this.closing&&!this.autoTask&&!this.onlineTask&&!this.syncTask&&!this.observing&&!this.modelPending.size&&
       !this.pending.size&&!this.collector?.status().running&&this.browser.isIdle();
@@ -185,7 +202,7 @@ export class ClientService {
       if(this.closing||this.onlineAbort.signal.aborted)return;
       const code=clientError(error);
       this.onlineRetryAt=this.authority.now()+30_000;
-      if(collectionStops.has(code)){this.automation!.stop(true);this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}
+      if(collectionStops.has(code)){this.automation!.stop(true,code,'CONNECTION');this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}
       this.store.audit('SINGLE_ACCOUNT_CONNECTION_FAILED',digest(code),{stopped:collectionStops.has(code)});
     }).finally(()=>{this.onlineTask=null;if(!this.closing)this.emit('status_updated');});
     this.onlineTask=task;this.track(task);
@@ -222,9 +239,7 @@ export class ClientService {
     this.emit("inbox_sync_updated");
   }
   private syncMustStop(code: string): boolean {
-    return ["OBSERVATION_PAGE_BLOCKED", "OBSERVATION_ACCOUNT_CHANGED", "ACCOUNT_CHANGED", "BROWSER_CLOSED", "PLATFORM_STOP", "CHALLENGE_REQUIRED",
-      "LOGIN_REQUIRED", "ACCOUNT_NOT_VERIFIED", "UNEXPECTED_ORIGIN", "OWNER_LOCKED_OR_PORT_UNAVAILABLE",
-      "OPERATOR_EXPIRED", "OPERATOR_PERMISSION_DENIED"].includes(code);
+    return collectionStops.has(code)||["BROWSER_CLOSED","OPERATOR_EXPIRED","OPERATOR_PERMISSION_DENIED"].includes(code);
   }
   private observationFailed(source:"works"|"dm"|"notifications",error:unknown):never {
     const code=clientError(error),mode=this.browser.status().mode;
@@ -253,12 +268,15 @@ export class ClientService {
     }
   }
   private startInboxSync(token: string): void {
+    const assistantVersion=this.authority.assistantVersion(token);
+    const scope=assistantVersion===null?null:this.authority.assistant.require('editControl',assistantVersion);
+    const sources:('works'|'dm')[]=scope?scope.scope.channels.map(channel=>channel==='DIRECT_MESSAGE'?'dm':'works'):['works','dm'];
     if (this.syncTask) return;
     requireSafe(!this.observing, "INBOX_SYNC_IN_PROGRESS");
     requireSafe(!this.automation?.state().emergencyStopped,'COLLECTION_CANCELLED');
     this.sync = {
-      runId: randomUUID(), running: true, cancelled: false, source: "works",
-      results: [{source: "works", state: "RUNNING", error: null}, {source: "dm", state: "PENDING", error: null}],
+      runId: randomUUID(), running: true, cancelled: false, source: sources[0]!,
+      results: sources.map(source=>({source,state:'PENDING',error:null})),
     };
     const ownerEpoch=this.browser.ownerEpoch,abort=new AbortController();this.syncAbort=abort;
     const task = Promise.resolve().then(async () => {
@@ -269,6 +287,7 @@ export class ClientService {
         this.emit("inbox_sync_updated");
         try {
           this.authority.operator(token, "CONTROL");
+          if(assistantVersion!==null)this.authority.assistant.require('editControl',assistantVersion);
           requireSafe(this.browser.ownerEpoch === ownerEpoch, "BROWSER_CLOSED");
           const deferred=await this.syncSource(result.source,abort.signal);
           if(!this.sync.cancelled){result.state=deferred?'DEFERRED':'SUCCEEDED';result.error=deferred;}
@@ -279,7 +298,7 @@ export class ClientService {
           result.error = code;
           const safeCode=/^[A-Z][A-Z0-9_]{0,99}$/u.test(code)?code:'PRIVATE_DIAGNOSTICS';
           this.store.audit(`INBOX_SYNC_${result.source.toUpperCase()}_${result.state}_${safeCode}`,this.sync.runId!);
-          if (this.syncMustStop(code)) {
+          if (this.syncMustStop(code)||code.startsWith('ASSISTANT_')) {
             for (const next of this.sync.results) if (next.state === "PENDING") next.state = "SKIPPED";
             break;
           }
@@ -297,16 +316,16 @@ export class ClientService {
     this.track(task);
   }
   private thread(token: string,eventId: string) {
-    return this.queries.thread(token,eventId,this.automation,undefined,this.suggestionState());
+    return this.queries.thread(token,eventId,this.automation,undefined,this.suggestionState(),this.verification?.activeEventId());
   }
   private suggestionState(){return{settings:this.settings,keyPresent:!!this.key,modelAuthorized:this.modelAuthorized,
     modelBusy:this.modelPending.size>0,recovering:this.browser.loginRecovery};}
   private status(token: string) {
-    return this.queries.status(token,{
+    return {...this.queries.status(token,{
       settings:this.settings,keyPresent:!!this.key,keyStored:this.keyStored,keyStorageError:this.keyStorageError,
       modelAuthorized:this.modelAuthorized,modelBusy:this.modelPending.size>0,automation:this.automation,
       collector:this.collector?.status(),inboxRevision:this.inboxRevision,sync:this.sync,
-    });
+    }),localAssistant:this.authority.assistant.state(),localAssistantConnection:{...this.assistantConnection}};
   }
   async dispatch(token: string, raw: unknown): Promise<unknown> {
     requireSafe(!this.closing, "CLIENT_CLOSING");
@@ -314,6 +333,12 @@ export class ClientService {
     this.authority.operator(token);
     if(!['getStatus','getInbox','getThread','getDiagnostics','getAudit','getSendResult','getMessagePreview'].includes(c.command))this.maintenance.cancel();
     switch (c.command) {
+      case 'setLocalAssistantGrant': {
+        this.authority.operator(token,'CONTROL');
+        requireSafe(this.authority.assistantVersion(token)===null,'ASSISTANT_CANNOT_GRANT');
+        await configureAssistantConnection(this.authority.assistant,this.browser.root,c.enabled?'ENABLE':'DISABLE',()=>requireSafe(!this.closing,'CLIENT_CLOSING'));
+        this.emit('status_updated');return this.status(token);
+      }
       case 'openHumanDialog': {
         this.authority.operator(token,'EDIT');
         this.authority.select(token,c.eventId,c.selectionId);
@@ -323,7 +348,7 @@ export class ClientService {
           const current=this.authority.ownership(event);
           const owner=current.operator_id===this.authority.operator(token).id&&current.lease_expires_at>this.authority.now()?current:
             this.authority.claim(token,c.eventId,current.generation);
-          this.dialogs.set(c.eventId,{token,generation:owner.generation});
+          if(this.authority.assistantVersion(token)===null)this.dialogs.set(c.eventId,{token,generation:owner.generation});
         }
         this.emit('takeover_updated');return this.thread(token,c.eventId);
       }
@@ -370,6 +395,10 @@ export class ClientService {
         this.emit('status_updated');return this.status(token);
       case 'setAutomaticReply':
         this.authority.operator(token,'CONTROL');requireSafe(this.automation,'AUTOMATION_NOT_READY');
+        if(this.authority.assistantVersion(token)!==null){
+          const scope=this.authority.assistant.require('editControl',this.authority.assistantVersion(token)!),policy=this.automation.active('AUTO_REPLY');
+          if(c.enabled&&policy)this.authority.assistant.requirePolicy(scope.version,policy.scope as ReplyPolicy);
+        }
         if(c.enabled){
           requireSafe(!this.automation.state().emergencyStopped,'EMERGENCY_STOPPED');
           const grant=this.automation.active('AUTO_REPLY');requireSafe(grant,'AUTO_POLICY_REQUIRED');
@@ -406,7 +435,7 @@ export class ClientService {
         return {...readDiagnostics(this.store),performance:runtimePerformance.snapshot(),evidence:this.maintenance.status()};
       case "getThread":
         return {
-          ...this.queries.thread(token,c.eventId,this.automation,c.timelineBefore,this.suggestionState()),
+          ...this.queries.thread(token,c.eventId,this.automation,c.timelineBefore,this.suggestionState(),this.verification?.activeEventId()),
           workUrl: await this.browser.workUrl(
             this.store.event(c.eventId).payload,
             this.store,
@@ -434,6 +463,12 @@ export class ClientService {
         }
       }
       case 'getInbox': return this.queries.inbox(c);
+      case 'markInboxRead': {
+        this.authority.operator(token,'EDIT');
+        const version=this.authority.assistantVersion(token),grant=version===null?null:this.authority.assistant.require('editControl',version);
+        const ids=grant?this.store.events().filter(event=>this.authority.assistant.inScope(grant,event)).map(event=>event.id):undefined;
+        const result=markInboxRead(this.store,ids);this.inboxRevision++;this.emit('inbox_updated');return result;
+      }
       case "selectTarget":
         this.closeOtherDialogs(token,c.eventId);
         this.authority.select(token, c.eventId, c.selectionId);
@@ -471,6 +506,12 @@ export class ClientService {
       case "pause":
       case "resume":
       case "emergencyStop": {
+        if(c.command==='resume'&&c.eventId===null&&this.automation?.state().emergencyStopped){
+          this.authority.operator(token,'CONTROL');this.onlineAbort=new AbortController();
+          await recoverEmergency({store:this.store,data:this.automation,authority:this.authority,browser:this.browser,token,
+            signal:AbortSignal.any([this.onlineAbort.signal,AbortSignal.timeout(30_000)]),closing:()=>this.closing});
+          this.resumeAfterLogin();this.keepOnline();this.emit('status_updated');return this.status(token);
+        }
         this.authority.pause(
           token,
           c.command === "emergencyStop" ? null : c.eventId,
@@ -478,9 +519,10 @@ export class ClientService {
         );
         if (c.command === "emergencyStop") {
           this.inboxRevision++;
+          this.automation?.stop(true,'MANUAL_EMERGENCY_STOP','MANUAL');
           this.onlineAbort.abort();
           this.dialogs.clear();
-          this.automation?.stop(true);this.collector?.cancel();
+          this.collector?.cancel();
           this.verification?.cancel();
           this.stopSync();
           this.modelAbort.abort();
@@ -632,7 +674,8 @@ export class ClientService {
       status: row.status,
       intentId: row.intent_id,
       reason: row.reason,
-      accepted:row.status!=='FAILED_BEFORE_CLICK'&&!!this.store.db.prepare('SELECT command_id FROM manual_send_inputs WHERE command_id=?').get(id),
+      accepted:row.status!=='FAILED_BEFORE_CLICK'&&!!this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='manual_send_inputs'").get()&&
+        !!this.store.db.prepare('SELECT command_id FROM manual_send_inputs WHERE command_id=?').get(id),
     };
   }
   private enqueueHuman(operation:()=>Promise<void>):Promise<void>{
@@ -650,7 +693,7 @@ export class ClientService {
       provider:this.provider,humanReplies:this.humanReplies,settings:this.settings,key:this.key,modelPending:this.modelPending,
       automaticSignal:this.automaticAbort.signal,modelSignal:this.modelAbort.signal,isClosing:()=>this.closing,
       updated:()=>{this.inboxRevision++;this.emit('inbox_updated');},errorCode:clientError,beforeWork:()=>this.maintenance.cancel(),statusUpdated:()=>this.emit('status_updated'),
-      stop:()=>{this.automation!.stop(true);this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}});
+      stop:(code:string)=>{this.automation!.stop(true,code,'AUTOMATIC_REPLY');this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}});
   }
   private async deliver(
     token: string,

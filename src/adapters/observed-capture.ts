@@ -137,6 +137,24 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       const children = dom.data(dom.react(element,'__reactProps$'),'children');
       return dom.data(Array.isArray(children) ? dom.data(children,'0') : children,'props');
     },
+    commentIconIssue(node:Element):number {
+      const shapes=Array.from(node.querySelectorAll('*')),box=node.getBoundingClientRect();let issue=0;
+      if(node.textContent!=='')issue|=1;
+      if(shapes.length<1||shapes.length>8)issue|=2;
+      if(box.width<1||box.height<1||box.width>32||box.height>32)issue|=4;
+      if(!shapes.every(shape=>shape.namespaceURI===node.namespaceURI&&['g','path'].includes(shape.tagName)))issue|=8;
+      if(!shapes.some(shape=>shape.tagName==='path'))issue|=16;
+      for(const shape of [node,...shapes].slice(0,10))for(const attr of shape.attributes){
+        // An XML namespace identifies SVG; it is not an external resource reference.
+        if(attr.name==='xmlns'&&attr.value==='http://www.w3.org/2000/svg')continue;
+        if(/^on/i.test(attr.name))issue|=32;
+        if(/(?:^|:)(?:href|src)$/.test(attr.name))issue|=64;
+        if(['aria-label','aria-labelledby'].includes(attr.name))issue|=128;
+        if(attr.name==='role'&&!['none','presentation'].includes(attr.value))issue|=256;
+        if(/url\s*\(|(?:https?|data|javascript):/i.test(attr.value))issue|=512;
+      }
+      return issue;
+    },
     // Adapted from LockyBee readOwnedCommentText (MIT, fixed SHA in UPSTREAM).
     // Kept inside each serialized capture so tsx and built Node need no module closure.
     commentText(content:Element,row:Element,rowSelector:string,fixture:boolean):string|null {
@@ -148,9 +166,12 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
           if(++visited>180)return null;
           if(node.nodeType===Node.TEXT_NODE)return traversal.append(node.nodeValue??'');
           if(!(node instanceof Element)||node.closest(rowSelector)!==row||
-            node.closest('[data-e2e="im-dialog"]')||!tags.has(node.tagName))return null;
+            node.closest('[data-e2e="im-dialog"]'))return null;
+          const icon=node.namespaceURI==='http://www.w3.org/2000/svg'&&node.tagName==='svg';
+          if(!icon&&!tags.has(node.tagName))return null;
           const style=getComputedStyle(node);
           if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return '';
+          if(icon)return dom.commentIconIssue(node)===0?'':null;
           if(node.tagName==='BR')return traversal.append('\n');
           if(node.tagName==='IMG'){
             if(++images>8||node.childNodes.length||node.closest('a[href]'))return null;
@@ -244,8 +265,9 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       return uid;
     },
   };
-  dom.check(location.origin === m.origin && !/验证码|安全验证/.test(document.title), 'OBSERVATION_PAGE_BLOCKED');
-  dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_PAGE_BLOCKED');
+  dom.check(location.origin===m.origin,'OBSERVATION_UNEXPECTED_ORIGIN');
+  dom.check(!/验证码|安全验证|访问受限/.test(document.title),'OBSERVATION_SECURITY_TITLE');
+  dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_SECURITY_COMPONENT');
   const avatar = dom.one(document,s.selfAvatar,'OBSERVATION_ACCOUNT_AVATAR'), own = dom.fiberProps(avatar,s.selfFiberDepth);
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
   const events: InboundEvent[] = [],commentThreads:NonNullable<ObservationBatch['commentThreads']>=[]; let unsupported = 0, loaded = 0,incomplete=false;

@@ -56,3 +56,12 @@
 .detail[data-channel="COMMENT_NOTIFICATION"] .detail-heading {
   background: var(--comment-fill);
 }
+
+.unread-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: #245a86;
+}

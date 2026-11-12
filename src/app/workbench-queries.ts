@@ -6,10 +6,12 @@ import type { BrowserService } from './browser-service.js';
 import type { AiSettings, InboxSync, ClientCommand } from './contracts.js';
 import type { CollectionScheduler } from './collection-scheduler.js';
 import {InboxQueries,inboxGroupKey} from './inbox-queries.js';
+import {InboxProjection,type ReplyStatus} from './inbox-projection.js';
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
 import {HumanFollowups} from './human-followup.js';
 import {readCommentThreadContext,commentThreadPage,commentThreadGroupKey} from '../storage/comment-thread-context.js';
 import {hasSuggestionAuthorization,suggestionEligibility,type SuggestionState} from './suggestion-eligibility.js';
+import {readVerificationView} from './verification-view.js';
 
 interface ViewState {
   settings: AiSettings;
@@ -27,13 +29,15 @@ interface ViewState {
 /** Read-only product views; raw intents, receipts and freezes remain authoritative. */
 export class WorkbenchQueries {
   constructor(readonly store: EventStore, readonly authority: WorkbenchAuthority, readonly browser: BrowserService) {}
-  replyStatus(eventId:string,status:string):'WAITING'|'REPLIED' {
-    const latest=this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='verification_results'").get()?this.store.db.prepare(`SELECT r.verified FROM verification_results r JOIN send_intents i ON i.id=r.intent_id
-      WHERE i.event_id=? ORDER BY r.rowid DESC LIMIT 1`).get(eventId) as {verified:number}|undefined:undefined;
-    return latest?latest.verified===1?'REPLIED':'WAITING':status==='CONFIRMED'?'REPLIED':'WAITING';
+  replyStatus(eventId:string,_status:string):ReplyStatus {
+    const event=this.store.event(eventId);
+    return new InboxProjection(this.store,event.payload.channel,{key:targetKey(event.payload),accountId:event.payload.accountId,
+      ...(event.payload.channel==='DIRECT_MESSAGE'&&event.payload.conversationId?{}:{eventId})})
+      .replyStatus(event);
   }
 
-  thread(token: string, eventId: string, automation: AutomationStore | null,timelineBefore?:string,aiState?:SuggestionState) {
+  thread(token: string, eventId: string, automation: AutomationStore | null,timelineBefore?:string,aiState?:SuggestionState,
+    activeVerificationEventId?:string|null) {
     const op = this.authority.operator(token),
       e = this.store.event(eventId),
       draft = this.authority.draftFor(eventId);
@@ -88,8 +92,7 @@ export class WorkbenchQueries {
       intent,
       receipt: this.store.receiptForEvent(eventId) ?? null,
       suggestions,
-      verification:automation?this.store.db.prepare(`SELECT j.state,j.attempts,j.last_error,r.verified,r.evidence_ref,r.checked_at FROM verification_jobs j
-        LEFT JOIN verification_results r ON r.intent_id=j.intent_id WHERE j.event_id=? ORDER BY r.rowid DESC LIMIT 1`).get(eventId)??null:null,
+      verification:automation?readVerificationView(this.store,e,activeVerificationEventId):null,
       automationJob:automation?this.store.db.prepare('SELECT state,reason,grant_version FROM automation_jobs WHERE event_id=?').get(eventId)??null:null,
     };
   }

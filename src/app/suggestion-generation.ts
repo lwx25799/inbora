@@ -7,6 +7,7 @@ import type {WorkbenchAuthority} from './authority.js';
 import type {ClientCommand} from './contracts.js';
 import {requireSuggestionEligibility,type SuggestionState,type SuggestionAuthorization} from './suggestion-eligibility.js';
 import {runtimePerformance,type RuntimeOutcome} from '../observability/runtime-performance.js';
+import {requireAssistantModelContext} from './local-assistant-model-context.js';
 
 interface Context {store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore|null;provider:Pick<DeepSeekProvider,'generate'>;
   state():SuggestionState;key():string;signal():AbortSignal;pending:Set<string>;emit(event:string):void;cancelMaintenance():void}
@@ -15,14 +16,25 @@ interface Context {store:EventStore;authority:WorkbenchAuthority;automation:Auto
 export async function generateSuggestion(c:Context,token:string,command:Extract<ClientCommand,{command:'generateSuggestion'}>){
   c.authority.operator(token,'EDIT');const event=c.store.event(command.eventId),state=c.state();
   const authorization=requireSuggestionEligibility(c.store,c.authority,c.automation,event,{...state,modelBusy:c.pending.has(event.id)});
+  c.authority.checkAssistantModel(token,event);
   requireSafe((c.authority.draftFor(event.id)?.version??0)===command.draftVersion,'DRAFT_VERSION_CONFLICT');
   const context=c.authority.contextVersion(event),id=randomUUID(),signal=c.signal();
+  const assistant=c.authority.assistantVersion(token),generation=c.authority.ownership(event).generation;
+  const selection=assistant===null?null:c.authority.selectionId(token,event.id);
+  if(assistant!==null)c.authority.requireOwner(token,event,generation);
   const sameAuthorization=(fresh:SuggestionAuthorization)=>requireSafe(authorization.grant?
     fresh.grant?.kind===authorization.grant.kind&&fresh.grant.version===authorization.grant.version:
     fresh.grant===null,'GRANT_REVOKED');
   const recheck=(checkAllowance=true)=>{
     c.authority.operator(token,'EDIT');requireSafe(!signal.aborted,'MODEL_PAUSED');
     const current=c.store.event(event.id);requireSafe(current.binding===event.binding,'TARGET_CHANGED');
+    c.authority.checkAssistantModel(token,current,checkAllowance);
+    if(assistant!==null){
+      c.authority.requireSelection(token,event.id,selection!);
+      c.authority.requireOwner(token,current,generation);
+      requireSafe(c.authority.contextVersion(current)===context,'CONTEXT_VERSION_CONFLICT');
+      requireSafe((c.authority.draftFor(event.id)?.version??0)===command.draftVersion,'DRAFT_VERSION_CONFLICT');
+    }
     const fresh=requireSuggestionEligibility(c.store,c.authority,c.automation,current,{...c.state(),modelBusy:false},checkAllowance);sameAuthorization(fresh);return fresh;
   };
   const settings=authorization.policy?{...state.settings,rules:authorization.policy.instructions}:state.settings;
@@ -33,7 +45,9 @@ export async function generateSuggestion(c:Context,token:string,command:Extract<
   let outcome:RuntimeOutcome='FAILED';
   try{
     const result=await c.provider.generate(c.store,event.payload,history,settings,c.key(),true,signal,
-      authorization.grant?()=>{recheck();c.automation!.reserve(authorization.grant!.version,'MODEL',id);}:undefined);
+      ()=>{recheck();if(authorization.grant)c.automation!.reserve(authorization.grant.version,'MODEL',id);
+        c.authority.reserveAssistantModel(token,event,id);},
+      (_input,actualHistory)=>requireAssistantModelContext(c.authority,token,event,actualHistory));
     recheck(false);
     c.store.db.prepare('INSERT INTO ai_suggestions VALUES(?,?,?,?,?,?,?,0)').run(id,event.id,command.draftVersion,context,result.text,result.model,Date.now());
     outcome='SUCCEEDED';

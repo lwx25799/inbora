@@ -3,6 +3,7 @@ import { Blocked, requireSafe,targetKey } from "../core/contracts.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import { collectionStops } from "./collection-scheduler.js";
 import {claimDmContextVerification,type VerificationJob} from './dm-context-verification.js';
+import {claimReceiptRecheck,receiptRecheckStillBound,receiptRecheckVersion,type ReceiptRecheckJob} from './receipt-recheck.js';
 
 /** Append-only follow-up evidence for an existing intent. This worker has no sending capability. */
 export class VerificationScheduler {
@@ -11,6 +12,8 @@ export class VerificationScheduler {
   private abort:AbortController|undefined;
   private closed=false;
   private activeDeadline=0;
+  private activeEvent:string|null=null;
+  activeEventId():string|null {return this.activeEvent;}
   private suspended=false;
   constructor(readonly data:AutomationStore,
     private readonly verify:(eventId:string,signal:AbortSignal)=>Promise<{verified:boolean;evidenceId:string;nativeIdDigest?:string}>,
@@ -37,20 +40,24 @@ export class VerificationScheduler {
     if(this.closed||this.suspended||this.data.state().emergencyStopped)return;
     this.data.store.db.prepare("UPDATE verification_jobs SET state='NOT_NEEDED' WHERE state='PENDING' AND intent_id IN (SELECT id FROM send_intents WHERE status='CONFIRMED')").run();
     this.data.store.db.prepare("UPDATE verification_jobs SET state='REVIEW',last_error='VERIFICATION_DEADLINE' WHERE state='PENDING' AND (deadline<=? OR attempts>=2)").run(this.data.now());
-    let job=this.data.store.db.prepare("SELECT j.* FROM verification_jobs j JOIN send_intents i ON i.id=j.intent_id WHERE j.state='PENDING' AND j.next_at<=? AND i.status='UNCERTAIN' ORDER BY j.next_at LIMIT 1").get(this.data.now()) as VerificationJob|undefined;
+    let job=this.data.store.db.prepare("SELECT j.* FROM verification_jobs j JOIN send_intents i ON i.id=j.intent_id WHERE j.state='PENDING' AND j.next_at<=? AND i.status='UNCERTAIN' ORDER BY j.next_at LIMIT 1").get(this.data.now()) as VerificationJob|ReceiptRecheckJob|undefined;
     const supplemental=!job;
     job??=claimDmContextVerification(this.data.store,this.data.now());
+    job??=claimReceiptRecheck(this.data.store,this.data.now());
     if(!job)return;
+    const repair='recheckRevision' in job?job:undefined;
     const abort=new AbortController();this.abort=abort;
     this.activeDeadline=Math.min(job.deadline,this.data.now()+30_000);
     const timeout=setTimeout(()=>abort.abort(),Math.max(1,this.activeDeadline-this.data.now()));timeout.unref();
     const task=Promise.resolve().then(async()=>{
       if(this.closed||abort.signal.aborted||this.data.state().emergencyStopped)return;
+      this.activeEvent=job.event_id;this.updated();
       const intent=this.data.store.db.prepare('SELECT event_id,attempt_started_at,target_digest FROM send_intents WHERE id=?').get(job.intent_id) as {
         event_id:string;attempt_started_at:string;target_digest:string;
       }|undefined;
       try {
         requireSafe(intent&&intent.event_id===job.event_id&&intent.attempt_started_at===job.boundary&&intent.target_digest===job.target_digest,'VERIFICATION_BINDING_CHANGED');
+        if(repair)requireSafe(receiptRecheckStillBound(this.data.store,repair,this.data.now()),'VERIFICATION_BINDING_CHANGED');
         if(!supplemental)this.data.store.db.prepare("UPDATE verification_jobs SET state='RUNNING',attempts=attempts+1 WHERE intent_id=? AND state='PENDING'").run(job.intent_id);
         const result=await this.verify(job.event_id,abort.signal);
         requireSafe(!abort.signal.aborted,'VERIFICATION_CANCELLED');
@@ -61,8 +68,10 @@ export class VerificationScheduler {
           const event=this.data.store.event(job.event_id);
           requireSafe(current&&current.event_id===job.event_id&&current.attempt_started_at===job.boundary&&current.target_digest===job.target_digest&&
             current.target_key===targetKey(event.payload),'VERIFICATION_BINDING_CHANGED');
+          if(repair)requireSafe(receiptRecheckStillBound(this.data.store,repair,this.data.now()),'VERIFICATION_BINDING_CHANGED');
           let verified=result.verified,conflict=false;
-          if(supplemental&&verified)requireSafe(result.nativeIdDigest===job.nativeIdDigest,'VERIFICATION_BINDING_CHANGED');
+          if(supplemental&&verified&&(!repair||event.payload.channel==='DIRECT_MESSAGE'))
+            requireSafe(!!job.nativeIdDigest&&result.nativeIdDigest===job.nativeIdDigest,'VERIFICATION_BINDING_CHANGED');
           if(verified&&result.nativeIdDigest!==undefined&&event.payload.channel==='DIRECT_MESSAGE'){
             requireSafe(/^[a-f0-9]{64}$/u.test(result.nativeIdDigest),'VERIFICATION_BINDING_CHANGED');
             const prior=this.data.store.db.prepare('SELECT native_id_digest FROM chat_delivery_links WHERE intent_id=?').get(job.intent_id) as {native_id_digest:string}|undefined;
@@ -81,12 +90,20 @@ export class VerificationScheduler {
           .run(job.attempts+1>=2||error==='VERIFICATION_BINDING_CHANGED'?'REVIEW':'PENDING',this.data.now()+10_000,error,job.intent_id);
         if(supplemental)this.data.store.db.transaction(()=>{
           this.data.store.db.prepare('INSERT INTO verification_results VALUES(?,?,?,?,?)')
-            .run(randomUUID(),job.intent_id,0,'DM_CONTEXT_WINDOW_INCOMPLETE',this.data.now());
-          this.data.store.audit('DM_CONTEXT_WINDOW_INCOMPLETE',job.intent_id);
+            .run(randomUUID(),job.intent_id,0,repair?receiptRecheckVersion+'_INCOMPLETE':'DM_CONTEXT_WINDOW_INCOMPLETE',this.data.now());
+          this.data.store.audit(repair?receiptRecheckVersion+'_INCOMPLETE':'DM_CONTEXT_WINDOW_INCOMPLETE',job.intent_id);
+          if(repair){
+            const safe=['VERIFICATION_BINDING_CHANGED','VERIFICATION_CANCELLED','OBSERVATION_DM_CONTENT_DOM_NOT_READY',
+              'OBSERVATION_DM_MESSAGES_DOM_NOT_READY','OBSERVATION_PAGE_BLOCKED','OBSERVATION_ACCOUNT_CHANGED',
+              'OBSERVATION_UNEXPECTED_ORIGIN','OBSERVATION_SECURITY_TITLE','OBSERVATION_SECURITY_COMPONENT',
+              'OBSERVATION_CONVERSATION_NOT_FOUND','COMMENT_REPLY_CANCELLED','COMMENT_REPLY_ROOT_NOT_FOUND',
+              'COMMENT_REPLY_PAGE_BLOCKED','COMMENT_REPLY_ORIGINAL_CHANGED'].includes(error)?error:'PRIVATE_DIAGNOSTICS';
+            this.data.store.audit(receiptRecheckVersion+'_FAILED_'+safe,job.intent_id);
+          }
         }).immediate();
-        if(collectionStops.has(error))this.data.stop(true);
+        if(collectionStops.has(error))this.data.stop(true,error,'VERIFICATION');
       }
-    }).finally(()=>{clearTimeout(timeout);this.running=null;this.abort=undefined;this.updated();});
+    }).finally(()=>{clearTimeout(timeout);this.running=null;this.abort=undefined;this.activeEvent=null;this.updated();});
     this.running=task;await task;
   }
   cancel():void {this.abort?.abort();}

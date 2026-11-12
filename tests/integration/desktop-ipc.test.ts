@@ -82,7 +82,8 @@ test("source sidecar authenticates IPC, rejects unbounded/extra fields, reconnec
       }),
     ).toMatchObject({
       ok: true,
-      result: { connected: true, schema: 3, mode: "DRAFT_ONLY" },
+      result: { connected: true, schema: 3, mode: "DRAFT_ONLY",
+        localAssistantConnection:{ready:true,instanceId:expect.any(String),transport:'stdio',tools:16} },
     });
     expect(
       await call({ command: "getStatus", operatorId: "forged" }),

@@ -13,10 +13,14 @@ import type {
 } from "../../src/core/contracts.js";
 import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../src/app/automation-contracts.js';
 import type { TimelineItem } from '../../src/app/inbox-queries.js';
+import type {LocalAssistantState} from '../../src/app/local-assistant-contracts.js';
 export type { TimelineItem };
 
 export type { SendParams, AiSettings, BrowserDraftChoice };
+export type ReplyStatus='WAITING'|'REPLIED'|'NOT_REQUIRED'|'MANUAL_ONLY';
 export interface Status {
+  localAssistant?:LocalAssistantState;
+  localAssistantConnection?:{ready:boolean;instanceId:string|null;transport:'stdio';tools:16};
   runtime: string;
   account: { id: string; identity: string } | null;
   operator: { id: string; permissions: string[]; expiresAt: number };
@@ -47,6 +51,7 @@ export interface Status {
   keyPresent: boolean;
   keyStored?:boolean;keyStorageError?:string|null;
   automation?:{startedAt:number;emergencyStopped:boolean;collection:CollectionSettings|null;modelGrant:Grant<ModelGrant>|null;replyPolicy:Grant<ReplyPolicy>|null;
+    emergencyStop?:{reason:string;source:string;stoppedAt:number|null;legacy:boolean}|null;
     unresolvedSends?:{channel:string;count:number}[];
     inboxRevision:number;autoStopReason?:string|null;collector:{running:boolean;source:string|null;fatal:string|null;channels:{source:string;next_at:number;last_success:number|null;last_error:string|null;failures:number;elapsed_ms:number|null}[]};pendingWorks:{count:number}}|null;
   modelAuthorized: boolean;
@@ -57,15 +62,18 @@ export interface Status {
 }
 export interface Inbox {
   total: number;
+  unreadTotal?:number;
   page: number;
   pageSize: number;
   items: {
     id: string;
     status: string;
-    replyStatus: 'WAITING'|'REPLIED';
+    replyStatus: ReplyStatus;
+    unread?:boolean;
     channel: string;
     author: string | null;
     preview: string;
+    previewDirection?:'INCOMING'|'OUTGOING';
     displayText?: string;
     time: string | null;
     source: string;
@@ -83,8 +91,8 @@ export interface Inbox {
 export interface Thread {
   groupKey?:string;
   timeline?:{items:TimelineItem[];pageSize:number;hasMore:boolean;before:string|null;projectionRevision?:string};
-  replyStatus: 'WAITING'|'REPLIED';
-  conversationReplyStatus?: 'WAITING'|'REPLIED';
+  replyStatus: ReplyStatus;
+  conversationReplyStatus?: ReplyStatus;
   commentContext?: ReturnType<typeof import('../../src/storage/comment-thread-context.js').commentThreadPage>;
   controlledTrial: boolean;
   workUrl: string | null;
@@ -171,6 +179,11 @@ export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
 export const reasons: Record<string, string> = {
+  MCP_DRAFT_VERSION_CHANGED:'助手已保存新版本，你的未保存内容已保留，暂不自动覆盖。核对后继续编辑即可按当前版本保存。',
+  ASSISTANT_PERMISSION_REQUIRED:'助手暂不可执行此操作，请核对连接状态和当前账号。',
+  ASSISTANT_SCOPE_CHANGED:'账号或收取范围已变化，请核对应用当前的后台收取范围。',
+  ASSISTANT_LIMIT_BELOW_USED:'助手累计额度不能低于已用次数，历史消耗保留',
+  ASSISTANT_SEND_PERMISSIONS_REQUIRED:'文字发送需要正文读取、草稿及日常控制权限和可用发送额度',
   BROWSER_DRAFT_NOT_RECOVERABLE:'当前没有可安全清理的已保存自动回复稿，网页输入已保留',
   BROWSER_DRAFT_NOT_MATCHED:'网页输入与已保存的自动回复稿不一致，未清理',
   BROWSER_DRAFT_CHANGED:'应用回复稿或会话已变化，未清理，请重新检查',
@@ -213,7 +226,14 @@ export const reasons: Record<string, string> = {
   DPAPI_RESTORE_FAILED:'当前 Windows 用户无法解密已保存的 Key，请重新配置',
   INBOX_SYNC_IN_PROGRESS: "收件箱正在同步，请等待当前读取完成。",
   OBSERVATION_DOM_NOT_READY: "页面尚未就绪，请稍后再次同步。",
-  OBSERVATION_PAGE_BLOCKED: "请在专属浏览器检查登录或验证提示。",
+  OBSERVATION_PAGE_BLOCKED: "页面安全检查未通过；可重新检查，若仍有登录或验证提示再处理。",
+  OBSERVATION_UNEXPECTED_ORIGIN:'当前页面来源与已授权网站不一致，请返回正常抖音页面后检查恢复。',
+  OBSERVATION_SECURITY_TITLE:'页面出现验证码、安全验证或访问受限提示，请本人处理后检查恢复。',
+  OBSERVATION_SECURITY_COMPONENT:'页面出现安全验证组件，请本人处理后检查恢复。',
+  EMERGENCY_RECOVERY_HEADLESS_REQUIRED:'请先返回无头运行，再检查并恢复调度。',
+  EMERGENCY_RECOVERY_CHANGED:'检查期间发生了新的急停，请查看最新原因后重新检查。',
+  EMERGENCY_RECOVERY_CANCELLED:'恢复检查已取消，急停状态保留。',
+  EMERGENCY_RECOVERY_TIMEOUT:'恢复检查超时，急停状态保留，请稍后重试。',
   OBSERVATION_ACCOUNT_CHANGED: "浏览器账号与绑定账号不一致，已停止同步。",
   PLATFORM_STOP: "平台要求停止，已结束本次同步。",
   CHALLENGE_REQUIRED: "请在专属浏览器完成平台验证后再同步。",

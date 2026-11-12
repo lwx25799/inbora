@@ -18,7 +18,7 @@ interface AutomaticReplyContext {
   store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore;browser:BrowserService;
   provider:DeepSeekProvider;humanReplies:HumanReplyWorkflow;settings:AiSettings;key:string;
   modelPending:Set<string>;automaticSignal:AbortSignal;modelSignal:AbortSignal;
-  isClosing():boolean;updated():void;stop():void;beforeWork():void;statusUpdated():void;errorCode(error:unknown):string;
+  isClosing():boolean;updated():void;stop(code:string):void;beforeWork():void;statusUpdated():void;errorCode(error:unknown):string;
 }
 
 async function qualifyPolicyTarget(c:AutomaticReplyContext,grant:Grant<ReplyPolicy>,event:StoredEvent,signal:AbortSignal):Promise<void>{
@@ -83,7 +83,7 @@ async function recoverUnpaidCommentRoot(c:AutomaticReplyContext,grant:Grant<Repl
     }catch(error){
       const code=c.errorCode(error);c.store.db.prepare("UPDATE automation_jobs SET reason=?,updated_at=? WHERE event_id=? AND state='REVIEW' AND draft_version=0")
         .run(code,c.authority.now(),event.id);
-      if(collectionStops.has(code))c.stop();
+      if(collectionStops.has(code))c.stop(code);
     }finally{c.modelPending.delete(event.id);c.updated();}
     return;
   }
@@ -155,7 +155,7 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
       const paid=c.store.db.prepare("SELECT job_key FROM grant_reservations WHERE grant_version=? AND kind='MODEL' AND job_key=?").get(grant.version,event.id);
       if(automaticSignal.aborted&&!paid)c.store.db.prepare("DELETE FROM automation_jobs WHERE event_id=? AND command_id IS NULL AND state IN ('QUALIFYING','GENERATING')").run(event.id);
       else c.store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE event_id=?").run(code,c.authority.now(),event.id);
-      if(collectionStops.has(code))c.stop();
+      if(collectionStops.has(code))c.stop(code);
       c.store.audit('AUTO_REPLY_STOPPED',event.id);
     }finally{c.modelPending.delete(event.id);c.updated();}
 }
