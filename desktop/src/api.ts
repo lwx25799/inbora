@@ -51,6 +51,7 @@ export interface Status {
   keyPresent: boolean;
   keyStored?:boolean;keyStorageError?:string|null;
   automation?:{startedAt:number;emergencyStopped:boolean;collection:CollectionSettings|null;modelGrant:Grant<ModelGrant>|null;replyPolicy:Grant<ReplyPolicy>|null;
+    emergencyStop?:{reason:string;source:string;stoppedAt:number|null;legacy:boolean}|null;
     unresolvedSends?:{channel:string;count:number}[];
     inboxRevision:number;autoStopReason?:string|null;collector:{running:boolean;source:string|null;fatal:string|null;channels:{source:string;next_at:number;last_success:number|null;last_error:string|null;failures:number;elapsed_ms:number|null}[]};pendingWorks:{count:number}}|null;
   modelAuthorized: boolean;
@@ -225,7 +226,14 @@ export const reasons: Record<string, string> = {
   DPAPI_RESTORE_FAILED:'当前 Windows 用户无法解密已保存的 Key，请重新配置',
   INBOX_SYNC_IN_PROGRESS: "收件箱正在同步，请等待当前读取完成。",
   OBSERVATION_DOM_NOT_READY: "页面尚未就绪，请稍后再次同步。",
-  OBSERVATION_PAGE_BLOCKED: "请在专属浏览器检查登录或验证提示。",
+  OBSERVATION_PAGE_BLOCKED: "页面安全检查未通过；可重新检查，若仍有登录或验证提示再处理。",
+  OBSERVATION_UNEXPECTED_ORIGIN:'当前页面来源与已授权网站不一致，请返回正常抖音页面后检查恢复。',
+  OBSERVATION_SECURITY_TITLE:'页面出现验证码、安全验证或访问受限提示，请本人处理后检查恢复。',
+  OBSERVATION_SECURITY_COMPONENT:'页面出现安全验证组件，请本人处理后检查恢复。',
+  EMERGENCY_RECOVERY_HEADLESS_REQUIRED:'请先返回无头运行，再检查并恢复调度。',
+  EMERGENCY_RECOVERY_CHANGED:'检查期间发生了新的急停，请查看最新原因后重新检查。',
+  EMERGENCY_RECOVERY_CANCELLED:'恢复检查已取消，急停状态保留。',
+  EMERGENCY_RECOVERY_TIMEOUT:'恢复检查超时，急停状态保留，请稍后重试。',
   OBSERVATION_ACCOUNT_CHANGED: "浏览器账号与绑定账号不一致，已停止同步。",
   PLATFORM_STOP: "平台要求停止，已结束本次同步。",
   CHALLENGE_REQUIRED: "请在专属浏览器完成平台验证后再同步。",

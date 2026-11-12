@@ -1,19 +1,14 @@
 import { Blocked, requireSafe } from "../core/contracts.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type {CollectionSettings} from './automation-contracts.js';
+import {platformStopCodes} from '../core/emergency-stop.js';
 
 export type CollectionSource = "works" | "dm";
 export type CollectionTrigger = 'BACKGROUND'|'MANUAL';
 interface TurnResult {error:string|null;deferredCode:string|null;cancelled:boolean}
 /** An object-specific failure was persisted; the channel can serve a different object next turn. */
 export class DeferredObjectRead extends Blocked {}
-export const collectionStops = new Set([
-  "OBSERVATION_PAGE_BLOCKED", "OBSERVATION_ACCOUNT_CHANGED", "ACCOUNT_CHANGED",
-  "PLATFORM_STOP", "CHALLENGE_REQUIRED", "LOGIN_REQUIRED", "ACCOUNT_NOT_VERIFIED", "UNEXPECTED_ORIGIN",
-  "OWNER_LOCKED_OR_PORT_UNAVAILABLE",
-  "OWN_WORKS_ACCOUNT_CHANGED", "NATIVE_REPLY_ACCOUNT_CHANGED", "COMMENT_REPLY_ACCOUNT_CHANGED",
-  "NATIVE_REPLY_PAGE_BLOCKED", "COMMENT_REPLY_PAGE_BLOCKED",
-]);
+export const collectionStops = new Set<string>(platformStopCodes);
 
 /** One bounded browser turn at a time. No AI, sending, WebView visibility or operator-session dependency. */
 export class CollectionScheduler {
@@ -120,7 +115,7 @@ export class CollectionScheduler {
         const delay = objectDeferred?interval:Math.min(Math.max(interval, 600_000), interval * 2 ** Math.min(old.failures + 1, 10));
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_error=?,failures=failures+1,elapsed_ms=? WHERE source=?")
           .run(now + delay, error, Math.max(0, now - started),source);
-        if (collectionStops.has(error)) this.persistence.stop(true);
+        if (collectionStops.has(error)) this.persistence.stop(true,error,source==='works'?'COLLECTION_COMMENTS':'COLLECTION_DM');
       } else {
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_success=?,last_error=NULL,failures=0,elapsed_ms=? WHERE source=?")
           .run(now + interval, now, Math.max(0, now - started),source);

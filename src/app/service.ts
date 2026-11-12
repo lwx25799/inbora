@@ -42,6 +42,7 @@ import {generateSuggestion} from './suggestion-generation.js';
 import {migrateLocalAssistant} from '../storage/local-assistant-migration.js';
 import type {ReplyPolicy} from './automation-contracts.js';
 import {configureAssistantConnection} from './local-assistant-connection.js';
+import {recoverEmergency} from './emergency-recovery.js';
 
 export function clientError(error: unknown): string {
   return error instanceof Blocked
@@ -201,7 +202,7 @@ export class ClientService {
       if(this.closing||this.onlineAbort.signal.aborted)return;
       const code=clientError(error);
       this.onlineRetryAt=this.authority.now()+30_000;
-      if(collectionStops.has(code)){this.automation!.stop(true);this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}
+      if(collectionStops.has(code)){this.automation!.stop(true,code,'CONNECTION');this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}
       this.store.audit('SINGLE_ACCOUNT_CONNECTION_FAILED',digest(code),{stopped:collectionStops.has(code)});
     }).finally(()=>{this.onlineTask=null;if(!this.closing)this.emit('status_updated');});
     this.onlineTask=task;this.track(task);
@@ -238,9 +239,7 @@ export class ClientService {
     this.emit("inbox_sync_updated");
   }
   private syncMustStop(code: string): boolean {
-    return ["OBSERVATION_PAGE_BLOCKED", "OBSERVATION_ACCOUNT_CHANGED", "ACCOUNT_CHANGED", "BROWSER_CLOSED", "PLATFORM_STOP", "CHALLENGE_REQUIRED",
-      "LOGIN_REQUIRED", "ACCOUNT_NOT_VERIFIED", "UNEXPECTED_ORIGIN", "OWNER_LOCKED_OR_PORT_UNAVAILABLE",
-      "OPERATOR_EXPIRED", "OPERATOR_PERMISSION_DENIED"].includes(code);
+    return collectionStops.has(code)||["BROWSER_CLOSED","OPERATOR_EXPIRED","OPERATOR_PERMISSION_DENIED"].includes(code);
   }
   private observationFailed(source:"works"|"dm"|"notifications",error:unknown):never {
     const code=clientError(error),mode=this.browser.status().mode;
@@ -507,6 +506,12 @@ export class ClientService {
       case "pause":
       case "resume":
       case "emergencyStop": {
+        if(c.command==='resume'&&c.eventId===null&&this.automation?.state().emergencyStopped){
+          this.authority.operator(token,'CONTROL');this.onlineAbort=new AbortController();
+          await recoverEmergency({store:this.store,data:this.automation,authority:this.authority,browser:this.browser,token,
+            signal:AbortSignal.any([this.onlineAbort.signal,AbortSignal.timeout(30_000)]),closing:()=>this.closing});
+          this.resumeAfterLogin();this.keepOnline();this.emit('status_updated');return this.status(token);
+        }
         this.authority.pause(
           token,
           c.command === "emergencyStop" ? null : c.eventId,
@@ -514,9 +519,10 @@ export class ClientService {
         );
         if (c.command === "emergencyStop") {
           this.inboxRevision++;
+          this.automation?.stop(true,'MANUAL_EMERGENCY_STOP','MANUAL');
           this.onlineAbort.abort();
           this.dialogs.clear();
-          this.automation?.stop(true);this.collector?.cancel();
+          this.collector?.cancel();
           this.verification?.cancel();
           this.stopSync();
           this.modelAbort.abort();
@@ -687,7 +693,7 @@ export class ClientService {
       provider:this.provider,humanReplies:this.humanReplies,settings:this.settings,key:this.key,modelPending:this.modelPending,
       automaticSignal:this.automaticAbort.signal,modelSignal:this.modelAbort.signal,isClosing:()=>this.closing,
       updated:()=>{this.inboxRevision++;this.emit('inbox_updated');},errorCode:clientError,beforeWork:()=>this.maintenance.cancel(),statusUpdated:()=>this.emit('status_updated'),
-      stop:()=>{this.automation!.stop(true);this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}});
+      stop:(code:string)=>{this.automation!.stop(true,code,'AUTOMATIC_REPLY');this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}});
   }
   private async deliver(
     token: string,

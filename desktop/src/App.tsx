@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Settings } from './Settings';
+import {EmergencyStopNotice} from './EmergencyStopNotice';
 import { ReplyDetail } from './ReplyDetail';
 import {InboxList} from './InboxList';
 import {remoteDraftUpdate,remoteDraftConflict,mayAdvanceReplySelection,type RemoteDraftEditor} from './remote-draft';
@@ -655,6 +656,7 @@ export function App() {
             </button>
           </div>
         </header>
+        <EmergencyStopNotice status={status} busy={busy} act={act} update={setStatus}/>
         {status.sync.runId&&<div className={"message"+(status.sync.results.some(result=>result.state==='FAILED')?' error':'')}
           role={status.sync.results.some(result=>result.state==='FAILED')?'alert':'status'} data-testid="inbox-sync-progress">
           {status.sync.results.map(result=>`${syncNames[result.source]}${syncStates[result.state]}${result.error?'：'+(reasons[result.error]??result.error):''}`).join('；')}

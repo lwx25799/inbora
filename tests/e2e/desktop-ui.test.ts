@@ -73,6 +73,7 @@ test.each([
         return this.identity();
       }
       override async close() {}
+      override async verifyEmergencyRecovery(_ownId:string,_signal:AbortSignal,_check:()=>void,complete:()=>void=()=>{}) {complete();}
       override async observe(_store:typeof store,source:'works'|'dm'|'notifications'){
         syncCalls.push(source);if(holdSyncRead)await new Promise<void>(resolve=>{releaseSyncRead=resolve;});
         if(source==='works')pending(store,candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',conversationId:null,
@@ -261,7 +262,6 @@ test.each([
       await expect.poll(()=>controlTrace.filter(item=>item.command==='openHumanDialog').at(-1)?.isMine).toBe(true);
       await expect.poll(()=>service.authority.draftFor(dm)?.text).toBe('暂停期间保留的完整人稿');
       await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
-      await page.getByText('故障处理',{exact:true}).click();
       await page.getByRole('button',{name:'恢复运行',exact:true}).click();
       await expect.poll(()=>service.authority.paused()).toBe(false);
       await page.getByRole('button',{name:'收件箱',exact:true}).click();

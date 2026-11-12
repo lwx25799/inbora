@@ -51,6 +51,7 @@ class FixtureBrowser extends BrowserService {
     if (this.failStart) throw new Error("fixture cold start failure");
   }
   override async close() {}
+  override async verifyEmergencyRecovery(_ownId:string,_signal:AbortSignal,check:()=>void,complete:()=>void=()=>{}){check();complete();}
   override async adapter(e: InboundEvent) {
     await this.open();
     let text = "";

@@ -95,12 +95,13 @@ export class VerificationScheduler {
           if(repair){
             const safe=['VERIFICATION_BINDING_CHANGED','VERIFICATION_CANCELLED','OBSERVATION_DM_CONTENT_DOM_NOT_READY',
               'OBSERVATION_DM_MESSAGES_DOM_NOT_READY','OBSERVATION_PAGE_BLOCKED','OBSERVATION_ACCOUNT_CHANGED',
+              'OBSERVATION_UNEXPECTED_ORIGIN','OBSERVATION_SECURITY_TITLE','OBSERVATION_SECURITY_COMPONENT',
               'OBSERVATION_CONVERSATION_NOT_FOUND','COMMENT_REPLY_CANCELLED','COMMENT_REPLY_ROOT_NOT_FOUND',
               'COMMENT_REPLY_PAGE_BLOCKED','COMMENT_REPLY_ORIGINAL_CHANGED'].includes(error)?error:'PRIVATE_DIAGNOSTICS';
             this.data.store.audit(receiptRecheckVersion+'_FAILED_'+safe,job.intent_id);
           }
         }).immediate();
-        if(collectionStops.has(error))this.data.stop(true);
+        if(collectionStops.has(error))this.data.stop(true,error,'VERIFICATION');
       }
     }).finally(()=>{clearTimeout(timeout);this.running=null;this.abort=undefined;this.activeEvent=null;this.updated();});
     this.running=task;await task;

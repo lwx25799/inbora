@@ -32,8 +32,8 @@ export function AutomationSettings({status,busy,act,update}:{status:Status;busy:
       <div className="policy-fields"><label>评论轮询秒数<input type="number" min="15" max="3600" value={commentSeconds} onChange={e=>setCommentSeconds(Number(e.target.value))}/></label>
         <label>私信轮询秒数<input type="number" min="15" max="3600" value={dmSeconds} onChange={e=>setDmSeconds(Number(e.target.value))}/></label></div>
     </details>
-    <button disabled={!ownId||!!busy} onClick={()=>void act('保存收取范围',async()=>update(await request<Status>({command:'configureCollection',settings:{ownId,comments,inbox,commentIntervalMs:commentSeconds*1000,dmIntervalMs:dmSeconds*1000}})))}>保存并恢复后台收取</button>
-    {state.emergencyStopped&&<p className="error">全局急停或账号验证已停止调度。处理必要异常后显式恢复，重启不会解除。</p>}
+    <button disabled={!ownId||!!busy} onClick={()=>void act('保存收取范围',async()=>update(await request<Status>({command:'configureCollection',settings:{ownId,comments,inbox,commentIntervalMs:commentSeconds*1000,dmIntervalMs:dmSeconds*1000}})))}>保存收取范围</button>
+    {state.emergencyStopped&&<p className="error">当前全局急停，保存范围不会恢复调度。请使用页面上方的“检查并恢复运行”。</p>}
     {state.collector.channels.map(c=><p className="hint" key={c.source}>{c.source==='dm'?'私信':'评论'}：{state.collector.running&&state.collector.source===c.source?'读取中':c.last_success?'最近成功 '+new Date(c.last_success).toLocaleTimeString('zh-CN'):'尚无成功轮次'}{c.elapsed_ms!==null?' · '+c.elapsed_ms+'ms':''}{c.last_error?' · '+c.last_error:''}</p>)}
     <h3 className="settings-subtitle">模型与自动回复范围</h3>
     <div className="settings-options">

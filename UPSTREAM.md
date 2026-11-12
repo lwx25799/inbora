@@ -1,5 +1,11 @@
 # 来源与许可
 
+## 2026-11-12：全局急停原因与显式恢复
+
+实施前复读 MIT `Yht20927/douyin-cli` 固定提交 `4073159bea585de6d33a4747a475669440737932` 的 `lib/memory/failures.js:45–65,76–107`、`lib/commands/suggest.js:212–224,326–334` 及 LICENSE，采用稳定故障原因、发生时间与处理建议分离的组织方式；不将累计失败排行当作当前故障，不复制原始错误正文或查询失败放行。另核对 `lib/server/router.js:320–364` 的超时转轮询路线；恢复不采用写操作回退或重投。
+
+本项目独立复用既有 `audit_events`、账号协调器和页面门禁，无新增依赖或数据库迁移。急停开关与固定枚举原因、来源、时间事务保存，二次故障保留首因并更新恢复比较标识；旧急停只显示未知时间及明确标注的诊断提示，不补造历史。显式恢复在仍急停时检查原账号及两个专用页面，并在同一账号任务的最终检查后同步提交比较事务；取消、超时、新急停或页面阻断保留停止。既有意图、收据、草稿、预算和水位不重写，不增加发送或模型授权。适用 MIT 许可继续保留于 `third_party/douyin-cli/LICENSE`。合成、源码及构建链证据与真实界面验收分别记录。
+
 ## 2026-11-11：本机 inbora MCP
 
 采用官方 [TypeScript SDK v2.4.0](https://github.com/modelcontextprotocol/typescript-sdk/tree/951fe5603a7ec0b2dcb6a0b95d92cd86f93ad9e5)，固定提交 `951fe5603a7ec0b2dcb6a0b95d92cd86f93ad9e5`；直接依赖 `@modelcontextprotocol/server` 精确 `2.4.0`，传递依赖 `@modelcontextprotocol/core` 同为 `2.4.0`，包完整性由 `pnpm-lock.yaml` 固定。核对源码 `packages/server/src/server/{mcp,stdio,serveStdio}.ts`、`docs/serving/stdio.md`、`docs/servers/tools.md` 和 `docs/migration/support-2026-07-28.md`，使用官方 `McpServer.registerTool`、Zod 4 输入/输出校验、`StdioServerTransport` 和 `serveStdio`；由 SDK 选择旧 `initialize` 或新发现协议，没有自制 MCP 服务端协议。

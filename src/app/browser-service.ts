@@ -181,6 +181,37 @@ export class BrowserService {
     });
     return this.finishLoginRecovery(generation);
   }
+  async verifyEmergencyRecovery(ownId:string,signal:AbortSignal,check:()=>void,complete:()=>void=()=>{}):Promise<void>{
+    const active=()=>{
+      check();requireSafe(!signal.aborted,'EMERGENCY_RECOVERY_CANCELLED');
+      requireSafe(!this.loginRecovery&&this.mode==='headless','EMERGENCY_RECOVERY_HEADLESS_REQUIRED');
+    };
+    active();await this.open('headless',signal);active();
+    const owner=this.owner,epoch=this.epoch;requireSafe(owner,'BROWSER_NOT_RUNNING');
+    const observation=await loadObservationMapping(this.root),mapping=observation?null:await loadMapping(this.root);
+    const [commentReply,dmReply]=await Promise.all([loadCommentReplyMapping(this.root),loadDmReplyMapping(this.root)]);
+    active();requireSafe((observation?.self.uid??mapping?.ownId)===ownId,'ACCOUNT_CHANGED');
+    await owner.actor.run(async()=>{
+      for(const [channel,page] of [['COMMENT_NOTIFICATION',owner.notification],['DIRECT_MESSAGE',owner.dm]] as const){
+        active();requireSafe(this.owner===owner&&this.epoch===epoch,'BROWSER_CLOSED');
+        try{
+          if(observation)await new ObservedReader(page,observation,undefined,signal).guard();
+          else await new DomAdapter(page,channel,mapping!).guard();
+          const reply=channel==='DIRECT_MESSAGE'?dmReply:commentReply;
+          if(reply){
+            requireSafe(reply.observation.self.uid===ownId&&(!observation||reply.observation.self.secUid===observation.self.secUid),'ACCOUNT_CHANGED');
+            for(const selector of [reply.blockers,reply.observation.securityBlockers])
+              for(const node of await page.locator(selector).all())requireSafe(!await node.isVisible(),'OBSERVATION_SECURITY_COMPONENT');
+          }
+        }catch(error){
+          if(error instanceof Error&&error.name==='TimeoutError')requireSafe(false,'ACCOUNT_NOT_VERIFIED');
+          throw error;
+        }
+        active();requireSafe(this.owner===owner&&this.epoch===epoch,'BROWSER_CLOSED');
+      }
+      active();complete();
+    });
+  }
   private async changeMode(mode:'headed'|'headless',signal?:AbortSignal,check?:()=>void):Promise<void>{
     if(this.modeTransition)await this.modeTransition.catch(()=>{});
     const task=(async()=>{

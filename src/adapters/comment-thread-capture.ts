@@ -62,7 +62,8 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
     },
     root():Element {
       dom.check(location.origin===m.origin&&m.works.some(w=>w.id===e.videoId&&w.url.split('?')[0]===location.href.split('?')[0]),'OBSERVATION_WORK_CHANGED');
-      dom.check(!/验证码|安全验证|访问受限/.test(document.title)&&!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_PAGE_BLOCKED');
+      dom.check(!/验证码|安全验证|访问受限/.test(document.title),'OBSERVATION_SECURITY_TITLE');
+      dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_SECURITY_COMPONENT');
       const own=Array.from(document.querySelectorAll(s.selfAvatar));dom.check(own.length===1,'OBSERVATION_ACCOUNT_CHANGED');
       const identity=dom.props(own[0]!,s.selfFiberDepth);dom.check(dom.data(identity,'uid')===m.self.uid&&dom.data(identity,'secUid')===m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
       const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);dom.check(lists.length===1,'OBSERVATION_DOM_NOT_UNIQUE');

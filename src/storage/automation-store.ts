@@ -1,6 +1,8 @@
 import { digest, isStrong, requireSafe, targetKey, type StoredEvent } from "../core/contracts.js";
 import { collectionSchema, modelGrantSchema, replyPolicySchema, type CollectionSettings, type Grant, type ModelGrant, type ReplyPolicy } from "../app/automation-contracts.js";
 import type { EventStore } from "./store.js";
+import type {EmergencySource} from '../core/emergency-stop.js';
+import {readEmergencyStop,recordEmergencyStop,emergencyRevision,resumeEmergency} from './emergency-stop.js';
 
 export class AutomationStore {
   constructor(readonly store: EventStore, readonly now: () => number = Date.now) {}
@@ -17,6 +19,7 @@ export class AutomationStore {
     };
     const raw: unknown = JSON.parse(row.collection_json);
     return { startedAt: row.started_at, emergencyStopped: !!row.emergency_stopped,
+      emergencyStop:row.emergency_stopped?readEmergencyStop(this.store):null,
       collection: raw === null ? null : collectionSchema.parse(raw) };
   }
   requireAccount(ownId: string): void {
@@ -29,9 +32,11 @@ export class AutomationStore {
     this.store.db.prepare("UPDATE automation_state SET collection_json=? WHERE id=1").run(JSON.stringify(parsed));
     this.store.audit("COLLECTION_CONFIGURED", digest(parsed.ownId), {comments: parsed.comments, inbox: parsed.inbox});
   }
-  stop(stopped: boolean): void {
-    this.store.db.prepare("UPDATE automation_state SET emergency_stopped=? WHERE id=1").run(Number(stopped));
+  stop(stopped:boolean,reason='MANUAL_EMERGENCY_STOP',source:EmergencySource='MANUAL'):void {
+    recordEmergencyStop(this.store,stopped,this.now(),reason,source);
   }
+  emergencyRevision():string {return emergencyRevision(this.store);}
+  resumeEmergency(expectedRevision:string):boolean {return resumeEmergency(this.store,expectedRevision,this.now());}
   grant(kind: "MODEL", scope: ModelGrant): Grant<ModelGrant>;
   grant(kind: "AUTO_REPLY", scope: ReplyPolicy): Grant<ReplyPolicy>;
   grant(kind: "MODEL" | "AUTO_REPLY", scope: ModelGrant | ReplyPolicy): Grant {

@@ -191,20 +191,17 @@ export function Settings({
           {status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('恢复无头运行',async()=>update(
             await request<Status>({command:'browser',open:true,mode:'headless'})))}>返回无头运行</button>}
         </div>
-        <details className="fault-controls"><summary>故障处理</summary>
+        <details className="fault-controls" open={status.automation?.emergencyStopped||undefined}><summary>故障处理</summary>
           <BrowserDraftRecovery busy={busy} act={act}/>
           <p className="hint">仅在需要停止全部后台操作时使用。急停会停止收取、模型和发送；已提交消息不会撤回或重复发送。</p>
           <button className="danger" onClick={stop}>全局急停</button>
-          {status.automation?.emergencyStopped&&<button
+          {status.automation?.emergencyStopped&&<button disabled={!!busy}
             onClick={() =>
-              void act("更新账号暂停", async () =>
-                update(
-                  await request<Status>({
-                    command: 'resume',
-                    eventId: null,
-                  }),
-                ),
-              )
+              void act("检查并恢复运行", async () => {
+                if(status.browser.loginRecovery||status.browser.mode==='headed')
+                  update(await request<Status>({command:'browser',open:true,mode:'headless'}));
+                update(await request<Status>({command:'resume',eventId:null}));
+              })
             }
           >
             恢复运行
