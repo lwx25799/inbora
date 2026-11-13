@@ -52,11 +52,3 @@ test('source runtime correlates both native submission responses through a fresh
   expect(result.stderr).toBe('');expect(result.status).toBe(0);
   expect(result.stdout).toContain('"submissionSmoke":"PASS"');expect(result.stdout).toContain('"refreshedCrossClockProofs":2');
 });
-
-test('source runtime installs a self-contained media guard before navigation and restores playback on release',()=>{
-  const result=spawnSync(process.execPath,['--import','tsx',resolve('scripts/media-pause-smoke.mjs'),'source'],
-    {encoding:'utf8',timeout:20000});
-  expect(result.stderr).toBe('');expect(result.status).toBe(0);
-  expect(result.stdout).toContain('"mediaPauseSmoke":"PASS"');
-  expect(result.stdout).toContain('"realPlaybackBaseline":true');
-});

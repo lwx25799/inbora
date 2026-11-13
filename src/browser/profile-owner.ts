@@ -3,13 +3,12 @@ import { chromium, type BrowserContext, type Page } from 'playwright';
 import { AccountActor } from './account-actor.js';
 import { OwnerLock } from './owner-lock.js';
 import { requireSafe } from '../core/contracts.js';
-import { installMediaPauseGuard } from './media-pause.js';
 
 export class BrowserProfileOwner {
   readonly actor = new AccountActor();
   private closing:Promise<void>|undefined;
   private constructor(readonly context: BrowserContext, readonly notification: Page, readonly dm: Page,
-    private readonly lock: OwnerLock,private readonly headless:boolean) {}
+    private readonly lock: OwnerLock) {}
   static async launch(profile: string, headless: boolean): Promise<BrowserProfileOwner> {
     await mkdir(profile, { recursive: true });
     const lock = await OwnerLock.acquire(profile);
@@ -21,7 +20,7 @@ export class BrowserProfileOwner {
       // Do not navigate or reuse the notification page as the DM page.
       const dm = await context.newPage();
       for (const extra of context.pages()) if (extra !== notification && extra !== dm) await extra.close();
-      const owner=new BrowserProfileOwner(context, notification, dm, lock,headless);
+      const owner=new BrowserProfileOwner(context, notification, dm, lock);
       context.once('close',()=>{void owner.close().catch(()=>{});});
       return owner;
     } catch (error) {
@@ -31,8 +30,6 @@ export class BrowserProfileOwner {
   }
   async open(origin: string, signal?: AbortSignal): Promise<void> {
     await this.actor.run(async () => {
-      requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
-      for(const page of [this.notification,this.dm])await installMediaPauseGuard(page,origin,this.headless);
       requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
       await this.notification.goto(origin, { waitUntil: 'domcontentloaded' });
       requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
