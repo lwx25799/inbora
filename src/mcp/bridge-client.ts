@@ -4,7 +4,7 @@ import { Blocked, requireSafe } from '../core/contracts.js';
 import { assistantTools } from './tool-contracts.js';
 import { readAssistantDiscovery } from './discovery.js';
 import {
-  assistantRoute, bridgeResponseSchema, maxAssistantRequestBytes, maxAssistantResponseBytes,
+  assistantRoute, browserResourcesHeader, bridgeResponseSchema, maxAssistantRequestBytes, maxAssistantResponseBytes,
   type AssistantToolRegistry,
 } from './bridge-contracts.js';
 
@@ -42,6 +42,7 @@ export class AssistantBridgeClient {
         headers: {
           Authorization: `Bearer ${descriptor.secret}`, 'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(body), Connection: 'close',
+          ...(tool === 'inbora_get_diagnostics' ? { [browserResourcesHeader]: '1' } : {}),
         },
       }, response => {
         let bytes = 0;

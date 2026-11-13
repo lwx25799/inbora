@@ -6,6 +6,7 @@ import type {RuntimePerformanceSummary} from '../../src/observability/runtime-pe
 import {request,reasons} from './api';
 import {time} from './presentation';
 import {ReadRefresh} from './read-refresh';
+import {BrowserResourcesPanel} from './BrowserResourcesPanel';
 
 type DiagnosticsView=DiagnosticsSnapshot&{
   performance:RuntimePerformanceSummary[];evidence:ReturnType<EvidenceMaintenance['status']>;
@@ -44,6 +45,7 @@ export function DiagnosticsPanel(){
     {failed&&<p role="status">诊断数据暂不可用，后台运行不受影响。</p>}
     {!snapshot&&!failed&&<p>正在读取本地诊断…</p>}
     {snapshot&&usage&&<>
+      <BrowserResourcesPanel snapshot={snapshot.browserResources}/>
       <h3>模型调用累计</h3>
       <p>共 {usage.requests} 次 · 已知用量 {usage.knownUsageRequests} 次 · 用量未知 {usage.unknownUsageRequests} 次</p>
       <p>已知输入 {usage.inputTokens} / 输出 {usage.outputTokens} Token</p>

@@ -1,5 +1,6 @@
 import {z} from 'zod';
 import {channelSchema} from '../core/contracts.js';
+import {browserResourceReasons} from '../observability/browser-resource-contracts.js';
 import type {AssistantToolRegistry} from './bridge-contracts.js';
 
 const id=z.uuid(), count=z.number().int().nonnegative(), hash=z.string().regex(/^[a-f0-9]{64}$/u);
@@ -31,13 +32,22 @@ export const statusSchema=z.object({runtime:z.string().min(1).max(1000),instance
     remaining:z.object({MODEL:count.nullable(),SEND:count.nullable()}).strict(),reason:code.nullable()}).strict(),sync:syncSchema}).strict();
 const usage=z.object({requests:count,knownUsageRequests:count,unknownUsageRequests:count,inputTokens:count,outputTokens:count,
   elapsedSamples:count,averageElapsedMs:z.number().nonnegative().nullable(),p95ElapsedMs:z.number().nonnegative().nullable()}).strict();
+const memoryWindow=z.object({samples:count.max(1440),
+  workingSetBytes:z.object({p50:count,p95:count,max:count}).strict(),
+  privateBytes:z.object({p50:count,p95:count,max:count}).strict()}).strict();
+export const browserResourcesSchema=z.object({state:z.enum(['WAITING','AVAILABLE','UNAVAILABLE','STALE','CLOSED']),
+  reason:z.enum(browserResourceReasons).nullable(),
+  intervalMs:count,sampledAt:count.nullable(),segmentStartedAt:count.nullable(),
+  latest:z.object({workingSetBytes:count,privateBytes:count,browserProcesses:count,pageCount:count,elapsedMs:z.number().nonnegative()}).strict().nullable(),
+  hour:memoryWindow.nullable(),run:memoryWindow.nullable()}).strict();
 export const diagnosticsSchema=z.object({version:z.literal(1),timeRangeSupported:z.literal(false),
   model:z.object({total:usage,groups:z.array(usage.extend({model:z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/u),status:code})).max(100)}).strict(),
   blockers:z.array(z.object({source:code,code,count}).strict()).max(10),
   collection:z.object({channels:z.array(z.object({source:z.enum(['dm','works','UNKNOWN']),nextAt:count,lastSuccess:count.nullable(),
     lastError:code.nullable(),failures:count,elapsedMs:count.nullable()}).strict()).max(2),
     works:z.object({included:count,historical:count,review:count}).strict(),
-    conversations:z.object({total:count,neverRead:count}).strict()}).strict()}).strict();
+    conversations:z.object({total:count,neverRead:count}).strict()}).strict(),
+  browserResources:browserResourcesSchema.optional()}).strict();
 const resultSchema=z.discriminatedUnion('kind',[
   replySchema,
   z.object({kind:z.literal('saved'),eventId:id,draft:draftSchema}).strict(),

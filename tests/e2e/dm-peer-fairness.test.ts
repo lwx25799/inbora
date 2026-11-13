@@ -145,7 +145,7 @@ async function twoPeers(listWindow=false,bLong=true){
       space.style.height=id==='conv-a'||bLong?'600px':'96px';mount(false);list.scrollTop=list.scrollHeight-list.clientHeight;
     };
     a.addEventListener('click',()=>show('conv-a'));b.addEventListener('click',()=>show('conv-b'));
-    list.addEventListener('scroll',()=>requestAnimationFrame(()=>mount(list.scrollTop<=list.clientHeight)));
+    list.addEventListener('scroll',()=>requestAnimationFrame(()=>mount(list.scrollHeight>list.clientHeight&&list.scrollTop<=list.clientHeight)));
     document.querySelector('#back')!.addEventListener('click',()=>{state.backs++;if(!state.backFailure)chat.hidden=true;});chat.hidden=true;
     if(listWindow){
       a.remove();const contacts=document.createElement('div');contacts.id='peer-contact-list';contacts.style.cssText='height:80px;width:360px;overflow-y:auto';
@@ -251,6 +251,23 @@ test('preview priority retains collection gates, object cooldown and webpage dra
     const before=f.cursor();await expect(f.collector.collect('dm',f.signal)).rejects.toThrow();
     expect(await f.owner.dm.getByText('网页未发送人稿',{exact:true}).textContent()).toBe('网页未发送人稿');
     expect(checkpoint(f.cursor(),'conv-a')).toEqual(checkpoint(before,'conv-a'));noExternalCalls(f);
+  }finally{await f.close();}
+});
+
+test('a short peer keeps its latest native messages after a queued scroll frame',async()=>{
+  const f=await twoPeers(false,false);
+  try{
+    const ids=()=>f.owner.dm.locator('.message').evaluateAll(rows=>rows.map(row=>
+      Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message.serverId));
+    await f.owner.dm.locator('.conversation').filter({hasText:'Peer B'}).click();
+    expect(await ids()).toEqual(['4002','4003']);
+    expect(await f.owner.dm.locator('#peer-messages').evaluate(node=>node.scrollHeight<=node.clientHeight)).toBe(true);
+    await f.owner.dm.evaluate(async()=>{
+      document.querySelector('#peer-messages')!.dispatchEvent(new Event('scroll'));
+      await new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())));
+    });
+    expect(await ids()).toEqual(['4002','4003']);
+    noExternalCalls(f);
   }finally{await f.close();}
 });
 

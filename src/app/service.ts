@@ -38,6 +38,7 @@ import {markInboxRead} from './inbox-read-state.js';
 import {classifyStoredShares} from './message-disposition.js';
 import {EvidenceMaintenance} from './evidence-maintenance.js';
 import {runtimePerformance} from '../observability/runtime-performance.js';
+import {BrowserResources} from '../observability/browser-resources.js';
 import {generateSuggestion} from './suggestion-generation.js';
 import {migrateLocalAssistant} from '../storage/local-assistant-migration.js';
 import type {ReplyPolicy} from './automation-contracts.js';
@@ -87,6 +88,7 @@ export class ClientService {
   private onlineAbort=new AbortController();
   private recoveryDiagnosticPending=false;
   private readonly maintenance:EvidenceMaintenance;
+  private readonly browserResources:BrowserResources;
   private assistantConnection={ready:false,instanceId:null as string|null,transport:'stdio' as const,tools:16 as const};
   private sync: InboxSync = {
     runId: null, running: false, cancelled: false, source: null, results: [],
@@ -100,6 +102,7 @@ export class ClientService {
   ) {
     this.startedAt = startedAt;
     this.maintenance=new EvidenceMaintenance(store,browser.root);
+    this.browserResources=new BrowserResources({root:browser.root,identity:()=>browser.resourceIdentity(),onUpdated:()=>{if(!this.closing)this.emit('diagnostics_updated');}});
     this.authority = new WorkbenchAuthority(store, now);
     this.authority.recover();
     this.followups=new HumanFollowups(store,this.authority,browser,()=>this.closing,()=>this.emit('send_status_updated'),clientError);
@@ -156,6 +159,7 @@ export class ClientService {
     catch{this.keyStorageError='DPAPI_RESTORE_FAILED';}
   }
   startOnline():void {
+    this.browserResources.start();
     this.onlineEnabled=true;this.keepOnline();
   }
   setAssistantConnection(instanceId:string|null):void{
@@ -192,7 +196,7 @@ export class ClientService {
       this.onlineRetryAt=this.authority.now()+30_000;
       const own=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string};
       const task=this.browser.completeLoginIfVerified(own.own_id).then(done=>{if(done)this.resumeAfterLogin();})
-        .catch(()=>{}).finally(()=>{this.onlineTask=null;if(!this.closing)this.emit('status_updated');});
+        .catch(()=>{}).finally(()=>{this.onlineTask=null;if(!this.closing){this.emit('status_updated');this.browserResources.ownerReady();}});
       this.onlineTask=task;this.track(task);return;
     }
     this.inspectStartupRecovery();
@@ -204,7 +208,7 @@ export class ClientService {
       this.onlineRetryAt=this.authority.now()+30_000;
       if(collectionStops.has(code)){this.automation!.stop(true,code,'CONNECTION');this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}
       this.store.audit('SINGLE_ACCOUNT_CONNECTION_FAILED',digest(code),{stopped:collectionStops.has(code)});
-    }).finally(()=>{this.onlineTask=null;if(!this.closing)this.emit('status_updated');});
+    }).finally(()=>{this.onlineTask=null;if(!this.closing){this.emit('status_updated');this.browserResources.ownerReady();}});
     this.onlineTask=task;this.track(task);
   }
   private resumeAfterLogin():void{
@@ -432,7 +436,7 @@ export class ClientService {
         return this.status(token);
       case 'getDiagnostics':
         this.authority.operator(token,'READ');
-        return {...readDiagnostics(this.store),performance:runtimePerformance.snapshot(),evidence:this.maintenance.status()};
+        return {...readDiagnostics(this.store),performance:runtimePerformance.snapshot(),evidence:this.maintenance.status(),browserResources:this.browserResources.snapshot()};
       case "getThread":
         return {
           ...this.queries.thread(token,c.eventId,this.automation,c.timelineBefore,this.suggestionState(),this.verification?.activeEventId()),
@@ -547,6 +551,7 @@ export class ClientService {
         else if(c.open&&this.browser.loginRecovery){if(await this.browser.finishLoginRecovery())this.resumeAfterLogin();}
         else if (c.open) await this.browser.open('headless');
         else {this.stopSync();this.collector?.cancel();await this.browser.close();}
+        this.browserResources.ownerReady();
         this.emit("status_updated");
         return this.status(token);
       }
@@ -754,6 +759,7 @@ export class ClientService {
   }
   async close(): Promise<void> {
     this.closing = true;
+    const resourcesClosed=this.browserResources.close();
     this.keyGeneration++;
     this.stopSync();
     this.key = "";
@@ -766,6 +772,7 @@ export class ClientService {
     await this.collector?.close();
     await this.verification?.close();
     await this.maintenance.close();
+    await resourcesClosed;
     if(!this.automation)this.store.db.prepare("UPDATE client_state SET paused=1 WHERE id=1").run();
     await this.drain();
     await this.browser.close();

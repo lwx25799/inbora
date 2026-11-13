@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import type {BrowserResourcesSnapshot} from '../observability/browser-resource-contracts.js';
 
 type Store = {db:Database.Database};
 export interface ModelUsageSummary {
@@ -9,6 +10,7 @@ export interface ModelUsageGroup extends ModelUsageSummary {model:string;status:
 export interface DiagnosticBlocker {source:string;code:string;count:number}
 export interface DiagnosticsSnapshot {
   version:1;timeRangeSupported:false;
+  browserResources?:BrowserResourcesSnapshot;
   model:{total:ModelUsageSummary;groups:ModelUsageGroup[]};
   blockers:DiagnosticBlocker[];
   collection:{channels:{source:string;nextAt:number;lastSuccess:number|null;lastError:string|null;failures:number;elapsedMs:number|null}[];

@@ -1,5 +1,6 @@
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
+import {existsSync} from 'node:fs';
 import {ClientService} from '../../src/app/service.js';
 import {BrowserService} from '../../src/app/browser-service.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
@@ -17,9 +18,13 @@ test('diagnostics is an authenticated read with no business mutation and no priv
     // Permission denial is intentionally audited; an authorized read must add no further business writes.
     const inventory=before();
     const result=await service.dispatch(token,{command:'getDiagnostics'});
-    expect(result).toMatchObject({version:1,timeRangeSupported:false,model:{total:{requests:0}},performance:expect.any(Array),evidence:{running:false}});
+    expect(result).toMatchObject({version:1,timeRangeSupported:false,model:{total:{requests:0}},performance:expect.any(Array),evidence:{running:false},
+      browserResources:{state:'WAITING',reason:'NO_OWNER',latest:null}});
+    for(let n=0;n<3;n++)expect(await service.dispatch(token,{command:'getDiagnostics'})).toEqual(result);
+    expect(existsSync(join(root,'reports','browser-resources.json'))).toBe(false);
     const text=JSON.stringify(result);expect(text).not.toContain(event);expect(text).not.toContain(store.event(event).payload.text);
-    expect(text).not.toContain(store.event(event).payload.conversationId);expect(before()).toBe(inventory);
+    expect(text).not.toContain(store.event(event).payload.conversationId);expect(text).not.toMatch(/"(?:pid|rootPid|commandLine|url)":|"samples":\[/iu);
+    expect(before()).toBe(inventory);
     await expect(service.dispatch(token,{command:'getDiagnostics',privatePath:'anything'})).rejects.toThrow();
   }finally{await service.close();store.close();}
 });

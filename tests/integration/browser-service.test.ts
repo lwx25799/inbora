@@ -26,6 +26,20 @@ function fakeOwner() {
   } as unknown as BrowserProfileOwner;
   return { owner, context, closed: () => closed, opened: () => opened };
 }
+
+test('resource identity reads actual Context pages without entering the account queue and changes on close',async()=>{
+  const fake=fakeOwner();
+  Object.assign(fake.context,{pages:()=>[{},{}]});
+  const browser=BrowserService.adopt(privateTemp('resource-identity-'),fake.owner,'headless');
+  let release!:()=>void;
+  const busy=fake.owner.actor.run(()=>new Promise<void>(resolve=>{release=resolve;}));
+  await Promise.resolve();
+  const before=browser.resourceIdentity();
+  expect(before).toEqual({open:true,epoch:0,mode:'headless',pageCount:2});
+  release();await busy;
+  await browser.close();
+  expect(browser.resourceIdentity()).toEqual({...before,open:false,epoch:1,pageCount:0});
+});
 test("browser launch is single-flight, loads current mapping identity, and releases natural close before reopening", async () => {
   const root = privateTemp("browser-lifecycle-"),
     config = { ...mapping("https://www.douyin.com"), environment: "douyin" };

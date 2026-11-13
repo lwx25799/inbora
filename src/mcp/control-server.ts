@@ -4,7 +4,7 @@ import { requireSafe } from '../core/contracts.js';
 import { assistantTools } from './tool-contracts.js';
 import { canonicalAssistantRoot, publishAssistantDiscovery } from './discovery.js';
 import {
-  assistantError, assistantRoute, bridgeRequestSchema, maxAssistantRequestBytes,
+  assistantError, assistantRoute, browserResourcesHeader, bridgeRequestSchema, maxAssistantRequestBytes,
   maxAssistantResponseBytes, type AssistantToolRegistry,
 } from './bridge-contracts.js';
 
@@ -71,6 +71,9 @@ export async function startAssistantControl(options: AssistantControlOptions): P
       const expectedBytes = Buffer.from(expected);
       requireSafe(oneHeader(request, 'authorization') && suppliedBytes.length === expectedBytes.length &&
         timingSafeEqual(suppliedBytes, expectedBytes), 'ASSISTANT_AUTHENTICATION_FAILED');
+      const resourcesHeader = request.headers[browserResourcesHeader];
+      requireSafe(resourcesHeader === undefined || oneHeader(request, browserResourcesHeader) && resourcesHeader === '1',
+        'ASSISTANT_INVALID_REQUEST');
       requireSafe(request.headers['content-type'] === 'application/json', 'ASSISTANT_INVALID_REQUEST');
       const envelope = bridgeRequestSchema.parse(await readBody(request));
       requireSafe(!closing, 'APP_NOT_RUNNING');
@@ -85,7 +88,15 @@ export async function startAssistantControl(options: AssistantControlOptions): P
       const result = await options.dispatch(envelope.sessionId, envelope.tool, input.data);
       const checked = definition.outputSchema.safeParse(result);
       requireSafe(checked.success, 'ASSISTANT_RESPONSE_INVALID');
-      send(response, 200, { ok: true, instanceId, result: checked.data });
+      let compatible = checked.data;
+      if (envelope.tool === 'inbora_get_diagnostics' && resourcesHeader === undefined &&
+        compatible !== null && typeof compatible === 'object' && !Array.isArray(compatible)) {
+        // Existing stdio processes retain the previous strict output schema until their next start.
+        const legacy: Record<string, unknown> = { ...compatible };
+        delete legacy.browserResources;
+        compatible = legacy;
+      }
+      send(response, 200, { ok: true, instanceId, result: compatible });
     } catch (error) {
       const code = assistantError(error);
       send(response, code === 'ASSISTANT_AUTHENTICATION_FAILED' ? 401 : 400, { ok: false, error: code });

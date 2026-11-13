@@ -52,6 +52,9 @@ export class BrowserService {
   private latestViewRequest=0;
   get loginRecovery(){return this.recoveringLogin||this.viewRequests>0;}
   get ownerEpoch() { return this.epoch; }
+  resourceIdentity() {
+    return {open:!!this.owner&&this.state.startsWith('OPEN'),epoch:this.epoch,mode:this.mode,pageCount:this.owner?.context.pages().length??0};
+  }
   constructor(
     readonly root: string,
     private readonly launch = BrowserProfileOwner.launch,

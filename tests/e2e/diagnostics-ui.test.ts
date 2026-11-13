@@ -4,6 +4,7 @@ import {chromium} from 'playwright';
 import {resolve} from 'node:path';
 import {defaultSettings} from '../../src/app/contracts.js';
 import type {Status} from '../../desktop/src/api.js';
+import type {BrowserResourcesSnapshot} from '../../src/observability/browser-resource-contracts.js';
 
 test('settings shows cumulative diagnostics, combines events and rejects results after leaving settings',async()=>{
   const server=await createServer({configFile:resolve('desktop/vite.config.ts'),server:{port:0,strictPort:false},logLevel:'error'});await server.listen();
@@ -19,7 +20,7 @@ test('settings shows cumulative diagnostics, combines events and rejects results
     performance:[{stage:'QUEUE_WAIT',channel:'SHARED',count:12,failures:0,cancelled:1,lastMs:8,p50Ms:5,p95Ms:12,maxMs:20}],
     evidence:{running:false,nextAt:0,error:null,report:{scope:'EVIDENCE_METADATA',retentionDays:14,referencesComplete:false,unknownReferences:1,cancelled:false,
       total:{files:10,bytes:2048},recognized:{files:9,bytes:2000},expired:{files:2,bytes:400},protected:{files:8,bytes:1600},eligible:capacity,unknown:{files:1,bytes:48},deleted:capacity,remainingEligible:capacity}}};
-  const calls:string[]=[],errors:string[]=[];let hold=false,entered=false,release:(()=>void)|undefined;
+  const calls:string[]=[],errors:string[]=[];let hold=false,entered=false,release:(()=>void)|undefined,resources:BrowserResourcesSnapshot|undefined;
   page.on('pageerror',error=>errors.push(error.message));
   await page.exposeFunction('fixtureInvoke',async(command:string,args:{body:{command:string}})=>{
     if(command==='desktop_info')return {runtime:status.runtime,version:'synthetic-diagnostics'};
@@ -27,7 +28,7 @@ test('settings shows cumulative diagnostics, combines events and rejects results
     if(name==='getStatus')return status;
     if(name==='getInbox')return {items:[],total:0,page:0,pageSize:20};
     if(name==='browser')return {available:false};
-    if(name==='getDiagnostics'){if(hold){hold=false;entered=true;await new Promise<void>(resolve=>{release=resolve;});}return data;}
+    if(name==='getDiagnostics'){if(hold){hold=false;entered=true;await new Promise<void>(resolve=>{release=resolve;});}return {...data,...(resources?{browserResources:resources}:{})};}
     throw Error('UNEXPECTED_FIXTURE_COMMAND');
   });
   await page.addInitScript(()=>{
@@ -51,16 +52,30 @@ test('settings shows cumulative diagnostics, combines events and rejects results
     await page.getByText('运行诊断与用量详情',{exact:true}).click();
     await page.getByRole('heading',{name:'运行诊断',exact:true}).waitFor({timeout:1000});
     const panel=page.getByRole('region',{name:'运行诊断'});await panel.getByText('已知输入 500 / 输出 80 Token',{exact:true}).waitFor();
+    await panel.getByRole('region',{name:'后台浏览器资源'}).getByText('当前内核未提供浏览器资源监测数据。',{exact:true}).waitFor();
     expect(await panel.innerText()).toContain('用量未知 1 次');expect(await panel.innerText()).toContain('125 ms');
     expect(await panel.innerText()).toContain('200 ms');expect(await panel.innerText()).toContain('排队等待');
     expect(await panel.innerText()).toContain('证据元数据');expect(await panel.innerText()).toContain('不是整个运行目录的磁盘占用');
     expect(await panel.innerText()).toContain('引用尚未全部确认');expect(await panel.innerText()).toContain('费用：未知');
     expect(await panel.innerText()).not.toMatch(/今日|¥|￥|(?:费用|成本)\s*[：:]\s*\d/u);
     usage.requests=7;
+    const summary={samples:12,workingSetBytes:{p50:1024**3,p95:1.5*1024**3,max:2*1024**3},privateBytes:{p50:2*1024**3,p95:2.5*1024**3,max:3*1024**3}};
+    resources={state:'AVAILABLE',reason:null,intervalMs:60_000,sampledAt:Date.now()-5000,segmentStartedAt:Date.now()-600_000,
+      latest:{workingSetBytes:1.5*1024**3,privateBytes:2*1024**3,browserProcesses:7,pageCount:2,elapsedMs:25.5},hour:summary,run:summary};
     const focusBefore=calls.filter(name=>name==='getDiagnostics').length;
     await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
     await expect.poll(()=>calls.filter(name=>name==='getDiagnostics').length,{timeout:1000}).toBe(focusBefore+1);
     await panel.getByText('共 7 次 · 已知用量 2 次 · 用量未知 1 次',{exact:true}).waitFor({timeout:1000});
+    const browserResources=panel.getByRole('region',{name:'后台浏览器资源'});
+    await browserResources.getByText('采样正常',{exact:true}).waitFor({timeout:1000});
+    expect(await browserResources.innerText()).toContain('工作集 1.50 GiB · 私有提交量 2.00 GiB');
+    expect(await browserResources.innerText()).toContain('页面 2 个 · Edge 进程 7 个');
+    expect(await browserResources.innerText()).toContain('共享页的重复计数');
+    expect(await browserResources.getByRole('table',{name:'后台浏览器内存摘要'}).innerText()).toContain('最近一小时 / 12');
+    resources={...resources,state:'STALE',reason:'SAMPLE_STALE'};await emit();
+    await browserResources.getByText('数据已过期 · 最近有效采样已超过 150 秒',{exact:true}).waitFor({timeout:1000});
+    expect(await browserResources.innerText()).toContain('工作集 1.50 GiB');
+    expect(await browserResources.innerText()).not.toContain('工作集 0.0 MiB');
     const before=calls.filter(name=>name==='getDiagnostics').length;hold=true;await emit(30);await expect.poll(()=>entered).toBe(true);
     await emit(30);expect(calls.filter(name=>name==='getDiagnostics').length).toBe(before+1);
     await page.getByRole('button',{name:'收件箱',exact:true}).click();release?.();

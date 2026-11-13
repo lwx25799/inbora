@@ -1,7 +1,7 @@
-import {expect,test} from 'vitest';
+import {expect,test,vi} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {AssistantFacade} from '../../src/mcp/assistant-facade.js';
-import {operationSchema,replySchema,statusSchema,threadSchema} from '../../src/mcp/tool-contracts.js';
+import {operationSchema,replySchema,statusSchema,threadSchema,diagnosticsSchema} from '../../src/mcp/tool-contracts.js';
 import {ChatMessageStore} from '../../src/storage/chat-messages.js';
 import {setupAssistant} from '../mcp-helpers.js';
 import {candidate,pending} from '../helpers.js';
@@ -82,6 +82,24 @@ test('public status and diagnostics are body-free, reads and mutations cannot se
     await expect(f.call('setLocalAssistantGrant',{scope:{}})).rejects.toThrow('ASSISTANT_TOOL_NOT_ALLOWED');
     expect(f.store.budgets().every(row=>row.used===0)).toBe(true);
   }finally{await f.close();}
+});
+
+test('public diagnostics explicitly preserve the bounded resource summary without new permissions or sampler controls',async()=>{
+  const f=await fixture(),dispatch=f.service.dispatch.bind(f.service);
+  const resources={state:'STALE',reason:'SAMPLE_STALE',intervalMs:60_000,sampledAt:1000,segmentStartedAt:500,
+    latest:{workingSetBytes:2048,privateBytes:1024,browserProcesses:6,pageCount:2,elapsedMs:15},hour:null,run:null};
+  const spy=vi.spyOn(f.service,'dispatch').mockImplementation(async(token,body)=>{
+    const result=await dispatch(token,body);
+    return (body as {command:string}).command==='getDiagnostics'?{...result as object,browserResources:resources}:result;
+  });
+  try{
+    await f.service.dispatch(f.gui,{command:'setLocalAssistantGrant',enabled:false,confirmed:true});
+    const result=diagnosticsSchema.parse(await f.call('inbora_get_diagnostics'));
+    expect(result.browserResources).toEqual(resources);
+    expect(JSON.stringify(result)).not.toMatch(/"(?:pid|rootPid|commandLine|url)":|"samples":\[/iu);
+    await expect(f.call('inbora_get_diagnostics',{sampleNow:true})).rejects.toThrow();
+    expect(f.browser.clicks).toBe(0);expect(f.store.budgets().every(row=>row.used===0)).toBe(true);
+  }finally{spy.mockRestore();await f.close();}
 });
 
 test('GUI draft lease wins, stale assistant context/draft refused, stable operation IDs never overwrite twice',async()=>{

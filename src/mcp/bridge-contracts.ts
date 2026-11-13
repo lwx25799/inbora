@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { Blocked } from '../core/contracts.js';
 
 export const assistantRoute = '/inbora/assistant/v1';
+export const browserResourcesHeader = 'x-inbora-browser-resources';
 export const maxAssistantRequestBytes = 100_000;
 export const maxAssistantResponseBytes = 2_000_000;
 export const bridgeRequestSchema = z.object({

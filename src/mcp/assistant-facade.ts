@@ -69,7 +69,8 @@ export class AssistantFacade {
       authority.assistant.state(),this.instanceId);
     if(request.tool==='inbora_get_diagnostics'){
       const data=await this.service.dispatch(this.readToken(),{command:'getDiagnostics'}) as import('../app/diagnostics.js').DiagnosticsSnapshot;
-      return {version:data.version,timeRangeSupported:data.timeRangeSupported,model:data.model,blockers:data.blockers,collection:data.collection};
+      return {version:data.version,timeRangeSupported:data.timeRangeSupported,model:data.model,blockers:data.blockers,collection:data.collection,
+        ...(data.browserResources?{browserResources:data.browserResources}:{})};
     }
     if(request.tool==='inbora_get_operation')return this.operation(request.input.operationId);
     if(request.tool==='inbora_list_inbox'||request.tool==='inbora_get_thread'||request.tool==='inbora_inspect_preview'){
