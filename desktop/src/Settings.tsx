@@ -3,6 +3,7 @@ import { AutomationSettings } from './AutomationSettings';
 import {LocalAssistantSettings} from './LocalAssistantSettings';
 import { BrowserDraftRecovery } from './BrowserDraftRecovery';
 import {DiagnosticsPanel} from './DiagnosticsPanel';
+import {KnowledgeSettings} from './KnowledgeSettings';
 import { request, closeDesktop, reasons, capabilityNames, type Status } from './api';
 import { modes } from './presentation';
 import {SettingsDialog} from './SettingsDialog';
@@ -249,6 +250,7 @@ export function Settings({
       </div>
         </div>
       </div>
+      <KnowledgeSettings key={status.account?.id??'unbound'} accountId={status.account?.id??null} disabled={!!busy}/>
       <details className="settings-diagnostics"><summary>运行诊断与用量详情</summary><DiagnosticsPanel/></details>
     </section>
   );

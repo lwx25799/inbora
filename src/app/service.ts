@@ -1,6 +1,8 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile, rename } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import {ReplyKnowledgeService} from '../knowledge/service.js';
+import {saveAiSettings,grantConfiguredModel} from './ai-configuration.js';
 import { join } from "node:path";
 import {
   Blocked,
@@ -57,6 +59,7 @@ export function clientError(error: unknown): string {
 
 /** Transport-neutral application service. Short controls never wait behind browser/model operations. */
 export class ClientService {
+  private readonly knowledge:ReplyKnowledgeService;
   private readonly followups:HumanFollowups;
   private readonly queries: WorkbenchQueries;
   readonly events = new EventEmitter();
@@ -111,6 +114,8 @@ export class ClientService {
     this.browserResources=new BrowserResources({root:browser.root,identity:()=>browser.resourceIdentity(),onUpdated:()=>{if(!this.closing)this.emit('diagnostics_updated');}});
     this.authority = new WorkbenchAuthority(store, now);
     this.authority.recover();
+    this.knowledge=new ReplyKnowledgeService(store,this.authority,browser.root,()=>({settings:this.settings,key:this.key,
+      automation:this.automation,signal:this.modelAbort.signal,closing:this.closing}));
     this.followups=new HumanFollowups(store,this.authority,browser,()=>this.closing,()=>this.emit('send_status_updated'),clientError);
     this.humanReplies=new HumanReplyWorkflow(store,this.authority,browser,()=>this.closing,(token,id,params)=>this.deliver(token,id,params),event=>this.emit(event),clientError);
     this.queries = new WorkbenchQueries(store,this.authority,browser);
@@ -121,6 +126,7 @@ export class ClientService {
       await ensureQueryIndexes(this.store,join(this.browser.root,'backups',`query-indexes-${randomUUID()}.sqlite`));
       await migrateFollowups(this.store,join(this.browser.root,'backups',`human-followups-${randomUUID()}.sqlite`));
       await migrateLocalAssistant(this.store,join(this.browser.root,'backups',`local-assistant-${randomUUID()}.sqlite`));
+      await this.knowledge.initialize();
       this.followups.recover();
       this.automation=new AutomationStore(this.store,this.authority.now);
       this.automation.initialize(this.startedAt);
@@ -178,6 +184,7 @@ export class ClientService {
     if(await configureAssistantConnection(this.authority.assistant,this.browser.root,'IF_NEW',check))this.emit('status_updated');
   }
   private maintainEvidence():void {
+    if(!this.closing)try{this.knowledge.collectIfDue();}catch{this.store.audit('KNOWLEDGE_COLLECTION_DEFERRED','account_001');}
     const idle=!this.closing&&!this.autoTask&&!this.onlineTask&&!this.syncTask&&!this.observing&&!this.modelPending.size&&
       !this.pending.size&&!this.collector?.status().running&&this.browser.isIdle();
     void this.maintenance.runIfDue(idle).then(report=>{if(report)this.emit('diagnostics_updated');}).catch(()=>this.emit('diagnostics_updated'));
@@ -346,6 +353,10 @@ export class ClientService {
     this.authority.operator(token);
     if(!['getStatus','getInbox','getThread','getDiagnostics','getAudit','getSendResult','getMessagePreview'].includes(c.command))this.maintenance.cancel();
     switch (c.command) {
+      case 'replyKnowledge': {
+        const task=this.knowledge.dispatch(token,c).finally(()=>this.emit('knowledge_updated'));
+        this.track(task);return task;
+      }
       case 'securityRecovery': {
         const check=()=>{this.authority.operator(token,'CONTROL');requireSafe(!this.closing,'CLIENT_CLOSING');
           requireSafe(this.authority.assistantVersion(token)===null,'ASSISTANT_CANNOT_CONTROL_VERIFICATION');};
@@ -641,23 +652,12 @@ export class ClientService {
         this.authority.operator(token, "CONTROL");
         requireSafe(!/[\r\n]/u.test(c.key), "INVALID_MODEL_KEY");
         const generation=c.key?++this.keyGeneration:this.keyGeneration;
-        const file = join(this.browser.root, "client-settings.json"),
-          temporary = `${file}.${randomUUID()}.tmp`;
-        await writeFile(temporary, JSON.stringify(c.settings), {
-          flag: "wx",
-          mode: 0o600,
-        });
-        await rename(temporary, file);
+        await saveAiSettings(this.browser.root,c.settings);
         const modelChanged=this.settings.model!==c.settings.model;
         this.settings = c.settings;
         if(c.key&&generation===this.keyGeneration&&!this.closing){if(this.keyStored)await new CredentialStore(this.browser.root).save(c.key);if(generation===this.keyGeneration&&!this.closing)this.key = c.key;}
         if(modelChanged)this.modelAuthorized=false;
-        if(c.key&&generation===this.keyGeneration&&this.automation){
-          const budget=this.store.budget('MODEL'),remaining=budget.maximum===null?null:budget.maximum-budget.used;
-          const own=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
-          if(own&&(remaining===null||remaining>0)&&!this.automation.active('MODEL')&&!this.automation.active('AUTO_REPLY'))
-            this.automation.grant('MODEL',{ownId:own.own_id,channels:['COMMENT_NOTIFICATION','DIRECT_MESSAGE'],model:c.settings.model,modelLimit:remaining,expiresAt:null});
-        }
+        if(c.key&&generation===this.keyGeneration&&this.automation)grantConfiguredModel(this.store,this.automation,c.settings);
         this.emit('status_updated');return this.status(token);
       }
       case "authorizeAi":
@@ -672,6 +672,7 @@ export class ClientService {
         this.emit('status_updated');return this.status(token);
       case "generateSuggestion": {
         return generateSuggestion({store:this.store,authority:this.authority,automation:this.automation,provider:this.provider,
+          knowledgeContext:event=>this.authority.assistantVersion(token)===null&&this.knowledge.data.available()?this.knowledge.data.context(event.accountId,event.channel,event.text):null,
           state:()=>this.suggestionState(),key:()=>this.key,signal:()=>this.modelAbort.signal,pending:this.modelPending,
           emit:event=>this.emit(event),cancelMaintenance:()=>this.maintenance.cancel()},token,c);
       }
@@ -709,7 +710,8 @@ export class ClientService {
   async runAutomaticReply():Promise<void> {
     if(this.closing||this.browser.loginRecovery||!this.automation||!this.key||this.modelPending.size)return;
     await runAutomaticReply({store:this.store,authority:this.authority,automation:this.automation,browser:this.browser,
-      provider:this.provider,humanReplies:this.humanReplies,settings:this.settings,key:this.key,modelPending:this.modelPending,
+      knowledgeContext:event=>this.knowledge.data.available()?this.knowledge.data.context(event.accountId,event.channel,event.text):null,
+      provider:this.provider,humanReplies:this.humanReplies,settings:this.settings,currentSettings:()=>this.settings,key:this.key,modelPending:this.modelPending,
       automaticSignal:this.automaticAbort.signal,modelSignal:this.modelAbort.signal,isClosing:()=>this.closing,
       updated:()=>{this.inboxRevision++;this.emit('inbox_updated');},errorCode:clientError,beforeWork:()=>this.maintenance.cancel(),statusUpdated:()=>this.emit('status_updated'),
       stop:(code:string)=>{this.automation!.stop(true,code,'AUTOMATIC_REPLY');this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}});
@@ -773,6 +775,7 @@ export class ClientService {
   }
   async close(): Promise<void> {
     this.closing = true;
+    await this.knowledge.cancelActiveParse();
     await this.browser.closeManualRecovery();
     const resourcesClosed=this.browserResources.close();
     this.keyGeneration++;
@@ -790,6 +793,7 @@ export class ClientService {
     await resourcesClosed;
     if(!this.automation)this.store.db.prepare("UPDATE client_state SET paused=1 WHERE id=1").run();
     await this.drain();
+    await this.knowledge.close();
     await this.browser.close();
   }
 }

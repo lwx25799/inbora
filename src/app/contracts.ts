@@ -1,4 +1,5 @@
 import { z } from "zod";
+import {knowledgeCommandSchema} from '../knowledge/commands.js';
 import { collectionSchema, modelGrantSchema, replyPolicySchema } from "./automation-contracts.js";
 import {manualRecoveryCommandSchema} from './manual-recovery-contracts.js';
 
@@ -166,7 +167,7 @@ const ordinaryCommandSchema = z.discriminatedUnion("command", [
     .object({ command: z.literal("authorizeAi"), authorized: z.boolean() })
     .strict(),
 ]);
-export const commandSchema=z.union([ordinaryCommandSchema,browserCommandSchema,manualRecoveryCommandSchema]);
+export const commandSchema=z.union([ordinaryCommandSchema,browserCommandSchema,manualRecoveryCommandSchema,knowledgeCommandSchema]);
 export type ClientCommand = z.infer<typeof commandSchema>;
 export interface InboxSync {
   runId: string | null;

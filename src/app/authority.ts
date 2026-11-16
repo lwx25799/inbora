@@ -1,6 +1,7 @@
 import { ChannelAuthority, type CapabilityIdentity } from './channel-authority.js';
 export type { CapabilityIdentity } from './channel-authority.js';
 import { randomBytes, randomUUID } from "node:crypto";
+import {assertDraftLearningCurrent,bindSuggestionLearningToDraft} from '../knowledge/generation-context.js';
 import {
   digest,
   requireSafe,
@@ -390,6 +391,7 @@ export class WorkbenchAuthority {
         this.store.db
           .prepare("INSERT INTO draft_revisions VALUES(?,?,?,?,?,?)")
           .run(id, version, origin, text, op.id, this.now());
+        if(suggestionId)bindSuggestionLearningToDraft(this.store,suggestionId,id,version);
         this.store.audit(assistantVersion===null?"HUMAN_DRAFT_SAVED":"ASSISTANT_DRAFT_SAVED", id, { version });
         return this.draftFor(eventId)!;
       })
@@ -555,6 +557,7 @@ export class WorkbenchAuthority {
       "DRAFT_VERSION_CONFLICT",
     );
     validText(d.text);
+    assertDraftLearningCurrent(this.store,d.id,d.version);
     requireSafe(
       this.contextVersion(e) === p.contextVersion,
       "CONTEXT_VERSION_CONFLICT",

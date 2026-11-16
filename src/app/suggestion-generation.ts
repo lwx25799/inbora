@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {isStrong,requireSafe} from '../core/contracts.js';
+import {isStrong,requireSafe,type InboundEvent} from '../core/contracts.js';
 import type {EventStore} from '../storage/store.js';
 import type {AutomationStore} from '../storage/automation-store.js';
 import type {DeepSeekProvider} from '../ai/deepseek.js';
@@ -9,9 +9,12 @@ import {requireSuggestionEligibility,type SuggestionState,type SuggestionAuthori
 import {runtimePerformance,type RuntimeOutcome} from '../observability/runtime-performance.js';
 import {requireAssistantModelContext} from './local-assistant-model-context.js';
 import {assertSecurityRevision,securityRevision} from '../storage/security-holds.js';
+import type {ReplyKnowledgeContext} from '../knowledge/contracts.js';
+import {assertReplyKnowledgeCurrent,bindReplyKnowledge,replySettingsFingerprint} from '../knowledge/generation-context.js';
 
 interface Context {store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore|null;provider:Pick<DeepSeekProvider,'generate'>;
-  state():SuggestionState;key():string;signal():AbortSignal;pending:Set<string>;emit(event:string):void;cancelMaintenance():void}
+  state():SuggestionState;key():string;signal():AbortSignal;pending:Set<string>;emit(event:string):void;cancelMaintenance():void;
+  knowledgeContext?(event:InboundEvent):ReplyKnowledgeContext|null}
 
 /** Explicit first-reply candidates share persistent MODEL allowance with their exact saved policy. */
 export async function generateSuggestion(c:Context,token:string,command:Extract<ClientCommand,{command:'generateSuggestion'}>){
@@ -38,9 +41,14 @@ export async function generateSuggestion(c:Context,token:string,command:Extract<
       requireSafe(c.authority.contextVersion(current)===context,'CONTEXT_VERSION_CONFLICT');
       requireSafe((c.authority.draftFor(event.id)?.version??0)===command.draftVersion,'DRAFT_VERSION_CONFLICT');
     }
-    const fresh=requireSuggestionEligibility(c.store,c.authority,c.automation,current,{...c.state(),modelBusy:false},checkAllowance);sameAuthorization(fresh);return fresh;
+    const freshState=c.state(),fresh=requireSuggestionEligibility(c.store,c.authority,c.automation,current,{...freshState,modelBusy:false},checkAllowance);
+    sameAuthorization(fresh);
+    requireSafe(replySettingsFingerprint(freshState.settings,knowledge?.persona,fresh.policy?.instructions??freshState.settings.rules)===settingsFingerprint,'AI_SETTINGS_CHANGED');
+    return fresh;
   };
   const settings=authorization.policy?{...state.settings,rules:authorization.policy.instructions}:state.settings;
+  const knowledge=c.knowledgeContext?.(event.payload)??null;
+  const settingsFingerprint=replySettingsFingerprint(settings,knowledge?.persona);
   const history=c.store.history(event.payload).filter(item=>isStrong(item)&&!c.store.db.prepare(`SELECT c.id FROM source_collisions c
     JOIN inbound_events e ON e.id=c.event_id WHERE e.account_id=? AND e.channel=? AND e.source_key=? LIMIT 1`)
     .get(item.accountId,item.channel,item.platformEventId));
@@ -48,11 +56,15 @@ export async function generateSuggestion(c:Context,token:string,command:Extract<
   let outcome:RuntimeOutcome='FAILED';
   try{
     const result=await c.provider.generate(c.store,event.payload,history,settings,c.key(),true,signal,
-      ()=>{recheck();if(authorization.grant)c.automation!.reserve(authorization.grant.version,'MODEL',id,event.payload.channel);
+      ()=>{recheck();assertReplyKnowledgeCurrent(c.store,knowledge);if(authorization.grant)c.automation!.reserve(authorization.grant.version,'MODEL',id,event.payload.channel);
         c.authority.reserveAssistantModel(token,event,id);},
-      (_input,actualHistory)=>requireAssistantModelContext(c.authority,token,event,actualHistory));
+      (_input,actualHistory)=>requireAssistantModelContext(c.authority,token,event,actualHistory),knowledge);
     recheck(false);
-    c.store.db.prepare('INSERT INTO ai_suggestions VALUES(?,?,?,?,?,?,?,0)').run(id,event.id,command.draftVersion,context,result.text,result.model,Date.now());
+    c.store.db.transaction(()=>{
+      assertReplyKnowledgeCurrent(c.store,knowledge);
+      c.store.db.prepare('INSERT INTO ai_suggestions VALUES(?,?,?,?,?,?,?,0)').run(id,event.id,command.draftVersion,context,result.text,result.model,Date.now());
+      bindReplyKnowledge(c.store,'SUGGESTION',id,command.draftVersion,knowledge);
+    }).immediate();
     outcome='SUCCEEDED';
     c.emit('suggestion_updated');return{id,...result,stale:(c.authority.draftFor(event.id)?.version??0)!==command.draftVersion||c.authority.contextVersion(c.store.event(event.id))!==context};
   }finally{end(signal.aborted?'CANCELLED':outcome);c.pending.delete(event.id);c.emit('status_updated');}

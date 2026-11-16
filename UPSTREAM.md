@@ -697,3 +697,11 @@ UI 独立按准确存量 eventId 查看 IMAGE／MIXED／VIDEO／AUDIO，不扩�
 复读已核对的 MIT LockyBee/dsh-douyin-agent@7989640e340f0fd79e2de9874880d5197546e755 的 chat-browser.mjs:247–252、tests/chat-browser.test.mjs:250–258（本地 .local/upstream-review/LockyBee__dsh-douyin-agent/tree）。其中无文字、全屏可见 captcha 仍阻断，隐藏后通过；据此保留真实安全遮罩门禁，不把缺少外层文字当作没有验证。另核对 MIT miqian-nomad/dsh-douyin-watch@d1a14e3fc8d7a18089d412ae3479365974c069df 的 tools/work-comments.mjs:262–283，采用在目标作品触发并观察验证的排查思路；不采用其内部请求、UA、40px阈值或发送路线。来源与许可证沿用已有上游归档，本次未复制新上游代码或引入依赖。
 
 旧投影记录过安全容器与字节域名 iframe，但缺少足够现场关联，不能确认本次真实验证；另一个入口正常只证明该新文档。原恢复模式切换关闭两页后只打开 entryUrl，检查健康入口无法证明故障作品正常。新增本机私有、按绑定账号及准确授权作品重校验的位置记录；模式切换与后端重载保留故障作品，恢复回到该作品后检查，未保存人稿阻止导航。外站、其它账号、未授权作品及URL凭据不能恢复；正常关闭不写新的持久故障。沿用单持有者、无头默认、人工验证与未知不重发。
+
+## 2026-11-16：本地知识、回复样例与人格草稿
+
+实施前核对 AnythingLLM 的 MIT 固定 `1626d971c73d70a68602a662e3baf52e160c62ff`，具体 [`collector/processRawText/index.js`](https://github.com/Mintplex-Labs/anything-llm/blob/1626d971c73d70a68602a662e3baf52e160c62ff/collector/processRawText/index.js) 的来源与文本组织；以及 LangChainJS 的 MIT 固定 `c266deb5c9afee8253dab0f1e92aec5727159150`，具体 [`libs/langchain-core/src/example_selectors/semantic_similarity.ts`](https://github.com/langchain-ai/langchainjs/blob/c266deb5c9afee8253dab0f1e92aec5727159150/libs/langchain-core/src/example_selectors/semantic_similarity.ts) 的输入/样例选择边界。采用来源可撤销、资料与会话分离、少量相关样例的机制，独立实现到现有 SQLite/模型/发送合同；未复制其宿主、框架、向量服务或发送代码，不以其能力声明代替本机验收。
+
+解析依赖固定为 `mammoth@1.13.0`（BSD-2-Clause，纯文本 DOCX）、`pdfjs-dist@6.5.438`（Apache-2.0，文字 PDF）和 `exceljs@4.4.0`（MIT，CSV/XLSX）。使用发布包 API，许可证随依赖保留，现有构建 notices 生成流程在获准打包时收录。无 OCR、宏、公式计算、外链下载或任意 URL 导入。保留 better-sqlite3 13.0.3 及禁止隐式 node-gyp 的策略；干净生产依赖安装、SQLite 持久化和纯构建 Node Worker 实际通过。
+
+本项目增补本地来源/样本/人格版本、中文二元 FTS 与三元 FTS、显式学习用途预算、人格基线试聊及最终意图前版本门禁。知识/样例作为不可信数据，账号及准确目标由原授权和协调器控制；学习和试聊没有发送入口。数据、模型、实际 ClientService 及合成 UI 的验证范围和剩余限制见 `docs/KNOWLEDGE-PERSONA.zh-CN.md`。无新增真实模型调用或真实发送作为测试，无安装包。

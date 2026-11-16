@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {digest,requireSafe,targetKey,type StoredEvent} from '../core/contracts.js';
+import {digest,requireSafe,targetKey,type StoredEvent,type InboundEvent} from '../core/contracts.js';
 import type {EventStore} from '../storage/store.js';
 import type {AutomationStore} from '../storage/automation-store.js';
 import type {DeepSeekProvider} from '../ai/deepseek.js';
@@ -14,12 +14,16 @@ import {readCommentThreadContext,commentThreadModelHistory} from '../storage/com
 import {shouldStopGlobally,securityCandidateCodes} from '../core/emergency-stop.js';
 import {assertSecurityRevision,securityRevision} from '../storage/security-holds.js';
 import {runtimePerformance} from '../observability/runtime-performance.js';
+import type {ReplyKnowledgeContext} from '../knowledge/contracts.js';
+import {assertReplyKnowledgeCurrent,bindReplyKnowledge,replySettingsFingerprint} from '../knowledge/generation-context.js';
 
 interface AutomaticReplyContext {
   store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore;browser:BrowserService;
   provider:DeepSeekProvider;humanReplies:HumanReplyWorkflow;settings:AiSettings;key:string;
   modelPending:Set<string>;automaticSignal:AbortSignal;modelSignal:AbortSignal;
   isClosing():boolean;updated():void;stop(code:string):void;beforeWork():void;statusUpdated():void;errorCode(error:unknown):string;
+  knowledgeContext?(event:InboundEvent):ReplyKnowledgeContext|null;
+  currentSettings?():AiSettings;
 }
 
 async function qualifyPolicyTarget(c:AutomaticReplyContext,grant:Grant<ReplyPolicy>,event:StoredEvent,signal:AbortSignal):Promise<void>{
@@ -130,26 +134,35 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
       await qualifyPolicyTarget(c,grant,event,signal);
       requireSafe(!signal.aborted&&c.automation.policyMatches(grant,c.store.event(event.id))&&c.authority.contextVersion(event)===context&&c.authority.ownership(event).generation===generation,'AUTO_RESULT_STALE');
       c.store.db.prepare("UPDATE automation_jobs SET state='GENERATING',updated_at=? WHERE event_id=?").run(c.authority.now(),event.id);
+      const knowledge=c.knowledgeContext?.(event.payload)??null;
+      const settings={...c.settings,rules:grant.scope.instructions},settingsFingerprint=replySettingsFingerprint(settings,knowledge?.persona);
+      const checkSettings=()=>requireSafe(replySettingsFingerprint(c.currentSettings?.()??c.settings,knowledge?.persona,grant.scope.instructions)===settingsFingerprint,'AI_SETTINGS_CHANGED');
       const modelEnd=runtimePerformance.start('MODEL',event.payload.channel);
       const result=await c.provider.generate(c.store,event.payload,c.store.history(event.payload).filter(item=>!item.observationIssue&&!item.contentType),
-        {...c.settings,rules:grant.scope.instructions},c.key,true,signal,()=>{
+        settings,c.key,true,signal,()=>{
           requireSafe(!signal.aborted,'MODEL_CANCELLED');
+          checkSettings();
+          assertReplyKnowledgeCurrent(c.store,knowledge);
           requireSafe(c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
           requireSafe(c.automation.allowance(grant.version,'SEND'),'SEND_GRANT_EXHAUSTED');
           c.automation.reserve(grant.version,'MODEL',event.id);
-        }).then(result=>{modelEnd();return result;},error=>{modelEnd(signal.aborted?'CANCELLED':'FAILED');throw error;});
+        },undefined,knowledge).then(result=>{modelEnd();return result;},error=>{modelEnd(signal.aborted?'CANCELLED':'FAILED');throw error;});
       requireSafe(!signal.aborted,'MODEL_CANCELLED');
+      checkSettings();
       assertSecurityRevision(c.store,event.payload.channel,security);
       const commandId=randomUUID(),selectionId=randomUUID();
       const token=c.authority.issueSession();
       try {
         c.store.db.transaction(()=>{
+          checkSettings();
+          assertReplyKnowledgeCurrent(c.store,knowledge);
           assertSecurityRevision(c.store,event.payload.channel,security);
           requireSafe(!c.isClosing()&&c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
           requireSafe(c.authority.ownership(event).generation===generation&&c.authority.contextVersion(event)===context&&!c.authority.draftFor(event.id),'AUTO_RESULT_STALE');
           const draftId=randomUUID();
           c.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,?,1,'DRAFT',NULL,NULL)").run(draftId,event.id,result.text,result.model);
           c.store.db.prepare("INSERT INTO draft_revisions VALUES(?,1,'AUTO_POLICY',?,?,?)").run(draftId,result.text,`policy:${grant.version}`,c.authority.now());
+          bindReplyKnowledge(c.store,'DRAFT',draftId,1,knowledge);
           c.store.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(event.id);
           const params:SendParams={eventId:event.id,generation,draftId,draftVersion:1,text:result.text,contextVersion:context,selectionId};
           c.store.db.prepare("INSERT INTO manual_send_commands VALUES(?,?,?,?,?,'PREPARING',NULL,NULL,?)").run(commandId,event.id,

@@ -7,6 +7,7 @@ import type {HumanReplyWorkflow} from './human-reply-workflow.js';
 import type {Grant,ReplyPolicy} from './automation-contracts.js';
 import {sendParamsSchema,type SendParams} from './contracts.js';
 import {replyPolicySchema} from './automation-contracts.js';
+import {assertDraftLearningCurrent} from '../knowledge/generation-context.js';
 
 /** Requalify one generated policy draft that never acquired an intent. No model call or submit replay is available here. */
 export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAuthority,auto:AutomationStore,
@@ -34,6 +35,10 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
     if(digest(rules(previous.data))!==digest(rules(grant.scope)))continue;
     const event=store.event(job.event_id),draft=authority.draftFor(event.id);
     if(!draft||!auto.policyMatches(grant,event,'DRAFT')||authority.contextVersion(event)!==job.context_version)continue;
+    try{assertDraftLearningCurrent(store,draft.id,draft.version);}catch{
+      store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason='KNOWLEDGE_CONTEXT_CHANGED',updated_at=? WHERE event_id=?")
+        .run(authority.now(),event.id);continue;
+    }
     const marker=store.db.prepare("SELECT id FROM audit_events WHERE event_type='AUTO_COMMENT_ROOT_REQUALIFIED' AND entity_id=?").get(draft.id);
     // Root and clock failures share the original one-time comment preparation contract, not separate retry budgets.
     const commentRoot=['COMMENT_REPLY_ROOT_NOT_UNIQUE','COMMENT_REPLY_CLOCK_UNVERIFIED'].includes(job.reason),rootClose=!!marker&&job.reason==='CLIENT_CLOSING';

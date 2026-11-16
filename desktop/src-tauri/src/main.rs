@@ -113,6 +113,7 @@ async fn client_request(
         .and_then(Value::as_str)
         .ok_or("INVALID_COMMAND")?;
     const ALLOWED: &[&str] = &[
+        "replyKnowledge",
         "connect",
         "disconnect",
         "getStatus",

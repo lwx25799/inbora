@@ -6,6 +6,7 @@ import type {BrowserService} from './browser-service.js';
 import {humanReplySchema,type SendParams} from './contracts.js';
 import type {z} from 'zod';
 import {captureHumanQueueContext,recordHumanQueueContext} from './human-queue-context.js';
+import {assertDraftLearningCurrent} from '../knowledge/generation-context.js';
 
 /** One explicit human request, durable latest text, backend qualification, then the shared send coordinator. */
 export class HumanReplyWorkflow {
@@ -29,6 +30,7 @@ export class HumanReplyWorkflow {
         this.authority.save(token,input.eventId,input.generation,input.expectedVersion,input.text,input.suggestionId);
       const params:SendParams={eventId:input.eventId,generation:input.generation,draftId:draft.id,draftVersion:draft.version,
         text:draft.text,contextVersion:input.contextVersion,selectionId:input.selectionId};
+      assertDraftLearningCurrent(this.store,draft.id,draft.version);
       this.store.db.prepare('INSERT INTO manual_send_commands VALUES(?,?,?,?,?,?,?,?,?)').run(id,event.id,this.authority.operator(token).id,
         digest(params),JSON.stringify(params),'PREPARING',null,null,this.authority.now());
       this.store.db.prepare('INSERT INTO manual_send_inputs VALUES(?,?)').run(id,digest(input));

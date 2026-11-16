@@ -1,0 +1,215 @@
+.knowledge-settings {
+  border-top: 1px solid var(--line);
+  padding-top: 18px !important;
+}
+.knowledge-heading,
+.knowledge-toolbar,
+.knowledge-entry-heading,
+.knowledge-pagination {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+}
+.knowledge-heading > div,
+.knowledge-entry-heading h4 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.knowledge-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  margin-top: 14px;
+}
+.knowledge-tabs button {
+  border-radius: 6px 6px 0 0;
+  border-color: transparent;
+  background: transparent;
+  min-height: 40px;
+}
+.knowledge-tabs button[aria-selected="true"] {
+  color: var(--green);
+  background: #e5ece5;
+  border-bottom-color: var(--green);
+  font-weight: 600;
+}
+.knowledge-settings [hidden] {
+  display: none !important;
+}
+.knowledge-feedback {
+  min-height: 30px;
+  margin: 8px 0;
+}
+.knowledge-settings h3 {
+  font-size: 15px;
+}
+.knowledge-settings h4 {
+  font-size: 14px;
+  margin: 0;
+}
+.knowledge-workspace,
+.knowledge-persona-comparison,
+.knowledge-trial-answers.comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+  align-items: start;
+  margin-top: 16px;
+}
+.knowledge-workspace > *,
+.knowledge-persona-comparison > *,
+.knowledge-trial-answers > * {
+  min-width: 0;
+}
+.knowledge-entry,
+.knowledge-sample {
+  border-bottom: 1px solid var(--line);
+  padding: 12px 0;
+}
+.knowledge-entry:first-child {
+  padding-top: 0;
+}
+.knowledge-state {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.knowledge-state.active {
+  color: var(--green);
+}
+.knowledge-excerpt,
+.knowledge-answer,
+.knowledge-quote,
+.knowledge-sample dd {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.knowledge-excerpt {
+  margin: 7px 0;
+}
+.knowledge-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 12px;
+}
+.knowledge-empty {
+  padding: 22px 0;
+  color: var(--muted);
+}
+.knowledge-import,
+.knowledge-history {
+  margin-top: 12px;
+}
+.knowledge-import > summary,
+.knowledge-history > summary,
+.knowledge-trial summary {
+  cursor: pointer;
+  color: var(--green);
+  padding: 6px 0;
+}
+.knowledge-text-preview {
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: auto;
+  max-height: 320px;
+  padding: 12px;
+  background: #edf0ea;
+  border-radius: var(--radius);
+  margin: 10px 0;
+}
+.knowledge-persona-comparison .knowledge-text-preview {
+  max-height: 490px;
+}
+.knowledge-warning {
+  color: #85510f;
+  background: #f8f0df;
+  padding: 8px 10px;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.knowledge-confirm {
+  background: #fff3f1;
+  padding: 12px;
+  border-radius: var(--radius);
+}
+.knowledge-sample dl,
+.knowledge-pair-preview dl {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 8px 0;
+}
+.knowledge-sample dt,
+.knowledge-pair-preview dt {
+  color: var(--muted);
+}
+.knowledge-sample dd,
+.knowledge-pair-preview dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.knowledge-filter {
+  min-width: 120px;
+}
+.knowledge-pagination {
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.knowledge-pagination span {
+  margin-right: auto;
+  color: var(--muted);
+}
+.knowledge-trial-result {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.knowledge-quote {
+  color: var(--muted);
+  margin: 8px 0;
+}
+.knowledge-answer {
+  margin: 8px 0;
+  line-height: 1.8;
+}
+.knowledge-persona-diff {
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+}
+.knowledge-persona-diff summary {
+  color: var(--green);
+  cursor: pointer;
+}
+.knowledge-persona-diff p {
+  margin-top: 6px;
+  white-space: pre-wrap;
+}
+.knowledge-persona-diff del {
+  color: #963a32;
+  background: #fff3f1;
+}
+.knowledge-persona-diff ins {
+  color: #194d38;
+  background: #e5ece5;
+}
+@media (max-width: 1100px) {
+  .knowledge-workspace,
+  .knowledge-persona-comparison,
+  .knowledge-trial-answers.comparison {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 680px) {
+  .knowledge-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
