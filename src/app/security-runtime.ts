@@ -12,8 +12,10 @@ import {inspectSecuritySignal} from '../adapters/security-inspection.js';
 import {isSecurityFailure,parseSecuritySignal,reportSecurityFailure} from '../adapters/security-signal.js';
 import {globalStopCodes,platformStopCodes,securityCandidateCodes,shouldStopGlobally} from '../core/emergency-stop.js';
 import {assertSecurityChannelClear,securityRevision,assertSecurityRevision,holdSecurityChannel,resolveSecurityHold,readSecurityHold} from '../storage/security-holds.js';
+import {ManualRecovery} from '../browser/manual-recovery.js';
+import {manualRecoveryElements,inspectManualRecoveryElement} from '../browser/manual-recovery-dom.js';
 
-export const securityRuleVersion='2026-11-16.1';
+export const securityRuleVersion='2026-11-16.2';
 export interface SecurityRuntime {
   ruleVersion:string;
   fingerprint:string;
@@ -29,7 +31,8 @@ const fingerprint=createHash('sha256').update(JSON.stringify({
   functions:{hasVisibleSecurityComponent,captureObserved,captureCommentThread,captureDmReply,
     captureCommentReply,captureAndGuard,inspectMessageImage,inspectMessageShare,visibleStoredMessage,inspectSecuritySignal,
     isSecurityFailure,parseSecuritySignal,reportSecurityFailure,shouldStopGlobally,
-    assertSecurityChannelClear,securityRevision,assertSecurityRevision,holdSecurityChannel,resolveSecurityHold,readSecurityHold},
+    assertSecurityChannelClear,securityRevision,assertSecurityRevision,holdSecurityChannel,resolveSecurityHold,readSecurityHold,
+    ManualRecovery,manualRecoveryElements,inspectManualRecoveryElement},
 },(_key,value:unknown)=>typeof value==='function'?value.toString():value)).digest('hex');
 
 export function securityRuntime(instanceId:string|null):SecurityRuntime {

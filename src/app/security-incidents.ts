@@ -72,8 +72,9 @@ export class SecurityIncidents {
     }
     return count<maximumFiles&&total<maximumBytes-4*1024*1024;
   }
-  async record(channel:Channel,page:Page,initial:SecuritySignal|null,context:IncidentContext):Promise<void>{
-    if(readSecurityHold(this.store,channel))return;
+  async record(channel:Channel,page:Page,initial:SecuritySignal|null,context:IncidentContext,replaceRevision?:string):Promise<void>{
+    const previous=readSecurityHold(this.store,channel);
+    if(previous&&previous.revision!==replaceRevision||replaceRevision&&!previous)return;
     const id=randomUUID(),createdAt=Date.now();
     holdSecurityChannel(this.store,channel,{incidentId:id,reason:'OBSERVATION_SECURITY_SUSPECT',mode:context.mode,
       source:'UNKNOWN',

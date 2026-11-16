@@ -31,6 +31,8 @@ import type {PreviewDisplayTarget} from './media-preview-request.js';
 import {resolveStoredDmMessage,locateStoredDmMessage} from './message-view.js';
 import {BrowserSafety} from './browser-safety.js';
 import {readSecurityHold} from '../storage/security-holds.js';
+import {BrowserManualRecovery} from './browser-manual-recovery.js';
+import type {ManualRecoveryCommand} from './manual-recovery-contracts.js';
 
 export interface AdapterHandle {
   adapter: ReplyAdapter;
@@ -39,9 +41,23 @@ export interface AdapterHandle {
 export class BrowserService {
   private readonly recoveryLocations:BrowserRecoveryLocations;
   private safety:BrowserSafety|undefined;
+  private manualRecovery:BrowserManualRecovery|undefined;
+  onManualRecoveryClosed:()=>void=()=>{};
+  get manualRecoveryActive(){return this.manualRecovery?.active??false;}
+  manualRecoveryStatus(){return this.manualRecovery?.status()??null;}
+  async securityRecovery(command:ManualRecoveryCommand,token:string,check:()=>void):Promise<unknown>{
+    requireSafe(this.manualRecovery,'MANUAL_RECOVERY_INCIDENT_REQUIRED');
+    return this.manualRecovery.handle(command,token,check);
+  }
+  async closeManualRecovery():Promise<void>{await this.manualRecovery?.shutdown();}
   bindStore(store:EventStore):void {
     this.recoveryLocations.bindStore(store);
     if(!this.safety)this.safety=new BrowserSafety(this.root,store,(owner,channel)=>this.recoveryLocations.captureFault(owner,channel));
+    if(!this.manualRecovery){
+      this.manualRecovery=new BrowserManualRecovery(this.root,store,this.safety,()=>({owner:this.owner,epoch:this.epoch,mode:this.mode,
+        transitioning:this.recoveringLogin||!!this.modeTransition||!!this.opening||!!this.closing}));
+      this.manualRecovery.onClosed=()=>this.onManualRecoveryClosed();
+    }
     if(this.owner)this.safety.attach(this.owner,this.epoch,this.mode);
   }
   setRuntimeInstance(instanceId:string|null):void {if(this.safety)this.safety.instanceId=instanceId;}
@@ -67,7 +83,7 @@ export class BrowserService {
   private modeTransition:Promise<void>|undefined;
   private viewRequests=0;
   private latestViewRequest=0;
-  get loginRecovery(){return this.recoveringLogin||this.viewRequests>0;}
+  get loginRecovery(){return this.recoveringLogin||this.viewRequests>0||this.manualRecoveryActive;}
   get ownerEpoch() { return this.epoch; }
   resourceIdentity() {
     return {open:!!this.owner&&this.state.startsWith('OPEN'),epoch:this.epoch,mode:this.mode,pageCount:this.owner?.context.pages().length??0};
@@ -125,6 +141,7 @@ export class BrowserService {
     });
   }
   async open(_legacyMode: "headed" | "headless" = 'headless', signal?:AbortSignal): Promise<void> {
+    requireSafe(!this.manualRecoveryActive,'MANUAL_RECOVERY_IN_PROGRESS');
     requireSafe(!this.recoveringLogin,'LOGIN_RECOVERY_IN_PROGRESS');
     await this.openMode('headless',signal);
   }
@@ -150,6 +167,7 @@ export class BrowserService {
     }
   }
   async beginLoginRecovery(autoFinish=true,signal?:AbortSignal,check?:()=>void):Promise<void>{
+    requireSafe(!this.manualRecoveryActive,'MANUAL_RECOVERY_IN_PROGRESS');
     check?.();
     this.loginGeneration++;
     this.recoveringLogin=true;
@@ -320,6 +338,7 @@ export class BrowserService {
     }
   }
   async close(): Promise<void> {
+    await this.closeManualRecovery();
     if(this.modeTransition)await this.modeTransition.catch(()=>{});
     this.collector?.dispose();this.collector=undefined;
     if (this.opening) await this.opening.catch(() => {});

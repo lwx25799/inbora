@@ -11,6 +11,7 @@ import {ObservedReader,captureObserved} from '../adapters/observed-reader.js';
 import type {CaptureInput} from '../adapters/observed-capture.js';
 import {inspectRecoveryNavigation} from './browser-recovery-locations.js';
 import {SecurityIncidents} from './security-incidents.js';
+import {inspectSecuritySignal} from '../adapters/security-inspection.js';
 import {recordEmergencyStop} from '../storage/emergency-stop.js';
 
 /** Only a complete fixed code is authoritative; page text and error substrings are never causes. */
@@ -37,13 +38,13 @@ export class BrowserSafety {
     for(const [channel,page] of [['COMMENT_NOTIFICATION',owner.notification],['DIRECT_MESSAGE',owner.dm]] as const)
       this.detach.push(registerSecurityObserver(page,signal=>this.record(channel,page,signal)));
   }
-  private async record(channel:Channel,page:Page,signal:SecuritySignal|null):Promise<void>{
+  private async record(channel:Channel,page:Page,signal:SecuritySignal|null,replaceRevision?:string):Promise<void>{
     const previous=readSecurityHold(this.store,channel),owner=this.owner,epoch=this.epoch;
     const mapping=await loadObservationMapping(this.root).catch(()=>null);
     await this.incidents.record(channel,page,signal,{mode:this.mode,epoch:this.epoch,instanceId:this.instanceId,
-      selectors:[mapping?.securityBlockers??observedSecurityBlockers],mappingDigest:mapping?digest(mapping):null});
+      selectors:[mapping?.securityBlockers??observedSecurityBlockers],mappingDigest:mapping?digest(mapping):null},replaceRevision);
     const held=readSecurityHold(this.store,channel);
-    if(!previous&&held&&owner&&this.owner===owner&&this.epoch===epoch){
+    if(held&&held.revision!==previous?.revision&&owner&&this.owner===owner&&this.epoch===epoch){
       try{await this.captureFault?.(owner,channel);}catch{this.store.audit('SECURITY_RECOVERY_LOCATION_UNAVAILABLE',held.incidentId);}
     }
   }
@@ -52,7 +53,13 @@ export class BrowserSafety {
     const code=error instanceof Blocked?error.code:'';
     const strong=strongFailure(error);
     if(strong){
-      recordEmergencyStop(this.store,true,Date.now(),strong.code,'UNKNOWN');throw strong;
+      recordEmergencyStop(this.store,true,Date.now(),strong.code,'UNKNOWN');
+      if(['CHALLENGE_REQUIRED','SECURITY_VERIFICATION_CONFIRMED'].includes(strong.code)){
+        const mapping=await loadObservationMapping(this.root).catch(()=>null);
+        const signal=await page.evaluate(inspectSecuritySignal,{selectors:[mapping?.securityBlockers??observedSecurityBlockers]}).catch(()=>null);
+        await this.record(channel,page,signal);
+      }
+      throw strong;
     }
     if(isSecurityFailure(error)||securityCandidateCodes.has(code)){
       await this.record(channel,page,parseSecuritySignal(error));throw new Blocked('OBSERVATION_SECURITY_SUSPECT');
@@ -72,14 +79,15 @@ export class BrowserSafety {
       };
     }});
   }
-  async recover(owner:BrowserProfileOwner,channel:Channel,signal?:AbortSignal,explicit=false):Promise<boolean>{
+  async recover(owner:BrowserProfileOwner,channel:Channel,signal?:AbortSignal,explicit=false,inPlace=false,resolve=true):Promise<boolean>{
     const held=readSecurityHold(this.store,channel);if(!held)return true;
     if(this.mode!=='headless'||!explicit&&Date.now()<(this.retryAt.get(channel)??0))return false;
     this.retryAt.set(channel,Date.now()+30_000);
     const epoch=this.epoch,page=channel==='DIRECT_MESSAGE'?owner.dm:owner.notification;
-    return owner.actor.run(async()=>{
+    const verify=async()=>{
       const active=()=>requireSafe(this.owner===owner&&this.epoch===epoch&&!signal?.aborted&&
         readSecurityHold(this.store,channel)?.revision===held.revision,'SECURITY_RECOVERY_CHANGED');
+      let recoveryTarget:string|undefined;
       try{
         active();const incident=await this.incidents.read(held.incidentId),initial=incident?.initial??incident?.afterFailure;
         const mapping=await loadObservationMapping(this.root);active();
@@ -87,6 +95,7 @@ export class BrowserSafety {
         const own=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
         requireSafe(own?.own_id===mapping.self.uid,'ACCOUNT_CHANGED');
         const targetUrl=new URL(initial.href);targetUrl.hash='';targetUrl.search='';
+        recoveryTarget=targetUrl.href;
         requireSafe(targetUrl.origin===mapping.origin&&!targetUrl.username&&!targetUrl.password,'UNEXPECTED_ORIGIN');
         const expanded=structuredClone(mapping);
         const entryPath=new URL(mapping.entryUrl).pathname;
@@ -112,7 +121,7 @@ export class BrowserSafety {
           requireSafe(targetUrl.pathname===entryPath,'SECURITY_RECOVERY_TARGET_UNAVAILABLE');
         }
         if(page.url().split('?')[0]!==targetUrl.href){
-          requireSafe(explicit,'SECURITY_RECOVERY_TARGET_UNAVAILABLE');
+          requireSafe(explicit&&!inPlace,'SECURITY_RECOVERY_TARGET_UNAVAILABLE');
           const navigation=await page.evaluate(inspectRecoveryNavigation,mapping.origin);active();
           requireSafe(navigation.originMatches&&navigation.empty,'BROWSER_HAS_HUMAN_INPUT');
           await page.goto(targetUrl.href,{waitUntil:'domcontentloaded'});active();
@@ -124,12 +133,27 @@ export class BrowserSafety {
         await page.evaluate(captureObserved,input).catch(error=>reportSecurityFailure(page,error));active();
         const after=await page.evaluate(()=>({href:location.href,started:performance.timeOrigin}));active();
         requireSafe(digest(document)===digest(after)&&after.href.split('?')[0]===targetUrl.href,'SECURITY_RECOVERY_CHANGED');
-        return resolveSecurityHold(this.store,channel,held.revision);
+        return resolve?resolveSecurityHold(this.store,channel,held.revision):true;
       }catch(error){
         const strong=strongFailure(error);
+        const challenge=strong&&['CHALLENGE_REQUIRED','SECURITY_VERIFICATION_CONFIRMED'].includes(strong.code);
+        if(explicit&&!inPlace&&recoveryTarget&&(challenge||isSecurityFailure(error)||error instanceof Blocked&&securityCandidateCodes.has(error.code))){
+          // A new challenge after an explicit recovery is a new incident, never a restored old instance.
+          active();const mapping=await loadObservationMapping(this.root);
+          if(mapping){
+            const fresh=await page.evaluate(inspectSecuritySignal,{selectors:[mapping.securityBlockers]});active();
+            const incident=await this.incidents.read(held.incidentId),original=incident?.initial??incident?.afterFailure;
+            if(fresh.state==='SUSPECT'&&fresh.origin===mapping.origin&&fresh.href.split('?')[0]===recoveryTarget&&
+              (!original||fresh.documentStartedAt!==original.documentStartedAt||fresh.href!==original.href||
+                incident?.context.epoch!==epoch||incident?.context.instanceId!==this.instanceId)){
+              await this.record(channel,page,fresh,held.revision);
+            }
+          }
+        }
         if(strong)return this.failure(channel,page,strong);
         if(explicit)throw error;return false;
       }
-    },'background');
+    };
+    return inPlace?verify():owner.actor.run(verify,'background');
   }
 }

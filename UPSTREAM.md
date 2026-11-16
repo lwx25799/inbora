@@ -1,5 +1,13 @@
 # 来源与许可
 
+## 2026-11-16：在原无头页面内人工处理验证
+
+用户指出模式迁移不能承接原验证现场。本轮在实现前核对 Apache-2.0 `microsoft/playwright@cfe490d941f992655948eee8fd4fd94e1c4234bf` 的 `packages/playwright-core/src/server/input.ts`、`chromium/crInput.ts` 与 `screenshotter.ts`，并核对官方 [Mouse](https://playwright.dev/docs/api/class-mouse)、[Keyboard](https://playwright.dev/docs/api/class-keyboard) 及 [Page.screenshot](https://playwright.dev/docs/api/class-page#page-screenshot) 文档。鼠标采用主框架视口 CSS 坐标，按下、移动及抬起由同一 Page 保持状态；普通视口截图不采用会滚动的元素截图。使用已有 Playwright 公开接口，不复制上游源函数、不引入远程桌面服务或新依赖，原依赖许可保持。
+
+采用路径是客户端本地显示现有无头 Page 的有界实时截图，并将本人在验证区域内的操作交回原账号协调器；不切换浏览器模式、不重建页面、不自动求解验证。会话须绑定持有者、原文档、冻结版本及当前画面，后台页面调度在人工处理期间暂停；失效或关闭不能解除原冻结或重放发送。下文关闭后重建有头页面的记录描述上一轮实现，不再作为原验证现场的接管方案。
+
+本条记录接口与实现取舍。合成跨框架点击、拖动、输入、文档变化和调度竞争回归与真实平台人工验证分别记录；源码、文档或合成页面通过均不能证明真实验证码已经由本人处理，也不能使此前丢失的文档恢复。
+
 ## 2026-11-16：安全候选分级、同文档证据与持久门禁
 
 本轮复核前述验证码结论：旧 JSON 未保存可独立复核的同刻顶层 URL、截图及生成链，不能据其证明最近一次急停真实触发验证码，也不能从 iframe 来源推导顶层产品。下文旧观察仅保留为排查线索，不作为确认规则或本轮实机通过证据。

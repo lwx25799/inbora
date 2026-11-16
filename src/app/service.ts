@@ -47,6 +47,7 @@ import {recoverEmergency} from './emergency-recovery.js';
 import {shouldStopGlobally} from '../core/emergency-stop.js';
 import {readSecurityHold} from '../storage/security-holds.js';
 import {securityRuntime} from './security-runtime.js';
+import {handleBrowserCommand} from './browser-command.js';
 
 export function clientError(error: unknown): string {
   return error instanceof Blocked
@@ -105,6 +106,7 @@ export class ClientService {
   ) {
     this.startedAt = startedAt;
     browser.bindStore(store);
+    browser.onManualRecoveryClosed=()=>{this.resumeAfterLogin();this.emit('status_updated');};
     this.maintenance=new EvidenceMaintenance(store,browser.root);
     this.browserResources=new BrowserResources({root:browser.root,identity:()=>browser.resourceIdentity(),onUpdated:()=>{if(!this.closing)this.emit('diagnostics_updated');}});
     this.authority = new WorkbenchAuthority(store, now);
@@ -334,7 +336,7 @@ export class ClientService {
       settings:this.settings,keyPresent:!!this.key,keyStored:this.keyStored,keyStorageError:this.keyStorageError,
       modelAuthorized:this.modelAuthorized,modelBusy:this.modelPending.size>0,automation:this.automation,
       collector:this.collector?.status(),inboxRevision:this.inboxRevision,sync:this.sync,
-    }),localAssistant:this.authority.assistant.state(),localAssistantConnection:{...this.assistantConnection},
+    }),manualRecovery:this.browser.manualRecoveryStatus(),localAssistant:this.authority.assistant.state(),localAssistantConnection:{...this.assistantConnection},
       securityRuntime:securityRuntime(this.assistantConnection.instanceId),
       securityHolds:(['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as const).flatMap(channel=>{const hold=readSecurityHold(this.store,channel);return hold?[hold]:[];})};
   }
@@ -344,6 +346,18 @@ export class ClientService {
     this.authority.operator(token);
     if(!['getStatus','getInbox','getThread','getDiagnostics','getAudit','getSendResult','getMessagePreview'].includes(c.command))this.maintenance.cancel();
     switch (c.command) {
+      case 'securityRecovery': {
+        const check=()=>{this.authority.operator(token,'CONTROL');requireSafe(!this.closing,'CLIENT_CLOSING');
+          requireSafe(this.authority.assistantVersion(token)===null,'ASSISTANT_CANNOT_CONTROL_VERIFICATION');};
+        check();if(c.action==='start')this.suspendForVisible();
+        try{
+          const result=await this.browser.securityRecovery(c,token,check);
+          return c.action==='close'||c.action==='finish'?this.status(token):result;
+        }finally{
+          if(!this.browser.manualRecoveryActive)this.resumeAfterLogin();
+          this.emit('status_updated');
+        }
+      }
       case 'setLocalAssistantGrant': {
         this.authority.operator(token,'CONTROL');
         requireSafe(this.authority.assistantVersion(token)===null,'ASSISTANT_CANNOT_GRANT');
@@ -517,6 +531,7 @@ export class ClientService {
       case "pause":
       case "resume":
       case "emergencyStop": {
+        requireSafe(c.command!=='resume'||!this.browser.manualRecoveryActive,'MANUAL_RECOVERY_IN_PROGRESS');
         if(c.command==='resume'&&c.eventId===null&&this.automation?.state().emergencyStopped){
           this.authority.operator(token,'CONTROL');this.onlineAbort=new AbortController();
           await recoverEmergency({store:this.store,data:this.automation,authority:this.authority,browser:this.browser,token,
@@ -531,6 +546,7 @@ export class ClientService {
         if (c.command === "emergencyStop") {
           this.inboxRevision++;
           this.automation?.stop(true,'MANUAL_EMERGENCY_STOP','MANUAL');
+          void this.browser.closeManualRecovery().catch(()=>{});
           this.onlineAbort.abort();
           this.dialogs.clear();
           this.collector?.cancel();
@@ -545,22 +561,13 @@ export class ClientService {
         return this.status(token);
       }
       case "browser": {
-        this.authority.operator(token, "CONTROL");
-        if('action' in c){
-          const recovery=new BrowserDraftRecovery(this.store,this.authority,this.browser);
-          if(c.action==='inspectSavedDraftRecovery')return recovery.available(token);
-          const result=await recovery.clear(token,c);this.emit('status_updated');return result;
-        }
-        if(c.open&&c.loginRecovery){
-          this.suspendForVisible();
-          await this.browser.beginLoginRecovery(!c.manualVisible);this.onlineRetryAt=0;
-        }
-        else if(c.open&&this.browser.loginRecovery){if(await this.browser.finishLoginRecovery())this.resumeAfterLogin();}
-        else if (c.open) await this.browser.open('headless');
-        else {this.stopSync();this.collector?.cancel();await this.browser.close();}
+        requireSafe(!this.browser.manualRecoveryActive,'MANUAL_RECOVERY_IN_PROGRESS');
+        const result=await handleBrowserCommand({command:c,token,store:this.store,authority:this.authority,browser:this.browser,
+          suspend:()=>this.suspendForVisible(),resume:()=>this.resumeAfterLogin(),cancel:()=>{this.stopSync();this.collector?.cancel();},
+          resetRetry:()=>{this.onlineRetryAt=0;}});
         this.browserResources.ownerReady();
         this.emit("status_updated");
-        return this.status(token);
+        return result.status?this.status(token):result.value;
       }
       case "observe": {
         this.authority.operator(token, "CONTROL");
@@ -766,6 +773,7 @@ export class ClientService {
   }
   async close(): Promise<void> {
     this.closing = true;
+    await this.browser.closeManualRecovery();
     const resourcesClosed=this.browserResources.close();
     this.keyGeneration++;
     this.stopSync();
