@@ -4,6 +4,7 @@ import type {AutomationStore} from '../storage/automation-store.js';
 import type {WorkbenchAuthority} from './authority.js';
 import type {AiSettings} from './contracts.js';
 import type {Grant,ReplyPolicy} from './automation-contracts.js';
+import {assertSecurityChannelClear} from '../storage/security-holds.js';
 
 export interface SuggestionState {settings:AiSettings;keyPresent:boolean;modelAuthorized:boolean;modelBusy:boolean;recovering:boolean}
 export interface SuggestionEligibility {eligible:boolean;reason:string|null}
@@ -23,6 +24,7 @@ export function requireSuggestionAuthorization(store:EventStore,automation:Autom
 }
 
 export function requireSuggestionEligibility(store:EventStore,authority:WorkbenchAuthority,automation:AutomationStore|null,event:StoredEvent,state:SuggestionState,checkAllowance=true):SuggestionAuthorization {
+  assertSecurityChannelClear(store,event.payload.channel);
   requireSafe(!state.recovering,'LOGIN_RECOVERY_IN_PROGRESS');
   requireSafe(authority.mode()!=='OBSERVE'&&!authority.paused(),'MODEL_PAUSED');
   requireSafe(!automation?.state().emergencyStopped,'EMERGENCY_STOPPED');

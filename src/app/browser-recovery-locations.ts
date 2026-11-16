@@ -3,9 +3,10 @@ import {lstat,readFile,rename,unlink,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {z} from 'zod';
 import {loadMapping,loadObservationMapping} from '../config/runtime.js';
-import {requireSafe} from '../core/contracts.js';
+import {requireSafe,type Channel} from '../core/contracts.js';
 import type {BrowserProfileOwner} from '../browser/profile-owner.js';
 import type {EventStore} from '../storage/store.js';
+import {readSecurityHold} from '../storage/security-holds.js';
 
 const savedSchema=z.object({version:z.literal(1),ownId:z.string().min(1).max(128),
   notification:z.string().min(1).max(2000),dm:z.string().min(1).max(2000)}).strict();
@@ -99,10 +100,10 @@ export class BrowserRecoveryLocations {
     return this.captureLocations(owner,persist,false);
   }
   /** A newly observed platform fault supersedes an older recovery position. */
-  captureFault(owner:BrowserProfileOwner):Promise<void>{
-    return this.captureLocations(owner,true,true);
+  captureFault(owner:BrowserProfileOwner,channel?:Channel):Promise<void>{
+    return this.captureLocations(owner,true,true,channel);
   }
-  private captureLocations(owner:BrowserProfileOwner,persist:boolean,replaceSaved:boolean):Promise<void>{
+  private captureLocations(owner:BrowserProfileOwner,persist:boolean,replaceSaved:boolean,channel?:Channel):Promise<void>{
     return this.exclusive(async()=>{
       const scope=await this.scope();if(!scope)return;
       const saved=await this.readSaved(scope);
@@ -111,6 +112,11 @@ export class BrowserRecoveryLocations {
       const locations:Locations={version:1,ownId:scope.ownId,
         notification:notification&&scope.notification.has(notification)?notification:scope.entry,
         dm:dm&&scope.dm.has(dm)?dm:scope.entry};
+      const previous=saved??this.validate(this.memory,scope);
+      if(channel&&previous){
+        if(channel==='DIRECT_MESSAGE')locations.notification=previous.notification;
+        else locations.dm=previous.dm;
+      }
       this.memory=locations;if(!persist)return;
       const directory=await lstat(this.root);requireSafe(directory.isDirectory()&&!directory.isSymbolicLink(),'BROWSER_RECOVERY_PATH_UNAVAILABLE');
       try{const file=await lstat(this.file);requireSafe(file.isFile()&&!file.isSymbolicLink(),'BROWSER_RECOVERY_PATH_UNAVAILABLE');}
@@ -123,7 +129,7 @@ export class BrowserRecoveryLocations {
     });
   }
   /** Called outside the actor; only normal navigation to current allowlisted positions is permitted. */
-  async restore(owner:BrowserProfileOwner,signal?:AbortSignal):Promise<void>{
+  async restore(owner:BrowserProfileOwner,signal?:AbortSignal,allowHeld=false):Promise<void>{
     const locations=await this.exclusive(async()=>{
       if(!this.memory)try{await lstat(this.file);}
       catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error;}
@@ -137,6 +143,7 @@ export class BrowserRecoveryLocations {
       const valid=this.validate(locations,scope);
       const current=valid??{notification:scope.entry,dm:scope.entry};
       for(const [page,url] of [[owner.notification,current.notification],[owner.dm,current.dm]] as const){
+        if(!allowHeld&&this.store&&readSecurityHold(this.store,page===owner.dm?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION'))continue;
         requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
         if(page.url()===url)continue;
         const navigation=await page.evaluate(inspectRecoveryNavigation,scope.origin);

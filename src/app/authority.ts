@@ -17,6 +17,7 @@ import { AutomationStore } from "../storage/automation-store.js";
 import type { Grant, ReplyPolicy } from "./automation-contracts.js";
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
 import {LocalAssistantStore} from '../storage/local-assistant-store.js';
+import {assertSecurityChannelClear} from '../storage/security-holds.js';
 
 export type Permission = "READ" | "EDIT" | "APPROVE" | "SEND" | "CONTROL";
 interface Operator {
@@ -479,6 +480,7 @@ export class WorkbenchAuthority {
     this.operator(token, "APPROVE");
     this.operator(token, "SEND");
     const e = this.store.event(p.eventId);
+    assertSecurityChannelClear(this.store,e.payload.channel);
     this.assistant.requireSend(this.operator(token).id,e);
     const policy=this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='policy_commands'").get()&&commandId?
       this.store.db.prepare('SELECT grant_version,ownership_generation FROM policy_commands WHERE command_id=?').get(commandId) as {grant_version:number;ownership_generation:number}|undefined:null;

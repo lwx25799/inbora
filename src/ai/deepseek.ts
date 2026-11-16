@@ -10,6 +10,7 @@ import type { EventStore } from "../storage/store.js";
 import { prompt, sensitive } from "./draft-service.js";
 import {readCommentThreadContext,commentThreadModelHistory} from '../storage/comment-thread-context.js';
 import type { AiSettings } from "../app/contracts.js";
+import {assertSecurityChannelClear,assertSecurityRevision,securityRevision} from '../storage/security-holds.js';
 
 const responseSchema = z.object({
   model: z.string().min(1),
@@ -65,9 +66,11 @@ export class DeepSeekProvider {
       "SENSITIVE_MANUAL_HANDLING",
     );
     const context=prompt(event,history);
+    const security=securityRevision(store,event.channel);
     const id = randomUUID();
     store.db
       .transaction(() => {
+        assertSecurityChannelClear(store,event.channel);
         store.assertModelObservation(event);
         for(const item of history)store.assertModelObservation(item);
         reserve?.();
@@ -149,6 +152,7 @@ export class DeepSeekProvider {
           id,
         );
       const text = validText(result.choices[0]!.message.content);
+      assertSecurityRevision(store,event.channel,security);
       requireSafe(
         !sensitive({ ...event, text }) && !/https?:\/\//iu.test(text),
         "MODEL_SENSITIVE_OUTPUT",

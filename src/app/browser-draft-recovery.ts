@@ -7,6 +7,7 @@ import type {WorkbenchAuthority} from './authority.js';
 import type {BrowserService} from './browser-service.js';
 import {collectionStops} from './collection-scheduler.js';
 import {sendParamsSchema,type BrowserDraftChoice,type ClientCommand} from './contracts.js';
+import {assertSecurityChannelClear} from '../storage/security-holds.js';
 
 interface SavedDraftAdapter extends ReplyAdapter {
   readSavedDraft(event:InboundEvent):Promise<{text:string;snapshot:TargetSnapshot}>;
@@ -49,6 +50,7 @@ export class BrowserDraftRecovery {
   }
   private candidate(eventId:string):BrowserDraftChoice{
     const event=this.store.event(eventId),payload=event.payload,draft=this.authority.draftFor(eventId);
+    assertSecurityChannelClear(this.store,payload.channel);
     gate(payload.channel==='DIRECT_MESSAGE'&&isStrong(payload)&&!!payload.conversationId,'dbRejected','EVENT_NOT_STRONG_DM');
     gate(draft&&draft.text.trim()&&['DRAFT','APPROVED'].includes(draft.status),'dbRejected','DRAFT_STATE_OR_EMPTY');
     gate(['AWAITING_APPROVAL','APPROVED'].includes(event.status),'dbRejected','EVENT_STATE');

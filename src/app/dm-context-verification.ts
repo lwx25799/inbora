@@ -1,11 +1,13 @@
 import {digest,dmClockToleranceMs,eventBinding,isStrong,targetKey} from '../core/contracts.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
 import type {EventStore} from '../storage/store.js';
+import {readSecurityHold} from '../storage/security-holds.js';
 
 export interface VerificationJob {intent_id:string;event_id:string;boundary:string;target_digest:string;attempts:number;next_at:number;deadline:number;state:string;nativeIdDigest?:string}
 
 /** A new read-only evidence contract; never renews old attempts or permits another submission. */
 export function claimDmContextVerification(store:EventStore,now:number):VerificationJob|undefined {
+  if(readSecurityHold(store,'DIRECT_MESSAGE'))return undefined;
   return store.db.transaction(()=>{
     if(store.db.prepare("SELECT id FROM audit_events WHERE event_type='DM_CONTEXT_WINDOW_CHECKED' LIMIT 1").get())return undefined;
     const candidates=store.db.prepare(`SELECT j.* FROM verification_jobs j JOIN send_intents i ON i.id=j.intent_id

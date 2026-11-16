@@ -125,7 +125,7 @@ test.each(['FAILED','WRONG_NATIVE','MISSING_NATIVE','BINDING_CHANGED','CANCEL','
     const before=f.ledger();let calls=0;
     worker=new VerificationScheduler(f.data,async()=>{
       calls++;
-      if(fault==='PLATFORM_STOP')throw new Blocked('OBSERVATION_PAGE_BLOCKED');
+      if(fault==='PLATFORM_STOP')throw new Blocked('PLATFORM_STOP');
       if(fault==='CANCEL')worker!.cancel();
       if(fault==='BINDING_CHANGED')f.store.db.prepare("UPDATE reply_drafts SET text='changed during readback'").run();
       return {verified:fault!=='FAILED',evidenceId:'synthetic',...(fault==='MISSING_NATIVE'?{}:

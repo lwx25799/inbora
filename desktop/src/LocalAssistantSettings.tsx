@@ -1,4 +1,5 @@
 import {request,reasons,type Status} from './api';
+import {SecurityRuntimeDetails} from './SecurityRuntimeDetails';
 
 interface Props {
   status:Status;
@@ -32,5 +33,6 @@ export function LocalAssistantSettings({status,busy,act,update}:Props) {
       </dl>
       <p className="hint">入口就绪仅表示客户端可供连接。Codex 中的安装与实际工具调用需单独核验。</p>
     </details>
+    <SecurityRuntimeDetails status={status}/>
   </div>;
 }

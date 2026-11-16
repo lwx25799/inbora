@@ -1,3 +1,4 @@
+import {reportSecurityFailure} from './security-signal.js';
 import {randomUUID} from 'node:crypto';
 import type {Page} from 'playwright';
 import type {ObservationMapping} from '../config/site-mapping.js';
@@ -5,6 +6,7 @@ import {eventSchema,requireSafe,type InboundEvent} from '../core/contracts.js';
 import {captureCommentThread} from './comment-thread-capture.js';
 import {recoverCommentOffset} from './comment-offset-recovery.js';
 import {waitForCommentRender} from './comment-render.js';
+import {claimFreshCommentDocument,markCommentDocumentRead} from './fresh-comment-document.js';
 import {captureObserved,type CaptureInput,type CaptureOptions,type ObservationBatch,type DiscoveredPeer,type CollectionReadDiagnostic} from './observed-capture.js';
 export {captureObserved} from './observed-capture.js';
 export type {CaptureInput,CaptureOptions,DiscoveredPeer,CollectionReadDiagnostic,ObservationBatch} from './observed-capture.js';
@@ -15,7 +17,7 @@ export class ObservedReader {
   private async capture(channel: CaptureInput['channel'], index: number, selection: CaptureOptions = {}): Promise<ObservationBatch> {
     requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
     try {
-      const result = await this.page.evaluate(captureObserved,{mapping:this.mapping,channel,index,evidenceId:randomUUID(),...selection});
+      const result = await this.page.evaluate(captureObserved,{mapping:this.mapping,channel,index,evidenceId:randomUUID(),...selection}).catch(error=>reportSecurityFailure(this.page,error));
       requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
       return {...result,events:result.events.map(e=>eventSchema.parse(e))};
     } catch(error) {
@@ -127,7 +129,7 @@ export class ObservedReader {
   async commentThread(event:InboundEvent,offset=0):Promise<ObservationBatch> {
     const evaluate=async(action:'open'|'position'|'inspect')=>{
       requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
-      try{const value=await this.page.evaluate(captureCommentThread,{mapping:this.mapping,event,action,offset});
+      try{const value=await this.page.evaluate(captureCommentThread,{mapping:this.mapping,event,action,offset}).catch(error=>reportSecurityFailure(this.page,error));
         requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');return value;
       }catch(error){const code=error instanceof Error?error.message.match(/(?:OBSERVATION|RENDERED)_[A-Z_]+/)?.[0]:null;
         if(code)requireSafe(false,code);throw error;}
@@ -142,11 +144,20 @@ export class ObservedReader {
     await this.capture('commentScroll',index);await waitForCommentRender(this.page,this.signal);
     const batch=await this.capture('commentScroll',index,{commentStay:true});requireSafe(batch.scroll,'OBSERVATION_COMMENT_SCROLL_UNAVAILABLE');return batch.scroll;
   }
-  async comments(index: number, allCommentAuthors=false, offset=0,collection?:{holdScroll:boolean;stay:boolean;onRestoreWindow?:(batch:ObservationBatch)=>Promise<void>}): Promise<ObservationBatch> {
+  async comments(index: number, allCommentAuthors=false, offset=0,collection?:{holdScroll:boolean;stay:boolean;freshWithinMs?:number;onRestoreWindow?:(batch:ObservationBatch)=>Promise<void>}): Promise<ObservationBatch&{freshDocumentReused?:true}> {
     const work = this.mapping.works[index]; requireSafe(work,'OBSERVATION_WORK_REQUIRED');
-    if(allCommentAuthors){if(offset===0&&!collection?.stay||this.page.url().split('?')[0]!==work.url)await this.navigate(work.url);}
+    let freshDocumentReused=false;
+    if(allCommentAuthors){
+      if(offset===0&&!collection?.stay||this.page.url().split('?')[0]!==work.url){
+        if(collection?.freshWithinMs!==undefined)
+          freshDocumentReused=await claimFreshCommentDocument(this.page,work.url,collection.freshWithinMs);
+        if(!freshDocumentReused)await this.navigate(work.url);
+      }
+    }
     else await this.page.goto(work.url,{waitUntil:'domcontentloaded'});
     await this.guard();
+    if(allCommentAuthors)await this.capture('commentDocument',index);
+    await markCommentDocumentRead(this.page);
     if (!await this.page.evaluate(selector=>Array.from(document.querySelectorAll(selector)).some(n=>n.getClientRects().length),this.mapping.selectors.commentList))
       await this.page.locator(this.mapping.selectors.commentEntry).click();
     await this.page.waitForFunction(selector=>Array.from(document.querySelectorAll(selector)).filter(n=>n.getClientRects().length).length===1,
@@ -166,8 +177,8 @@ export class ObservedReader {
       read,collection?.onRestoreWindow,this.signal):await read();
     if(allCommentAuthors) {
       const input:CaptureInput={mapping:this.mapping,channel:'commentScroll',index,evidenceId:randomUUID(),...(collection?{commentStay:collection.holdScroll}:{})};
-      const next=await this.page.evaluate(captureObserved,input);if(next.scroll)batch.scroll=next.scroll;
+      const next=await this.page.evaluate(captureObserved,input).catch(error=>reportSecurityFailure(this.page,error));if(next.scroll)batch.scroll=next.scroll;
     }
-    return batch;
+    return freshDocumentReused?{...batch,freshDocumentReused:true}:batch;
   }
 }

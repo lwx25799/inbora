@@ -4,7 +4,7 @@ import { requireSafe } from '../core/contracts.js';
 import { assistantTools } from './tool-contracts.js';
 import { canonicalAssistantRoot, publishAssistantDiscovery } from './discovery.js';
 import {
-  assistantError, assistantRoute, browserResourcesHeader, bridgeRequestSchema, maxAssistantRequestBytes,
+  assistantError, assistantRoute, browserResourcesHeader, securityStatusHeader, bridgeRequestSchema, maxAssistantRequestBytes,
   maxAssistantResponseBytes, type AssistantToolRegistry,
 } from './bridge-contracts.js';
 
@@ -74,6 +74,8 @@ export async function startAssistantControl(options: AssistantControlOptions): P
       const resourcesHeader = request.headers[browserResourcesHeader];
       requireSafe(resourcesHeader === undefined || oneHeader(request, browserResourcesHeader) && resourcesHeader === '1',
         'ASSISTANT_INVALID_REQUEST');
+      const securityHeader=request.headers[securityStatusHeader];
+      requireSafe(securityHeader===undefined||oneHeader(request,securityStatusHeader)&&securityHeader==='1','ASSISTANT_INVALID_REQUEST');
       requireSafe(request.headers['content-type'] === 'application/json', 'ASSISTANT_INVALID_REQUEST');
       const envelope = bridgeRequestSchema.parse(await readBody(request));
       requireSafe(!closing, 'APP_NOT_RUNNING');
@@ -95,6 +97,11 @@ export async function startAssistantControl(options: AssistantControlOptions): P
         const legacy: Record<string, unknown> = { ...compatible };
         delete legacy.browserResources;
         compatible = legacy;
+      }
+      if(envelope.tool==='inbora_get_status'&&securityHeader===undefined&&
+        compatible!==null&&typeof compatible==='object'&&!Array.isArray(compatible)){
+        const legacy:Record<string,unknown>={...compatible};
+        delete legacy.securityRuntime;delete legacy.securityHolds;compatible=legacy;
       }
       send(response, 200, { ok: true, instanceId, result: compatible });
     } catch (error) {

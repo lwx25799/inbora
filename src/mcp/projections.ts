@@ -39,6 +39,9 @@ export function replyView(detail:Thread,selectionId:string):z.infer<typeof reply
 }
 export function statusView(status:ReturnType<WorkbenchQueries['status']>,assistant:LocalAssistantState,instanceId:string){
   return statusSchema.parse({runtime:status.runtime,instanceId,connected:true,accountConnected:!!status.account,
+    securityRuntime:{...status.securityRuntime,instanceId},
+    securityHolds:status.securityHolds.map(hold=>({channel:hold.channel,reason:hold.reason,incidentId:hold.incidentId,
+      revision:hold.revision,heldAt:hold.heldAt,mode:hold.mode})),
     browser:{state:status.browser.state,mode:status.browser.mode??null},automaticReply:status.configuredMode==='LIMITED_AUTO',
     emergencyStopped:status.automation?.emergencyStopped??false,budgets:status.budgets,
     assistant:{enabled:!!assistant.grant&&!assistant.reason,grantVersion:assistant.grant?.version??null,

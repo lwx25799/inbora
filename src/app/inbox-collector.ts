@@ -28,6 +28,7 @@ import {locatePreviewTarget,type PreviewTargetResult} from './preview-target.js'
 import {resolvePreviewDisplay,saveDisplayPreview,type PreviewDisplayTarget} from './media-preview-request.js';
 import {recordCommentWindow,type CommentWindowRead} from '../observability/comment-window-diagnostics.js';
 import {CommentListDiagnostics} from '../adapters/comment-list-diagnostics.js';
+import {assertSecurityChannelClear} from '../storage/security-holds.js';
 
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
@@ -60,12 +61,13 @@ export class InboxCollector {
     this.discovery = new OwnWorksDiscovery(owner.notification, mapping);
   }
   private check(source: CollectionSource, signal: AbortSignal):void {
+    assertSecurityChannelClear(this.data.store,source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION');
     const state=this.data.state(),settings=state.collection;
     requireSafe(!this.disposed&&!signal.aborted&&!state.emergencyStopped&&settings&&(source==='works'?settings.comments:settings.inbox),'COLLECTION_CANCELLED');
     this.data.requireAccount(this.mapping.self.uid);
     requireSafe(settings.ownId===this.mapping.self.uid,'ACCOUNT_CHANGED');
   }
-  async collect(source:CollectionSource,signal:AbortSignal,onPlatformFault?:()=>Promise<void>):Promise<void> {
+  async collect(source:CollectionSource,signal:AbortSignal,onPlatformFault?:(error:unknown)=>Promise<void>):Promise<void> {
     this.check(source,signal);
     // Known root backlog may use its existing two-window quantum; never drain a catalog or inbox inside the lock.
     await this.owner.actor.run(async()=>{
@@ -85,7 +87,7 @@ export class InboxCollector {
       }
       }catch(error){
         // Capture the fault location before the account queue can navigate another page.
-        if(error instanceof Blocked&&collectionStops.has(error.code))await onPlatformFault?.().catch(()=>{});
+        if(error instanceof Blocked&&collectionStops.has(error.code))await onPlatformFault?.(error).catch(()=>{});
         throw error;
       }
     },'background');
@@ -470,15 +472,21 @@ export class InboxCollector {
           if(more===false)cursor.pendingRootPages=cursor.pendingRootPages.filter(id=>id!==work.id);
           if(typeof more==='boolean')this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
         };
-        let batch:ObservationBatch|undefined,threadsPending=false,persisted=false;
+        let batch:ObservationBatch|undefined,threadsPending=false,persisted=false,freshDocumentReused=false;
         const reader=new ObservedReader(this.owner.notification,mapping,undefined,signal);
         try{
         try{
-          batch=await reader.comments(0,true,headRead?0:progress?.scroll_top??0,{holdScroll:true,
+          const read=await reader.comments(0,true,headRead?0:progress?.scroll_top??0,{holdScroll:true,
             stay:!headRead&&cursor.commentThreads.some(item=>item.workId===work.id&&!item.done&&item.retryAt<=this.data.now()),
+            freshWithinMs:this.data.state().collection!.commentIntervalMs,
             onRestoreWindow:async part=>{window.responseSummary=await responses.summary(signal);notePages(window.responseSummary?.hasMore);
               await this.persist('works',`work:${work.id}`,part,signal,undefined,window);}});
-          window.responseSummary=await responses.summary(signal);notePages(window.responseSummary?.hasMore);
+          batch=read;freshDocumentReused=!!read.freshDocumentReused;
+          window.responseSummary=await responses.summary(signal);
+          // Startup may have loaded the first native GET before this turn's observer existed.
+          // Keep that window unfinished until a later normal response proves its pagination.
+          if(freshDocumentReused&&window.responseSummary?.hasMore==null)notePages(true);
+          notePages(window.responseSummary?.hasMore);
           if(batch.commentRestoreIncomplete&&!(batch.commentRestoreStableEnd&&window.responseSummary?.hasMore===false)){
             this.check('works',signal);cursor.threadBurst=0;cursor.workIndex++;
             if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
@@ -556,7 +564,7 @@ export class InboxCollector {
         const rootPagesPending=cursor.pendingRootPages.includes(work.id),incomplete=threadIncomplete||rootPagesPending||changedResponse;
         const end=!threadsPending&&!rootPagesPending&&!changedResponse&&scroll.atEnd&&(progress?.last_height??scroll.height)===scroll.height?(progress?.end_observations??0)+1:0;
         done=end>=2;
-        continueRoots=!yieldWork&&(hadRootPages||rootPagesPending);
+        continueRoots=!freshDocumentReused&&!yieldWork&&(hadRootPages||rootPagesPending);
         if(done){cursor.threadBurst=0;cursor.headPending=cursor.headPending.filter(id=>id!==work.id);}
         this.data.store.db.prepare(`INSERT INTO work_collection_progress VALUES(?,?,?,?,?,?,0) ON CONFLICT(work_id)
           DO UPDATE SET scroll_top=excluded.scroll_top,last_height=excluded.last_height,end_observations=excluded.end_observations,last_read=excluded.last_read,last_error=excluded.last_error,next_at=0`)

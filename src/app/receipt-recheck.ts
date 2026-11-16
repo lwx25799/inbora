@@ -2,6 +2,7 @@ import {digest,dmClockToleranceMs,eventBinding,isStrong,targetKey,type StoredEve
 import {ChatMessageStore} from '../storage/chat-messages.js';
 import type {EventStore} from '../storage/store.js';
 import type {VerificationJob} from './dm-context-verification.js';
+import {readSecurityHold} from '../storage/security-holds.js';
 
 export const receiptRecheckVersion='RECEIPT_RECHECK_V6';
 const claimed=receiptRecheckVersion+'_CLAIMED';
@@ -39,6 +40,7 @@ function qualify(store:EventStore,job:VerificationJob,now:number):Qualification|
   const intent=store.db.prepare('SELECT * FROM send_intents WHERE id=?').get(job.intent_id) as IntentRow|undefined;
   if(!intent||intent.status!=='UNCERTAIN'||intent.event_id!==job.event_id||intent.attempt_started_at!==job.boundary||intent.target_digest!==job.target_digest)return;
   const event=store.event(job.event_id),e=event.payload,draft=store.draft(intent.draft_id),approval=draft.approval;
+  if(readSecurityHold(store,e.channel))return;
   const own=store.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(e.accountId) as {own_id:string}|undefined;
   const boundary=Date.parse(job.boundary),persisted=store.db.prepare('SELECT state,attempts,last_error FROM verification_jobs WHERE intent_id=?').get(job.intent_id) as
     {state:string;attempts:number;last_error:string}|undefined;

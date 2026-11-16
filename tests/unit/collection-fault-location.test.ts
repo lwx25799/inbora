@@ -1,16 +1,21 @@
-import {expect,test,vi} from 'vitest';
+import {afterEach,expect,test,vi} from 'vitest';
 import {AccountActor} from '../../src/browser/account-actor.js';
 import type {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
 import {InboxCollector} from '../../src/app/inbox-collector.js';
 import {Blocked} from '../../src/core/contracts.js';
 import type {AutomationStore} from '../../src/storage/automation-store.js';
 import {observedMapping} from '../fixtures/observed-site.js';
+import {EventStore} from '../../src/storage/store.js';
+
+const stores:EventStore[]=[];
+afterEach(()=>{for(const store of stores.splice(0))store.close();});
 
 function fixture(){
+  const store=new EventStore(':memory:',true);stores.push(store);
   const actor=new AccountActor();
   const page={on:vi.fn(),once:vi.fn(),off:vi.fn(),bringToFront:vi.fn(async()=>{})};
   const owner={actor,notification:page,dm:page} as unknown as BrowserProfileOwner;
-  const data={state:()=>({emergencyStopped:false,collection:{ownId:'100',comments:true,inbox:true}}),
+  const data={store,state:()=>({emergencyStopped:false,collection:{ownId:'100',comments:true,inbox:true}}),
     requireAccount:vi.fn()} as unknown as AutomationStore;
   const collector=new InboxCollector(owner,observedMapping('https://fixture.invalid'),data,'unused','headless');
   const works=vi.spyOn(collector as unknown as {works(signal:AbortSignal):Promise<boolean>},'works');

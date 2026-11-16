@@ -3,7 +3,7 @@ import type {InboundEvent} from '../core/contracts.js';
 import type {CommentThreadWindow} from './comment-thread-capture.js';
 
 export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string;activity?:string }
-export interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'diagnostic' | 'dmScroll'; index: number;
+export interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'commentDocument' | 'diagnostic' | 'dmScroll'; index: number;
   evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; commentStay?:boolean;
   commentRootId?:string;commentChildOffset?:number;conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number; collectionPartial?:boolean }
 export type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'|'collectionPartial'|'navigationUrl'|'commentRootId'|'commentChildOffset'|'commentOffset'|'commentStay'>;
@@ -48,6 +48,29 @@ export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; 
 export function captureObserved(input: CaptureInput): ObservationBatch {
   const { mapping: m, channel, index, evidenceId } = input; const s = m.selectors;
   const dom = {
+    securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
+      if(value)return;
+      const matches=[];
+      for(const selector of selectors.slice(0,8))for(const node of Array.from(document.querySelectorAll(selector)).slice(0,12-matches.length)){
+        const r=node.getBoundingClientRect();matches.push({selector:selector.slice(0,2000),tag:node.tagName.slice(0,24),id:node.id.slice(0,160),
+          left:r.left,top:r.top,right:r.right,bottom:r.bottom,visible:dom.securityVisible(node)});
+      }
+      const frames=Array.from(document.querySelectorAll('iframe')).slice(0,8).map(node=>{const r=node.getBoundingClientRect();
+        return{src:(node.getAttribute('src')??'').slice(0,2048),title:node.title.slice(0,160),left:r.left,top:r.top,right:r.right,bottom:r.bottom};});
+      let target:{workId?:string|undefined;conversationId?:string|undefined}|undefined;
+      if(channel==='comments'||channel.startsWith('comment'))target={workId:m.works[index]?.id};
+      else if(channel==='dm'||input.peer?.conversationId)target={conversationId:(input.peer??m.peers[index])?.conversationId};
+      else try{
+        const work=m.works.find(work=>work.url.split('?')[0]===location.href.split('?')[0]);
+        if(work)target={workId:work.id};
+        else{const chats=Array.from(document.querySelectorAll(s.chat)).filter(dom.visible);
+          if(chats.length===1){const headers=Array.from(chats[0]!.querySelectorAll(s.chatHeader)).filter(dom.visible);
+            if(headers.length===1)target={conversationId:dom.conversationId(dom.data(dom.childProps(headers[0]!),'conversation'))};}}
+      }catch{/* An unavailable calibrated header proves only account-page scope. */}
+      const signal={version:1,state:'SUSPECT',kind,href:location.href.slice(0,2048),origin:location.origin.slice(0,256),title:document.title.slice(0,160),
+        documentStartedAt:performance.timeOrigin,observedAt:Date.now(),scope:target&&(target.workId||target.conversationId)?'TARGET':'ACCOUNT_PAGE',...(target?{target}:{}),matches,frames};
+      throw Error('OBSERVATION_SECURITY_SUSPECT INBORA_SECURITY_SIGNAL:'+JSON.stringify(signal));
+    },
     securityVisible(element:Element):boolean {
       for(const node of [element,...element.querySelectorAll('*')]){
         if(!node.isConnected)continue;
@@ -57,14 +80,14 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
           if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
         }
         if(!shown)continue;
-        const candidates:{rect:DOMRect;parent:Element|null}[]=Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement}));
+        const candidates:{rect:DOMRect;parent:Element|null}[]=/^(?:IFRAME|IMG|CANVAS|VIDEO|AUDIO|INPUT|BUTTON|SELECT|TEXTAREA|SVG|OBJECT|EMBED)$/u.test(node.tagName)?Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement})):[];
         for(const child of node.childNodes){
           if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
           const range=document.createRange();range.selectNodeContents(child);
           for(const rect of range.getClientRects())candidates.push({rect,parent:node});
         }
         for(const {rect,parent} of candidates){
-          let left=rect.left,top=rect.top,right=rect.right,bottom=rect.bottom;
+          let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(innerWidth,rect.right),bottom=Math.min(innerHeight,rect.bottom);
           if(!(right>left&&bottom>top))continue;
           for(let current=parent;current;current=current.parentElement){
             const style=getComputedStyle(current);
@@ -300,8 +323,8 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     },
   };
   dom.check(location.origin===m.origin,'OBSERVATION_UNEXPECTED_ORIGIN');
-  dom.check(!/验证码|安全验证|访问受限/.test(document.title),'OBSERVATION_SECURITY_TITLE');
-  dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.securityVisible),'OBSERVATION_SECURITY_COMPONENT');
+  dom.securityCheck(!/验证码|安全验证|访问受限/.test(document.title),[m.securityBlockers],'TITLE');
+  dom.securityCheck(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.securityVisible),[m.securityBlockers]);
   const avatar = dom.one(document,s.selfAvatar,'OBSERVATION_ACCOUNT_AVATAR'), own = dom.fiberProps(avatar,s.selfFiberDepth);
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
   const events: InboundEvent[] = [],commentThreads:NonNullable<ObservationBatch['commentThreads']>=[]; let unsupported = 0, loaded = 0,incomplete=false;
@@ -505,6 +528,11 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     if(hit instanceof HTMLElement)hit.click();
     else {dom.check(hit instanceof SVGElement,'OBSERVATION_BACK_NOT_INTERACTABLE');
       hit!.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}));}
+    return {events,evidenceId,unsupported,loaded};
+  }
+  if(channel==='commentDocument') {
+    const work=m.works[index];dom.check(work&&location.href.split('?')[0]===work.url.split('?')[0],'OBSERVATION_WORK_CHANGED');
+    dom.emptyEditors();
     return {events,evidenceId,unsupported,loaded};
   }
   if(channel==='commentReveal') {

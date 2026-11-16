@@ -122,11 +122,11 @@ test.each(['within','too-old','changed-context','not-latest'] as const)('small n
   }finally{f.adapter.dispose();await f.close();}
 });
 
-test('native SMS verification blocks both direct-message reading and reply inspection',async()=>{
+test('a native SMS-shaped candidate blocks both direct-message reading and reply inspection',async()=>{
   const f=await setup();try{
     await f.owner.dm.evaluate(()=>{const n=document.createElement('div');n.className='uc-ui-verify-new_header-title';n.textContent='接收短信验证码';document.body.append(n);});
-    await expect(new ObservedReader(f.owner.dm,f.mapping.observation).dm(0)).rejects.toThrow('OBSERVATION_SECURITY_COMPONENT');
-    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('OBSERVATION_SECURITY_COMPONENT');
+    await expect(new ObservedReader(f.owner.dm,f.mapping.observation).dm(0)).rejects.toThrow('OBSERVATION_SECURITY_SUSPECT');
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('OBSERVATION_SECURITY_SUSPECT');
     expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
     await f.owner.dm.locator('.uc-ui-verify-new_header-title').evaluate(n=>(n as HTMLElement).style.display='none');
     expect(await f.adapter.inspect(f.event.payload)).toHaveProperty('ownId','100');
@@ -368,7 +368,7 @@ test('new incoming context, missing latest end, login dialog, getter and existin
     await expect(new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).rejects.toThrow('TARGET_CHANGED_REAPPROVE');
     expect(f.store.draft(f.draft.id).approval).toBeNull();
     await f.owner.dm.evaluate(()=>{const dialog=document.createElement('div');dialog.setAttribute('role','dialog');dialog.textContent='扫码登录';document.body.append(dialog);});
-    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('NATIVE_REPLY_PAGE_BLOCKED');
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('NATIVE_REPLY_INTERACTION_BLOCKED');
     await f.owner.dm.locator('[role=dialog]').evaluate(e=>e.remove());
     await f.owner.dm.locator('[data-index="0"]').evaluate(e=>e.setAttribute('data-index','30'));
     await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('NATIVE_REPLY_LATEST_END_MISSING');

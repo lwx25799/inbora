@@ -8,6 +8,7 @@ import type {ClientCommand} from './contracts.js';
 import {requireSuggestionEligibility,type SuggestionState,type SuggestionAuthorization} from './suggestion-eligibility.js';
 import {runtimePerformance,type RuntimeOutcome} from '../observability/runtime-performance.js';
 import {requireAssistantModelContext} from './local-assistant-model-context.js';
+import {assertSecurityRevision,securityRevision} from '../storage/security-holds.js';
 
 interface Context {store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore|null;provider:Pick<DeepSeekProvider,'generate'>;
   state():SuggestionState;key():string;signal():AbortSignal;pending:Set<string>;emit(event:string):void;cancelMaintenance():void}
@@ -19,6 +20,7 @@ export async function generateSuggestion(c:Context,token:string,command:Extract<
   c.authority.checkAssistantModel(token,event);
   requireSafe((c.authority.draftFor(event.id)?.version??0)===command.draftVersion,'DRAFT_VERSION_CONFLICT');
   const context=c.authority.contextVersion(event),id=randomUUID(),signal=c.signal();
+  const security=securityRevision(c.store,event.payload.channel);
   const assistant=c.authority.assistantVersion(token),generation=c.authority.ownership(event).generation;
   const selection=assistant===null?null:c.authority.selectionId(token,event.id);
   if(assistant!==null)c.authority.requireOwner(token,event,generation);
@@ -26,6 +28,7 @@ export async function generateSuggestion(c:Context,token:string,command:Extract<
     fresh.grant?.kind===authorization.grant.kind&&fresh.grant.version===authorization.grant.version:
     fresh.grant===null,'GRANT_REVOKED');
   const recheck=(checkAllowance=true)=>{
+    assertSecurityRevision(c.store,event.payload.channel,security);
     c.authority.operator(token,'EDIT');requireSafe(!signal.aborted,'MODEL_PAUSED');
     const current=c.store.event(event.id);requireSafe(current.binding===event.binding,'TARGET_CHANGED');
     c.authority.checkAssistantModel(token,current,checkAllowance);
@@ -45,7 +48,7 @@ export async function generateSuggestion(c:Context,token:string,command:Extract<
   let outcome:RuntimeOutcome='FAILED';
   try{
     const result=await c.provider.generate(c.store,event.payload,history,settings,c.key(),true,signal,
-      ()=>{recheck();if(authorization.grant)c.automation!.reserve(authorization.grant.version,'MODEL',id);
+      ()=>{recheck();if(authorization.grant)c.automation!.reserve(authorization.grant.version,'MODEL',id,event.payload.channel);
         c.authority.reserveAssistantModel(token,event,id);},
       (_input,actualHistory)=>requireAssistantModelContext(c.authority,token,event,actualHistory));
     recheck(false);

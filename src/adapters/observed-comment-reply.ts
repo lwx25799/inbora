@@ -1,3 +1,4 @@
+import {reportSecurityFailure} from './security-signal.js';
 import {randomUUID} from 'node:crypto';
 import type {Page} from 'playwright';
 import type {CommentReplyMapping} from '../config/site-mapping.js';
@@ -22,6 +23,19 @@ export function captureCommentReply(input:Input):Frame{
   type InputGate={token:string;used:boolean;blocked:boolean;editor:HTMLElement;remove:()=>void};
   const host=window as unknown as {__inboraCommentGate?:Gate;__inboraCommentInputGate?:InputGate};
   const dom={
+    securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
+      if(value)return;
+      const matches=[];
+      for(const selector of selectors.slice(0,8))for(const node of Array.from(document.querySelectorAll(selector)).slice(0,12-matches.length)){
+        const r=node.getBoundingClientRect();matches.push({selector:selector.slice(0,2000),tag:node.tagName.slice(0,24),id:node.id.slice(0,160),
+          left:r.left,top:r.top,right:r.right,bottom:r.bottom,visible:dom.securityVisible(node)});
+      }
+      const frames=Array.from(document.querySelectorAll('iframe')).slice(0,8).map(node=>{const r=node.getBoundingClientRect();
+        return{src:(node.getAttribute('src')??'').slice(0,2048),title:node.title.slice(0,160),left:r.left,top:r.top,right:r.right,bottom:r.bottom};});
+      const signal={version:1,state:'SUSPECT',kind,href:location.href.slice(0,2048),origin:location.origin.slice(0,256),title:document.title.slice(0,160),
+        documentStartedAt:performance.timeOrigin,observedAt:Date.now(),scope:'TARGET',target:{workId:e.videoId??undefined},matches,frames};
+      throw Error('OBSERVATION_SECURITY_SUSPECT INBORA_SECURITY_SIGNAL:'+JSON.stringify(signal));
+    },
     securityVisible(element:Element):boolean {
       for(const node of [element,...element.querySelectorAll('*')]){
         if(!node.isConnected)continue;
@@ -31,14 +45,14 @@ export function captureCommentReply(input:Input):Frame{
           if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
         }
         if(!shown)continue;
-        const candidates:{rect:DOMRect;parent:Element|null}[]=Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement}));
+        const candidates:{rect:DOMRect;parent:Element|null}[]=/^(?:IFRAME|IMG|CANVAS|VIDEO|AUDIO|INPUT|BUTTON|SELECT|TEXTAREA|SVG|OBJECT|EMBED)$/u.test(node.tagName)?Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement})):[];
         for(const child of node.childNodes){
           if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
           const range=document.createRange();range.selectNodeContents(child);
           for(const rect of range.getClientRects())candidates.push({rect,parent:node});
         }
         for(const {rect,parent} of candidates){
-          let left=rect.left,top=rect.top,right=rect.right,bottom=rect.bottom;
+          let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(innerWidth,rect.right),bottom=Math.min(innerHeight,rect.bottom);
           if(!(right>left&&bottom>top))continue;
           for(let current=parent;current;current=current.parentElement){
             const style=getComputedStyle(current);
@@ -144,9 +158,11 @@ export function captureCommentReply(input:Input):Frame{
       const work=o.works.find(w=>w.id===e.videoId),peer=[...o.peers,...o.commentAuthors??[]].find(p=>p.uid===e.actorId);
       const nested=e.kind==='REPLY',rootId=nested?e.rootCommentId:e.commentId;
       dom.check(work&&peer&&e.channel==='COMMENT_NOTIFICATION'&&(e.kind==='COMMENT'||nested&&rootId&&rootId!==e.commentId&&e.replyToCommentId===e.commentId)&&e.direction==='INCOMING','COMMENT_REPLY_SCOPE_REQUIRED');
-      dom.check(location.origin===o.origin&&location.href.split('?')[0]===work!.url.split('?')[0]&&
-        !/验证码|安全验证|访问受限/.test(document.title)&&!Array.from(document.querySelectorAll(m.blockers)).some(dom.securityVisible),'COMMENT_REPLY_PAGE_BLOCKED');
-      dom.check(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.securityVisible),'COMMENT_REPLY_PAGE_BLOCKED');
+      dom.check(location.origin===o.origin,'OBSERVATION_UNEXPECTED_ORIGIN');
+      dom.check(location.href.split('?')[0]===work!.url.split('?')[0],'COMMENT_REPLY_SCOPE_REQUIRED');
+      dom.securityCheck(!/验证码|安全验证|访问受限/.test(document.title),[o.securityBlockers],'TITLE');
+      dom.securityCheck(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.securityVisible),[o.securityBlockers]);
+      dom.check(!Array.from(document.querySelectorAll(m.blockers)).some(dom.securityVisible),'COMMENT_REPLY_INTERACTION_BLOCKED');
       const own=dom.props(dom.one(document,s.selfAvatar),s.selfFiberDepth);
       dom.check(dom.data(own,'uid')===o.self.uid&&dom.data(own,'secUid')===o.self.secUid,'COMMENT_REPLY_ACCOUNT_CHANGED');
       const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);
@@ -324,7 +340,9 @@ export function captureCommentReply(input:Input):Frame{
   if(input.action==='locateRoot'){
     const work=o.works.find(w=>w.id===e.videoId),rootId=e.kind==='REPLY'?e.rootCommentId:e.commentId;
     dom.check(work&&location.origin===o.origin&&location.href.split('?')[0]===work.url.split('?')[0],'COMMENT_REPLY_SCOPE_REQUIRED');
-    dom.check(!/验证码|安全验证|访问受限/.test(document.title)&&![m.blockers,o.securityBlockers].some(selector=>Array.from(document.querySelectorAll(selector)).some(dom.securityVisible)),'COMMENT_REPLY_PAGE_BLOCKED');
+    dom.securityCheck(!/验证码|安全验证|访问受限/.test(document.title),[o.securityBlockers],'TITLE');
+    dom.securityCheck(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.securityVisible),[o.securityBlockers]);
+    dom.check(!Array.from(document.querySelectorAll(m.blockers)).some(dom.securityVisible),'COMMENT_REPLY_INTERACTION_BLOCKED');
     const own=dom.props(dom.one(document,s.selfAvatar),s.selfFiberDepth);
     dom.check(dom.data(own,'uid')===o.self.uid&&dom.data(own,'secUid')===o.self.secUid,'COMMENT_REPLY_ACCOUNT_CHANGED');
     const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);dom.check(lists.length===1,'COMMENT_REPLY_LIST_NOT_UNIQUE');
@@ -353,10 +371,11 @@ export function captureCommentReply(input:Input):Frame{
     dom.check(buttons.length<=1,'COMMENT_REPLY_EXPAND_NOT_UNIQUE');
     const button=buttons[0];
     if(button){
-      const gate={handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root().thread===state.thread&&button.isConnected);}
-        catch{event.preventDefault();event.stopImmediatePropagation();}}};
+      const gate={securityFailure:null as string|null,handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root().thread===state.thread&&button.isConnected);}
+        catch(error){if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;event.preventDefault();event.stopImmediatePropagation();}}};
       button.addEventListener('click',gate.handle,true);
       try{dom.check(button instanceof HTMLElement);(button as HTMLElement).click();}finally{button.removeEventListener('click',gate.handle,true);}
+      if(gate.securityFailure)throw Error(gate.securityFailure);
     }
     return dom.frame({...state,editorText:'',shape:''});
   }
@@ -376,9 +395,10 @@ export function captureCommentReply(input:Input):Frame{
           if(editors[0])dom.check(dom.editorText(editors[0])==='','COMMENT_REPLY_EXISTING_DRAFT');}
       }
       const action=dom.one(state.root,m.replyAction);dom.check(action.textContent==='回复','COMMENT_REPLY_ACTION_CHANGED');
-      const gate={handle(event:Event):void{if(event.currentTarget!==action)return;try{dom.check(dom.root().root===state.root&&action.isConnected);}
-        catch{event.preventDefault();event.stopImmediatePropagation();}}};
+      const gate={securityFailure:null as string|null,handle(event:Event):void{if(event.currentTarget!==action)return;try{dom.check(dom.root().root===state.root&&action.isConnected);}
+        catch(error){if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;event.preventDefault();event.stopImmediatePropagation();}}};
       action.addEventListener('click',gate.handle,true);try{action instanceof HTMLElement&&action.click();}finally{action.removeEventListener('click',gate.handle,true);}
+      if(gate.securityFailure)throw Error(gate.securityFailure);
     }
     return dom.frame({...state,editorText:'',shape:''});
   }
@@ -394,7 +414,7 @@ export function captureCommentReply(input:Input):Frame{
     const textEvent=new InputEvent('textInput',{data:input.text!,inputType:'insertText',bubbles:true,cancelable:true,composed:true});
     // Controlled-editor event only: never allow browser default insertion into a newly focused frame.
     textEvent.preventDefault();
-    const gate={token:input.token!,used:false,blocked:false,editor,
+    const gate={token:input.token!,used:false,blocked:false,securityFailure:null as string|null,editor,
       handle(event:Event):void{
         try{
           const selected=getSelection();
@@ -403,13 +423,14 @@ export function captureCommentReply(input:Input):Frame{
           checkInput.validate();dom.check(selected?.rangeCount===1&&editor.contains(selected.anchorNode)&&editor.contains(selected.focusNode)&&
             selected.toString()===prior.editorText,'COMMENT_REPLY_SELECTION_CHANGED');
           if(event.currentTarget===editor)gate.used=true;
-        }catch{gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}
+        }catch(error){if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}
       },
       remove():void{window.removeEventListener('textInput',gate.handle,true);editor.removeEventListener('textInput',gate.handle,true);},
     };
     window.addEventListener('textInput',gate.handle,true);editor.addEventListener('textInput',gate.handle,true);host.__inboraCommentInputGate=gate;
     checkInput.validate();
     try{editor.dispatchEvent(textEvent);}finally{gate.remove();}
+    if(gate.securityFailure)throw Error(gate.securityFailure);
     dom.check(gate.used&&!gate.blocked,'COMMENT_REPLY_INPUT_NOT_WITNESSED');
     return dom.frame(state);
   }
@@ -425,16 +446,16 @@ export function captureCommentReply(input:Input):Frame{
   if(input.action==='arm'){
     dom.check(input.token&&input.text===state.editorText&&input.shape===state.shape,'COMMENT_REPLY_PREPARED_CHANGED');
     host.__inboraCommentGate?.remove();const editor=state.editor,button=state.button,root=state.root,shape=state.shape,context=JSON.stringify(state.context);
-    const gate={token:input.token!,enabled:false,used:false,blocked:false,attempted:false,
+    const gate={token:input.token!,enabled:false,used:false,blocked:false,attempted:false,securityFailure:null as string|null,
       validate():void{const now=dom.capture();dom.check(dom.visible(button),'COMMENT_REPLY_SEND_NOT_READY');dom.check(now.root===root&&now.editor===editor&&now.button===button&&now.shape===shape&&
         now.editorText===input.text&&JSON.stringify(now.context)===context&&!button.closest('[disabled],[aria-disabled="true"],.disabled')&&
         getComputedStyle(button).pointerEvents!=='none');},
       handle(event:Event):void{if(!event.composedPath().includes(button))return;
         try{dom.check(gate.enabled&&!gate.used&&!gate.blocked);gate.validate();if(event.currentTarget===button)gate.used=true;}
-        catch{gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}},
+        catch(error){if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}},
       submit():boolean{dom.check(!gate.attempted&&!gate.blocked);gate.attempted=true;gate.validate();
         button.removeEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);gate.enabled=true;
-        try{button.click();}finally{gate.enabled=false;gate.remove();}return gate.used&&!gate.blocked;},
+        try{button.click();}finally{gate.enabled=false;gate.remove();}if(gate.securityFailure)throw Error(gate.securityFailure);return gate.used&&!gate.blocked;},
       remove():void{window.removeEventListener('click',gate.handle,true);button.removeEventListener('click',gate.handle,true);},
     };
     gate.validate();window.addEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);host.__inboraCommentGate=gate;
@@ -460,9 +481,9 @@ export class ObservedCommentReply implements ReplyAdapter{
     before:Input['before']=null,shape:string|null=null):Promise<Frame>{
     const signal=this.readingBack?this.options.readonlySignal:this.options.signal;
     requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');
-    try{const value=await this.page.evaluate(captureCommentReply,{mapping:this.mapping,event,action,text,token,before,shape,receipts:this.responses.snapshot(event)});
+    try{const value=await this.page.evaluate(captureCommentReply,{mapping:this.mapping,event,action,text,token,before,shape,receipts:this.responses.snapshot(event)}).catch(error=>reportSecurityFailure(this.page,error));
       requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');return value;}
-    catch(error){const code=error instanceof Error?error.message.match(/COMMENT_REPLY_[A-Z_]+/)?.[0]:null;if(code)requireSafe(false,code);throw error;}
+    catch(error){const code=error instanceof Error?error.message.match(/(?:COMMENT_REPLY|OBSERVATION)_[A-Z_]+/)?.[0]:null;if(code)requireSafe(false,code);throw error;}
   }
   private snapshot(event:InboundEvent,state:Frame):TargetSnapshot{return{accountId:event.accountId,ownId:this.mapping.observation.self.uid,
     targetKey:targetKey(event),eventBinding:eventBinding(event),composerKey:targetKey(event),contextDigest:digest(state.context),mappingDigest:digest(this.mapping)};}
@@ -580,7 +601,7 @@ export class ObservedCommentReply implements ReplyAdapter{
       await new Promise(resolve=>setTimeout(resolve,Math.max(1,deadline-Date.now()+1)));}
     }
     const accepted=await this.page.evaluate(token=>{const gate=(window as unknown as {__inboraCommentGate?:Gate}).__inboraCommentGate;
-      if(!gate||gate.token!==token)throw Error('COMMENT_REPLY_NOT_PREPARED');try{return gate.submit();}finally{gate.remove();}},token);
+      if(!gate||gate.token!==token)throw Error('COMMENT_REPLY_NOT_PREPARED');try{return gate.submit();}finally{gate.remove();}},token).catch(error=>reportSecurityFailure(this.page,error));
     requireSafe(accepted,'COMMENT_REPLY_CLICK_BLOCKED');
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{

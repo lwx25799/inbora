@@ -58,12 +58,26 @@ test.each(['works','dm'] as const)('ordinary %s failure preserves the other chan
   }finally{await f.close();}
 });
 
-test.each(['OBSERVATION_PAGE_BLOCKED','OBSERVATION_ACCOUNT_CHANGED','PLATFORM_STOP','CHALLENGE_REQUIRED','LOGIN_REQUIRED','ACCOUNT_NOT_VERIFIED','OWNER_LOCKED_OR_PORT_UNAVAILABLE'])
+test.each(['OBSERVATION_ACCOUNT_CHANGED','OBSERVATION_UNEXPECTED_ORIGIN','PLATFORM_STOP','CHALLENGE_REQUIRED','SECURITY_VERIFICATION_CONFIRMED'])
 ('account-wide %s stops the next channel',async code=>{
   const f=await fixture(async()=>{throw new Blocked(code);});try{
     await f.service.dispatch(f.token,{command:'syncInbox'});await f.service.drain();
     expect(f.calls).toEqual(['works']);expect((await f.status()).sync.results).toMatchObject([{state:'FAILED',error:code},{state:'SKIPPED'}]);
     expect(f.store.db.prepare("SELECT count(*) AS n FROM channel_capabilities WHERE state='BLOCKED'").get()).toEqual({n:2});
+  }finally{await f.close();}
+});
+
+test.each(['OBSERVATION_SECURITY_SUSPECT','SECURITY_CHANNEL_HELD','OBSERVATION_SECURITY_TITLE','OBSERVATION_SECURITY_COMPONENT',
+  'OBSERVATION_PAGE_BLOCKED','NATIVE_REPLY_PAGE_BLOCKED','COMMENT_REPLY_PAGE_BLOCKED','LOGIN_REQUIRED','ACCOUNT_NOT_VERIFIED','OWNER_LOCKED_OR_PORT_UNAVAILABLE'])
+('channel-scoped or temporary %s does not suppress the independent next channel',async code=>{
+  const f=await fixture(async source=>{if(source==='works')throw new Blocked(code);});try{
+    await f.service.dispatch(f.token,{command:'syncInbox'});await f.service.drain();
+    expect(f.calls).toEqual(['works','dm']);
+    expect((await f.status()).sync.results).toMatchObject([{source:'works',state:'FAILED',error:code},{source:'dm',state:'SUCCEEDED',error:null}]);
+    expect(f.store.db.prepare('SELECT channel,state FROM channel_capabilities ORDER BY channel').all())
+      .toEqual([{channel:'COMMENT_NOTIFICATION',state:'BLOCKED'},{channel:'DIRECT_MESSAGE',state:'SEND_AVAILABLE'}]);
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
+    expect(f.store.db.prepare('SELECT count(*) AS n FROM model_calls').get()).toEqual({n:0});
   }finally{await f.close();}
 });
 

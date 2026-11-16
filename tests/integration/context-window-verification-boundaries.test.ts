@@ -111,7 +111,7 @@ test.each(['CANCEL','CLOSE','PLATFORM_STOP','WRONG_NATIVE','MISSING_NATIVE'] as 
   const f=await setup();let worker:VerificationScheduler|undefined;try{
     const before=f.original();let started!:()=>void,finish!:(value:{verified:boolean;evidenceId:string;nativeIdDigest?:string})=>void,calls=0;
     const begun=new Promise<void>(resolve=>started=resolve),result=new Promise<{verified:boolean;evidenceId:string;nativeIdDigest?:string}>(resolve=>finish=resolve);
-    worker=new VerificationScheduler(f.data,async()=>{calls++;started();if(cause==='PLATFORM_STOP')throw new Blocked('OBSERVATION_PAGE_BLOCKED');return result;});
+    worker=new VerificationScheduler(f.data,async()=>{calls++;started();if(cause==='PLATFORM_STOP')throw new Blocked('PLATFORM_STOP');return result;});
     const task=worker.tick();await begun;
     if(cause==='CANCEL')worker.cancel();const closing=cause==='CLOSE'?worker.close():Promise.resolve();
     finish({verified:true,evidenceId:'synthetic',...(cause==='MISSING_NATIVE'?{}:{nativeIdDigest:digest(cause==='WRONG_NATIVE'?'outside':f.item.nativeId)})});

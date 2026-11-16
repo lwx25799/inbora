@@ -29,7 +29,7 @@ import { BrowserService } from "./browser-service.js";
 import { DeepSeekProvider } from "../ai/deepseek.js";
 import { AutomationStore } from "../storage/automation-store.js";
 import { migrateAutomation } from "../storage/automation-migration.js";
-import { CollectionScheduler, collectionStops } from "./collection-scheduler.js";
+import { CollectionScheduler } from "./collection-scheduler.js";
 import { VerificationScheduler } from "./verification-scheduler.js";
 import { CredentialStore } from "./credentials.js";
 import {runAutomaticReply} from './automatic-reply.js';
@@ -44,6 +44,9 @@ import {migrateLocalAssistant} from '../storage/local-assistant-migration.js';
 import type {ReplyPolicy} from './automation-contracts.js';
 import {configureAssistantConnection} from './local-assistant-connection.js';
 import {recoverEmergency} from './emergency-recovery.js';
+import {shouldStopGlobally} from '../core/emergency-stop.js';
+import {readSecurityHold} from '../storage/security-holds.js';
+import {securityRuntime} from './security-runtime.js';
 
 export function clientError(error: unknown): string {
   return error instanceof Blocked
@@ -164,6 +167,7 @@ export class ClientService {
     this.onlineEnabled=true;this.keepOnline();
   }
   setAssistantConnection(instanceId:string|null):void{
+    this.browser.setRuntimeInstance(instanceId);
     this.assistantConnection={ready:instanceId!==null,instanceId,transport:'stdio',tools:16};
     this.emit('status_updated');
   }
@@ -207,8 +211,8 @@ export class ClientService {
       if(this.closing||this.onlineAbort.signal.aborted)return;
       const code=clientError(error);
       this.onlineRetryAt=this.authority.now()+30_000;
-      if(collectionStops.has(code)){this.automation!.stop(true,code,'CONNECTION');this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}
-      this.store.audit('SINGLE_ACCOUNT_CONNECTION_FAILED',digest(code),{stopped:collectionStops.has(code)});
+      if(shouldStopGlobally(code)){this.automation!.stop(true,code,'CONNECTION');this.collector?.cancel();this.modelAbort.abort();this.modelAbort=new AbortController();}
+      this.store.audit('SINGLE_ACCOUNT_CONNECTION_FAILED',digest(code),{stopped:shouldStopGlobally(code)});
     }).finally(()=>{this.onlineTask=null;if(!this.closing){this.emit('status_updated');this.browserResources.ownerReady();}});
     this.onlineTask=task;this.track(task);
   }
@@ -244,12 +248,12 @@ export class ClientService {
     this.emit("inbox_sync_updated");
   }
   private syncMustStop(code: string): boolean {
-    return collectionStops.has(code)||["BROWSER_CLOSED","OPERATOR_EXPIRED","OPERATOR_PERMISSION_DENIED"].includes(code);
+    return shouldStopGlobally(code)||["BROWSER_CLOSED","OPERATOR_EXPIRED","OPERATOR_PERMISSION_DENIED"].includes(code);
   }
   private observationFailed(source:"works"|"dm"|"notifications",error:unknown):never {
     const code=clientError(error),mode=this.browser.status().mode;
     if(code!=='BROWSER_CLOSED'){
-      if(this.syncMustStop(code))this.store.db.prepare("UPDATE channel_capabilities SET state='BLOCKED'").run();
+      if(shouldStopGlobally(code))this.store.db.prepare("UPDATE channel_capabilities SET state='BLOCKED'").run();
       else this.store.db.prepare("UPDATE channel_capabilities SET state='BLOCKED' WHERE channel=? AND browser_mode=?")
         .run(source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION',mode);
     }
@@ -330,7 +334,9 @@ export class ClientService {
       settings:this.settings,keyPresent:!!this.key,keyStored:this.keyStored,keyStorageError:this.keyStorageError,
       modelAuthorized:this.modelAuthorized,modelBusy:this.modelPending.size>0,automation:this.automation,
       collector:this.collector?.status(),inboxRevision:this.inboxRevision,sync:this.sync,
-    }),localAssistant:this.authority.assistant.state(),localAssistantConnection:{...this.assistantConnection}};
+    }),localAssistant:this.authority.assistant.state(),localAssistantConnection:{...this.assistantConnection},
+      securityRuntime:securityRuntime(this.assistantConnection.instanceId),
+      securityHolds:(['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as const).flatMap(channel=>{const hold=readSecurityHold(this.store,channel);return hold?[hold]:[];})};
   }
   async dispatch(token: string, raw: unknown): Promise<unknown> {
     requireSafe(!this.closing, "CLIENT_CLOSING");
@@ -533,7 +539,7 @@ export class ClientService {
           this.modelAbort.abort();
           this.modelAbort = new AbortController();
         }
-        if(c.command==='resume'&&c.eventId===null){this.automation?.stop(false);this.keepOnline();}
+        if(c.command==='resume'&&c.eventId===null){await this.browser.recoverSecurityHolds(true);this.automation?.stop(false);this.keepOnline();}
         this.emit("takeover_updated");
         this.emit("send_status_updated");
         return this.status(token);

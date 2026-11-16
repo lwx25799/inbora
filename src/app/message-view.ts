@@ -7,6 +7,8 @@ import type {ObservationMapping} from '../config/site-mapping.js';
 import type {Page} from 'playwright';
 import {locatePreviewTarget} from './preview-target.js';
 import {visibleStoredMessage} from '../adapters/message-view-location.js';
+import {reportSecurityFailure} from '../adapters/security-signal.js';
+import {assertSecurityChannelClear} from '../storage/security-holds.js';
 
 export function resolveStoredDmMessage(store:EventStore,eventId:string,source?:'INBOUND'|'CHAT'){
   const chat=source!=='INBOUND'?new ChatMessageStore(store).get(eventId):null;
@@ -29,6 +31,7 @@ const checkpoints=z.object({sweep:checkpoint.optional(),parked:z.array(checkpoin
 
 /** One explicit viewing request. Exact visible native identity proves location; no messages or previews are saved. */
 export async function locateStoredDmMessage(input:{store:EventStore;eventId:string;page:Page;mapping:ObservationMapping;signal:AbortSignal;check():void}){
+  assertSecurityChannelClear(input.store,'DIRECT_MESSAGE');
   input.check();const resolved=resolveStoredDmMessage(input.store,input.eventId);
   requireSafe(resolved.ownId===input.mapping.self.uid,'ACCOUNT_CHANGED');
   const row=input.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string}|undefined;
@@ -38,9 +41,9 @@ export async function locateStoredDmMessage(input:{store:EventStore;eventId:stri
   // This read creates no tasks: metadata-complete stored rows need no body-ready waiting against the collection origin.
   const reader=new ObservedReader(input.page,input.mapping,Date.now(),input.signal),initial=await reader.dmWindow(resolved.peer,undefined,true);input.check();
   const result=await locatePreviewTarget({reader,peer:resolved.peer,target:resolved.event,initial,anchors,check:input.check,
-    persist:async()=>false,record:()=>{},viewNativeTarget:()=>input.page.evaluate(visibleStoredMessage,{mapping:input.mapping,event:resolved.event,peer:resolved.peer})});input.check();
+    persist:async()=>false,record:()=>{},viewNativeTarget:()=>input.page.evaluate(visibleStoredMessage,{mapping:input.mapping,event:resolved.event,peer:resolved.peer}).catch(error=>reportSecurityFailure(input.page,error))});input.check();
   await input.page.bringToFront();input.check();
-  const located=result.found&&await input.page.evaluate(visibleStoredMessage,{mapping:input.mapping,event:resolved.event,peer:resolved.peer});
+  const located=result.found&&await input.page.evaluate(visibleStoredMessage,{mapping:input.mapping,event:resolved.event,peer:resolved.peer}).catch(error=>reportSecurityFailure(input.page,error));
   input.check();input.store.audit(located?'MESSAGE_VIEW_LOCATED':'MESSAGE_VIEW_NOT_FOUND',digest(input.eventId),{headed:true,located,windows:result.windows});
   return {opened:true as const,located};
 }

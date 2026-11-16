@@ -8,6 +8,19 @@ export interface CommentThreadInput {mapping:ObservationMapping;event:InboundEve
 export function captureCommentThread(input:CommentThreadInput):CommentThreadWindow {
   const {mapping:m,event:e}=input,s=m.selectors;
   const dom={
+    securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
+      if(value)return;
+      const matches=[];
+      for(const selector of selectors.slice(0,8))for(const node of Array.from(document.querySelectorAll(selector)).slice(0,12-matches.length)){
+        const r=node.getBoundingClientRect();matches.push({selector:selector.slice(0,2000),tag:node.tagName.slice(0,24),id:node.id.slice(0,160),
+          left:r.left,top:r.top,right:r.right,bottom:r.bottom,visible:dom.securityVisible(node)});
+      }
+      const frames=Array.from(document.querySelectorAll('iframe')).slice(0,8).map(node=>{const r=node.getBoundingClientRect();
+        return{src:(node.getAttribute('src')??'').slice(0,2048),title:node.title.slice(0,160),left:r.left,top:r.top,right:r.right,bottom:r.bottom};});
+      const signal={version:1,state:'SUSPECT',kind,href:location.href.slice(0,2048),origin:location.origin.slice(0,256),title:document.title.slice(0,160),
+        documentStartedAt:performance.timeOrigin,observedAt:Date.now(),scope:'TARGET',target:{workId:e.videoId??undefined},matches,frames};
+      throw Error('OBSERVATION_SECURITY_SUSPECT INBORA_SECURITY_SIGNAL:'+JSON.stringify(signal));
+    },
     securityVisible(element:Element):boolean {
       for(const node of [element,...element.querySelectorAll('*')]){
         if(!node.isConnected)continue;
@@ -17,14 +30,14 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
           if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
         }
         if(!shown)continue;
-        const candidates:{rect:DOMRect;parent:Element|null}[]=Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement}));
+        const candidates:{rect:DOMRect;parent:Element|null}[]=/^(?:IFRAME|IMG|CANVAS|VIDEO|AUDIO|INPUT|BUTTON|SELECT|TEXTAREA|SVG|OBJECT|EMBED)$/u.test(node.tagName)?Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement})):[];
         for(const child of node.childNodes){
           if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
           const range=document.createRange();range.selectNodeContents(child);
           for(const rect of range.getClientRects())candidates.push({rect,parent:node});
         }
         for(const {rect,parent} of candidates){
-          let left=rect.left,top=rect.top,right=rect.right,bottom=rect.bottom;
+          let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(innerWidth,rect.right),bottom=Math.min(innerHeight,rect.bottom);
           if(!(right>left&&bottom>top))continue;
           for(let current=parent;current;current=current.parentElement){
             const style=getComputedStyle(current);
@@ -95,9 +108,10 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
       }
     },
     root():Element {
-      dom.check(location.origin===m.origin&&m.works.some(w=>w.id===e.videoId&&w.url.split('?')[0]===location.href.split('?')[0]),'OBSERVATION_WORK_CHANGED');
-      dom.check(!/验证码|安全验证|访问受限/.test(document.title),'OBSERVATION_SECURITY_TITLE');
-      dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.securityVisible),'OBSERVATION_SECURITY_COMPONENT');
+      dom.check(location.origin===m.origin,'OBSERVATION_UNEXPECTED_ORIGIN');
+      dom.check(m.works.some(w=>w.id===e.videoId&&w.url.split('?')[0]===location.href.split('?')[0]),'OBSERVATION_WORK_CHANGED');
+      dom.securityCheck(!/验证码|安全验证|访问受限/.test(document.title),[m.securityBlockers],'TITLE');
+      dom.securityCheck(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.securityVisible),[m.securityBlockers]);
       const own=Array.from(document.querySelectorAll(s.selfAvatar));dom.check(own.length===1,'OBSERVATION_ACCOUNT_CHANGED');
       const identity=dom.props(own[0]!,s.selfFiberDepth);dom.check(dom.data(identity,'uid')===m.self.uid&&dom.data(identity,'secUid')===m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
       const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);dom.check(lists.length===1,'OBSERVATION_DOM_NOT_UNIQUE');
@@ -124,9 +138,10 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
   if(input.action==='open'&&buttons[0]){
     dom.empty();const button=buttons[0];dom.check(button instanceof HTMLElement,'OBSERVATION_COMMENT_EXPAND_NOT_INTERACTABLE');
     button.scrollIntoView({block:'center'});
-    const gate={handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root()===root&&button.isConnected&&dom.buttons(root)[0]===button,
-      'OBSERVATION_COMMENT_THREAD_CHANGED');dom.empty();}catch{event.preventDefault();event.stopImmediatePropagation();}}};
+    const gate={securityFailure:null as string|null,handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root()===root&&button.isConnected&&dom.buttons(root)[0]===button,
+      'OBSERVATION_COMMENT_THREAD_CHANGED');dom.empty();}catch(error){if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;event.preventDefault();event.stopImmediatePropagation();}}};
     button.addEventListener('click',gate.handle,true);try{(button as HTMLElement).click();expanded=true;}finally{button.removeEventListener('click',gate.handle,true);}
+    if(gate.securityFailure)throw Error(gate.securityFailure);
   }
   const current=dom.root(),native=dom.data(dom.props(current,s.commentFiberDepth),'commentInfo'),total=dom.data(native,'replyTotal');
   dom.check(typeof total==='number'&&Number.isSafeInteger(total)&&total>=0,'OBSERVATION_COMMENT_THREAD_METADATA_NOT_READY');

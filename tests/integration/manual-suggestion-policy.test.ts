@@ -131,7 +131,7 @@ test.each(['MEDIA','KEY','ACCOUNT','EMERGENCY','READ_ONLY','SUBMITTED'] as const
       eventId=f.store.events().find(row=>row.payload.platformEventId==='weak-current')!.id;reason='DM_CONTENT_UNVERIFIED';
     }else if(fault==='KEY'){await f.service.dispatch(f.token,{command:'clearModelKey'});reason='MODEL_KEY_REQUIRED';}
     else if(fault==='ACCOUNT'){f.store.db.prepare("UPDATE accounts SET own_id='different-own'").run();reason='ACCOUNT_NOT_VERIFIED';}
-    else if(fault==='EMERGENCY'){await f.service.dispatch(f.token,{command:'emergencyStop'});reason='MODEL_PAUSED';}
+    else if(fault==='EMERGENCY'){await f.service.dispatch(f.token,{command:'emergencyStop'});reason='EMERGENCY_STOPPED';}
     else if(fault==='READ_ONLY'){token=f.service.authority.issueSession(['READ']);reason='OPERATOR_PERMISSION_DENIED';}
     else{f.store.db.prepare('INSERT INTO manual_send_commands VALUES(?,?,?,?,?,?,?,?,?)')
       .run('synthetic-submitted',eventId,'fixture',digest('fixture'),'{}','PREPARING',null,null,f.clock);reason='SUGGESTION_ALREADY_SUBMITTED';}

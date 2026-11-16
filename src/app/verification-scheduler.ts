@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { Blocked, requireSafe,targetKey } from "../core/contracts.js";
 import type { AutomationStore } from "../storage/automation-store.js";
-import { collectionStops } from "./collection-scheduler.js";
+import {shouldStopGlobally} from '../core/emergency-stop.js';
+import {readSecurityHold,assertSecurityRevision,securityRevision} from '../storage/security-holds.js';
 import {claimDmContextVerification,type VerificationJob} from './dm-context-verification.js';
 import {claimReceiptRecheck,receiptRecheckStillBound,receiptRecheckVersion,type ReceiptRecheckJob} from './receipt-recheck.js';
 
@@ -38,19 +39,26 @@ export class VerificationScheduler {
   async tick():Promise<void> {
     if(this.running){if(this.data.now()>=this.activeDeadline)this.abort?.abort();return;}
     if(this.closed||this.suspended||this.data.state().emergencyStopped)return;
+    const held=(['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as const).filter(channel=>readSecurityHold(this.data.store,channel));
+    for(const channel of held)this.data.store.db.prepare(`UPDATE verification_jobs SET deadline=MAX(deadline,?) WHERE state='PENDING' AND attempts<2
+      AND event_id IN (SELECT id FROM inbound_events WHERE channel=?)`).run(this.data.now()+120_000,channel);
     this.data.store.db.prepare("UPDATE verification_jobs SET state='NOT_NEEDED' WHERE state='PENDING' AND intent_id IN (SELECT id FROM send_intents WHERE status='CONFIRMED')").run();
     this.data.store.db.prepare("UPDATE verification_jobs SET state='REVIEW',last_error='VERIFICATION_DEADLINE' WHERE state='PENDING' AND (deadline<=? OR attempts>=2)").run(this.data.now());
-    let job=this.data.store.db.prepare("SELECT j.* FROM verification_jobs j JOIN send_intents i ON i.id=j.intent_id WHERE j.state='PENDING' AND j.next_at<=? AND i.status='UNCERTAIN' ORDER BY j.next_at LIMIT 1").get(this.data.now()) as VerificationJob|ReceiptRecheckJob|undefined;
+    let job=this.data.store.db.prepare(`SELECT j.* FROM verification_jobs j JOIN send_intents i ON i.id=j.intent_id JOIN inbound_events e ON e.id=j.event_id
+      WHERE j.state='PENDING' AND j.next_at<=? AND i.status='UNCERTAIN' AND e.channel NOT IN (?,?) ORDER BY j.next_at LIMIT 1`)
+      .get(this.data.now(),held[0]??'',held[1]??'') as VerificationJob|ReceiptRecheckJob|undefined;
     const supplemental=!job;
     job??=claimDmContextVerification(this.data.store,this.data.now());
     job??=claimReceiptRecheck(this.data.store,this.data.now());
     if(!job)return;
+    const channel=this.data.store.event(job.event_id).payload.channel,security=securityRevision(this.data.store,channel);
     const repair='recheckRevision' in job?job:undefined;
     const abort=new AbortController();this.abort=abort;
     this.activeDeadline=Math.min(job.deadline,this.data.now()+30_000);
     const timeout=setTimeout(()=>abort.abort(),Math.max(1,this.activeDeadline-this.data.now()));timeout.unref();
     const task=Promise.resolve().then(async()=>{
       if(this.closed||abort.signal.aborted||this.data.state().emergencyStopped)return;
+      if(readSecurityHold(this.data.store,channel))return;
       this.activeEvent=job.event_id;this.updated();
       const intent=this.data.store.db.prepare('SELECT event_id,attempt_started_at,target_digest FROM send_intents WHERE id=?').get(job.intent_id) as {
         event_id:string;attempt_started_at:string;target_digest:string;
@@ -62,6 +70,7 @@ export class VerificationScheduler {
         const result=await this.verify(job.event_id,abort.signal);
         requireSafe(!abort.signal.aborted,'VERIFICATION_CANCELLED');
         this.data.store.db.transaction(()=>{
+          assertSecurityRevision(this.data.store,channel,security);
           const current=this.data.store.db.prepare('SELECT event_id,attempt_started_at,target_digest,target_key FROM send_intents WHERE id=?').get(job.intent_id) as {
             event_id:string;attempt_started_at:string;target_digest:string;target_key:string;
           }|undefined;
@@ -101,7 +110,7 @@ export class VerificationScheduler {
             this.data.store.audit(receiptRecheckVersion+'_FAILED_'+safe,job.intent_id);
           }
         }).immediate();
-        if(collectionStops.has(error))this.data.stop(true,error,'VERIFICATION');
+        if(shouldStopGlobally(error))this.data.stop(true,error,'VERIFICATION');
       }
     }).finally(()=>{clearTimeout(timeout);this.running=null;this.abort=undefined;this.activeEvent=null;this.updated();});
     this.running=task;await task;

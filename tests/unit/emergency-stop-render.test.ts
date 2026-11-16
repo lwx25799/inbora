@@ -14,9 +14,29 @@ const render=(value:ReturnType<typeof props>)=>renderToStaticMarkup(createElemen
 
 test('a fresh security incident explains its observed signal and offers direct recovery without assuming the current account is broken',()=>{
   const html=render(props('OBSERVATION_SECURITY_COMPONENT'));
-  expect(html).toContain('页面出现已识别的安全验证组件');expect(html).toContain('触发来源：评论后台收取');
-  expect(html).toContain('处理登录或验证会打开发生问题的页面');expect(html).toContain('>检查并恢复运行</button>');
+  expect(html).toContain('候选安全组件');expect(html).toContain('缺少足以确认验证生效的现场证明');expect(html).toContain('触发来源：评论后台收取');
+  expect(html).toContain('按原故障地址重建页面');expect(html).toContain('新页面不保证出现同一验证');expect(html).toContain('>检查并恢复运行</button>');
   expect(html).toContain('>处理登录或验证</button>');expect(html).not.toContain('旧版本未独立记录');
+});
+
+test('unresolved candidates offer visible login handling without claiming a captcha or a global stop',()=>{
+  const value=props('OBSERVATION_SECURITY_SUSPECT');value.status.automation!.emergencyStopped=false;
+  value.status.securityHolds=[{channel:'COMMENT_NOTIFICATION',reason:'OBSERVATION_SECURITY_SUSPECT',incidentId:'synthetic-incident',
+    revision:'synthetic-revision',heldAt:1794399998894,mode:'headless'}];
+  const html=render(value);
+  expect(html).toContain('页面安全状态待核验');expect(html).toContain('评论通道');
+  expect(html).toContain('synthetic-incident');expect(html).toContain('已有草稿可继续保存');
+  expect(html).not.toContain('全局急停，等待恢复');expect(html).toContain('>处理登录或验证</button>');
+  expect(html).not.toContain('>检查并恢复运行</button>');expect(html).toContain('原现场证据仍单独保留');
+  expect(html).not.toContain('已触发验证码');
+  value.status.browser.mode='headed';value.status.browser.loginRecovery=true;value.busy='检查并恢复运行';
+  const headed=render(value);expect(headed).toContain('>返回无头并检查恢复</button>');
+  expect(headed).toContain('disabled=""');expect(headed).not.toContain('>处理登录或验证</button>');
+});
+
+test('a title-only historical signal is reported as insufficient evidence',()=>{
+  const html=render(props('OBSERVATION_SECURITY_TITLE'));
+  expect(html).toContain('仅命中了页面标题');expect(html).toContain('尚不能确认发生了安全验证');
 });
 
 test('legacy errors are only diagnostic hints and do not become invented incident timestamps or definite causes',()=>{

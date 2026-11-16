@@ -64,6 +64,19 @@ test('status reflects the exact runtime and backend instance without claiming a 
   expect(html(status)).toContain('尚未建立');
 });
 
+test('loaded security rules are tied to the connected backend and missing proof is not shown as a loaded repair',()=>{
+  const status=fixture();status.securityRuntime={instanceId:status.localAssistantConnection!.instanceId,
+    ruleVersion:'synthetic-rules',fingerprint:'ab'.repeat(32)};
+  const rendered=html(status);
+  expect(rendered).toContain('安全检查运行版本');expect(rendered).toContain('synthetic-rules');
+  expect(rendered).toContain('ab'.repeat(32));expect(rendered).toContain('来自当前连接后端已加载的规则');
+  status.securityRuntime.instanceId='different-backend';
+  expect(html(status)).toContain('规则记录与当前连接实例不一致');
+  delete status.securityRuntime;
+  expect(html(status)).toContain('未取得指纹时，不能据此确认修复已生效');
+  expect(html(status)).not.toContain('synthetic-rules');
+});
+
 test.each([true,false])('the single toggle changes connectionEnabled=%s without accepting caller scope',async enabled=>{
   const status=fixture();status.localAssistant!.connectionEnabled=enabled;
   const next=fixture();next.localAssistant!.connectionEnabled=!enabled;

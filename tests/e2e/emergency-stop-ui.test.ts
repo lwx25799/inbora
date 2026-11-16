@@ -43,7 +43,7 @@ test.each([{width:900,height:640},{width:1240,height:800}])('emergency reason an
     }
     if(body.command==='resume'){
       if(refuseRecovery)throw Error('OBSERVATION_PAGE_BLOCKED');
-      status.automation!.emergencyStopped=false;return status;
+      status.automation!.emergencyStopped=false;status.securityHolds=[];return status;
     }
     if(body.command==='getStatus'||body.command==='connect')return status;
     throw Error('UNEXPECTED_BUSINESS_COMMAND_'+String(body.command));
@@ -83,6 +83,29 @@ test.each([{width:900,height:640},{width:1240,height:800}])('emergency reason an
     await page.screenshot({path:resolve(`.local/emergency-stop-ui/legacy-${viewport.width}.png`)});
     refuseRecovery=false;await recover.click();await notice.waitFor({state:'detached'});
     expect(calls.filter(c=>c.command==='resume')).toHaveLength(3);
+    status.securityHolds=[{channel:'COMMENT_NOTIFICATION',reason:'OBSERVATION_SECURITY_SUSPECT',incidentId:'synthetic-held-incident',
+      revision:'synthetic-held-revision',heldAt:1794399998894,mode:'headless'}];
+    status.securityRuntime={ruleVersion:'synthetic-rules',fingerprint:'ab'.repeat(32),instanceId:'synthetic-loaded-instance'};
+    status.localAssistantConnection={ready:true,instanceId:'synthetic-loaded-instance',transport:'stdio',tools:16};
+    await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+    const held=page.getByRole('region',{name:'通道安全状态待核验'});await held.waitFor();
+    expect(await held.innerText()).toContain('评论通道');expect(await held.innerText()).toContain('synthetic-held-incident');
+    expect(await held.innerText()).toContain('按原故障地址重建页面');expect(await held.innerText()).toContain('新页面不保证出现同一验证');
+    expect(await notice.count()).toBe(0);expect(await held.getByRole('button').count()).toBe(1);
+    await held.getByRole('button',{name:'处理登录或验证',exact:true}).click();
+    await expect.poll(()=>status.browser.mode).toBe('headed');expect(status.securityHolds).toHaveLength(1);
+    expect(calls.filter(c=>c.command==='browser'&&!c.action).at(-1)).toEqual({
+      command:'browser',open:true,mode:'headed',loginRecovery:true,manualVisible:true});
+    await held.getByRole('button',{name:'返回无头并检查恢复',exact:true}).waitFor();
+    expect(await held.getByRole('button',{name:'处理登录或验证',exact:true}).count()).toBe(0);
+    await held.getByRole('button',{name:'返回无头并检查恢复',exact:true}).click();
+    await held.waitFor({state:'detached'});expect(status.browser.mode).toBe('headless');expect(status.securityHolds).toEqual([]);
+    expect(calls.filter(c=>c.command==='resume')).toHaveLength(4);
+    expect(calls.filter(c=>c.command==='browser'&&!c.action).at(-1)).toEqual({command:'browser',open:true,mode:'headless'});
+    await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.getByText('安全检查运行版本',{exact:true}).click();
+    expect(await page.getByText('ab'.repeat(32),{exact:true}).isVisible()).toBe(true);
+    expect(await page.getByText('synthetic-loaded-instance',{exact:true}).count()).toBe(2);
     expect(calls.some(c=>/send|suggestion|generate/i.test(String(c.command)))).toBe(false);expect(errors).toEqual([]);
   }finally{await browser.close();await server.close();}
 });

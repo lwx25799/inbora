@@ -14,6 +14,7 @@ import type {
 import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../src/app/automation-contracts.js';
 import type { TimelineItem } from '../../src/app/inbox-queries.js';
 import type {LocalAssistantState} from '../../src/app/local-assistant-contracts.js';
+import type {SecurityRuntime} from '../../src/app/security-runtime.js';
 export type { TimelineItem };
 
 export type { SendParams, AiSettings, BrowserDraftChoice };
@@ -21,6 +22,8 @@ export type ReplyStatus='WAITING'|'REPLIED'|'NOT_REQUIRED'|'MANUAL_ONLY';
 export interface Status {
   localAssistant?:LocalAssistantState;
   localAssistantConnection?:{ready:boolean;instanceId:string|null;transport:'stdio';tools:16};
+  securityRuntime?:SecurityRuntime;
+  securityHolds?:{channel:'DIRECT_MESSAGE'|'COMMENT_NOTIFICATION';reason:string;incidentId:string;revision:string;heldAt:number;mode:'headed'|'headless'}[];
   runtime: string;
   account: { id: string; identity: string } | null;
   operator: { id: string; permissions: string[]; expiresAt: number };
@@ -228,8 +231,11 @@ export const reasons: Record<string, string> = {
   OBSERVATION_DOM_NOT_READY: "页面尚未就绪，请稍后再次同步。",
   OBSERVATION_PAGE_BLOCKED: "页面安全检查未通过；可重新检查，若仍有登录或验证提示再处理。",
   OBSERVATION_UNEXPECTED_ORIGIN:'当前页面来源与已授权网站不一致，请返回正常抖音页面后检查恢复。',
-  OBSERVATION_SECURITY_TITLE:'页面出现验证码、安全验证或访问受限提示，请本人处理后检查恢复。',
-  OBSERVATION_SECURITY_COMPONENT:'页面出现安全验证组件，请本人处理后检查恢复。',
+  OBSERVATION_SECURITY_TITLE:'页面标题命中了安全提示，尚不能确认发生验证；后台将检查原页面。',
+  OBSERVATION_SECURITY_COMPONENT:'页面命中了候选安全组件，尚不能确认验证生效；后台将检查原页面。',
+  OBSERVATION_SECURITY_SUSPECT:'页面安全状态待核验，受影响通道暂缓收取、模型和发送。',
+  SECURITY_CHANNEL_HELD:'此通道安全状态待核验，后台正在检查原页面；已有草稿保留。',
+  SECURITY_VERIFICATION_CONFIRMED:'平台已明确要求安全验证，请在专属浏览器由本人完成后检查恢复。',
   EMERGENCY_RECOVERY_HEADLESS_REQUIRED:'请先返回无头运行，再检查并恢复调度。',
   EMERGENCY_RECOVERY_CHANGED:'检查期间发生了新的急停，请查看最新原因后重新检查。',
   EMERGENCY_RECOVERY_CANCELLED:'恢复检查已取消，急停状态保留。',

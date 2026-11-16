@@ -21,10 +21,10 @@ afterEach(()=>vi.restoreAllMocks());
 async function setup(kind:'CURRENT'|'HISTORY'|'OWN'='CURRENT'){
   const root=privateTemp('visible-message-view-'),store=database();await migrateClient(store,join(root,'client.sqlite'));
   const windows:(number|undefined)[]=[],sequence:string[]=[],owners:{closed:boolean;dirty:boolean;actor:AccountActor;context:EventEmitter;
-    dm:{bringToFront:()=>Promise<void>;evaluate:()=>Promise<boolean>;locator:()=>{evaluateAll:()=>Promise<boolean>}}}[]=[];
+    dm:{url:()=>string;bringToFront:()=>Promise<void>;evaluate:()=>Promise<boolean>;locator:()=>{evaluateAll:()=>Promise<boolean>}}}[]=[];
   const browser=new BrowserService(root,async(_profile,headless)=>{
     expect(owners.every(owner=>owner.closed)).toBe(true);sequence.push(headless?'headless':'headed');
-    const context=new EventEmitter(),state={closed:false,dirty:false,actor:new AccountActor(),context,dm:{bringToFront:async()=>{sequence.push('front');},evaluate:async()=>windows.at(-1)===500,
+    const context=new EventEmitter(),state={closed:false,dirty:false,actor:new AccountActor(),context,dm:{url:()=> 'https://www.douyin.com/',bringToFront:async()=>{sequence.push('front');},evaluate:async()=>windows.at(-1)===500,
       locator:()=>({evaluateAll:async()=>!state.dirty})}};owners.push(state);
     return {...state,notification:state.dm,version:()=> 'fixture',open:async()=>{},close:async()=>{sequence.push('close');state.closed=true;context.emit('close');}} as unknown as BrowserProfileOwner;
   });

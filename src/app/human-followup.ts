@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {digest,requireSafe,validText,isStrong,targetKey,validManualMediaProof,type Draft,type TargetSnapshot,type SendProof} from '../core/contracts.js';
 import {SendCoordinator} from '../core/send-coordinator.js';
 import type {EventStore} from '../storage/store.js';
+import {assertSecurityChannelClear} from '../storage/security-holds.js';
 import type {WorkbenchAuthority} from './authority.js';
 import type {BrowserService} from './browser-service.js';
 import type {z} from 'zod';
@@ -86,6 +87,7 @@ export class HumanFollowups {
   guard(token:string,id:string,approved=false,preparing=true):void {
     requireSafe(!this.closing(),'CLIENT_CLOSING');requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
     const turn=this.turn(id);requireSafe(turn,'COMMAND_NOT_FOUND');const input=JSON.parse(turn.params) as Input,event=this.store.event(turn.event_id);
+    assertSecurityChannelClear(this.store,event.payload.channel);
     requireSafe(['PREPARING',...(approved?['APPROVED']:[])].includes(turn.status),'COMMAND_NOT_QUEUED');
     const op=this.authority.operator(token,'SEND');this.authority.operator(token,'APPROVE');
     requireSafe(op.id===turn.operator_id,'OPERATOR_PERMISSION_DENIED');this.authority.requireOwner(token,event,input.generation);
@@ -174,6 +176,7 @@ export class HumanFollowups {
       invalidateApproval:(_draftId:string)=>{this.store.db.prepare("UPDATE human_reply_turns SET status='FAILED_BEFORE_CLICK',approval=NULL WHERE command_id=? AND intent_id IS NULL").run(id);},
       recordIntent:(_draftId:string,snapshot:TargetSnapshot,real:boolean,authority?:{check():void;committed(id:string):void;manualMedia?():void})=>this.store.db.transaction(()=>{
         requireSafe(authority,'CLIENT_AUTHORITY_REQUIRED');authority.check();const row=this.turn(id)!;
+        assertSecurityChannelClear(this.store,this.store.event(row.event_id).payload.channel);
         const approval=row.approval?JSON.parse(row.approval) as Draft['approval']:null;
         requireSafe(row.status==='APPROVED'&&!row.intent_id&&approval&&approval.version===row.version&&approval.textDigest===digest(row.text)&&
           digest(approval.snapshot)===digest(snapshot),'APPROVAL_INVALID');

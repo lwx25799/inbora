@@ -11,7 +11,8 @@ import type {Grant,ReplyPolicy} from './automation-contracts.js';
 import {replyPolicySchema} from './automation-contracts.js';
 import {recoverPolicyDraft} from './policy-draft-recovery.js';
 import {readCommentThreadContext,commentThreadModelHistory} from '../storage/comment-thread-context.js';
-import {collectionStops} from './collection-scheduler.js';
+import {shouldStopGlobally,securityCandidateCodes} from '../core/emergency-stop.js';
+import {assertSecurityRevision,securityRevision} from '../storage/security-holds.js';
 import {runtimePerformance} from '../observability/runtime-performance.js';
 
 interface AutomaticReplyContext {
@@ -83,7 +84,7 @@ async function recoverUnpaidCommentRoot(c:AutomaticReplyContext,grant:Grant<Repl
     }catch(error){
       const code=c.errorCode(error);c.store.db.prepare("UPDATE automation_jobs SET reason=?,updated_at=? WHERE event_id=? AND state='REVIEW' AND draft_version=0")
         .run(code,c.authority.now(),event.id);
-      if(collectionStops.has(code))c.stop(code);
+      if(shouldStopGlobally(code))c.stop(code);
     }finally{c.modelPending.delete(event.id);c.updated();}
     return;
   }
@@ -93,6 +94,13 @@ async function recoverUnpaidCommentRoot(c:AutomaticReplyContext,grant:Grant<Repl
 export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
     const grant=c.automation.active('AUTO_REPLY') as Grant<ReplyPolicy>|null;
     if(!grant||grant.scope.model!==c.settings.model)return;
+    const heldJobs=c.store.db.prepare(`SELECT event_id,reason FROM automation_jobs WHERE state='REVIEW' AND draft_version=0
+      AND NOT EXISTS(SELECT 1 FROM grant_reservations r WHERE r.job_key=automation_jobs.event_id)
+      AND NOT EXISTS(SELECT 1 FROM reply_drafts d WHERE d.event_id=automation_jobs.event_id)
+      AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=automation_jobs.event_id)`).all() as {event_id:string;reason:string}[];
+    for(const job of heldJobs)if((securityCandidateCodes.has(job.reason)||job.reason==='SECURITY_CHANNEL_HELD')&&
+      c.automation.policyMatches(grant,c.store.event(job.event_id)))
+      c.store.db.prepare("DELETE FROM automation_jobs WHERE event_id=? AND state='REVIEW' AND draft_version=0").run(job.event_id);
     if(await recoverPolicyDraft(c.store,c.authority,c.automation,c.humanReplies,grant,c.beforeWork)){
       c.updated();return;
     }
@@ -113,6 +121,7 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
     if(!event)return;
     c.beforeWork();
     const generation=c.authority.ownership(event).generation,context=c.authority.contextVersion(event),now=c.authority.now();
+    const security=securityRevision(c.store,event.payload.channel);
     c.store.db.prepare('INSERT INTO automation_jobs VALUES(?,?,?,?,?,?,NULL,NULL,?,?)').run(event.id,grant.version,'QUALIFYING',context,generation,0,now,now);
     c.modelPending.add(event.id);
     c.statusUpdated();
@@ -130,10 +139,12 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
           c.automation.reserve(grant.version,'MODEL',event.id);
         }).then(result=>{modelEnd();return result;},error=>{modelEnd(signal.aborted?'CANCELLED':'FAILED');throw error;});
       requireSafe(!signal.aborted,'MODEL_CANCELLED');
+      assertSecurityRevision(c.store,event.payload.channel,security);
       const commandId=randomUUID(),selectionId=randomUUID();
       const token=c.authority.issueSession();
       try {
         c.store.db.transaction(()=>{
+          assertSecurityRevision(c.store,event.payload.channel,security);
           requireSafe(!c.isClosing()&&c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
           requireSafe(c.authority.ownership(event).generation===generation&&c.authority.contextVersion(event)===context&&!c.authority.draftFor(event.id),'AUTO_RESULT_STALE');
           const draftId=randomUUID();
@@ -155,7 +166,7 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
       const paid=c.store.db.prepare("SELECT job_key FROM grant_reservations WHERE grant_version=? AND kind='MODEL' AND job_key=?").get(grant.version,event.id);
       if(automaticSignal.aborted&&!paid)c.store.db.prepare("DELETE FROM automation_jobs WHERE event_id=? AND command_id IS NULL AND state IN ('QUALIFYING','GENERATING')").run(event.id);
       else c.store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE event_id=?").run(code,c.authority.now(),event.id);
-      if(collectionStops.has(code))c.stop(code);
+      if(shouldStopGlobally(code))c.stop(code);
       c.store.audit('AUTO_REPLY_STOPPED',event.id);
     }finally{c.modelPending.delete(event.id);c.updated();}
 }

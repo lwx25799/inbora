@@ -23,7 +23,11 @@ export const replySchema=z.object({kind:z.literal('reply'),eventId:id,selectionI
   expectedVersion:count,contextVersion:hash,draft:draftSchema.nullable()}).strict();
 const syncSchema=z.object({runId:id.nullable(),running:z.boolean(),cancelled:z.boolean(),source:z.enum(['works','dm']).nullable(),
   results:z.array(z.object({source:z.enum(['works','dm']),state:code,error:code.nullable()}).strict()).max(2)}).strict();
+const securityRuntimeSchema=z.object({ruleVersion:z.string().min(1).max(80),fingerprint:hash,instanceId:id.nullable()}).strict();
+const securityHoldSchema=z.object({channel:channelSchema,reason:code,incidentId:id,revision:id,heldAt:count,
+  mode:z.enum(['headed','headless'])}).strict();
 export const statusSchema=z.object({runtime:z.string().min(1).max(1000),instanceId:id,connected:z.literal(true),
+  securityRuntime:securityRuntimeSchema.optional(),securityHolds:z.array(securityHoldSchema).max(2).optional(),
   accountConnected:z.boolean(),browser:z.object({state:code,mode:z.enum(['headed','headless']).nullable()}).strict(),
   automaticReply:z.boolean(),emergencyStopped:z.boolean(),budgets:z.array(z.object({kind:z.enum(['MODEL','SEND']),
     used:count,maximum:count.nullable()}).strict()).max(2),

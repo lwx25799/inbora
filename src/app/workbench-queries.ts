@@ -12,6 +12,8 @@ import {HumanFollowups} from './human-followup.js';
 import {readCommentThreadContext,commentThreadPage,commentThreadGroupKey} from '../storage/comment-thread-context.js';
 import {hasSuggestionAuthorization,suggestionEligibility,type SuggestionState} from './suggestion-eligibility.js';
 import {readVerificationView} from './verification-view.js';
+import {securityRuntime} from './security-runtime.js';
+import {readSecurityHold} from '../storage/security-holds.js';
 
 interface ViewState {
   settings: AiSettings;
@@ -115,6 +117,10 @@ export class WorkbenchQueries {
       .get("account_001") as { own_id: string } | undefined;
     return {
       runtime: this.browser.root,
+      securityRuntime:securityRuntime(null),
+      securityHolds:(['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as const).flatMap(channel=>{
+        const hold=readSecurityHold(this.store,channel);return hold?[hold]:[];
+      }),
       account: account ? { id: "account_001", identity: account.own_id } : null,
       operator: {
         id: op.id,

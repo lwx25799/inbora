@@ -4,6 +4,7 @@ import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import {readCommentThreadContext} from './comment-thread-context.js';
+import {assertSecurityChannelClear} from './security-holds.js';
 import {
   digest, dmClockToleranceMs, eventBinding, eventSchema, isEligible, isManualMediaCandidate, isStrong, requireSafe, targetKey, validText,
   validManualMediaProof,
@@ -324,6 +325,7 @@ export class EventStore {
       requireSafe(this.db.pragma('user_version', {simple:true}) !== 3 || authority, 'CLIENT_AUTHORITY_REQUIRED');
       authority?.check();
       const d = this.draft(draftId); this.assertSendable(d.eventId);
+      assertSecurityChannelClear(this,this.event(d.eventId).payload.channel);
       if(!isStrong(this.event(d.eventId).payload)){
         requireSafe(authority?.manualMedia&&d.approval&&validManualMediaProof(this.event(d.eventId).payload,d.approval.snapshot),'HUMAN_MEDIA_APPROVAL_REQUIRED');
         authority.manualMedia();

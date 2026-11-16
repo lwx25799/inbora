@@ -1,3 +1,4 @@
+import {reportSecurityFailure} from './security-signal.js';
 import { randomUUID } from 'node:crypto';
 import type { Page } from 'playwright';
 import type { DmReplyMapping } from '../config/site-mapping.js';
@@ -39,6 +40,19 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     context:unknown[];latestId:string|null;viewport:ReplyViewport|null;remove:()=>void};
   const host=window as unknown as {__inboraDmReplyGate?:Gate;__inboraDmPreparation?:Preparation};
   const dom={
+    securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
+      if(value)return;
+      const matches=[];
+      for(const selector of selectors.slice(0,8))for(const node of Array.from(document.querySelectorAll(selector)).slice(0,12-matches.length)){
+        const r=node.getBoundingClientRect();matches.push({selector:selector.slice(0,2000),tag:node.tagName.slice(0,24),id:node.id.slice(0,160),
+          left:r.left,top:r.top,right:r.right,bottom:r.bottom,visible:dom.securityVisible(node)});
+      }
+      const frames=Array.from(document.querySelectorAll('iframe')).slice(0,8).map(node=>{const r=node.getBoundingClientRect();
+        return{src:(node.getAttribute('src')??'').slice(0,2048),title:node.title.slice(0,160),left:r.left,top:r.top,right:r.right,bottom:r.bottom};});
+      const signal={version:1,state:'SUSPECT',kind,href:location.href.slice(0,2048),origin:location.origin.slice(0,256),title:document.title.slice(0,160),
+        documentStartedAt:performance.timeOrigin,observedAt:Date.now(),scope:'TARGET',target:{conversationId:expected.conversationId??undefined},matches,frames};
+      throw Error('OBSERVATION_SECURITY_SUSPECT INBORA_SECURITY_SIGNAL:'+JSON.stringify(signal));
+    },
     securityVisible(element:Element):boolean {
       for(const node of [element,...element.querySelectorAll('*')]){
         if(!node.isConnected)continue;
@@ -48,14 +62,14 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
           if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
         }
         if(!shown)continue;
-        const candidates:{rect:DOMRect;parent:Element|null}[]=Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement}));
+        const candidates:{rect:DOMRect;parent:Element|null}[]=/^(?:IFRAME|IMG|CANVAS|VIDEO|AUDIO|INPUT|BUTTON|SELECT|TEXTAREA|SVG|OBJECT|EMBED)$/u.test(node.tagName)?Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement})):[];
         for(const child of node.childNodes){
           if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
           const range=document.createRange();range.selectNodeContents(child);
           for(const rect of range.getClientRects())candidates.push({rect,parent:node});
         }
         for(const {rect,parent} of candidates){
-          let left=rect.left,top=rect.top,right=rect.right,bottom=rect.bottom;
+          let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(innerWidth,rect.right),bottom=Math.min(innerHeight,rect.bottom);
           if(!(right>left&&bottom>top))continue;
           for(let current=parent;current;current=current.parentElement){
             const style=getComputedStyle(current);
@@ -269,9 +283,10 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     capture(): CapturedReplyFrame {
       sourceBudget=1_048_576;
       dom.check(peer&&expected.channel==='DIRECT_MESSAGE'&&expected.direction==='INCOMING'&&expected.kind==='DM','NATIVE_REPLY_SCOPE_REQUIRED');
-      dom.check(location.origin===o.origin&&!/验证码|安全验证|访问受限/.test(document.title),'NATIVE_REPLY_PAGE_BLOCKED');
-      dom.check(!Array.from(document.querySelectorAll(m.blockers)).some(dom.securityVisible),'NATIVE_REPLY_PAGE_BLOCKED');
-      dom.check(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.securityVisible),'NATIVE_REPLY_PAGE_BLOCKED');
+      dom.check(location.origin===o.origin,'OBSERVATION_UNEXPECTED_ORIGIN');
+      dom.securityCheck(!/验证码|安全验证|访问受限/.test(document.title),[o.securityBlockers],'TITLE');
+      dom.securityCheck(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.securityVisible),[o.securityBlockers]);
+      dom.check(!Array.from(document.querySelectorAll(m.blockers)).some(dom.securityVisible),'NATIVE_REPLY_INTERACTION_BLOCKED');
       const own=dom.fiber(dom.one(document,s.selfAvatar),s.selfFiberDepth);
       dom.check(dom.data(own,'uid')===o.self.uid&&dom.data(own,'secUid')===o.self.secUid,'NATIVE_REPLY_ACCOUNT_CHANGED');
       const chat=dom.one(document,s.chat),header=dom.one(chat,s.chatHeader),conversation=dom.data(dom.childProps(header),'conversation');
@@ -426,7 +441,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     dom.check(input.editorShape===state.editorShape,'NATIVE_REPLY_EDITOR_CHANGED');
     host.__inboraDmReplyGate?.remove();
     const button=state.button,editor=state.editor,editorShape=state.editorShape,baseline=JSON.stringify(state.context);
-    const gate={token:token!,enabled:false,attempted:false,used:false,blocked:false,
+    const gate={token:token!,enabled:false,attempted:false,used:false,blocked:false,securityFailure:null as string|null,
       validate():void {
         const current=dom.preparedWindow(dom.capture(),input.preparationToken);
         dom.check(current.button===button&&current.editor===editor&&current.editorShape===editorShape&&
@@ -437,7 +452,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
         if(!event.composedPath().includes(button))return;
         try {dom.check(gate.enabled&&!gate.used&&!gate.blocked);gate.validate();
           if(event.currentTarget===button)gate.used=true;
-        } catch {gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}
+        } catch(error) {if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}
       },
       submit():boolean {
         dom.check(!gate.attempted&&!gate.blocked);gate.attempted=true;gate.validate();
@@ -447,7 +462,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
           if(m.submission==='html-click')(button as HTMLElement).click();
           else button.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,composed:true,view:window}));
         } finally {gate.enabled=false;gate.remove();const owned=host.__inboraDmPreparation;if(owned&&owned.token===input.preparationToken)owned.remove();}
-        return gate.used&&!gate.blocked;
+        if(gate.securityFailure)throw Error(gate.securityFailure);return gate.used&&!gate.blocked;
       },
       remove():void {window.removeEventListener('click',gate.handle,true);button.removeEventListener('click',gate.handle,true);},
     };
@@ -500,9 +515,9 @@ export class ObservedDmReply implements ReplyAdapter {
   private async frame(event:InboundEvent,action:ReplyCaptureInput['action']='snapshot',text:string|null=null,token:string|null=null,
     before:ReplyCaptureInput['before']=null,editorShape:string|null=null):Promise<ReplyFrame>{
     requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
-    try{const frame=await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape,manualMedia:this.options.manualMedia===true,preparationToken:this.preparationToken});
+    try{const frame=await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape,manualMedia:this.options.manualMedia===true,preparationToken:this.preparationToken}).catch(error=>reportSecurityFailure(this.page,error));
       requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');return frame;}
-    catch(error){const code=error instanceof Error?error.message.match(/NATIVE_REPLY_[A-Z_]+/)?.[0]:null;
+    catch(error){const code=error instanceof Error?error.message.match(/(?:NATIVE_REPLY|OBSERVATION)_[A-Z_]+/)?.[0]:null;
       if(code)requireSafe(false,code);throw error;}
   }
   private snapshot(event:InboundEvent,frame:ReplyFrame):TargetSnapshot {
@@ -577,7 +592,7 @@ export class ObservedDmReply implements ReplyAdapter {
       const gate=(window as unknown as {__inboraDmReplyGate?:{token:string;submit:()=>boolean;remove:()=>void}}).__inboraDmReplyGate;
       if(!gate||gate.token!==token)throw new Error('NATIVE_REPLY_NOT_PREPARED');
       try{return gate.submit();}finally{gate.remove();}
-    },token);
+    },token).catch(error=>reportSecurityFailure(this.page,error));
     requireSafe(accepted,'NATIVE_REPLY_CLICK_BLOCKED');
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{

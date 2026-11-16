@@ -43,10 +43,10 @@ test.each(['valid','wrong-parent','wrong-text','pending','missing','duplicate'])
   }finally{await f.close();}
 });
 
-test('visible native SMS challenge blocks inspection before input or intent',async()=>{
+test('a visible native SMS-shaped candidate blocks inspection before input or intent',async()=>{
   const f=await setup();try{
     await f.owner.notification.evaluate(()=>{const node=document.createElement('div');node.className='uc-ui-verify-new_header-title';node.textContent='接收短信验证码';document.body.append(node);});
-    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('COMMENT_REPLY_PAGE_BLOCKED');
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('OBSERVATION_SECURITY_SUSPECT');
     expect(f.store.stats().budgets).toMatchObject([{used:0},{used:0}]);
   }finally{await f.close();}
 });

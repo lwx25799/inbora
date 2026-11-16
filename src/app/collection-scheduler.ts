@@ -1,7 +1,8 @@
 import { Blocked, requireSafe } from "../core/contracts.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type {CollectionSettings} from './automation-contracts.js';
-import {platformStopCodes} from '../core/emergency-stop.js';
+import {platformStopCodes,securityCandidateCodes,shouldStopGlobally} from '../core/emergency-stop.js';
+import {readSecurityHold} from '../storage/security-holds.js';
 
 export type CollectionSource = "works" | "dm";
 export type CollectionTrigger = 'BACKGROUND'|'MANUAL';
@@ -61,6 +62,13 @@ export class CollectionScheduler {
         row.next_at=now+interval;
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=? WHERE source=? AND last_error='COLLECTION_CANCELLED'").run(row.next_at,row.source);
       }
+      if(row.last_error&&securityCandidateCodes.has(row.last_error)&&row.next_at>now+interval&&
+        readSecurityHold(this.persistence.store,row.source==='works'?'COMMENT_NOTIFICATION':'DIRECT_MESSAGE')){
+        // A persisted hold needs bounded recovery checks, independent of the channel's old fault count.
+        row.next_at=now+interval;
+        this.persistence.store.db.prepare('UPDATE collection_progress SET next_at=? WHERE source=? AND last_error=?')
+          .run(row.next_at,row.source,row.last_error);
+      }
     }
     const due = progress.filter(p => (p.source === "works" ? collection.comments : collection.inbox) && p.next_at <= this.persistence.now());
     const next = due.find(p => p.source !== this.last) ?? due[0];
@@ -112,10 +120,11 @@ export class CollectionScheduler {
           .run(now+interval,Math.max(0,now-started),source);
       }else if (error) {
         const old = this.persistence.store.db.prepare("SELECT failures FROM collection_progress WHERE source=?").get(source) as {failures: number};
-        const delay = objectDeferred?interval:Math.min(Math.max(interval, 600_000), interval * 2 ** Math.min(old.failures + 1, 10));
+        const heldCandidate=securityCandidateCodes.has(error)&&!!readSecurityHold(this.persistence.store,source==='works'?'COMMENT_NOTIFICATION':'DIRECT_MESSAGE');
+        const delay = objectDeferred||error==='SECURITY_CHANNEL_HELD'||heldCandidate?interval:Math.min(Math.max(interval, 600_000), interval * 2 ** Math.min(old.failures + 1, 10));
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_error=?,failures=failures+1,elapsed_ms=? WHERE source=?")
           .run(now + delay, error, Math.max(0, now - started),source);
-        if (collectionStops.has(error)) this.persistence.stop(true,error,source==='works'?'COLLECTION_COMMENTS':'COLLECTION_DM');
+        if (shouldStopGlobally(error)) this.persistence.stop(true,error,source==='works'?'COLLECTION_COMMENTS':'COLLECTION_DM');
       } else {
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_success=?,last_error=NULL,failures=0,elapsed_ms=? WHERE source=?")
           .run(now + interval, now, Math.max(0, now - started),source);

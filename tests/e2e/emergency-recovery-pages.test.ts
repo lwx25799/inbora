@@ -36,7 +36,7 @@ test('healthy account recovery still refuses a blocked comment title or reply-on
       const before=['budgets','send_intents','delivery_receipts','inbound_events','collection_progress']
         .map(table=>store.db.prepare('SELECT * FROM '+table).all());
       await expect(service.dispatch(token,{command:'resume',eventId:null}))
-        .rejects.toThrow(variant==='title'?'OBSERVATION_SECURITY_TITLE':'OBSERVATION_SECURITY_COMPONENT');
+        .rejects.toThrow(variant==='title'?'OBSERVATION_SECURITY_SUSPECT':variant==='comment-reply'?'COMMENT_REPLY_INTERACTION_BLOCKED':'NATIVE_REPLY_INTERACTION_BLOCKED');
       expect(data.state().emergencyStopped).toBe(true);expect(service.authority.paused()).toBe(true);
       expect(['budgets','send_intents','delivery_receipts','inbound_events','collection_progress']
         .map(table=>store.db.prepare('SELECT * FROM '+table).all())).toEqual(before);

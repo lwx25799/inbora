@@ -3,6 +3,7 @@ import { collectionSchema, modelGrantSchema, replyPolicySchema, type CollectionS
 import type { EventStore } from "./store.js";
 import type {EmergencySource} from '../core/emergency-stop.js';
 import {readEmergencyStop,recordEmergencyStop,emergencyRevision,resumeEmergency} from './emergency-stop.js';
+import {readSecurityHold,assertSecurityChannelClear} from './security-holds.js';
 
 export class AutomationStore {
   constructor(readonly store: EventStore, readonly now: () => number = Date.now) {}
@@ -96,7 +97,7 @@ export class AutomationStore {
     const global=this.store.budget(kind),limit=kind==='MODEL'?grant.scope.modelLimit:(grant.scope as ReplyPolicy).sendLimit;
     return (limit===null||used.used<limit)&&(global.maximum===null||global.used<global.maximum);
   }
-  reserve(version: number, kind: "MODEL" | "SEND", jobKey: string): void {
+  reserve(version: number, kind: "MODEL" | "SEND", jobKey: string,channel?:StoredEvent['payload']['channel']): void {
     this.store.db.transaction(() => {
       const row = this.store.db.prepare("SELECT kind FROM automation_grants WHERE version=? AND revoked_at IS NULL").get(version) as {kind: "MODEL" | "AUTO_REPLY"} | undefined;
       requireSafe(row, "GRANT_REVOKED");
@@ -104,6 +105,8 @@ export class AutomationStore {
       requireSafe(grant?.version === version, "GRANT_REVOKED");
       this.requireAccount(grant.scope.ownId);
       requireSafe(!this.state().emergencyStopped, "EMERGENCY_STOPPED");
+      const event=this.store.db.prepare('SELECT channel FROM inbound_events WHERE id=?').get(jobKey) as {channel:StoredEvent['payload']['channel']}|undefined;
+      if(channel??event?.channel)assertSecurityChannelClear(this.store,(channel??event!.channel));
       const used = this.store.db.prepare("SELECT count(*) AS used FROM grant_reservations WHERE grant_version=? AND kind=?").get(version, kind) as {used: number};
       const limit = kind === "MODEL" ? grant.scope.modelLimit : (grant.scope as ReplyPolicy).sendLimit;
       requireSafe(limit===null||Number.isInteger(limit)&&used.used<limit, `${kind}_GRANT_EXHAUSTED`);
@@ -112,6 +115,7 @@ export class AutomationStore {
     }).immediate();
   }
   policyMatches(grant: Grant<ReplyPolicy>, e: StoredEvent, status: 'NEW'|'DRAFT'='NEW'): boolean {
+    if(readSecurityHold(this.store,e.payload.channel))return false;
     const active = this.active("AUTO_REPLY");
     if (active?.version !== grant.version || this.state().emergencyStopped || !isStrong(e.payload) ||
       !(status==='NEW'?['AWAITING_DRAFT']:['AWAITING_APPROVAL','APPROVED']).includes(e.status)) return false;
@@ -130,6 +134,7 @@ export class AutomationStore {
   }
   /** Authorization scope only; explicit human suggestions do not inherit automatic scheduling gates. */
   policyScopeMatches(grant:Grant<ReplyPolicy>,e:StoredEvent):boolean {
+    if(readSecurityHold(this.store,e.payload.channel))return false;
     const active=this.active('AUTO_REPLY');
     if(active?.version!==grant.version||this.state().emergencyStopped||!isStrong(e.payload))return false;
     const p=active.scope as ReplyPolicy;this.requireAccount(p.ownId);

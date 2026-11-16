@@ -4,6 +4,7 @@ import { digest, requireSafe, targetKey, validText,isStrong, type InboundEvent }
 import { EventStore } from '../storage/store.js';
 import {readCommentThreadContext,commentThreadModelHistory,sameCommentThread} from '../storage/comment-thread-context.js';
 import {replyStyleRules} from './reply-style.js';
+import {assertSecurityChannelClear,assertSecurityRevision,securityRevision} from '../storage/security-holds.js';
 
 export function sensitive(e: InboundEvent): boolean {
   return /投诉|隐私|退款|转账|验证码|密码|身份证|银行卡|金钱|complaint|password|verification|refund|payment|[\w.+-]+@[\w.-]+\.\w+|\b\d{11,19}\b/iu.test(e.text);
@@ -43,8 +44,10 @@ export class HttpDraftProvider {
       !endpoint.search && !endpoint.hash, 'INVALID_MODEL_ENDPOINT');
     requireSafe(!sensitive(e) && !history.some(sensitive), 'SENSITIVE_MANUAL_HANDLING');
     const context=prompt(e,history);
+    const security=securityRevision(store,e.channel);
     const id = randomUUID();
     store.db.transaction(() => {
+      assertSecurityChannelClear(store,e.channel);
       store.consumeBudget('MODEL');
       store.db.prepare('INSERT INTO model_calls VALUES (?,?,?,NULL,NULL,NULL,NULL)').run(id, this.grant!.model, 'STARTED');
     }).immediate();
@@ -60,6 +63,7 @@ export class HttpDraftProvider {
       const result = responseSchema.parse(JSON.parse(raw));
       requireSafe(result.model === this.grant.model, 'MODEL_CHANGED');
       const text = validText(result.text);
+      assertSecurityRevision(store,e.channel,security);
       requireSafe(!/https?:\/\/|[\w.+-]+@[\w.-]+\.\w+|\b\d{11,19}\b/u.test(text), 'MODEL_SENSITIVE_OUTPUT');
       requireSafe(!history.some(h => h.direction === 'OUTGOING' && h.text === text), 'MODEL_DUPLICATE_OUTPUT');
       store.db.prepare('UPDATE model_calls SET status=?,input_tokens=?,output_tokens=?,elapsed_ms=?,estimated_cost=? WHERE id=?')
