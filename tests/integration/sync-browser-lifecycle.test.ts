@@ -17,7 +17,12 @@ async function fixture(){
   const config=mapping('https://www.douyin.com');config.environment='douyin';
   await writeFile(join(root,'site-mapping.json'),JSON.stringify(config));await migrateClient(store,join(root,'backup.sqlite'));
   let closes=0;
-  const owner={actor,context,notification:{},dm:{},version:()=> 'synthetic',open:async()=>{},close:async()=>{closes++;}} as unknown as BrowserProfileOwner;
+  const pages=[0,1].map(()=>{
+    let currentUrl=config.origin;
+    return {url:()=>currentUrl,goto:async(url:string)=>{currentUrl=url;},evaluate:async()=>({originMatches:true,empty:true})};
+  });
+  const owner={actor,context,notification:pages[0],dm:pages[1],version:()=> 'synthetic',
+    open:async(origin:string)=>{for(const page of pages)await page.goto(origin);},close:async()=>{closes++;}} as unknown as BrowserProfileOwner;
   return{root,store,owner,context,get closes(){return closes;},close:()=>store.close()};
 }
 

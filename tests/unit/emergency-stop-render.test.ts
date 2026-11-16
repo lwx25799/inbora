@@ -15,7 +15,7 @@ const render=(value:ReturnType<typeof props>)=>renderToStaticMarkup(createElemen
 test('a fresh security incident explains its observed signal and offers direct recovery without assuming the current account is broken',()=>{
   const html=render(props('OBSERVATION_SECURITY_COMPONENT'));
   expect(html).toContain('页面出现已识别的安全验证组件');expect(html).toContain('触发来源：评论后台收取');
-  expect(html).toContain('网页账号正常时可直接检查恢复');expect(html).toContain('>检查并恢复运行</button>');
+  expect(html).toContain('处理登录或验证会打开发生问题的页面');expect(html).toContain('>检查并恢复运行</button>');
   expect(html).toContain('>处理登录或验证</button>');expect(html).not.toContain('旧版本未独立记录');
 });
 

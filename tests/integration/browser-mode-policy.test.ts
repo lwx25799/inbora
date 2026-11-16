@@ -12,13 +12,29 @@ import {mapping} from '../fixtures/site.js';
 import {privateTemp,database,pending} from '../helpers.js';
 import {observedMapping} from '../fixtures/observed-site.js';
 
+interface FakePage {
+  dirty:boolean;
+  url():string;
+  goto(url:string):Promise<void>;
+  evaluate():Promise<{originMatches:boolean;empty:boolean}>;
+  locator():{evaluateAll():Promise<boolean>};
+}
+function fakePage():FakePage{
+  let currentUrl='about:blank';
+  return {dirty:false,url:()=>currentUrl,goto:async(url:string)=>{currentUrl=url;},
+    async evaluate(){return {originMatches:true,empty:!this.dirty};},
+    locator(){return {evaluateAll:async()=>!this.dirty};}};
+}
+
 test('ordinary open ignores the legacy headed choice and reconnects in headless mode',async()=>{
   const root=privateTemp('headless-policy-'),launches:boolean[]=[],owners:{closed:number}[]=[];
   const config={...mapping('https://www.douyin.com'),environment:'douyin'};
   await writeFile(join(root,'site-mapping.json'),JSON.stringify(config));
   const browser=new BrowserService(root,async(_profile,headless)=>{
     launches.push(headless);const context=new EventEmitter(),state={closed:0};owners.push(state);
-    return {context,actor:new AccountActor(),version:()=> 'synthetic-headless',open:async()=>{},close:async()=>{state.closed++;context.emit('close');}} as unknown as BrowserProfileOwner;
+    const pages=[fakePage(),fakePage()];
+    return {context,notification:pages[0],dm:pages[1],actor:new AccountActor(),version:()=> 'synthetic-headless',
+      open:async(origin:string)=>{for(const page of pages)await page.goto(origin);},close:async()=>{state.closed++;context.emit('close');}} as unknown as BrowserProfileOwner;
   });
   try{
     await browser.open('headed');expect(launches).toEqual([true]);
@@ -29,14 +45,16 @@ test('ordinary open ignores the legacy headed choice and reconnects in headless 
 
 async function recoveryFixture(beforeLaunch?:(headless:boolean)=>Promise<void>){
   const root=privateTemp('login-recovery-policy-'),launches:boolean[]=[],sequence:string[]=[];
-  const owners:{closed:boolean;context:EventEmitter;pages:{dirty:boolean;locator:()=>{evaluateAll:()=>Promise<boolean>}}[]}[]=[];
+  const owners:{closed:boolean;context:EventEmitter;pages:FakePage[]}[]=[];
   const browser=new BrowserService(root,async(_profile,headless)=>{
     expect(owners.every(owner=>owner.closed)).toBe(true);launches.push(headless);sequence.push(headless?'headless':'headed');
     await beforeLaunch?.(headless);
     const context=new EventEmitter(),actor=new AccountActor();
-    const pages=[0,1].map(()=>({dirty:false,locator(){return {evaluateAll:async()=>!this.dirty};}}));
+    const pages=[0,1].map(()=>fakePage());
     const state={closed:false,pages,context};owners.push(state);
-    return {context,actor,notification:pages[0],dm:pages[1],version:()=> 'synthetic-mode',open:async()=>{},close:async()=>{
+    return {context,actor,notification:pages[0],dm:pages[1],version:()=> 'synthetic-mode',open:async(origin:string)=>{
+      for(const page of pages)await page.goto(origin);
+    },close:async()=>{
       sequence.push('close');state.closed=true;context.emit('close');
     }} as unknown as BrowserProfileOwner;
   });

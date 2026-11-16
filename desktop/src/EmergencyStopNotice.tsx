@@ -40,7 +40,7 @@ export function EmergencyStopNotice({status,busy,act,update}:{status:Status;busy
     <p>{legacy?'旧版本未独立记录本次急停原因。':reason??'后台检查未通过，已停止全部调度。'}</p>
     {legacy&&reason&&<p>最近收取错误（供排查）：{reason}</p>}
     <p className="emergency-stop-meta">{legacy?'排查来源':'触发来源'}：{stopSources[incident?.source??'UNKNOWN']??stopSources.UNKNOWN}。停止收取、模型和发送；已有草稿保留。</p>
-    <p className="emergency-stop-help">网页账号正常时可直接检查恢复；仍有登录或验证提示时再处理。恢复前会重新检查，重启不会自动解除急停。</p>
+    <p className="emergency-stop-help">处理登录或验证会打开发生问题的页面；返回无头后，会在原页面重新检查。重启不会自动解除急停。</p>
     <div className="row">
       <button disabled={!!busy} onClick={()=>void act('检查并恢复运行',resume)}>{recovery?'返回无头并检查恢复':'检查并恢复运行'}</button>
       {!recovery&&<button disabled={!!busy} onClick={()=>void act('打开登录或验证处理',async()=>update(await request<Status>({

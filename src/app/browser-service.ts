@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import {BrowserRecoveryLocations} from './browser-recovery-locations.js';
 import { BrowserProfileOwner } from "../browser/profile-owner.js";
 import { ObservedReader } from "../adapters/observed-reader.js";
 import {hasVisibleSecurityComponent} from '../adapters/security-components.js';
@@ -34,6 +35,8 @@ export interface AdapterHandle {
   dispose(): void;
 }
 export class BrowserService {
+  private readonly recoveryLocations:BrowserRecoveryLocations;
+  bindStore(store:EventStore):void {this.recoveryLocations.bindStore(store);}
   isIdle():boolean {return !this.owner||this.owner.actor.idle;}
   private owner: BrowserProfileOwner | undefined;
   private mode: "headed" | "headless" = "headless";
@@ -59,7 +62,7 @@ export class BrowserService {
   constructor(
     readonly root: string,
     private readonly launch = BrowserProfileOwner.launch,
-  ) {}
+  ) {this.recoveryLocations=new BrowserRecoveryLocations(root);}
   static adopt(
     root: string,
     owner: BrowserProfileOwner,
@@ -195,7 +198,10 @@ export class BrowserService {
     const observation=await loadObservationMapping(this.root),mapping=observation?null:await loadMapping(this.root);
     const [commentReply,dmReply]=await Promise.all([loadCommentReplyMapping(this.root),loadDmReplyMapping(this.root)]);
     active();requireSafe((observation?.self.uid??mapping?.ownId)===ownId,'ACCOUNT_CHANGED');
+    await this.recoveryLocations.restore(owner,signal);active();
+    requireSafe(this.owner===owner&&this.epoch===epoch,'BROWSER_CLOSED');
     await owner.actor.run(async()=>{
+      await this.recoveryLocations.capture(owner,true);active();
       for(const [channel,page] of [['COMMENT_NOTIFICATION',owner.notification],['DIRECT_MESSAGE',owner.dm]] as const){
         active();requireSafe(this.owner===owner&&this.epoch===epoch,'BROWSER_CLOSED');
         try{
@@ -213,7 +219,7 @@ export class BrowserService {
         }
         active();requireSafe(this.owner===owner&&this.epoch===epoch,'BROWSER_CLOSED');
       }
-      active();complete();
+      active();complete();await this.recoveryLocations.clear().catch(()=>{});
     });
   }
   private async changeMode(mode:'headed'|'headless',signal?:AbortSignal,check?:()=>void):Promise<void>{
@@ -247,6 +253,8 @@ export class BrowserService {
             requireSafe(empty,'BROWSER_HAS_HUMAN_INPUT');
             check?.();
           }
+          await this.recoveryLocations.capture(owner);check?.();
+          requireSafe(this.owner===owner,'BROWSER_CLOSED');
           this.owner=undefined;this.epoch++;this.currentIdentity.clear();this.collector?.dispose();this.collector=undefined;this.state='CLOSED';
           await owner.close();
         });
@@ -279,6 +287,8 @@ export class BrowserService {
       requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
       this.attachOwner(owner);
       await owner.open(origin,signal);
+      requireSafe(this.owner===owner,"BROWSER_CLOSED");
+      await this.recoveryLocations.restore(owner,signal);
       requireSafe(this.owner === owner, "BROWSER_CLOSED");
       for (const channel of ["COMMENT_NOTIFICATION", "DIRECT_MESSAGE"] as const)
         await this.refreshIdentity(channel);
@@ -305,7 +315,11 @@ export class BrowserService {
     this.currentIdentity.clear();
     this.state = "CLOSED";
     if (owner) {
-      this.closing = owner.actor.run(() => owner.close());
+      this.closing = owner.actor.run(async() => {
+        // Preserve the authorized positions before the old holder releases its Profile.
+        try{await this.recoveryLocations.capture(owner);}catch{/* Closing must still release the holder. */}
+        await owner.close();
+      });
       try {
         await this.closing;
       } finally {
@@ -529,6 +543,7 @@ export class BrowserService {
   }
   async collect(data:AutomationStore,source:CollectionSource,signal:AbortSignal):Promise<void> {
     requireSafe(!signal.aborted&&!data.state().emergencyStopped,'COLLECTION_CANCELLED');
+    this.bindStore(data.store);
     await this.open(this.mode,signal);
     requireSafe(!signal.aborted&&!data.state().emergencyStopped,'COLLECTION_CANCELLED');
     const owner=this.owner!,mapping=await loadObservationMapping(this.root);
@@ -538,7 +553,7 @@ export class BrowserService {
       this.collector?.dispose();this.collector=new InboxCollector(owner,mapping,data,this.root,this.mode);this.collectorMapping=key;
     }
     if(source==='dm'&&this.previewHint){const hint=this.previewHint;this.previewHint=undefined;this.collector.prioritize(hint.ownId,hint.conversationId,hint.eventId,'SELECTION');}
-    await this.collector.collect(source,signal);
+    await this.collector.collect(source,signal,()=>this.recoveryLocations.captureFault(owner));
     requireSafe(this.owner===owner,'BROWSER_CLOSED');
   }
   prioritizePreview(data:AutomationStore,event:InboundEvent,eventId?:string):void {

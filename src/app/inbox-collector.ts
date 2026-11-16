@@ -65,10 +65,11 @@ export class InboxCollector {
     this.data.requireAccount(this.mapping.self.uid);
     requireSafe(settings.ownId===this.mapping.self.uid,'ACCOUNT_CHANGED');
   }
-  async collect(source:CollectionSource,signal:AbortSignal):Promise<void> {
+  async collect(source:CollectionSource,signal:AbortSignal,onPlatformFault?:()=>Promise<void>):Promise<void> {
     this.check(source,signal);
     // Known root backlog may use its existing two-window quantum; never drain a catalog or inbox inside the lock.
     await this.owner.actor.run(async()=>{
+      try{
       this.check(source,signal);
       await (source==='works'?this.owner.notification:this.owner.dm).bringToFront();
       this.check(source,signal);
@@ -81,6 +82,11 @@ export class InboxCollector {
       }else if(await this.works(signal)){
         this.check(source,signal);
         await this.works(signal);
+      }
+      }catch(error){
+        // Capture the fault location before the account queue can navigate another page.
+        if(error instanceof Blocked&&collectionStops.has(error.code))await onPlatformFault?.().catch(()=>{});
+        throw error;
       }
     },'background');
   }

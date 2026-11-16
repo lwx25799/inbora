@@ -9,6 +9,7 @@ const load=name=>import(pathToFileURL(resolve(root,`adapters/${name}.${extension
 const {captureObserved}=await load('observed-capture');
 const {captureCommentThread}=await load('comment-thread-capture');
 const {hasVisibleSecurityComponent}=await load('security-components');
+const {inspectRecoveryNavigation}=await import(pathToFileURL(resolve(root,`app/browser-recovery-locations.${extension}`)).href);
 function context(title='',visibleBlocker=false,origin='https://www.douyin.com',width=320,height=180){
   const blocker={isConnected:true,parentElement:null,childNodes:[],querySelectorAll:()=>[],
     getClientRects:()=>[{left:0,top:0,right:width,bottom:height,width,height}]};
@@ -39,5 +40,9 @@ for(const [width,height] of [[0,0],[0,40],[40,0]]){
 for(const [width,height,expected] of [[0,0,false],[0,40,false],[40,0,false],[320,180,true]]){
   const invoke=runInNewContext(`(${hasVisibleSecurityComponent.toString()})`,context('',true,undefined,width,height));
   assert.equal(invoke(['.security']),expected);checked++;
+}
+for(const [origin,empty] of [['https://www.douyin.com',true],['https://example.invalid',false]]){
+  const environment=context('',false,origin),invoke=runInNewContext(`(${inspectRecoveryNavigation.toString()})`,environment);
+  const result=invoke('https://www.douyin.com');assert.equal(result.originMatches,empty);assert.equal(result.empty,empty);checked++;
 }
 console.log(`${source?'tsx source':'built Node'} serialized emergency guards passed: ${checked} checks; no browser, runtime or Profile accessed`);

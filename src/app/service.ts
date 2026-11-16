@@ -101,6 +101,7 @@ export class ClientService {
     startedAt = now(),
   ) {
     this.startedAt = startedAt;
+    browser.bindStore(store);
     this.maintenance=new EvidenceMaintenance(store,browser.root);
     this.browserResources=new BrowserResources({root:browser.root,identity:()=>browser.resourceIdentity(),onUpdated:()=>{if(!this.closing)this.emit('diagnostics_updated');}});
     this.authority = new WorkbenchAuthority(store, now);

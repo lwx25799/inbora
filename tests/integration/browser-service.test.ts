@@ -10,14 +10,22 @@ import { mapping } from "../fixtures/site.js";
 
 function fakeOwner() {
   const context = new EventEmitter();
+  const pages = [0, 1].map(() => {
+    let currentUrl = "about:blank";
+    return { url: () => currentUrl, goto: async (url: string) => { currentUrl = url; },
+      evaluate: async () => ({ originMatches: true, empty: true }) };
+  });
   let closed = 0,
     opened = "";
   const owner = {
     context,
+    notification: pages[0],
+    dm: pages[1],
     actor: new AccountActor(),
     version: () => "synthetic-edge-1",
     open: async (origin: string) => {
       opened = origin;
+      for (const page of pages) await page.goto(origin);
     },
     close: async () => {
       closed++;

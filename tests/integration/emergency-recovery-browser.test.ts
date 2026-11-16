@@ -13,7 +13,12 @@ import {privateTemp} from '../helpers.js';
 
 afterEach(()=>vi.restoreAllMocks());
 async function setup(mode:'headed'|'headless'='headless'){
-  const root=privateTemp('emergency-recovery-browser-'),notification={} as Page,dm={} as Page,context=new EventEmitter();
+  const page=()=>{
+    let currentUrl='https://www.douyin.com';
+    return {url:()=>currentUrl,goto:async(url:string)=>{currentUrl=url;},
+      evaluate:async()=>({originMatches:true,empty:true})} as unknown as Page;
+  };
+  const root=privateTemp('emergency-recovery-browser-'),notification=page(),dm=page(),context=new EventEmitter();
   const owner={notification,dm,context,actor:new AccountActor(),version:()=> 'synthetic',close:async()=>{}} as unknown as BrowserProfileOwner;
   await writeFile(join(root,'observation-mapping.json'),JSON.stringify({...observedMapping('https://www.douyin.com'),environment:'douyin'}));
   return {browser:BrowserService.adopt(root,owner,mode),notification,dm,context};
