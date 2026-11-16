@@ -152,7 +152,7 @@ export function request<T>(
 ): Promise<T> {
   return invoke<T>("client_request", { body });
 }
-export function desktopInfo(): Promise<{ runtime: string; version: string; rememberedRuntime?: string|null }> {
+export function desktopInfo(): Promise<{ runtime: string; version: string; rememberedRuntime?: string|null; features?:{replyKnowledge?:boolean} }> {
   return invoke("desktop_info");
 }
 export async function restoreDesktop() {

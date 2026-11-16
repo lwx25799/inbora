@@ -1,6 +1,6 @@
 import type {KnowledgeInput,KnowledgeOverview} from '../../src/knowledge/contracts.js';
 import type {Channel} from '../../src/core/contracts.js';
-import {request} from './api.js';
+import {request,desktopInfo} from './api.js';
 
 export interface ChatImportMapping {
   speakerColumn:string;
@@ -33,7 +33,9 @@ export type KnowledgeAction=
   | {action:'importCommit';id:string;mapping?:ChatImportMapping}
   | {action:'importCancel';id:string};
 
-export function knowledgeRequest<T>(body:KnowledgeAction):Promise<T> {
+export async function knowledgeRequest<T>(body:KnowledgeAction):Promise<T> {
+  if(body.action==='overview'&&(await desktopInfo()).features?.replyKnowledge!==true)
+    throw new Error('KNOWLEDGE_NATIVE_UPDATE_REQUIRED');
   return request<T>({command:'replyKnowledge',...body});
 }
 export type PerformKnowledge=<T>(label:string,action:KnowledgeAction|(()=>Promise<T>),onSuccess?:(result:T)=>void,refresh?:boolean)=>Promise<void>;
@@ -46,6 +48,7 @@ export const formatDate=(value:number|null)=>value===null?'未设置':new Date(v
 export function describeKnowledgeError(error:unknown):string {
   const code=typeof error==='string'?error:error instanceof Error?error.message:'';
   const known:Record<string,string>={
+    KNOWLEDGE_NATIVE_UPDATE_REQUIRED:'当前窗口尚未加载知识与人格功能。请保存正在编辑的内容，关闭后从项目根目录的「启动inbora.cmd」重新打开，无需重新填写运行目录。',
     KNOWLEDGE_NOT_AVAILABLE:'知识与人格资料尚未就绪，请重新读取。',
     KNOWLEDGE_NOT_READY:'知识存储尚未就绪，请重新连接运行目录后读取。',
     KNOWLEDGE_MIGRATION_REQUIRED:'知识存储尚未升级。请重新连接运行目录，由应用完成备份与升级。',

@@ -34,6 +34,7 @@ test('four knowledge tabs support drafts, explicit imports, interrupted learning
   page.setDefaultTimeout(5000);page.on('pageerror',error=>errors.push(error.message));
   let failResume=true;
   await page.exposeFunction('fixtureInvoke',async(native:string,args:{body:KnowledgeCommand})=>{
+    if(native==='desktop_info')return{runtime:'synthetic',version:'0.3.5',features:{replyKnowledge:true}};
     if(native!=='client_request')throw new Error('UNEXPECTED_NATIVE_COMMAND');const body=args.body;calls.push(body);
     if(body.command!=='replyKnowledge')throw new Error('UNEXPECTED_BUSINESS_COMMAND');
     switch(body.action){
@@ -156,3 +157,31 @@ test('four knowledge tabs support drafts, explicit imports, interrupted learning
     expect(errors).toEqual([]);expect(calls.every(body=>body.command==='replyKnowledge')).toBe(true);
   }finally{await browser.close();await server.close();}
 },30_000);
+
+test('an outdated native window explains the required restart and reloads forms when capability becomes available',async()=>{
+  const server=await createServer({configFile:resolve('desktop/vite.config.ts'),plugins:[fixturePlugin()],
+    server:{port:0,strictPort:false},logLevel:'error'});await server.listen();
+  const browser=await chromium.launch({channel:'msedge',headless:true}),page=await browser.newPage({viewport:{width:1240,height:800}});
+  let supported=false;const calls:KnowledgeCommand[]=[],errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));
+  page.setDefaultTimeout(5000);
+  await page.exposeFunction('fixtureInvoke',async(native:string,args:{body:KnowledgeCommand})=>{
+    if(native==='desktop_info')return{runtime:'synthetic',version:'0.3.5',...(supported?{features:{replyKnowledge:true}}:{})};
+    if(native!=='client_request')throw new Error('UNEXPECTED_NATIVE_COMMAND');calls.push(args.body);
+    if(!supported)throw new Error('INVALID_COMMAND');
+    if(args.body.command!=='replyKnowledge'||args.body.action!=='overview')throw new Error('UNEXPECTED_BUSINESS_COMMAND');
+    return initial();
+  });
+  await page.addInitScript(()=>{const bridge=window as unknown as {__TAURI_INTERNALS__:unknown;fixtureInvoke:(command:string,args:unknown)=>Promise<unknown>};
+    bridge.__TAURI_INTERNALS__={invoke:(command:string,args:unknown)=>bridge.fixtureInvoke(command,args)};});
+  try{
+    await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}/knowledge-ui-fixture`);
+    await expect.poll(()=>page.getByRole('alert').textContent()).toContain('当前窗口尚未加载知识与人格功能');
+    expect(await page.getByRole('alert').textContent()).toContain('启动inbora.cmd');
+    expect(await page.getByRole('alert').textContent()).not.toContain('必填项');expect(calls).toEqual([]);
+    expect(await page.getByLabel('知识正文',{exact:true}).count()).toBe(0);
+    supported=true;await page.getByRole('button',{name:'重新读取',exact:true}).click();
+    await expect.poll(()=>page.getByLabel('知识正文',{exact:true}).isVisible()).toBe(true);
+    expect(await page.getByRole('alert').count()).toBe(0);expect(calls).toEqual([{command:'replyKnowledge',action:'overview',page:0}]);
+    expect(errors).toEqual([]);
+  }finally{await browser.close();await server.close();}
+},20_000);

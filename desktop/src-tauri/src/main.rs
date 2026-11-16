@@ -91,7 +91,7 @@ fn desktop_info(window: WebviewWindow) -> Result<Value, String> {
     };
     Ok(
         json!({"runtime":std::path::Path::new(&root).join("inbora"),"version":env!("CARGO_PKG_VERSION"),
-            "rememberedRuntime":remembered_runtime}),
+            "rememberedRuntime":remembered_runtime,"features":{"replyKnowledge":true}}),
     )
 }
 #[tauri::command]

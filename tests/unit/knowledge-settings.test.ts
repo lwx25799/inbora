@@ -2,10 +2,10 @@ import {beforeEach,expect,test,vi} from 'vitest';
 import {createElement,type ReactElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import type {KnowledgeOverview} from '../../src/knowledge/contracts.js';
-import {request} from '../../desktop/src/api.js';
-import {describeKnowledgeError,type ImportPreview} from '../../desktop/src/knowledge-client.js';
+import {request,desktopInfo} from '../../desktop/src/api.js';
+import {describeKnowledgeError,knowledgeRequest,type ImportPreview} from '../../desktop/src/knowledge-client.js';
 
-vi.mock('../../desktop/src/api.js',()=>({request:vi.fn()}));
+vi.mock('../../desktop/src/api.js',()=>({request:vi.fn(),desktopInfo:vi.fn()}));
 const overview:KnowledgeOverview={available:true,sources:[],knowledge:[],samples:[],personas:[],activePersonaId:null,activePersona:null,
   totals:{sources:0,knowledge:0,samples:0,accepted:0,holdout:0,personas:0},learningTasks:[],page:0,pageSize:50};
 const perform=vi.fn();
@@ -18,7 +18,28 @@ const {KnowledgeSamples}=await import(samplesPath) as {KnowledgeSamples:Panel};
 const {KnowledgePersona}=await import(personaPath) as {KnowledgePersona:Panel};
 const {KnowledgeTrial}=await import(trialPath) as {KnowledgeTrial:Panel};
 const {uploadKnowledgeFile}=await import(importPath) as {uploadKnowledgeFile:(file:File,kind:'KNOWLEDGE'|'CHAT')=>Promise<ImportPreview>};
-beforeEach(()=>{vi.mocked(request).mockReset();perform.mockReset();});
+beforeEach(()=>{vi.mocked(request).mockReset();vi.mocked(desktopInfo).mockReset();perform.mockReset();});
+
+test.each([undefined,{replyKnowledge:false}])('overview blocks an outdated native window before requesting private data (%j)',async features=>{
+  const info={runtime:'synthetic',version:'0.3.5',...(features?{features}:{})};vi.mocked(desktopInfo).mockResolvedValue(info);
+  vi.mocked(request).mockResolvedValue(overview);
+  await expect(knowledgeRequest({action:'overview'})).rejects.toThrow('KNOWLEDGE_NATIVE_UPDATE_REQUIRED');
+  expect(request).not.toHaveBeenCalled();
+  const message=describeKnowledgeError('KNOWLEDGE_NATIVE_UPDATE_REQUIRED');
+  expect(message).toContain('当前窗口尚未加载知识与人格功能');expect(message).toContain('启动inbora.cmd');
+  expect(message).toContain('无需重新填写运行目录');expect(message).not.toContain('必填项');
+});
+
+test('overview rereads native capabilities and permits only a supported window',async()=>{
+  const legacy={runtime:'synthetic',version:'0.3.5'},updated={...legacy,features:{replyKnowledge:true}};
+  vi.mocked(desktopInfo).mockResolvedValueOnce(legacy).mockResolvedValueOnce(updated);
+  vi.mocked(request).mockResolvedValue(overview);
+  await expect(knowledgeRequest({action:'overview'})).rejects.toThrow('KNOWLEDGE_NATIVE_UPDATE_REQUIRED');
+  vi.mocked(request).mockResolvedValue(overview);
+  await expect(knowledgeRequest({action:'overview',page:1})).resolves.toEqual(overview);
+  expect(desktopInfo).toHaveBeenCalledTimes(2);expect(request).toHaveBeenCalledExactlyOnceWith({command:'replyKnowledge',action:'overview',page:1});
+  expect(describeKnowledgeError('INVALID_COMMAND')).toContain('输入格式不符合要求');
+});
 
 test('knowledge and sample forms explain publication, local imports, speaker mapping and source boundaries',()=>{
   const documents=renderToStaticMarkup(createElement(KnowledgeDocuments,props));
