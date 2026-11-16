@@ -1,0 +1,22 @@
+{
+  "result": "PASS",
+  "browser": "157.0.4341.60",
+  "checks": [
+    "9 routes render; controls have handlers; no page overflow at 1440/1280/768/375/320px",
+    "Inbox search, empty state and reset",
+    "Per-conversation draft isolation, escaping, save and reload",
+    "Protect edited draft before applying suggestion; simulate once and update status",
+    "Sending to old conversation moves it first with latest sort",
+    "Skip link focuses content without changing route",
+    "Account search, pagination, validation and add",
+    "Knowledge FAQ create, publish, disable and local text import",
+    "Rule groups retain separate keyword, reply and action edits",
+    "AI provider selection and local simulated reply",
+    "Task pool filter preserves group data and pause changes queue",
+    "Analytics range changes values and CSV downloads",
+    "Settings path renders literally and preferences survive reload",
+    "All configuration subsections render with live handlers"
+  ],
+  "errors": [],
+  "externalRequests": []
+}

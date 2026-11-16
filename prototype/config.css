@@ -1,0 +1,285 @@
+.cfg-page { display: flex; flex-direction: column; gap: 18px; }
+.cfg-page h2, .cfg-settings-grid h2 { margin: 0; font-size: 17px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
+.cfg-page h3, .cfg-settings-grid h3 { margin: 0; font-size: 14px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
+.cfg-page p, .cfg-settings-grid p { line-height: 1.7; }
+.cfg-head { min-height: 54px; padding: 14px 16px; gap: 8px; }
+.cfg-head > * { min-width: 0; }
+.cfg-pad { padding: 16px; }
+.cfg-metrics { display: grid; gap: 16px; }
+.cfg-metrics.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.cfg-metrics.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.cfg-metric { padding: 19px 18px; display: flex; gap: 15px; align-items: flex-start; }
+.cfg-metric-icon { display: grid; place-items: center; width: 48px; height: 48px; flex: 0 0 48px; border-radius: 50%; color: #4774ad; background: #edf3fc; }
+.cfg-metric-icon.green { color: #26935b; background: #eaf7ef; }
+.cfg-metric-icon.red { color: #ce3e46; background: #fcedee; }
+.cfg-metric-icon.amber { color: #db890e; background: #fff4e7; }
+.cfg-metric-label { color: #242b38; font-weight: 600; font-size: 14px; }
+.cfg-metric-value { margin: 3px 0 5px; color: #141b29; font-size: 28px; line-height: 1.2; font-weight: 700; font-variant-numeric: tabular-nums; }
+.cfg-metric-value small { font-size: 18px; }
+.cfg-metric-note { font-size: 12px; display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+.cfg-positive { color: #27944c; }
+.cfg-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #92a3bf; flex-shrink: 0; }
+.cfg-dot.green { background: #4eb467; }
+.cfg-dot.red { background: #dc5860; }
+.cfg-dot.amber { background: #e8a043; }
+.cfg-rule-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.cfg-rule-top > .muted { font-size: 12px; }
+.cfg-segments { display: flex; background: #fff; border: 1px solid #dce2ed; border-radius: 9px; padding: 3px; width: 360px; max-width: 100%; }
+.cfg-segments button { flex: 1; min-height: 36px; border: 0; background: transparent; display: flex; justify-content: center; align-items: center; gap: 8px; color: #42526a; border-radius: 6px; font: inherit; cursor: pointer; }
+.cfg-segments button.active { background: #527aaf; color: #fff; box-shadow: 0 1px 3px #1f3c6926; }
+.cfg-rule-grid { display: grid; grid-template-columns: minmax(210px, .8fr) minmax(380px, 1.55fr) minmax(310px, 1.3fr); gap: 14px; align-items: stretch; }
+.cfg-rule-grid > *, .cfg-ai-grid > * { min-width: 0; }
+.cfg-rule-nav { display: flex; flex-direction: column; }
+.cfg-rule-groups { padding: 4px 10px; }
+.cfg-rule-group { display: flex; align-items: center; text-align: left; width: 100%; gap: 9px; background: transparent; border: 0; border-bottom: 1px solid #edf0f5; padding: 15px 8px; border-radius: 8px; color: #283349; font: inherit; cursor: pointer; }
+.cfg-rule-group.selected { background: #edf3ff; border-bottom-color: transparent; }
+.cfg-group-icon { width: 30px; flex: 0 0 30px; color: #4b6487; font-size: 12px; font-weight: 700; }
+.cfg-rule-group.selected .cfg-group-icon { color: #2e64ac; }
+.cfg-rule-group > span:nth-child(2) { flex: 1; min-width: 0; }
+.cfg-rule-group strong { display: block; font-size: 13px; line-height: 1.5; }
+.cfg-rule-group small { display: block; color: #748096; font-size: 10px; line-height: 1.6; margin-top: 2px; }
+.cfg-count { font-size: 11px; padding: 2px 6px; background: #e7edf6; border-radius: 20px; }
+.cfg-rule-nav .cfg-add-group { margin: auto 14px 16px; justify-content: center; }
+.cfg-rule-builder .cfg-head { flex-wrap: wrap; }
+.cfg-rule-builder .cfg-head h2 { font-size: 16px; }
+.cfg-inline-label { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-left: auto; }
+.cfg-switch { width: 38px; height: 22px; border-radius: 15px; border: 0; padding: 3px; display: inline-flex; align-items: center; background: #bcc4d0; cursor: pointer; flex-shrink: 0; position: relative; }
+.cfg-switch::after { content: ''; position: absolute; inset: -9px -1px; }
+.cfg-switch span { display: block; width: 16px; height: 16px; border-radius: 50%; background: white; box-shadow: 0 1px 3px #172a482a; }
+.cfg-switch.on { background: #4d79b8; }
+.cfg-switch.on span { margin-left: 16px; }
+.cfg-intro { margin: 0 0 12px; font-size: 12px; }
+.cfg-tags { display: flex; flex-wrap: wrap; gap: 7px; }
+.cfg-step { border-top: 1px solid #e8edf4; padding-top: 17px; margin: 18px 0 8px !important; flex-wrap: wrap; }
+.cfg-step b { display: grid; place-items: center; width: 21px; height: 21px; border-radius: 50%; background: #7d9ed0; color: #fff; font-size: 12px; }
+.cfg-step > span { color: #778396; font-size: 11px; font-weight: 400; }
+.cfg-setting-row { display: flex; align-items: center; gap: 14px; min-height: 40px; padding: 4px 0; }
+.cfg-setting-label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex: 0 0 116px; font-size: 12px; font-weight: 500; }
+.cfg-setting-label small { width: 100%; color: #7c8799; font-size: 10px; font-weight: 400; }
+.cfg-setting-control { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; font-size: 12px; }
+.cfg-setting-control > .input, .cfg-setting-control > .cfg-readonly { width: 100%; min-width: 0; }
+.cfg-setting-control > small { font-size: 10px; }
+.cfg-check { display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: #f4f6f9; border-radius: 5px; }
+.cfg-check input { accent-color: #527aaf; margin: 0; }
+.cfg-select { padding: 7px 28px 7px 10px; min-height: 34px; max-width: 100%; font-size: 12px; color: #33415a; background: #fff; }
+.cfg-readonly { display: flex; align-items: center; gap: 10px; min-height: 34px; border: 1px solid #d7dfeb; border-radius: 6px; background: #fbfcff; padding: 6px 10px; font-size: 12px; line-height: 1.5; }
+.cfg-action-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-top: 12px; }
+.cfg-action-card { padding: 12px 9px; border: 1px solid #dfe5ee; border-radius: 8px; text-align: left; color: #34415a; background: #fff; font: inherit; cursor: pointer; }
+.cfg-action-card.selected { border-color: #8ab0ed; background: #edf4ff; }
+.cfg-action-top { display: flex; justify-content: space-between; gap: 4px; margin-bottom: 10px; }
+.cfg-action-top i { color: #84a0ca; font-style: normal; }
+.cfg-action-card strong { display: block; font-size: 12px; margin-bottom: 4px; }
+.cfg-action-card small { display: block; font-size: 10px; line-height: 1.6; color: #778398; }
+.cfg-mini-tabs { display: flex; border-radius: 7px; background: #f0f3f8; padding: 2px; }
+.cfg-mini-tabs button { border: 0; padding: 6px 10px; background: transparent; color: #64728b; border-radius: 5px; font-size: 11px; cursor: pointer; min-height: 32px; }
+.cfg-mini-tabs button.active { background: #5c80b2; color: #fff; }
+.cfg-preview-body { display: flex; flex-direction: column; gap: 14px; }
+.cfg-simulation { border: 1px solid #e9edf4; border-radius: 9px; padding: 10px 12px; }
+.cfg-sim-title { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12px; }
+.cfg-sim-title strong { display: flex; align-items: center; gap: 6px; }
+.cfg-sim-title > .muted { font-size: 10px; }
+.cfg-sim-message { display: flex; gap: 9px; align-items: flex-start; }
+.cfg-sim-message > div:last-child { flex: 1; min-width: 0; }
+.cfg-sim-message strong { font-size: 11px; }
+.cfg-sim-message strong small { font-weight: 400; margin-left: 4px; font-size: 10px; }
+.cfg-sim-message p { padding: 9px 11px; border-radius: 10px; background: #f0f3f8; margin: 6px 0 0; font-size: 12px; }
+.cfg-sim-input { width: 100%; min-height: 74px; margin-top: 6px; font-size: 12px; resize: vertical; }
+.cfg-match { border: 1px solid #e1eddf; border-radius: 9px; overflow: hidden; }
+.cfg-match-title { background: #f0f8f0; display: flex; justify-content: space-between; align-items: center; padding: 9px 11px; gap: 4px; }
+.cfg-match-title strong { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.cfg-match-title svg { color: #3e9f54; }
+.cfg-match.unmatched .cfg-match-title { background: #fff7ec; }
+.cfg-match dl { display: grid; grid-template-columns: 65px 1fr; gap: 12px 8px; font-size: 11px; margin: 13px; line-height: 1.6; }
+.cfg-match dt { font-weight: 500; }
+.cfg-match dd { margin: 0; }
+.cfg-reply-preview { background: #f7f9fc; border-radius: 9px; padding: 11px; }
+.cfg-reply-preview textarea { width: 100%; min-height: 155px; resize: vertical; font: inherit; font-size: 12px; line-height: 1.8; }
+.cfg-char-note { text-align: right; color: #7b879a; font-size: 10px; margin-top: 4px; }
+.cfg-bottom-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: auto; }
+.cfg-provider { display: inline-flex; align-items: center; gap: 8px; font: inherit; background: none; border: 0; padding: 0; color: inherit; cursor: pointer; }
+.cfg-ai-grid { display: grid; grid-template-columns: minmax(570px, 1.6fr) minmax(330px, 1fr); gap: 16px; }
+.cfg-ai-tabs { display: flex; border-bottom: 1px solid #e6ebf3; padding: 9px 12px 0; gap: 7px; overflow-x: auto; }
+.cfg-ai-tabs button { display: flex; align-items: center; justify-content: center; gap: 7px; white-space: nowrap; border: 0; border-bottom: 2px solid transparent; background: none; color: #526077; padding: 10px 8px 13px; font-size: 12px; flex: 1; cursor: pointer; }
+.cfg-ai-tabs button.active { background: #edf3fc; color: #315e9e; border-bottom-color: #4a76b6; border-radius: 7px 7px 0 0; font-weight: 600; }
+.cfg-editor-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.cfg-purple { color: #7161bf !important; background: #f5f1ff !important; border-color: #e6dcff !important; }
+.cfg-prompt { width: 100%; min-height: 132px; resize: vertical; font: inherit; font-size: 12px; line-height: 1.9; }
+.cfg-ai-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+.cfg-option-panel { border: 1px solid #e5eaf1; background: #fcfdff; padding: 13px; border-radius: 10px; min-width: 0; }
+.cfg-option-panel h3 { margin-bottom: 12px; }
+.cfg-choices { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+.cfg-choice { padding: 9px 3px; border: 1px solid #e0e6ef; background: #fff; border-radius: 6px; font-size: 10px; color: #4d5b73; cursor: pointer; min-height: 37px; position: relative; }
+.cfg-choice.selected { border-color: #89aee9; color: #3267b7; background: #eef5ff; }
+.cfg-choice span { position: absolute; right: 2px; top: 0; font-size: 9px; }
+.cfg-safety-checks { display: flex; gap: 9px 12px; flex-wrap: wrap; font-size: 10px; color: #405878; }
+.cfg-ai-toggles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; margin-top: 12px; }
+.cfg-ai-toggles h3 { font-size: 12px; gap: 5px; flex-wrap: wrap; }
+.cfg-ai-toggles h3 .cfg-switch { margin-left: auto; }
+.cfg-ai-toggles p { color: #758095; font-size: 10px; margin: 0; }
+.cfg-save-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 16px; font-size: 11px; }
+.cfg-sandbox { display: flex; flex-direction: column; }
+.cfg-sandbox > .cfg-head .cfg-select { max-width: 125px; }
+.cfg-sandbox-body { display: flex; flex-direction: column; gap: 23px; flex: 1; }
+.cfg-chat-entry { display: flex; align-items: flex-start; gap: 12px; }
+.cfg-chat-entry > div:last-child { flex: 1; min-width: 0; }
+.cfg-bot-avatar { background: #edf3ff; color: #4c72aa; border-radius: 50%; width: 36px; height: 36px; display: grid; place-items: center; flex-shrink: 0; }
+.cfg-chat-caption { font-size: 11px; font-weight: 600; margin: 2px 0 7px; line-height: 1.7; }
+.cfg-chat-caption span { color: #738097; font-weight: 400; }
+.cfg-chat-bubble { border-radius: 12px; background: #f0f3f8; padding: 12px 14px; font-size: 13px; line-height: 1.9; }
+.cfg-chat-bubble.bot { background: #edf3ff; }
+.cfg-evaluation { padding: 12px; border-radius: 10px; background: #f5f7fb; }
+.cfg-evaluation h3 { margin-bottom: 11px; }
+.cfg-evaluation > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.cfg-evaluation section { padding: 9px; background: white; border-radius: 7px; }
+.cfg-evaluation strong { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 11px; }
+.cfg-evaluation small { display: block; color: #7a8496; margin-top: 7px; font-size: 10px; }
+.cfg-test-composer { margin-top: auto; }
+.cfg-test-composer textarea { width: 100%; min-height: 80px; resize: vertical; font: inherit; font-size: 12px; }
+.cfg-test-composer .cfg-bottom-actions { margin-top: 9px; margin-bottom: 8px; }
+.cfg-test-composer > small { display: block; font-size: 10px; }
+.cfg-field-label { display: block; font-size: 12px; font-weight: 500; margin: 8px 0; }
+.cfg-note { display: flex; align-items: flex-start; gap: 8px; background: #edf4ff; color: #536d93; padding: 10px 12px; border-radius: 6px; font-size: 11px; line-height: 1.8; margin-top: 10px; }
+.cfg-note svg { flex-shrink: 0; margin-top: 2px; }
+.cfg-boundary-list > div { display: flex; align-items: center; gap: 10px; padding: 12px 0; border-bottom: 1px solid #ecf0f6; }
+.cfg-boundary-list > div:last-child { border: 0; }
+.cfg-boundary-list > div > svg { color: #5584ba; flex-shrink: 0; }
+.cfg-boundary-list > div > span:first-of-type { flex: 1; }
+.cfg-boundary-list strong { display: block; font-size: 12px; }
+.cfg-boundary-list small { display: block; color: #77849b; margin-top: 5px; font-size: 11px; }
+.cfg-style-preview { background: #edf3ff; padding: 22px; border-radius: 9px; font-size: 13px; line-height: 1.9; }
+.cfg-history { display: flex; align-items: flex-start; gap: 12px; padding: 20px 0; }
+.cfg-history > div { flex: 1; }
+.cfg-history .cfg-dot { margin-top: 7px; }
+.cfg-history strong { font-size: 12px; }
+.cfg-history p { font-size: 12px; margin: 10px 0; }
+.cfg-provider-form { display: grid; gap: 12px; }
+.cfg-provider-form label { display: grid; gap: 8px; font-size: 12px; }
+.cfg-settings-grid { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 18px; }
+.cfg-settings-nav { padding: 12px 8px; align-self: stretch; }
+.cfg-settings-nav button { display: flex; align-items: center; width: 100%; gap: 12px; padding: 13px 11px; border: 0; border-radius: 7px; background: transparent; color: #3d4b62; cursor: pointer; text-align: left; margin-bottom: 4px; }
+.cfg-settings-nav button.selected { background: #e9f0fc; color: #355d9c; }
+.cfg-settings-nav button > span { flex: 1; min-width: 0; }
+.cfg-settings-nav button > svg { flex-shrink: 0; }
+.cfg-settings-nav strong { display: block; font-size: 14px; line-height: 1.7; }
+.cfg-settings-nav small { display: block; font-size: 10px; line-height: 1.7; color: #758298; }
+.cfg-settings-content { min-width: 0; }
+.cfg-settings-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.cfg-settings-cards > .panel { min-width: 0; }
+.cfg-general-card, .cfg-wide { grid-column: 1 / -1; }
+.cfg-settings-cards .cfg-head { min-height: 45px; padding: 11px 15px; }
+.cfg-settings-cards .cfg-pad { padding: 12px 15px; }
+.cfg-settings-cards .cfg-setting-label { flex-basis: 112px; font-size: 11px; }
+.cfg-settings-cards .cfg-setting-control { flex-wrap: wrap; font-size: 11px; }
+.cfg-settings-cards .cfg-setting-control .cfg-select { flex: 1; width: auto; }
+.cfg-settings-cards .cfg-general-card .cfg-setting-label { flex-basis: 190px; }
+.cfg-settings-cards .cfg-general-card .cfg-setting-control { flex-wrap: nowrap; }
+.cfg-path { overflow-wrap: anywhere; }
+.cfg-card-actions { display: flex; justify-content: flex-end; margin-top: 9px; }
+.cfg-proxy-row { display: flex; gap: 9px; }
+.cfg-proxy-row .cfg-readonly { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.cfg-network-result { background: #eff9f3; padding: 12px; border-radius: 7px; margin-top: 10px; }
+.cfg-network-result > strong { display: flex; align-items: center; gap: 8px; color: #2b914c; font-size: 12px; }
+.cfg-network-result > div { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; margin-top: 7px; font-size: 10px; color: #6b7a8c; }
+.cfg-network-result b { color: #334255; font-weight: 500; }
+.cfg-network-result > div > span { padding-left: 7px; border-left: 1px solid #ccdacf; }
+.cfg-security-actions { display: grid; gap: 7px; }
+.cfg-security-actions button { display: flex; align-items: center; text-align: left; gap: 14px; border: 1px solid #d5e1f5; background: #eff5ff; border-radius: 6px; padding: 9px 15px; color: #3c567a; cursor: pointer; }
+.cfg-security-actions strong { display: block; font-size: 12px; }
+.cfg-security-actions small { display: block; font-size: 10px; color: #7688a2; margin-top: 3px; }
+.cfg-version { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; margin-top: 10px; }
+.cfg-version > span { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.cfg-emergency .cfg-head { color: #a74950; }
+.cfg-log p { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.cfg-log p > span:first-child { color: #8390a1; font-variant-numeric: tabular-nums; }
+.cfg-template-preview p, .cfg-diagnostic p { font-size: 13px; line-height: 1.8; }
+@media (hover: hover) {
+  .cfg-rule-group:hover, .cfg-settings-nav button:hover { background: #f0f4fb; }
+  .cfg-choice:hover, .cfg-action-card:hover { border-color: #a3bbdc; }
+  .cfg-provider:hover { color: #527aaf; }
+}
+@media (max-width: 1450px) {
+  .cfg-rule-grid { grid-template-columns: 210px minmax(320px, 1.25fr) minmax(280px, 1fr); gap: 11px; }
+  .cfg-rule-grid .cfg-head { padding: 12px; }
+  .cfg-rule-grid .cfg-pad { padding: 12px; }
+  .cfg-rule-grid .cfg-head h2 { font-size: 14px; }
+  .cfg-rule-grid .cfg-head { flex-wrap: wrap; }
+  .cfg-rule-grid .cfg-setting-label { flex-basis: 94px; }
+  .cfg-rule-grid .cfg-setting-row { gap: 7px; }
+  .cfg-rule-grid .cfg-action-cards { grid-template-columns: repeat(2, 1fr); }
+  .cfg-action-card { padding: 10px; }
+  .cfg-action-top { margin-bottom: 6px; }
+  .cfg-ai-grid { grid-template-columns: minmax(470px, 1.45fr) minmax(280px, 1fr); }
+  .cfg-metric { padding: 16px 13px; gap: 11px; }
+  .cfg-metric-icon { width: 42px; height: 42px; flex-basis: 42px; }
+  .cfg-metric-value { font-size: 25px; }
+  .cfg-settings-grid { grid-template-columns: 200px minmax(0, 1fr); gap: 14px; }
+  .cfg-settings-cards .cfg-setting-row { align-items: flex-start; gap: 8px; }
+  .cfg-settings-cards .cfg-setting-label { flex-basis: 105px; padding-top: 6px; }
+}
+@media (max-width: 1150px) {
+  .cfg-rule-grid { grid-template-columns: 180px minmax(0, 1fr); }
+  .cfg-rule-preview { grid-column: 1 / -1; }
+  .cfg-preview-body { display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
+  .cfg-preview-body .cfg-bottom-actions { align-self: end; }
+  .cfg-rule-group small { font-size: 10px; }
+  .cfg-ai-grid { grid-template-columns: minmax(0, 1fr); }
+  .cfg-ai-toggles h3 { flex-wrap: nowrap; }
+  .cfg-sandbox-body { display: grid; grid-template-columns: 1fr 1fr; }
+  .cfg-metrics.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cfg-settings-cards { grid-template-columns: minmax(0, 1fr); }
+  .cfg-settings-cards .cfg-setting-row { align-items: center; }
+  .cfg-settings-cards .cfg-setting-label { flex-basis: 170px; padding-top: 0; }
+  .cfg-settings-cards .cfg-general-card .cfg-setting-label { flex-basis: 170px; }
+  .cfg-settings-cards .cfg-general-card .cfg-setting-control { flex-wrap: wrap; }
+}
+@media (max-width: 760px) {
+  .cfg-metrics.three { grid-template-columns: minmax(0, 1fr); }
+  .cfg-metric { padding: 14px; }
+  .cfg-rule-grid { grid-template-columns: minmax(0, 1fr); }
+  .cfg-rule-nav { display: block; }
+  .cfg-rule-groups { display: grid; grid-template-columns: 1fr 1fr; }
+  .cfg-rule-nav .cfg-add-group { margin: 10px; }
+  .cfg-rule-top { align-items: flex-start; flex-direction: column; }
+  .cfg-rule-top > .muted { display: none; }
+  .cfg-rule-group { padding: 10px 7px; }
+  .cfg-preview-body { display: flex; }
+  .cfg-preview-body .cfg-bottom-actions { align-self: stretch; }
+  .cfg-ai-options { grid-template-columns: 1fr; }
+  .cfg-ai-toggles { grid-template-columns: 1fr; }
+  .cfg-sandbox-body { display: flex; }
+  .cfg-settings-grid { grid-template-columns: minmax(0, 1fr); }
+  .cfg-settings-nav { display: flex; overflow-x: auto; gap: 5px; padding: 7px; }
+  .cfg-settings-nav button { flex: 0 0 auto; width: auto; padding: 9px 11px; margin: 0; gap: 7px; }
+  .cfg-settings-nav small, .cfg-settings-nav button > svg:last-child { display: none; }
+  .cfg-settings-nav strong { font-size: 12px; }
+  .cfg-settings-nav button > svg { width: 17px; }
+  .cfg-settings-cards .cfg-setting-label, .cfg-settings-cards .cfg-general-card .cfg-setting-label { flex-basis: 120px; }
+  .cfg-general-card .cfg-readonly > .muted { display: none; }
+  .cfg-settings-cards .cfg-setting-row { align-items: flex-start; }
+  .cfg-settings-cards .cfg-setting-label { padding-top: 7px; }
+}
+@media (max-width: 430px) {
+  .cfg-metrics.four { gap: 9px; }
+  .cfg-metrics.four .cfg-metric { gap: 6px; padding: 11px; }
+  .cfg-metrics.four .cfg-metric-icon { width: 28px; height: 28px; flex-basis: 28px; }
+  .cfg-metrics.four .cfg-metric-icon svg { width: 19px; }
+  .cfg-metrics.four .cfg-metric-value { font-size: 18px; }
+  .cfg-metrics.four .cfg-metric-value small { font-size: 12px; }
+  .cfg-metrics.four .cfg-metric-label { font-size: 11px; }
+  .cfg-metrics.four .cfg-metric-note { font-size: 9px; }
+  .cfg-rule-groups { grid-template-columns: 1fr; }
+  .cfg-rule-group small { display: none; }
+  .cfg-rule-grid .cfg-setting-row { align-items: flex-start; }
+  .cfg-rule-grid .cfg-setting-label { flex-basis: 81px; font-size: 11px; padding-top: 7px; }
+  .cfg-rule-grid .cfg-setting-label svg { display: none; }
+  .cfg-rule-grid .cfg-setting-control { flex-wrap: wrap; }
+  .cfg-settings-cards .cfg-setting-row { flex-direction: column; gap: 3px; padding: 7px 0; }
+  .cfg-settings-cards .cfg-setting-label, .cfg-settings-cards .cfg-general-card .cfg-setting-label { flex-basis: auto; padding: 0; }
+  .cfg-settings-cards .cfg-setting-control { width: 100%; }
+  .cfg-proxy-row { flex-wrap: wrap; }
+  .cfg-readonly { font-size: 11px; }
+  .cfg-save-row { align-items: flex-start; }
+  .cfg-save-row > .muted { max-width: 170px; }
+  .cfg-evaluation > div { gap: 4px; }
+  .cfg-evaluation section { padding: 7px; }
+}

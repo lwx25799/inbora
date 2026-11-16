@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="inbora 智能客服工作台，基于效果图制作的离线交互原型。所有数据均为演示。">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>inbora · 智能客服工作台原型</title>
+  <link rel="stylesheet" href="prototype/base.css">
+  <link rel="stylesheet" href="prototype/overview.css">
+  <link rel="stylesheet" href="prototype/inbox.css">
+  <link rel="stylesheet" href="prototype/management.css">
+  <link rel="stylesheet" href="prototype/config.css">
+  <script defer src="prototype/vendor/feather-icons.js"></script>
+  <script defer src="prototype/core.js"></script>
+  <script defer src="prototype/overview.js"></script>
+  <script defer src="prototype/inbox.js"></script>
+  <script defer src="prototype/management.js"></script>
+  <script defer src="prototype/config.js"></script>
+  <script defer src="prototype/boot.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
+      <a class="brand" href="#dashboard" aria-label="inbora 工作台">
+        <span class="brand-logo" aria-hidden="true"><i></i><i></i></span>
+        <span>inbora</span>
+      </a>
+      <p class="brand-caption">抖音个人号智能客服工作台</p>
+      <nav id="navigation"></nav>
+      <div class="sidebar-bottom">
+        <span class="online-dot"></span><span>inbora</span><span class="prototype-label">交互原型</span>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <button class="icon-btn mobile-menu" data-action="toggle-menu" aria-label="展开导航"></button>
+        <div class="page-heading"><h1 id="page-title"></h1><p id="page-description"></p></div>
+        <div class="topbar-actions">
+          <span class="environment-status"><span class="online-dot"></span>演示运行正常</span>
+          <span class="top-divider"></span>
+          <button class="icon-btn notification-btn" data-action="notifications" aria-label="通知"><span class="notification-dot"></span></button>
+          <button class="icon-btn help-btn" data-action="help" aria-label="原型使用说明"></button>
+          <button class="icon-btn profile-btn" data-action="profile" aria-label="演示用户"></button>
+        </div>
+      </header>
+      <main id="main-content" tabindex="-1"></main>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog id="modal" aria-labelledby="modal-title">
+    <div class="modal-top"><h2 id="modal-title"></h2><button class="icon-btn" data-action="close-modal" aria-label="关闭对话框">×</button></div>
+    <div id="modal-body"></div>
+    <div id="modal-footer"></div>
+  </dialog>
+  <noscript>请在浏览器中启用 JavaScript，以查看并体验交互原型。</noscript>
+</body>
+</html>
