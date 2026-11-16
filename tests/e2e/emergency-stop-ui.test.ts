@@ -87,7 +87,9 @@ test.each([{width:900,height:640},{width:1240,height:800}])('emergency reason an
     await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
     const held=page.getByRole('region',{name:'通道安全状态待核验'});await held.waitFor();
     expect(await held.innerText()).toContain('评论通道');expect(await held.innerText()).toContain('synthetic-held-incident');
-    expect(await held.innerText()).toContain('在客户端内处理原无头页面');expect(await held.innerText()).toContain('若原页面已关闭或变化');
+    expect(await held.innerText()).toContain('在客户端内处理当前无头验证页面');
+    expect(await held.innerText()).toContain('点击处理会重新检查原授权地址');
+    expect(await held.innerText()).toContain('已正常则恢复对应通道，仍有验证则显示新的实时画面');
     expect(await notice.count()).toBe(0);expect(await held.getByRole('button').count()).toBe(2);
     await held.getByRole('button',{name:'处理原验证页面',exact:true}).click();
     await held.getByRole('alert').waitFor();expect(await held.getByRole('alert').innerText()).toContain('无法继续操作这个现场');

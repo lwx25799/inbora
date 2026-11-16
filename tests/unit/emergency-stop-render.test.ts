@@ -15,7 +15,8 @@ const render=(value:ReturnType<typeof props>)=>renderToStaticMarkup(createElemen
 test('a fresh security incident explains its observed signal and offers direct recovery without assuming the current account is broken',()=>{
   const html=render(props('OBSERVATION_SECURITY_COMPONENT'));
   expect(html).toContain('候选安全组件');expect(html).toContain('缺少足以确认验证生效的现场证明');expect(html).toContain('触发来源：评论后台收取');
-  expect(html).toContain('在客户端内处理原无头页面');expect(html).toContain('若原页面已关闭或变化');expect(html).toContain('>检查并恢复运行</button>');
+  expect(html).toContain('在客户端内处理当前无头验证页面');expect(html).toContain('点击处理会重新检查原授权地址');
+  expect(html).toContain('已正常则恢复对应通道，仍有验证则显示新的实时画面');expect(html).toContain('>检查并恢复运行</button>');
   expect(html).not.toContain('>处理登录或验证</button>');expect(html).not.toContain('旧版本未独立记录');
 });
 

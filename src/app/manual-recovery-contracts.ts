@@ -20,7 +20,9 @@ export const manualRecoveryCommandSchema=z.discriminatedUnion('action',[
 export type ManualRecoveryCommand=z.infer<typeof manualRecoveryCommandSchema>;
 export interface ManualRecoverySession {
   sessionId:string;channel:'COMMENT_NOTIFICATION'|'DIRECT_MESSAGE';incidentId:string;
+  recreated?:boolean;
 }
+export type ManualRecoveryStart=ManualRecoverySession|{state:'CLEARED'};
 export interface ManualRecoveryRegion {x:number;y:number;width:number;height:number}
 export interface ManualRecoveryFrame {
   sessionId:string;frameId:string;image:string;width:number;height:number;

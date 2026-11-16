@@ -1,6 +1,8 @@
 import type {BrowserProfileOwner} from '../browser/profile-owner.js';
 import {ManualRecovery} from '../browser/manual-recovery.js';
-import {digest,requireSafe} from '../core/contracts.js';
+import {Blocked,digest,requireSafe} from '../core/contracts.js';
+import {isSecurityFailure} from '../adapters/security-signal.js';
+import {securityCandidateCodes} from '../core/emergency-stop.js';
 import {loadObservationMapping} from '../config/runtime.js';
 import type {EventStore} from '../storage/store.js';
 import {readSecurityHold,securityRevision,resolveSecurityHold} from '../storage/security-holds.js';
@@ -15,11 +17,12 @@ export class BrowserManualRecovery {
   private requester:string|null=null;
   private mappingDigest:string|null=null;
   private starting=false;
+  private recreated=false;
   private permitted:()=>void=()=>{};
   onClosed:()=>void=()=>{};
   constructor(private readonly root:string,private readonly store:EventStore,private readonly safety:BrowserSafety,
     private readonly binding:()=>BrowserBinding){
-    this.controller=new ManualRecovery(()=>{this.requester=null;this.mappingDigest=null;this.onClosed();});
+    this.controller=new ManualRecovery(()=>{this.requester=null;this.mappingDigest=null;this.recreated=false;this.onClosed();});
   }
   get active(){return this.starting||this.controller.active;}
   status(){return this.controller.status();}
@@ -36,24 +39,55 @@ export class BrowserManualRecovery {
         const mapping=await loadObservationMapping(this.root).catch(()=>null);
         if(!mapping||digest(mapping)!==this.mappingDigest){await this.shutdown();requireSafe(false,'MANUAL_RECOVERY_MAPPING_CHANGED');}
         this.requester=token;this.permitted=permitted;
-        return this.controller.resume(permitted);
+        return {...await this.controller.resume(permitted),...(this.recreated?{recreated:true}:{})};
       }
       requireSafe(!this.active,'MANUAL_RECOVERY_ALREADY_ACTIVE');
       this.starting=true;
       try{
-      const current=this.binding(),hold=readSecurityHold(this.store,command.channel);
+      const current=this.binding();let hold=readSecurityHold(this.store,command.channel);
       requireSafe(current.owner&&current.mode==='headless'&&!current.transitioning,'MANUAL_RECOVERY_HEADLESS_REQUIRED');
       requireSafe(hold,'MANUAL_RECOVERY_INCIDENT_REQUIRED');
-      const incident=await this.safety.incidents.read(hold.incidentId),mapping=await loadObservationMapping(this.root);
+      let incident=await this.safety.incidents.read(hold.incidentId);
+      const mapping=await loadObservationMapping(this.root);
       permitted();
-      const original=incident?.initial??incident?.afterFailure;
-      requireSafe(incident?.sameDocument&&original&&incident.channel===command.channel&&incident.context.mode==='headless'&&
-        incident.context.epoch===current.epoch&&incident.context.instanceId===this.safety.instanceId,
+      let original=incident?.initial??incident?.afterFailure;
+      requireSafe(original&&incident?.channel===command.channel&&incident.context.mode==='headless',
       'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
       requireSafe(mapping&&incident.context.mappingDigest===digest(mapping)&&original.origin===mapping.origin,
         'MANUAL_RECOVERY_MAPPING_CHANGED');
       requireSafe(!hold.documentDigest||hold.documentDigest===digest([original.href,original.documentStartedAt]),
         'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
+      const previousHold=hold,stopRevision=securityRevision(this.store,command.channel).split(':')[1];
+      const unchanged=()=>{
+        permitted();const actual=this.binding();
+        requireSafe(actual.owner===current.owner&&actual.epoch===current.epoch&&actual.mode==='headless'&&!actual.transitioning,
+          'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
+        requireSafe(securityRevision(this.store,command.channel).split(':')[1]===stopRevision,'MANUAL_RECOVERY_SECURITY_CHANGED');
+      };
+      const document=await current.owner.actor.run(async()=>{unchanged();
+        requireSafe(readSecurityHold(this.store,command.channel)?.revision===previousHold.revision,'MANUAL_RECOVERY_SECURITY_CHANGED');
+        return (command.channel==='DIRECT_MESSAGE'?current.owner!.dm:current.owner!.notification)
+          .evaluate(()=>({href:location.href,started:performance.timeOrigin}));});
+      unchanged();
+      const recreated=!incident.sameDocument||incident.context.epoch!==current.epoch||incident.context.instanceId!==this.safety.instanceId||
+        document.href!==original.href||document.started!==original.documentStartedAt;
+      if(recreated){
+        try{
+          const clear=await this.safety.recover(current.owner,command.channel,AbortSignal.timeout(30_000),true,false,false,unchanged);unchanged();
+          requireSafe(clear&&readSecurityHold(this.store,command.channel)?.revision===previousHold.revision,'MANUAL_RECOVERY_SECURITY_CHANGED');
+          requireSafe(resolveSecurityHold(this.store,command.channel,previousHold.revision),'MANUAL_RECOVERY_SECURITY_CHANGED');
+          this.store.audit('SECURITY_MANUAL_RECOVERY_RECHECK_CLEAR',previousHold.incidentId);
+          return{state:'CLEARED'};
+        }catch(error){
+          unchanged();
+          if(!isSecurityFailure(error)&&!(error instanceof Blocked&&securityCandidateCodes.has(error.code)))throw error;
+          hold=readSecurityHold(this.store,command.channel);
+          requireSafe(hold&&hold.revision!==previousHold.revision,'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
+          incident=await this.safety.incidents.read(hold.incidentId);original=incident?.initial??incident?.afterFailure;
+          requireSafe(original&&incident?.sameDocument&&incident.context.epoch===current.epoch&&
+            incident.context.instanceId===this.safety.instanceId,'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
+        }
+      }
       const revision=securityRevision(this.store,command.channel),ownId=mapping.self.uid;
       const check=()=>{
         this.permitted();const actual=this.binding();
@@ -64,11 +98,16 @@ export class BrowserManualRecovery {
         const own=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
         requireSafe(own?.own_id===ownId,'ACCOUNT_CHANGED');
       };
-      this.permitted=permitted;check();this.requester=token;this.mappingDigest=digest(mapping);
-      try{return await this.controller.start(current.owner,{channel:command.channel,epoch:current.epoch,
+      this.permitted=permitted;check();this.requester=token;this.mappingDigest=digest(mapping);this.recreated=recreated;
+      try{const session=await this.controller.start(current.owner,{channel:command.channel,epoch:current.epoch,
         incidentId:hold.incidentId,revision:hold.revision,document:{href:original.href,started:original.documentStartedAt},
-        selectors:[mapping.securityBlockers],check});}
+        selectors:[mapping.securityBlockers],check});
+        this.store.audit('SECURITY_MANUAL_RECOVERY_STARTED',hold.incidentId,{recreated});
+        return {...session,...(recreated?{recreated:true}:{})};}
       catch(error){this.requester=null;this.mappingDigest=null;throw error;}
+      }catch(error){
+        const code=error instanceof Blocked&&/^[A-Z_]{1,100}$/u.test(error.code)?error.code:'OPERATION_FAILED_PRIVATE_DIAGNOSTICS';
+        this.store.audit('SECURITY_MANUAL_RECOVERY_START_FAILED_'+code,command.channel);throw error;
       }finally{this.starting=false;}
     }
     requireSafe(this.requester===token,'MANUAL_RECOVERY_OPERATOR_CHANGED');

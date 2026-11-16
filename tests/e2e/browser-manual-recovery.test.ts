@@ -14,9 +14,9 @@ import {AutomationStore} from '../../src/storage/automation-store.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
 import {migrateAutomation} from '../../src/storage/automation-migration.js';
 import {holdSecurityChannel,readSecurityHold,resolveSecurityHold} from '../../src/storage/security-holds.js';
-import {Blocked} from '../../src/core/contracts.js';
+import {Blocked,digest} from '../../src/core/contracts.js';
 import {recordEmergencyStop,readEmergencyStop} from '../../src/storage/emergency-stop.js';
-import {observedMapping,mountObserved,mountCommentReply} from '../fixtures/observed-site.js';
+import {observedMapping,mountObserved,mountCommentReply,reloadableCommentReply} from '../fixtures/observed-site.js';
 import {privateTemp} from '../helpers.js';
 
 const channel='COMMENT_NOTIFICATION' as const,origin='https://www.douyin.com',token='synthetic-native-gui';
@@ -103,13 +103,11 @@ test('a reconnected native operator takes over the same document with a fresh se
   }finally{await f.close();}
 });
 
-test.each(['epoch','instance','mode','document'] as const)('an incident from a different %s cannot be offered as the original page',async change=>{
+test.each(['mode','document'] as const)('an incident with an invalid %s cannot be offered or used for automatic recovery',async change=>{
   const f=await fixture();
   try{
     const file=join(f.root,'evidence','security-incidents',f.held.incidentId+'.json');
     const incident=JSON.parse(await readFile(file,'utf8'));
-    if(change==='epoch')incident.context.epoch++;
-    if(change==='instance')incident.context.instanceId='a-different-backend';
     if(change==='mode')incident.context.mode='headed';
     if(change==='document')incident.initial.documentStartedAt++;
     await writeFile(file,JSON.stringify(incident));
@@ -121,14 +119,74 @@ test.each(['epoch','instance','mode','document'] as const)('an incident from a d
   }finally{await f.close();}
 });
 
-test('a replaced original page is rejected without restoring an address or removing the persistent hold',async()=>{
+test.each(['epoch','instance'] as const)('an incident from a different %s is rechecked and rebound instead of being presented as the old instance',async change=>{
   const f=await fixture();
   try{
-    await f.owner.notification.reload();
+    const file=join(f.root,'evidence','security-incidents',f.held.incidentId+'.json');
+    const incident=JSON.parse(await readFile(file,'utf8'));
+    if(change==='epoch')incident.context.epoch++;
+    else incident.context.instanceId='a-different-backend';
+    await writeFile(file,JSON.stringify(incident));const previousEvidence=await readFile(file,'utf8');
     const document=await f.owner.notification.evaluate(()=>performance.timeOrigin),goto=vi.spyOn(f.owner.notification,'goto');
-    await expect(f.start()).rejects.toThrow('MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
+    const session=await f.start();expect(session.recreated).toBe(true);expect(session.incidentId).not.toBe(f.held.incidentId);
+    expect(await readFile(file,'utf8')).toBe(previousEvidence);
     expect(goto).not.toHaveBeenCalled();expect(await f.owner.notification.evaluate(()=>performance.timeOrigin)).toBe(document);
-    expect(readSecurityHold(f.store,channel)?.revision).toBe(f.held.revision);goto.mockRestore();
+    expect((await f.safety.incidents.read(session.incidentId))?.context).toMatchObject({epoch:1,instanceId:'synthetic-backend'});
+    const resumed=await f.start();expect(resumed.recreated).toBe(true);expect(resumed.sessionId).not.toBe(session.sessionId);
+    await f.recovery.handle(command(resumed,'close'),token,permitted);goto.mockRestore();
+  }finally{await f.close();}
+});
+
+test.each([true,false])('one start click reopens only the authorized target after a backend restart (challenge remains: %s)',async challenge=>{
+  const f=await fixture();
+  try{
+    const oldFile=join(f.root,'evidence','security-incidents',f.held.incidentId+'.json'),oldEvidence=await readFile(oldFile,'utf8');
+    const before=business(f.store),page=f.owner.notification;
+    await reloadableCommentReply(page,origin);
+    if(challenge)await page.addInitScript(()=>document.addEventListener('DOMContentLoaded',()=>{
+      const node=document.createElement('div');node.setAttribute('data-fixture-challenge','');
+      node.style.cssText='position:fixed;left:400px;top:100px;width:400px;height:300px;background:white;z-index:100';
+      node.textContent='Synthetic challenge on the current document';document.body.append(node);
+    }));
+    await page.goto(origin);f.binding.epoch=2;f.safety.attach(f.owner,2,'headless');f.safety.instanceId='synthetic-new-backend';
+    const goto=vi.spyOn(page,'goto'),result=await f.recovery.handle({command:'securityRecovery',action:'start',channel},token,permitted);
+    expect(goto).toHaveBeenCalledExactlyOnceWith(origin+'/video/10',{waitUntil:'domcontentloaded'});
+    expect(await readFile(oldFile,'utf8')).toBe(oldEvidence);
+    if(challenge){
+      const session=result as ManualRecoverySession,document=await page.evaluate(()=>({href:location.href,started:performance.timeOrigin}));
+      expect(session.recreated).toBe(true);expect(session.incidentId).not.toBe(f.held.incidentId);expect(f.recovery.active).toBe(true);
+      const current=readSecurityHold(f.store,channel)!;expect(current.incidentId).toBe(session.incidentId);expect(current.revision).not.toBe(f.held.revision);
+      expect(await f.safety.incidents.read(session.incidentId)).toMatchObject({sameDocument:true,
+        initial:{href:origin+'/video/10',documentStartedAt:document.started},context:{epoch:2,instanceId:'synthetic-new-backend'}});
+      const frame=await f.recovery.handle(command(session,'frame'),token,permitted) as ManualRecoveryFrame;
+      expect(frame.documentPreserved).toBe(true);expect(frame.regions).toHaveLength(1);
+      expect(await page.evaluate(()=>({href:location.href,started:performance.timeOrigin}))).toEqual(document);
+      await f.recovery.handle(command(session,'close'),token,permitted);
+      expect(readSecurityHold(f.store,channel)?.revision).toBe(current.revision);
+    }else{
+      expect(result).toEqual({state:'CLEARED'});expect(f.recovery.active).toBe(false);expect(f.recovery.status()).toBeNull();
+      expect(readSecurityHold(f.store,channel)).toBeNull();await f.owner.actor.run(async()=>{});
+    }
+    expect(business(f.store)).toEqual(before);expect(new AutomationStore(f.store).state().emergencyStopped).toBe(false);goto.mockRestore();
+  }finally{await f.close();}
+});
+
+test.each(['wrong-origin','unknown-target'] as const)('orphan recovery cannot navigate from a %s or remove its persistent hold',async failure=>{
+  const f=await fixture();
+  try{
+    if(failure==='wrong-origin')await f.owner.notification.goto('https://outside.invalid');
+    else{
+      const original=await f.safety.incidents.read(f.held.incidentId),id=randomUUID();
+      original!.id=id;original!.initial!.href=origin+'/video/999';original!.initial!.target={workId:'999'};
+      await writeFile(join(f.root,'evidence','security-incidents',id+'.json'),JSON.stringify(original));
+      holdSecurityChannel(f.store,channel,{incidentId:id,reason:f.held.reason,mode:'headless',
+        documentDigest:digest([original!.initial!.href,original!.initial!.documentStartedAt])});
+    }
+    f.binding.epoch=2;f.safety.attach(f.owner,2,'headless');f.safety.instanceId='synthetic-new-backend';
+    const held=readSecurityHold(f.store,channel)!,document=await f.owner.notification.evaluate(()=>performance.timeOrigin),goto=vi.spyOn(f.owner.notification,'goto');
+    await expect(f.start()).rejects.toThrow(failure==='wrong-origin'?'BROWSER_HAS_HUMAN_INPUT':'SECURITY_RECOVERY_TARGET_UNAVAILABLE');
+    expect(goto).not.toHaveBeenCalled();expect(await f.owner.notification.evaluate(()=>performance.timeOrigin)).toBe(document);
+    expect(f.recovery.active).toBe(false);expect(readSecurityHold(f.store,channel)?.revision).toBe(held.revision);goto.mockRestore();
   }finally{await f.close();}
 });
 

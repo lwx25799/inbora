@@ -138,6 +138,7 @@ async fn client_request(
         "setMode",
         "getAudit",
         "browser",
+        "securityRecovery",
         "observe",
         "syncInbox",
         "reconcileUncertain",

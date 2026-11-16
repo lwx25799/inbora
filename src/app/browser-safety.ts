@@ -79,14 +79,14 @@ export class BrowserSafety {
       };
     }});
   }
-  async recover(owner:BrowserProfileOwner,channel:Channel,signal?:AbortSignal,explicit=false,inPlace=false,resolve=true):Promise<boolean>{
+  async recover(owner:BrowserProfileOwner,channel:Channel,signal?:AbortSignal,explicit=false,inPlace=false,resolve=true,check:()=>void=()=>{}):Promise<boolean>{
     const held=readSecurityHold(this.store,channel);if(!held)return true;
     if(this.mode!=='headless'||!explicit&&Date.now()<(this.retryAt.get(channel)??0))return false;
     this.retryAt.set(channel,Date.now()+30_000);
     const epoch=this.epoch,page=channel==='DIRECT_MESSAGE'?owner.dm:owner.notification;
     const verify=async()=>{
-      const active=()=>requireSafe(this.owner===owner&&this.epoch===epoch&&!signal?.aborted&&
-        readSecurityHold(this.store,channel)?.revision===held.revision,'SECURITY_RECOVERY_CHANGED');
+      const active=()=>{check();requireSafe(this.owner===owner&&this.epoch===epoch&&!signal?.aborted&&
+        readSecurityHold(this.store,channel)?.revision===held.revision,'SECURITY_RECOVERY_CHANGED');};
       let recoveryTarget:string|undefined;
       try{
         active();const incident=await this.incidents.read(held.incidentId),initial=incident?.initial??incident?.afterFailure;
@@ -144,7 +144,7 @@ export class BrowserSafety {
             const fresh=await page.evaluate(inspectSecuritySignal,{selectors:[mapping.securityBlockers]});active();
             const incident=await this.incidents.read(held.incidentId),original=incident?.initial??incident?.afterFailure;
             if(fresh.state==='SUSPECT'&&fresh.origin===mapping.origin&&fresh.href.split('?')[0]===recoveryTarget&&
-              (!original||fresh.documentStartedAt!==original.documentStartedAt||fresh.href!==original.href||
+              (!incident?.sameDocument||!original||fresh.documentStartedAt!==original.documentStartedAt||fresh.href!==original.href||
                 incident?.context.epoch!==epoch||incident?.context.instanceId!==this.instanceId)){
               await this.record(channel,page,fresh,held.revision);
             }

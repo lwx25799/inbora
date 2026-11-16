@@ -6,13 +6,24 @@ import { join, resolve } from "node:path";
 import { privateTemp } from "../helpers.js";
 import Database from 'better-sqlite3';
 import {existsSync} from 'node:fs';
-import {readFile,writeFile} from 'node:fs/promises';
+import {readFile,rm,writeFile} from 'node:fs/promises';
+import {z} from 'zod';
+import {commandSchema} from '../../src/app/contracts.js';
+
+function applicationCommands(schema:unknown):string[]{
+  if(!schema||typeof schema!=='object')return[];
+  const object=schema as {properties?:{command?:{const?:unknown}}};
+  const command=object.properties?.command?.const;
+  const nested=Object.values(schema).flatMap(value=>Array.isArray(value)?value.flatMap(applicationCommands):applicationCommands(value));
+  return typeof command==='string'?[command,...nested]:nested;
+}
 
 test('native request allowlist matches the complete application command contract',async()=>{
-  const [contracts,native]=await Promise.all([readFile('src/app/contracts.ts','utf8'),readFile('desktop/src-tauri/src/main.rs','utf8')]);
-  const commands=[...contracts.matchAll(/command:\s*z\.literal\(["']([A-Za-z][A-Za-z0-9]+)["']\)/gu)].map(m=>m[1]!);
+  const native=await readFile('desktop/src-tauri/src/main.rs','utf8');
+  const commands=applicationCommands(z.toJSONSchema(commandSchema));
   const allowed=native.match(/const ALLOWED:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/u)?.[1];
-  expect(commands.length).toBeGreaterThan(30);expect(commands).toContain('enableReplyPolicy');expect(allowed).toBeDefined();
+  expect(commands.length).toBeGreaterThan(30);expect(commands).toContain('enableReplyPolicy');
+  expect(commands).toContain('securityRecovery');expect(allowed).toBeDefined();
   const names=[...allowed!.matchAll(/"([A-Za-z][A-Za-z0-9]+)"/gu)].map(m=>m[1]!);
   expect(new Set(names)).toEqual(new Set(['connect','disconnect',...commands]));
 });
@@ -85,6 +96,17 @@ test("source sidecar authenticates IPC, rejects unbounded/extra fields, reconnec
       result: { connected: true, schema: 3, mode: "DRAFT_ONLY",
         localAssistantConnection:{ready:true,instanceId:expect.any(String),transport:'stdio',tools:16} },
     });
+    const recoverySession=randomUUID();
+    expect(await call({command:'securityRecovery',action:'start',channel:'COMMENT_NOTIFICATION'}))
+      .toMatchObject({ok:false,error:'MANUAL_RECOVERY_HEADLESS_REQUIRED'});
+    for(const action of ['frame','finish'] as const)
+      expect(await call({command:'securityRecovery',action,sessionId:recoverySession}))
+        .toMatchObject({ok:false,error:'MANUAL_RECOVERY_OPERATOR_CHANGED'});
+    expect(await call({command:'securityRecovery',action:'input',sessionId:recoverySession,frameId:randomUUID(),
+      sequence:1,input:{kind:'pointer',phase:'down',x:1,y:1}}))
+      .toMatchObject({ok:false,error:'MANUAL_RECOVERY_OPERATOR_CHANGED'});
+    expect(await call({command:'securityRecovery',action:'close',sessionId:recoverySession}))
+      .toMatchObject({ok:true,result:{browser:{state:'CLOSED',mode:'headless'},manualRecovery:null}});
     expect(
       await call({ command: "getStatus", operatorId: "forged" }),
     ).toMatchObject({ ok: false, error: "INVALID_COMMAND" });
@@ -128,8 +150,10 @@ test("source sidecar authenticates IPC, rejects unbounded/extra fields, reconnec
     store.close();
   } finally {
     child.kill();
+    await exited;
     lines.close();
     for (const item of pending.values())
       item.reject(new Error("IPC_TEST_ENDED"));
+    await rm(root,{recursive:true,force:true});
   }
 }, 30_000);

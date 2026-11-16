@@ -17,6 +17,7 @@ test('the original-page dialog forwards bounded human gestures with fresh displa
   const calls:Record<string,unknown>[]=[],errors:string[]=[],frames=new Map<string,number>();
   const session={sessionId:randomUUID(),channel:'COMMENT_NOTIFICATION',incidentId:status.securityHolds![0]!.incidentId};
   let frameCount=0;
+  let startResult:'original'|'recreated'|'clear'='original';
   const image='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"><rect width="1280" height="720" fill="#dde5df"/><rect x="400" y="200" width="400" height="300" fill="#287a57"/><text x="440" y="270" fill="white" font-size="28">Synthetic challenge</text></svg>');
   const server=await createServer({configFile:resolve('desktop/vite.config.ts'),server:{port:0,strictPort:false},logLevel:'error'});
   await server.listen();const browser=await chromium.launch({channel:'msedge',headless:true}),page=await browser.newPage({viewport:{width:900,height:640}});
@@ -30,7 +31,10 @@ test('the original-page dialog forwards bounded human gestures with fresh displa
     if(body.command==='getStatus'||body.command==='connect')return status;
     if(body.command==='selectTarget')return null;
     if(body.command==='securityRecovery'){
-      if(body.action==='start')return session;
+      if(body.action==='start'){
+        if(startResult==='clear'){status.securityHolds=[];return{state:'CLEARED'};}
+        return{...session,...(startResult==='recreated'?{recreated:true}:{})};
+      }
       if(body.action==='frame'){
         const frameId=randomUUID(),expiresAt=Date.now()+3000;frames.set(frameId,expiresAt);frameCount++;
         return {sessionId:session.sessionId,frameId,image,width:1280,height:720,regions:[{x:400,y:200,width:400,height:300}],expiresAt,documentPreserved:true};
@@ -84,11 +88,22 @@ test('the original-page dialog forwards bounded human gestures with fresh displa
     await dialog.getByRole('button',{name:'暂不处理',exact:true}).click();await dialog.waitFor({state:'detached'});
     expect(status.securityHolds).toHaveLength(1);expect(await held.isVisible()).toBe(true);
     expect(calls.filter(body=>body.action==='close')).toHaveLength(1);
+    startResult='recreated';
     await held.getByRole('button',{name:'处理原验证页面',exact:true}).click();
-    await dialog.getByAltText('原验证页面实时画面').waitFor();
-    await dialog.getByRole('button',{name:'完成并核验',exact:true}).click();
-    await dialog.waitFor({state:'detached'});await held.waitFor({state:'detached'});
+    const currentDialog=page.getByRole('dialog',{name:'处理当前验证页面'});
+    await currentDialog.getByAltText('原验证页面实时画面').waitFor();
+    expect(await currentDialog.innerText()).toContain('原现场已丢失');
+    expect(await currentDialog.innerText()).toContain('重新检查后出现的新验证');
+    await currentDialog.getByRole('button',{name:'完成并核验',exact:true}).click();
+    await currentDialog.waitFor({state:'detached'});await held.waitFor({state:'detached'});
     expect(calls.filter(body=>body.action==='finish')).toHaveLength(1);
+    await page.reload();
+    // The native status can reconnect with an old hold whose authorized page is now clear.
+    status.securityHolds=[{channel:'COMMENT_NOTIFICATION',reason:'OBSERVATION_SECURITY_SUSPECT',incidentId:session.incidentId,
+      revision:randomUUID(),heldAt:Date.now(),mode:'headless'}];
+    startResult='clear';await page.reload();
+    await held.getByRole('button',{name:'处理原验证页面',exact:true}).click();
+    await held.waitFor({state:'detached'});expect(await page.getByRole('dialog').count()).toBe(0);
     expect(calls.some(body=>/send|generate|suggestion|setAutomaticReply/i.test(String(body.command)))).toBe(false);
     expect(errors).toEqual([]);
   }finally{await browser.close();await server.close();}

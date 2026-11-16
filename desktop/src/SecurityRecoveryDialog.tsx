@@ -155,9 +155,9 @@ export function SecurityRecoveryDialog({session,update,onClosed}:{session:Manual
 
   return <div className="security-recovery-backdrop">
     <section ref={dialog} className="security-recovery-dialog" role="dialog" aria-modal="true" aria-labelledby="security-recovery-title" onKeyDown={dialogKeys}>
-      <div className="security-recovery-heading"><h2 id="security-recovery-title">处理原验证页面</h2>
+      <div className="security-recovery-heading"><h2 id="security-recovery-title">{session.recreated?'处理当前验证页面':'处理原验证页面'}</h2>
         <button disabled={closing||finishing} onClick={()=>void close()} aria-label="关闭验证页面">关闭</button></div>
-      <p>这是{session.channel==='DIRECT_MESSAGE'?'私信':'评论'}原无头页面的实时画面。请在画面内完成验证，可点击或拖动；处理期间后台浏览器操作暂停。</p>
+      <p>{session.recreated?'原现场已丢失，这是在原授权地址重新检查后出现的新验证。':'这是'+(session.channel==='DIRECT_MESSAGE'?'私信':'评论')+'原无头页面的实时画面。'}请在画面内完成验证，可点击或拖动；处理期间后台浏览器操作暂停。</p>
       <p className="security-recovery-note">关闭后保留当前拦截；完成验证后点击“完成并核验”。</p>
       {error&&<p className="security-recovery-error" role="alert">{error}</p>}
       <div className="security-recovery-viewport" aria-busy={!frame}>

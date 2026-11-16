@@ -1,6 +1,6 @@
 import {useState} from 'react';
 import {request,type Status} from './api';
-import type {ManualRecoverySession} from '../../src/app/manual-recovery-contracts.js';
+import type {ManualRecoverySession,ManualRecoveryStart} from '../../src/app/manual-recovery-contracts.js';
 import {SecurityRecoveryDialog} from './SecurityRecoveryDialog';
 import {recoveryError} from './security-recovery-input';
 import './emergency-stop.css';
@@ -44,10 +44,14 @@ export function EmergencyStopNotice({status,busy,act,update}:{status:Status;busy
   })));
   const openOriginal=(channel:ManualRecoverySession['channel'])=>act('正在接管原验证页面…',async()=>{
     setOpeningError('');
-    try{setSession(await request<ManualRecoverySession>({command:'securityRecovery',action:'start',channel}));}
+    try{
+      const result=await request<ManualRecoveryStart>({command:'securityRecovery',action:'start',channel});
+      if('state' in result)update(await request<Status>({command:'getStatus'}));
+      else setSession(result);
+    }
     catch(error){setOpeningError(recoveryError(error));}
   });
-  const recoveryHelp='在客户端内处理原无头页面，保留当前验证现场。若原页面已关闭或变化，会说明无法接管；可点击“检查并恢复运行”重新核验，原现场证据仍单独保留。';
+  const recoveryHelp='在客户端内处理当前无头验证页面。若原现场已丢失，点击处理会重新检查原授权地址：已正常则恢复对应通道，仍有验证则显示新的实时画面；原现场证据仍单独保留。';
   const originalButtons=holds.map(hold=><button key={hold.revision} disabled={!!busy||!!session||!!recovery}
     onClick={()=>void openOriginal(hold.channel)}>
     {holds.length>1?`${hold.channel==='DIRECT_MESSAGE'?'私信':'评论'}：`:''}处理原验证页面</button>);
