@@ -22,6 +22,40 @@ export function captureCommentReply(input:Input):Frame{
   type InputGate={token:string;used:boolean;blocked:boolean;editor:HTMLElement;remove:()=>void};
   const host=window as unknown as {__inboraCommentGate?:Gate;__inboraCommentInputGate?:InputGate};
   const dom={
+    securityVisible(element:Element):boolean {
+      for(const node of [element,...element.querySelectorAll('*')]){
+        if(!node.isConnected)continue;
+        let shown=true;
+        for(let current:Element|null=node;current;current=current.parentElement){
+          const style=getComputedStyle(current);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
+        }
+        if(!shown)continue;
+        const candidates:{rect:DOMRect;parent:Element|null}[]=Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement}));
+        for(const child of node.childNodes){
+          if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
+          const range=document.createRange();range.selectNodeContents(child);
+          for(const rect of range.getClientRects())candidates.push({rect,parent:node});
+        }
+        for(const {rect,parent} of candidates){
+          let left=rect.left,top=rect.top,right=rect.right,bottom=rect.bottom;
+          if(!(right>left&&bottom>top))continue;
+          for(let current=parent;current;current=current.parentElement){
+            const style=getComputedStyle(current);
+            if(style.display==='contents')continue;
+            const clipX=['hidden','clip','auto','scroll','overlay'].includes(style.overflowX);
+            const clipY=['hidden','clip','auto','scroll','overlay'].includes(style.overflowY);
+            if(!clipX&&!clipY)continue;
+            const box=current.getBoundingClientRect();
+            if(clipX){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+            if(clipY){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+            if(!(right>left&&bottom>top))break;
+          }
+          if(right>left&&bottom>top)return true;
+        }
+      }
+      return false;
+    },
     check(ok:unknown,code='COMMENT_REPLY_GUARD_BLOCKED'):void{if(!ok)throw Error(code);},
     // Same reviewed MIT dataField adaptation as observed-reader; see UPSTREAM/third_party.
     data(object:unknown,key:string):unknown{
@@ -111,8 +145,8 @@ export function captureCommentReply(input:Input):Frame{
       const nested=e.kind==='REPLY',rootId=nested?e.rootCommentId:e.commentId;
       dom.check(work&&peer&&e.channel==='COMMENT_NOTIFICATION'&&(e.kind==='COMMENT'||nested&&rootId&&rootId!==e.commentId&&e.replyToCommentId===e.commentId)&&e.direction==='INCOMING','COMMENT_REPLY_SCOPE_REQUIRED');
       dom.check(location.origin===o.origin&&location.href.split('?')[0]===work!.url.split('?')[0]&&
-        !/验证码|安全验证|访问受限/.test(document.title)&&!Array.from(document.querySelectorAll(m.blockers)).some(dom.visible),'COMMENT_REPLY_PAGE_BLOCKED');
-      dom.check(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.visible),'COMMENT_REPLY_PAGE_BLOCKED');
+        !/验证码|安全验证|访问受限/.test(document.title)&&!Array.from(document.querySelectorAll(m.blockers)).some(dom.securityVisible),'COMMENT_REPLY_PAGE_BLOCKED');
+      dom.check(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.securityVisible),'COMMENT_REPLY_PAGE_BLOCKED');
       const own=dom.props(dom.one(document,s.selfAvatar),s.selfFiberDepth);
       dom.check(dom.data(own,'uid')===o.self.uid&&dom.data(own,'secUid')===o.self.secUid,'COMMENT_REPLY_ACCOUNT_CHANGED');
       const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);
@@ -290,7 +324,7 @@ export function captureCommentReply(input:Input):Frame{
   if(input.action==='locateRoot'){
     const work=o.works.find(w=>w.id===e.videoId),rootId=e.kind==='REPLY'?e.rootCommentId:e.commentId;
     dom.check(work&&location.origin===o.origin&&location.href.split('?')[0]===work.url.split('?')[0],'COMMENT_REPLY_SCOPE_REQUIRED');
-    dom.check(!/验证码|安全验证|访问受限/.test(document.title)&&![m.blockers,o.securityBlockers].some(selector=>Array.from(document.querySelectorAll(selector)).some(dom.visible)),'COMMENT_REPLY_PAGE_BLOCKED');
+    dom.check(!/验证码|安全验证|访问受限/.test(document.title)&&![m.blockers,o.securityBlockers].some(selector=>Array.from(document.querySelectorAll(selector)).some(dom.securityVisible)),'COMMENT_REPLY_PAGE_BLOCKED');
     const own=dom.props(dom.one(document,s.selfAvatar),s.selfFiberDepth);
     dom.check(dom.data(own,'uid')===o.self.uid&&dom.data(own,'secUid')===o.self.secUid,'COMMENT_REPLY_ACCOUNT_CHANGED');
     const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);dom.check(lists.length===1,'COMMENT_REPLY_LIST_NOT_UNIQUE');

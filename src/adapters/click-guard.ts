@@ -13,6 +13,40 @@ export function captureAndGuard(input: CaptureInput): CaptureResult {
   const t = m.targets[channel];
   // Object methods keep this serialized function self-contained under both tsc and tsx/esbuild.
   const dom = {
+    securityVisible(element:Element):boolean {
+      for(const node of [element,...element.querySelectorAll('*')]){
+        if(!node.isConnected)continue;
+        let shown=true;
+        for(let current:Element|null=node;current;current=current.parentElement){
+          const style=getComputedStyle(current);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
+        }
+        if(!shown)continue;
+        const candidates:{rect:DOMRect;parent:Element|null}[]=Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement}));
+        for(const child of node.childNodes){
+          if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
+          const range=document.createRange();range.selectNodeContents(child);
+          for(const rect of range.getClientRects())candidates.push({rect,parent:node});
+        }
+        for(const {rect,parent} of candidates){
+          let left=rect.left,top=rect.top,right=rect.right,bottom=rect.bottom;
+          if(!(right>left&&bottom>top))continue;
+          for(let current=parent;current;current=current.parentElement){
+            const style=getComputedStyle(current);
+            if(style.display==='contents')continue;
+            const clipX=['hidden','clip','auto','scroll','overlay'].includes(style.overflowX);
+            const clipY=['hidden','clip','auto','scroll','overlay'].includes(style.overflowY);
+            if(!clipX&&!clipY)continue;
+            const box=current.getBoundingClientRect();
+            if(clipX){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+            if(clipY){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+            if(!(right>left&&bottom>top))break;
+          }
+          if(right>left&&bottom>top)return true;
+        }
+      }
+      return false;
+    },
     check(ok: unknown): void { if (!ok) throw new Error('CLICK_DOM_GUARD_BLOCKED'); },
     visible(el: Element): boolean {
       const style = getComputedStyle(el); return el.getClientRects().length > 0 && style.visibility !== 'hidden' && style.display !== 'none';
@@ -43,7 +77,7 @@ export function captureAndGuard(input: CaptureInput): CaptureResult {
     capture(): CaptureResult {
       dom.check(location.origin === m.origin);
       for (const selector of [m.guards.loginRequired,m.guards.challenge,m.guards.stopped])
-        dom.check(!Array.from(document.querySelectorAll(selector)).some(dom.visible));
+        dom.check(!Array.from(document.querySelectorAll(selector)).some(dom.securityVisible));
       dom.one(document,m.guards.loggedIn); dom.check(dom.read(document,m.guards.ownIdentity) === m.ownId);
       const originals = Array.from(document.querySelectorAll(t.roots)).filter(root => dom.visible(root) &&
         JSON.stringify(dom.binding(dom.parse(root,t.fields))) === JSON.stringify(dom.binding(expected)));

@@ -1,3 +1,4 @@
+import {hasVisibleSecurityComponent} from './security-components.js';
 import { randomUUID } from 'node:crypto';
 import type { Locator, Page } from 'playwright';
 import { z } from 'zod';
@@ -39,7 +40,7 @@ export class DomAdapter implements ReplyAdapter {
     for (const [code, selector] of [
       ['PLATFORM_STOP', this.mapping.guards.stopped], ['CHALLENGE_REQUIRED', this.mapping.guards.challenge],
       ['LOGIN_REQUIRED', this.mapping.guards.loginRequired],
-    ] as const) requireSafe(!await visibleAny(this.page, selector), code);
+    ] as const) requireSafe(!await this.page.evaluate(hasVisibleSecurityComponent,[selector]), code);
     await unique(this.page, this.mapping.guards.loggedIn);
     requireSafe(await field(this.page, this.mapping.guards.ownIdentity) === this.mapping.ownId, 'ACCOUNT_NOT_VERIFIED');
   }

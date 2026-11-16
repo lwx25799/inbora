@@ -44,6 +44,40 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
   const {mapping:m,event,imageIndex,peer}=input,s=m.selectors;
   let phase:'ENVIRONMENT'|'IDENTITY'|'CHAT'|'HEADER'|'ID'|'PEERSEC'|'TITLE'|'MESSAGE'|'TIME'='ENVIRONMENT';
   const dom={
+    securityVisible(element:Element):boolean {
+      for(const node of [element,...element.querySelectorAll('*')]){
+        if(!node.isConnected)continue;
+        let shown=true;
+        for(let current:Element|null=node;current;current=current.parentElement){
+          const style=getComputedStyle(current);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
+        }
+        if(!shown)continue;
+        const candidates:{rect:DOMRect;parent:Element|null}[]=Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement}));
+        for(const child of node.childNodes){
+          if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
+          const range=document.createRange();range.selectNodeContents(child);
+          for(const rect of range.getClientRects())candidates.push({rect,parent:node});
+        }
+        for(const {rect,parent} of candidates){
+          let left=rect.left,top=rect.top,right=rect.right,bottom=rect.bottom;
+          if(!(right>left&&bottom>top))continue;
+          for(let current=parent;current;current=current.parentElement){
+            const style=getComputedStyle(current);
+            if(style.display==='contents')continue;
+            const clipX=['hidden','clip','auto','scroll','overlay'].includes(style.overflowX);
+            const clipY=['hidden','clip','auto','scroll','overlay'].includes(style.overflowY);
+            if(!clipX&&!clipY)continue;
+            const box=current.getBoundingClientRect();
+            if(clipX){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+            if(clipY){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+            if(!(right>left&&bottom>top))break;
+          }
+          if(right>left&&bottom>top)return true;
+        }
+      }
+      return false;
+    },
     check(condition:unknown):void{if(!condition)throw new Error('MESSAGE_PREVIEW_INSPECT_'+phase+'_FAILED');},
     imageValue(image:HTMLImageElement,key:'currentSrc'|'complete'|'naturalWidth'|'naturalHeight'):unknown{
       return Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,key)?.get?.call(image);
@@ -274,7 +308,7 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
     },
   };
   dom.check(location.origin===m.origin&&!/验证码|安全验证/u.test(document.title));
-  dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible));
+  dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.securityVisible));
   phase='IDENTITY';
   const own=dom.props(dom.one(s.selfAvatar),s.selfFiberDepth);
   dom.check(dom.value(own,'uid')===m.self.uid&&dom.value(own,'secUid')===m.self.secUid);

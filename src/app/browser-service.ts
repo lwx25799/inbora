@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { BrowserProfileOwner } from "../browser/profile-owner.js";
 import { ObservedReader } from "../adapters/observed-reader.js";
+import {hasVisibleSecurityComponent} from '../adapters/security-components.js';
 import { ObservedDmReply } from "../adapters/observed-dm-reply.js";
 import { ObservedCommentReply } from "../adapters/observed-comment-reply.js";
 import {commentReadbackAudit} from '../adapters/comment-readback-diagnostics.js';
@@ -203,8 +204,8 @@ export class BrowserService {
           const reply=channel==='DIRECT_MESSAGE'?dmReply:commentReply;
           if(reply){
             requireSafe(reply.observation.self.uid===ownId&&(!observation||reply.observation.self.secUid===observation.self.secUid),'ACCOUNT_CHANGED');
-            for(const selector of [reply.blockers,reply.observation.securityBlockers])
-              for(const node of await page.locator(selector).all())requireSafe(!await node.isVisible(),'OBSERVATION_SECURITY_COMPONENT');
+            requireSafe(!await page.evaluate(hasVisibleSecurityComponent,[reply.blockers,reply.observation.securityBlockers]),
+              'OBSERVATION_SECURITY_COMPONENT');
           }
         }catch(error){
           if(error instanceof Error&&error.name==='TimeoutError')requireSafe(false,'ACCOUNT_NOT_VERIFIED');

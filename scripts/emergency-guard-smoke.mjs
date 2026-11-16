@@ -8,8 +8,10 @@ const source=process.argv[2]==='source',root=source?'src':'dist',extension=sourc
 const load=name=>import(pathToFileURL(resolve(root,`adapters/${name}.${extension}`)).href);
 const {captureObserved}=await load('observed-capture');
 const {captureCommentThread}=await load('comment-thread-capture');
-function context(title='',visibleBlocker=false,origin='https://www.douyin.com'){
-  const blocker={isConnected:true,parentElement:null,getClientRects:()=>[{}]};
+const {hasVisibleSecurityComponent}=await load('security-components');
+function context(title='',visibleBlocker=false,origin='https://www.douyin.com',width=320,height=180){
+  const blocker={isConnected:true,parentElement:null,childNodes:[],querySelectorAll:()=>[],
+    getClientRects:()=>[{left:0,top:0,right:width,bottom:height,width,height}]};
   return {location:{origin,href:origin+'/video/work'},document:{title,
     querySelectorAll:selector=>selector==='.security'&&visibleBlocker?[blocker]:[]},
     getComputedStyle:()=>({visibility:'visible',display:'block',opacity:'1'})};
@@ -30,4 +32,12 @@ for(const [fn,input] of [[captureObserved,observed],[captureCommentThread,thread
   rejects(fn,input,context('',true),'OBSERVATION_SECURITY_COMPONENT');
 rejects(captureObserved,observed,context(),'OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_READY');
 rejects(captureCommentThread,thread,context(),'OBSERVATION_ACCOUNT_CHANGED');
+for(const [width,height] of [[0,0],[0,40],[40,0]]){
+  rejects(captureObserved,observed,context('',true,undefined,width,height),'OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_READY');
+  rejects(captureCommentThread,thread,context('',true,undefined,width,height),'OBSERVATION_ACCOUNT_CHANGED');
+}
+for(const [width,height,expected] of [[0,0,false],[0,40,false],[40,0,false],[320,180,true]]){
+  const invoke=runInNewContext(`(${hasVisibleSecurityComponent.toString()})`,context('',true,undefined,width,height));
+  assert.equal(invoke(['.security']),expected);checked++;
+}
 console.log(`${source?'tsx source':'built Node'} serialized emergency guards passed: ${checked} checks; no browser, runtime or Profile accessed`);

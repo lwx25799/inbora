@@ -8,6 +8,40 @@ export interface CommentThreadInput {mapping:ObservationMapping;event:InboundEve
 export function captureCommentThread(input:CommentThreadInput):CommentThreadWindow {
   const {mapping:m,event:e}=input,s=m.selectors;
   const dom={
+    securityVisible(element:Element):boolean {
+      for(const node of [element,...element.querySelectorAll('*')]){
+        if(!node.isConnected)continue;
+        let shown=true;
+        for(let current:Element|null=node;current;current=current.parentElement){
+          const style=getComputedStyle(current);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
+        }
+        if(!shown)continue;
+        const candidates:{rect:DOMRect;parent:Element|null}[]=Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement}));
+        for(const child of node.childNodes){
+          if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
+          const range=document.createRange();range.selectNodeContents(child);
+          for(const rect of range.getClientRects())candidates.push({rect,parent:node});
+        }
+        for(const {rect,parent} of candidates){
+          let left=rect.left,top=rect.top,right=rect.right,bottom=rect.bottom;
+          if(!(right>left&&bottom>top))continue;
+          for(let current=parent;current;current=current.parentElement){
+            const style=getComputedStyle(current);
+            if(style.display==='contents')continue;
+            const clipX=['hidden','clip','auto','scroll','overlay'].includes(style.overflowX);
+            const clipY=['hidden','clip','auto','scroll','overlay'].includes(style.overflowY);
+            if(!clipX&&!clipY)continue;
+            const box=current.getBoundingClientRect();
+            if(clipX){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+            if(clipY){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+            if(!(right>left&&bottom>top))break;
+          }
+          if(right>left&&bottom>top)return true;
+        }
+      }
+      return false;
+    },
     check(value:unknown,code:string):void {if(!value)throw Error(code);},
     data(object:unknown,key:string):unknown {
       if(!object||typeof object!=='object')return undefined;
@@ -63,7 +97,7 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
     root():Element {
       dom.check(location.origin===m.origin&&m.works.some(w=>w.id===e.videoId&&w.url.split('?')[0]===location.href.split('?')[0]),'OBSERVATION_WORK_CHANGED');
       dom.check(!/验证码|安全验证|访问受限/.test(document.title),'OBSERVATION_SECURITY_TITLE');
-      dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_SECURITY_COMPONENT');
+      dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.securityVisible),'OBSERVATION_SECURITY_COMPONENT');
       const own=Array.from(document.querySelectorAll(s.selfAvatar));dom.check(own.length===1,'OBSERVATION_ACCOUNT_CHANGED');
       const identity=dom.props(own[0]!,s.selfFiberDepth);dom.check(dom.data(identity,'uid')===m.self.uid&&dom.data(identity,'secUid')===m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
       const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);dom.check(lists.length===1,'OBSERVATION_DOM_NOT_UNIQUE');

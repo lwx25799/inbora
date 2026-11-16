@@ -6,6 +6,40 @@ import type {DiscoveredPeer} from './observed-reader.js';
 export function visibleStoredMessage(input:{mapping:ObservationMapping;event:InboundEvent;peer:DiscoveredPeer}):boolean{
   const {mapping:m,event,peer}=input,s=m.selectors;
   const dom={
+    securityVisible(element:Element):boolean {
+      for(const node of [element,...element.querySelectorAll('*')]){
+        if(!node.isConnected)continue;
+        let shown=true;
+        for(let current:Element|null=node;current;current=current.parentElement){
+          const style=getComputedStyle(current);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
+        }
+        if(!shown)continue;
+        const candidates:{rect:DOMRect;parent:Element|null}[]=Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement}));
+        for(const child of node.childNodes){
+          if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
+          const range=document.createRange();range.selectNodeContents(child);
+          for(const rect of range.getClientRects())candidates.push({rect,parent:node});
+        }
+        for(const {rect,parent} of candidates){
+          let left=rect.left,top=rect.top,right=rect.right,bottom=rect.bottom;
+          if(!(right>left&&bottom>top))continue;
+          for(let current=parent;current;current=current.parentElement){
+            const style=getComputedStyle(current);
+            if(style.display==='contents')continue;
+            const clipX=['hidden','clip','auto','scroll','overlay'].includes(style.overflowX);
+            const clipY=['hidden','clip','auto','scroll','overlay'].includes(style.overflowY);
+            if(!clipX&&!clipY)continue;
+            const box=current.getBoundingClientRect();
+            if(clipX){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+            if(clipY){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+            if(!(right>left&&bottom>top))break;
+          }
+          if(right>left&&bottom>top)return true;
+        }
+      }
+      return false;
+    },
     check(value:unknown):void{if(!value)throw Error('MESSAGE_VIEW_TARGET_CHANGED');},
     data(value:unknown,key:string):unknown{
       if(!value||typeof value!=='object')return undefined;
@@ -31,7 +65,7 @@ export function visibleStoredMessage(input:{mapping:ObservationMapping;event:Inb
     react(node:Element,prefix:string):unknown{const keys=Object.getOwnPropertyNames(node).filter(key=>key.startsWith(prefix));dom.check(keys.length===1);return dom.data(node,keys[0]!);},
     props(node:Element):unknown{const children=dom.data(dom.react(node,'__reactProps$'),'children');return dom.data(Array.isArray(children)?dom.data(children,'0'):children,'props');},
   };
-  dom.check(location.origin===m.origin&&!/验证码|安全验证/u.test(document.title)&&!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible));
+  dom.check(location.origin===m.origin&&!/验证码|安全验证/u.test(document.title)&&!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.securityVisible));
   let fiber=dom.react(dom.one(document,s.selfAvatar),'__reactFiber$');for(let level=0;level<s.selfFiberDepth;level++)fiber=dom.data(fiber,'return');
   const own=dom.data(fiber,'memoizedProps');dom.check(dom.data(own,'uid')===m.self.uid&&dom.data(own,'secUid')===m.self.secUid);
   const chat=dom.one(document,s.chat),nativeChat=dom.data(dom.props(dom.one(chat,s.chatHeader)),'conversation');

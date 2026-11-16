@@ -5,7 +5,8 @@ import {platformStopCodes} from '../../src/core/emergency-stop.js';
 
 afterEach(()=>vi.unstubAllGlobals());
 function setup(title='',visibleBlocker=false,origin='https://www.douyin.com'){
-  const blocker={isConnected:true,parentElement:null,getClientRects:()=>[{}]};
+  const blocker={isConnected:true,parentElement:null,childNodes:[],querySelectorAll:()=>[],
+    getClientRects:()=>[{left:0,top:0,right:320,bottom:180,width:320,height:180}]};
   vi.stubGlobal('location',{origin,href:origin+'/video/work'});
   vi.stubGlobal('document',{title,querySelectorAll:(selector:string)=>selector==='.security'&&visibleBlocker?[blocker]:[]});
   vi.stubGlobal('getComputedStyle',()=>({visibility:'visible',display:'block',opacity:'1'}));
