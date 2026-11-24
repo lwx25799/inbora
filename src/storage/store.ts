@@ -291,7 +291,7 @@ export class EventStore {
     // A legacy DM outcome belongs to its original inbound. It must not stop distinct later messages forever.
     if(next.channel!=='DIRECT_MESSAGE'||!(isStrong(next)||isManualMediaCandidate(next))||next.direction!=='INCOMING'||next.kind!=='DM')return true;
     const at=next.occurredAt?Date.parse(next.occurredAt):NaN;
-    if(!Number.isFinite(at)||at>Date.now())return true;
+    if(!Number.isFinite(at)||at>Date.now()+dmClockToleranceMs)return true;
     return unresolved.some(intent=>{
       if(intent.event_id===eventId||intent.status==='INTENT_RECORDED')return true;
       const prior=this.event(intent.event_id).payload,boundary=Date.parse(intent.attempt_started_at??'');

@@ -174,8 +174,16 @@ export async function reconcileUncertainCommand(
   eventId: string,
 ): Promise<unknown> {
   ctx.authority.operator(token, "CONTROL");
+  const hasVerificationResults = !!ctx.store.db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='verification_results'")
+    .get();
   const uncertainOriginal = ctx.store.db
-    .prepare("SELECT id FROM send_intents WHERE event_id=? AND status='UNCERTAIN'")
+    .prepare(
+      hasVerificationResults
+        ? `SELECT i.id FROM send_intents i WHERE i.event_id=? AND i.status='UNCERTAIN'
+           AND COALESCE((SELECT v.verified FROM verification_results v WHERE v.intent_id=i.id ORDER BY v.rowid DESC LIMIT 1), 0) <> 1`
+        : "SELECT id FROM send_intents WHERE event_id=? AND status='UNCERTAIN'",
+    )
     .get(eventId);
   if (!uncertainOriginal) {
     const uncertainFollowup = findUncertainFollowupForEvent(ctx.store, eventId);

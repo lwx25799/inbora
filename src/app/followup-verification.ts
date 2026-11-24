@@ -18,10 +18,13 @@ import type { BrowserService } from "./browser-service.js";
 
 const hash64 = /^[a-f0-9]{64}$/u;
 const attemptAuditType = "HUMAN_FOLLOWUP_VERIFICATION_ATTEMPT";
+const explicitAuditType = "HUMAN_FOLLOWUP_EXPLICIT_VERIFICATION";
+const deadlineAuditType = "HUMAN_FOLLOWUP_VERIFICATION_DEADLINE";
 const maxAttempts = 2;
 const initialDelayMs = 2_000;
 const retryDelayMs = 10_000;
 const deadlineWindowMs = 120_000;
+const holdExtensionMarginMs = 30_000;
 
 export interface FollowupTurnRow {
   command_id: string;
@@ -140,6 +143,99 @@ function parseApproval(raw: string | null): NonNullable<Draft["approval"]> | nul
   }
 }
 
+function persistedDeadline(store: EventStore, intentId: string, baseDeadline: number): number {
+  const rows = store.db
+    .prepare("SELECT detail_redacted FROM audit_events WHERE event_type=? AND entity_id=? ORDER BY rowid")
+    .all(deadlineAuditType, intentId) as { detail_redacted: string }[];
+  let deadline = baseDeadline;
+  for (const row of rows) {
+    try {
+      const detail = JSON.parse(row.detail_redacted) as { deadline?: unknown };
+      if (typeof detail.deadline === "number" && Number.isFinite(detail.deadline)) {
+        deadline = Math.max(deadline, detail.deadline);
+      }
+    } catch {
+      /* Ignore malformed deadline audit detail. */
+    }
+  }
+  return deadline;
+}
+
+function securityHoldDeadline(store: EventStore, channel: Channel, baseAt: number, currentDeadline: number): number {
+  const rows = store.db
+    .prepare(
+      "SELECT event_type,time,detail_redacted FROM audit_events WHERE entity_id=? AND event_type IN ('SECURITY_CHANNEL_HELD','SECURITY_CHANNEL_RESOLVED') ORDER BY rowid",
+    )
+    .all("account_001:" + channel) as { event_type: string; time: string; detail_redacted: string }[];
+  let deadline = currentDeadline;
+  let heldAt: number | null = null;
+  for (const row of rows) {
+    const eventTime = Date.parse(row.time);
+    if (row.event_type === "SECURITY_CHANNEL_HELD") {
+      let parsedHeldAt = eventTime;
+      try {
+        const detail = JSON.parse(row.detail_redacted) as { heldAt?: unknown };
+        if (typeof detail.heldAt === "number" && Number.isFinite(detail.heldAt)) parsedHeldAt = detail.heldAt;
+      } catch {
+        /* Fall back to audit row timestamp. */
+      }
+      if (heldAt === null && Number.isFinite(parsedHeldAt)) heldAt = parsedHeldAt;
+    } else if (row.event_type === "SECURITY_CHANNEL_RESOLVED") {
+      if (heldAt !== null && heldAt <= deadline && Number.isFinite(eventTime) && eventTime >= baseAt) {
+        deadline = Math.max(deadline, eventTime + deadlineWindowMs);
+      }
+      heldAt = null;
+    }
+  }
+  return deadline;
+}
+
+function effectiveFollowupDeadline(store: EventStore, intentId: string, channel: Channel, baseAt: number): number {
+  const withPersisted = persistedDeadline(store, intentId, baseAt + deadlineWindowMs);
+  return securityHoldDeadline(store, channel, baseAt, withPersisted);
+}
+
+/** Extend bounded verification windows for unfinished UNCERTAIN followups on startup or while a channel hold is active. */
+export function extendFollowupVerificationDeadlines(
+  store: EventStore,
+  now: number,
+  channels?: readonly Channel[],
+): void {
+  if (!hasFollowupTables(store)) return;
+  const turns = store.db
+    .prepare(
+      `SELECT t.*, e.channel FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
+       WHERE t.status='UNCERTAIN' AND t.intent_id IS NOT NULL AND t.attempt_started_at IS NOT NULL
+       ORDER BY t.rowid`,
+    )
+    .all() as (FollowupTurnRow & { channel: Channel })[];
+  if (!turns.length) return;
+  const insert = store.db.prepare("INSERT INTO audit_events VALUES(?,?,?,?,?)");
+  const nextDeadline = now + deadlineWindowMs;
+  for (const turn of turns) {
+    if (channels && !channels.includes(turn.channel)) continue;
+    const approval = parseApproval(turn.approval);
+    const boundaryMs = Date.parse(turn.attempt_started_at ?? "");
+    if (!approval || !Number.isFinite(boundaryMs) || !turn.intent_id) continue;
+    if (attemptStats(store, turn.intent_id).attempts >= maxAttempts) continue;
+    const baseAt = Math.max(boundaryMs, turn.created_at);
+    const current = effectiveFollowupDeadline(store, turn.intent_id, turn.channel, baseAt);
+    const shouldExtend = channels ? current <= now + deadlineWindowMs - holdExtensionMarginMs : current <= now;
+    if (!shouldExtend || nextDeadline <= current) continue;
+    insert.run(
+      randomUUID(),
+      new Date(now).toISOString(),
+      deadlineAuditType,
+      turn.intent_id,
+      JSON.stringify({
+        commandId: turn.command_id,
+        deadline: nextDeadline,
+        reason: channels ? "SECURITY_HOLD" : "STARTUP",
+      }),
+    );
+  }
+}
+
 /** Pick at most one UNCERTAIN human followup turn due for bounded read-only verification. */
 export function claimFollowupVerification(
   store: EventStore,
@@ -162,12 +258,11 @@ export function claimFollowupVerification(
     if (!approval || !Number.isFinite(boundaryMs) || !turn.intent_id) continue;
     const stats = attemptStats(store, turn.intent_id);
     if (stats.attempts >= maxAttempts) continue;
-    const deadline = Math.max(boundaryMs, turn.created_at) + deadlineWindowMs;
+    const baseAt = Math.max(boundaryMs, turn.created_at);
+    const deadline = effectiveFollowupDeadline(store, turn.intent_id, turn.channel, baseAt);
     if (deadline <= now) continue;
     const nextAt =
-      stats.attempts === 0
-        ? Math.max(boundaryMs, turn.created_at) + initialDelayMs
-        : stats.lastCheckedAt + retryDelayMs;
+      stats.attempts === 0 ? baseAt + initialDelayMs : stats.lastCheckedAt + retryDelayMs;
     if (nextAt > now) continue;
     const job: FollowupVerificationJob = {
       commandId: turn.command_id,
@@ -238,23 +333,21 @@ export function commitFollowupVerificationResult(
           verified = false;
         }
       }
-      if (recordAttempt) {
-        store.db
-          .prepare("INSERT INTO audit_events VALUES(?,?,?,?,?)")
-          .run(
-            randomUUID(),
-            new Date(now).toISOString(),
-            attemptAuditType,
-            job.intentId,
-            JSON.stringify({
-              commandId: job.commandId,
-              verified,
-              evidenceId: result.evidenceId,
-              checkedAt: now,
-              previousProofRef: row.proof_ref,
-            }),
-          );
-      }
+      store.db
+        .prepare("INSERT INTO audit_events VALUES(?,?,?,?,?)")
+        .run(
+          randomUUID(),
+          new Date(now).toISOString(),
+          recordAttempt ? attemptAuditType : explicitAuditType,
+          job.intentId,
+          JSON.stringify({
+            commandId: job.commandId,
+            verified,
+            evidenceId: result.evidenceId,
+            checkedAt: now,
+            previousProofRef: row.proof_ref,
+          }),
+        );
       if (verified) {
         const verifiedAt = new Date(Math.max(now, Date.parse(job.boundary))).toISOString();
         store.db

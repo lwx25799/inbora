@@ -192,9 +192,8 @@ export class BrowserService {
     permitted();const request=++this.latestViewRequest;this.viewRequests++;
     try{
     const signal=AbortSignal.any([await beforeOpen(),AbortSignal.timeout(30_000)]),active=()=>{permitted();requireSafe(!signal.aborted&&request===this.latestViewRequest,'MESSAGE_VIEW_CANCELLED');};
-    active();const previous={owner:this.owner,mode:this.mode,recovering:this.recoveringLogin,autoFinish:this.autoFinishLogin},generation=this.loginGeneration+1;
+    active();const generation=this.loginGeneration+1;
     try{await this.beginLoginRecovery(false,signal,active);}catch(error){
-      if(this.loginGeneration===generation&&this.owner===previous.owner&&this.mode===previous.mode){this.recoveringLogin=previous.recovering;this.autoFinishLogin=previous.autoFinish;}
       if(this.loginGeneration!==generation)requireSafe(false,'MESSAGE_VIEW_CANCELLED');
       if(signal.aborted){permitted();requireSafe(false,'MESSAGE_VIEW_CANCELLED');}
       throw error;

@@ -109,10 +109,21 @@ export class SecurityIncidents {
       };
     }catch{return null;}
   }
-  async read(id:string):Promise<SecurityIncident|null>{
-    if(!uuid.test(id))return null;
+  private async inspectDirectoryReadOnly():Promise<{status:'OK';directory:string}|{status:'MISSING'}|{status:'UNSAFE'}>{
+    const evidence=join(this.root,'evidence'),directory=join(evidence,'security-incidents');
+    for(const dir of [this.root,evidence,directory]){
+      try{
+        const stat=await lstat(dir);
+        if(!stat.isDirectory()||stat.isSymbolicLink())return {status:'UNSAFE'};
+      }catch(error){
+        return (error as NodeJS.ErrnoException).code==='ENOENT'?{status:'MISSING'}:{status:'UNSAFE'};
+      }
+    }
+    return {status:'OK',directory};
+  }
+  private async readFileRecord(file:string,id:string):Promise<SecurityIncident|null>{
     try{
-      const directory=await this.directory(),file=join(directory,id+'.json'),stat=await lstat(file);
+      const stat=await lstat(file);
       if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size>100_000)return null;
       const value=JSON.parse(await readFile(file,'utf8')) as SecurityIncident;
       if(value.version!==1||value.id!==id||!['COMMENT_NOTIFICATION','DIRECT_MESSAGE'].includes(value.channel))return null;
@@ -120,19 +131,35 @@ export class SecurityIncidents {
       return value;
     }catch{return null;}
   }
-  /** Reads disk evidence when present (preserving tamper checks); falls back to inline SQLite recovery meta only when disk evidence is absent/unwritable. */
+  private wasRecordedOnDisk(id:string):boolean{
+    return !!this.store.db.prepare("SELECT 1 FROM audit_events WHERE event_type='SECURITY_INCIDENT_RECORDED' AND entity_id=? LIMIT 1").get(id);
+  }
+  async read(id:string):Promise<SecurityIncident|null>{
+    if(!uuid.test(id))return null;
+    const dir=await this.inspectDirectoryReadOnly();
+    if(dir.status!=='OK')return null;
+    return this.readFileRecord(join(dir.directory,id+'.json'),id);
+  }
+  /** Reads disk evidence when present (preserving tamper checks); falls back to inline SQLite recovery meta only on pure ENOENT when never recorded on disk. */
   async readRecovery(id:string):Promise<SecurityRecoveryIncident|null>{
     if(!uuid.test(id))return null;
-    let diskFileExists=false;
-    try{
-      const directory=await this.directory();
-      await lstat(join(directory,id+'.json'));
-      diskFileExists=true;
-    }catch{diskFileExists=false;}
-    if(diskFileExists){
-      const saved=await this.read(id);
-      return saved?{...saved,fromFallback:false}:null;
+    const dir=await this.inspectDirectoryReadOnly();
+    if(dir.status==='UNSAFE')return null;
+    if(dir.status==='OK'){
+      const file=join(dir.directory,id+'.json');
+      let missing=false;
+      try{
+        await lstat(file);
+      }catch(error){
+        if((error as NodeJS.ErrnoException).code!=='ENOENT')return null;
+        missing=true;
+      }
+      if(!missing){
+        const saved=await this.readFileRecord(file,id);
+        return saved?{...saved,fromFallback:false}:null;
+      }
     }
+    if(this.wasRecordedOnDisk(id))return null;
     return this.readInlineFallback(id);
   }
   private async capacity(directory:string):Promise<boolean>{

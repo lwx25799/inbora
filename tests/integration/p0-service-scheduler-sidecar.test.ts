@@ -11,15 +11,19 @@ import { BrowserService } from "../../src/app/browser-service.js";
 import { ClientService } from "../../src/app/service.js";
 import { CollectionScheduler, DeferredObjectRead } from "../../src/app/collection-scheduler.js";
 import { VerificationScheduler } from "../../src/app/verification-scheduler.js";
+import { humanQueueFrozen } from "../../src/app/human-queue-context.js";
+import { claimReceiptRecheck, receiptRecheckVersion } from "../../src/app/receipt-recheck.js";
 import { CredentialStore } from "../../src/app/credentials.js";
 import { defaultSettings } from "../../src/app/contracts.js";
 import type { ReplyPolicy } from "../../src/app/automation-contracts.js";
 import { DeepSeekProvider } from "../../src/ai/deepseek.js";
 import { Blocked, digest, eventBinding, targetKey, type InboundEvent } from "../../src/core/contracts.js";
 import { AutomationStore } from "../../src/storage/automation-store.js";
+import { ChatMessageStore } from "../../src/storage/chat-messages.js";
 import { migrateClient } from "../../src/storage/client-migration.js";
 import { migrateAutomation } from "../../src/storage/automation-migration.js";
-import { candidate, database, pending, privateTemp, snapshot } from "../helpers.js";
+import { migrateFollowups } from "../../src/storage/followup-migration.js";
+import { approved, candidate, database, pending, privateTemp, snapshot } from "../helpers.js";
 import { setupAssistant } from "../mcp-helpers.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -264,6 +268,7 @@ test("schedulers recover from transient errors, DeferredObjectRead keeps failure
   store.db.pragma("foreign_keys = ON");
   await migrateClient(store, join(root, "client.sqlite"));
   await migrateAutomation(store, join(root, "automation.sqlite"));
+  await migrateFollowups(store, join(root, "followups.sqlite"));
   let now = Date.now();
   const data = new AutomationStore(store, () => now);
   data.initialize(now);
@@ -299,19 +304,52 @@ test("schedulers recover from transient errors, DeferredObjectRead keeps failure
   await (collector as unknown as { pulse(): Promise<void> }).pulse();
   expect(collector.status().fatal).toBe("COLLECTION_STATE_UNAVAILABLE");
   stateSpy.mockRestore();
+  // Suspended and emergencyStopped early returns must not falsely clear fatal/backoff.
+  collector.suspend(true);
   now += 2_000;
+  await (collector as unknown as { pulse(): Promise<void> }).pulse();
+  expect(collector.status().fatal).toBe("COLLECTION_STATE_UNAVAILABLE");
+  collector.suspend(false);
   await (collector as unknown as { pulse(): Promise<void> }).pulse();
   expect(collector.status().fatal).toBeNull();
 
-  const verifier = new VerificationScheduler(data, async () => ({ verified: false, evidenceId: "x" }));
+  const busyAgain = vi.spyOn(data, "state").mockImplementationOnce(() => {
+    throw new Error("SQLITE_BUSY");
+  });
+  await (collector as unknown as { pulse(): Promise<void> }).pulse();
+  expect(collector.status().fatal).toBe("COLLECTION_STATE_UNAVAILABLE");
+  busyAgain.mockRestore();
+  data.stop(true);
+  now += 2_000;
+  await (collector as unknown as { pulse(): Promise<void> }).pulse();
+  expect(collector.status().fatal).toBe("COLLECTION_STATE_UNAVAILABLE");
+  data.stop(false);
+  call = 0;
+  await collector.runNow("works");
+  expect(collector.status().fatal).toBeNull();
+
+  let verifierUpdates = 0;
+  const verifier = new VerificationScheduler(
+    data,
+    async () => ({ verified: false, evidenceId: "x" }),
+    () => {
+      verifierUpdates++;
+    },
+  );
   cleanups.push(() => verifier.close());
   const vSpy = vi.spyOn(data, "state").mockImplementationOnce(() => {
     throw new Error("SQLITE_BUSY");
   });
   await (verifier as unknown as { pulse(): Promise<void> }).pulse();
+  expect(verifierUpdates).toBe(0);
   vSpy.mockRestore();
+  // Suspended early return keeps backoff; suspend(false) resets retryAt for immediate recovery.
+  verifier.suspend(true);
   now += 2_000;
+  await (verifier as unknown as { pulse(): Promise<void> }).pulse();
+  verifier.suspend(false);
   await expect((verifier as unknown as { pulse(): Promise<void> }).pulse()).resolves.toBeUndefined();
+  expect(verifierUpdates).toBe(0);
 
   const insert = store.db.prepare("INSERT INTO inbound_events VALUES(?,?,?,?,?,?,?,?,?)");
   store.db.transaction(() => {
@@ -388,8 +426,75 @@ test("sidecar disconnect drains in-flight requests cleanly and allows clean reco
   ]);
   expect(disconnectRes).toEqual({ protocol: 1, requestId: expect.any(String), ok: true, result: { connected: false } });
   expect(statusRes.protocol).toBe(1);
+  expect(statusRes.ok === true || statusRes.error === "CLIENT_CLOSING").toBe(true);
   expect(await call({ command: "connect", runtime: root, initialize: false, consent: true })).toMatchObject({ ok: true });
   child.stdin.end();
   expect(await exited).toBe(0);
   expect(stderr).toBe("");
 }, 30_000);
+
+test("OBSERVATION_SECURITY_SUSPECT stays whitelisted and DM clock tolerance (+2000ms) aligns sendFrozen and receiptRecheck", async () => {
+  const root = privateTemp("p0-5-suspect-and-clock-");
+  const store = database();
+  cleanups.push(async () => {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const baseMs = Date.now() - 60_000;
+  const originalPayload = candidate({ platformEventId: "1001", conversationId: "conv-clock", occurredAt: new Date(baseMs).toISOString() });
+  const draftId = approved(store, originalPayload);
+  await migrateClient(store, join(root, "client.sqlite"));
+  await migrateAutomation(store, join(root, "automation.sqlite"));
+  await migrateFollowups(store, join(root, "followups.sqlite"));
+  const origEventId = store.draft(draftId).eventId;
+  const intentId = store.recordIntent(draftId, snapshot(originalPayload), false, { check: () => {}, committed: () => {} });
+  store.db.prepare("UPDATE send_intents SET attempt_started_at=? WHERE id=?").run(new Date(baseMs + 5_000).toISOString(), intentId);
+  store.receipt(intentId, "UNCERTAIN", "POST_INTENT_FAILURE:READBACK:OBSERVATION_SECURITY_SUSPECT");
+
+  // humanQueueFrozen must block same operator when proof_ref carries OBSERVATION_SECURITY_SUSPECT.
+  store.db.prepare("INSERT INTO manual_send_commands VALUES(?,?,?,?,?,'UNCERTAIN',?,NULL,?)").run("cmd-1", origEventId, "op-1", "d", "{}", intentId, baseMs);
+  store.db.prepare("INSERT INTO manual_send_inputs VALUES(?,?)").run("cmd-1", "in-1");
+  expect(humanQueueFrozen(store, store.event(origEventId), "op-1")).toBe(true);
+
+  // sendFrozen allows a distinct later incoming DM whose server timestamp is <=2000ms ahead of local clock, and blocks >2000ms ahead.
+  const withinSkew = pending(store, candidate({ platformEventId: "1002", conversationId: "conv-clock", occurredAt: new Date(Date.now() + 1_500).toISOString() }));
+  const beyondSkew = pending(store, candidate({ platformEventId: "1003", conversationId: "conv-clock", occurredAt: new Date(Date.now() + 2_500).toISOString() }));
+  expect(store.sendFrozen(withinSkew)).toBe(false);
+  expect(store.sendFrozen(beyondSkew)).toBe(true);
+
+  // claimReceiptRecheck accepts DM outgoing candidate up to now + 2000ms and rejects > now + 2000ms; repair failure audits OBSERVATION_SECURITY_SUSPECT.
+  const now = Date.now() + 10_000;
+  const recheckPayload = candidate({ platformEventId: "2001", conversationId: "conv-recheck", occurredAt: new Date(now - 20_000).toISOString() });
+  const rEventId = pending(store, recheckPayload);
+  const rDraftId = randomUUID();
+  const rText = "recheck clock skew reply";
+  store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,'mock',1,'DRAFT',NULL,NULL)").run(rDraftId, rEventId, rText);
+  store.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(rEventId);
+  const rProof = { ...snapshot(recheckPayload), contextDigest: "a".repeat(64) };
+  store.approve(rDraftId, rProof, 1, rText);
+  const rIntentId = store.recordIntent(rDraftId, rProof, false, { check: () => {}, committed: () => {} });
+  const rBoundary = store.intentBoundary(rIntentId);
+  store.receipt(rIntentId, "UNCERTAIN", "POST_INTENT_FAILURE:READBACK:UNCLASSIFIED");
+  store.db
+    .prepare("INSERT INTO verification_jobs VALUES(?,?,?,?,2,?,?,?,?)")
+    .run(rIntentId, rEventId, rBoundary, digest(rProof), now - 100, now - 1, "REVIEW", "OBSERVATION_DM_CONTENT_DOM_NOT_READY");
+
+  const chat = new ChatMessageStore(store);
+  const within = candidate({ conversationId: "conv-recheck", platformEventId: "9002", direction: "OUTGOING", actorId: "own-1", text: rText, occurredAt: new Date(now + 1_500).toISOString() });
+  chat.observe([within], "own-1", Date.parse(rBoundary) - 1_000, now);
+  const tooFar = { ...within, occurredAt: new Date(now + 2_500).toISOString() };
+  store.db.prepare("UPDATE chat_messages SET payload=?,binding=? WHERE conversation_id='conv-recheck'").run(JSON.stringify(tooFar), eventBinding(tooFar));
+  expect(claimReceiptRecheck(store, now)).toBeUndefined();
+
+  store.db.prepare("UPDATE chat_messages SET payload=?,binding=? WHERE conversation_id='conv-recheck'").run(JSON.stringify(within), eventBinding(within));
+  const auto = new AutomationStore(store, () => now);
+  auto.initialize(now - 10_000);
+  const repairWorker = new VerificationScheduler(auto, async () => {
+    throw new Blocked("OBSERVATION_SECURITY_SUSPECT");
+  });
+  cleanups.push(() => repairWorker.close());
+  await repairWorker.tick();
+  expect(
+    store.db.prepare("SELECT event_type FROM audit_events WHERE event_type LIKE ?").all(receiptRecheckVersion + "_FAILED_%"),
+  ).toEqual([{ event_type: receiptRecheckVersion + "_FAILED_OBSERVATION_SECURITY_SUSPECT" }]);
+});

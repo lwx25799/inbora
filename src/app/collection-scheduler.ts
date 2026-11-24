@@ -34,9 +34,10 @@ export class CollectionScheduler {
     void this.pulse();
   }
   private async pulse():Promise<void> {
-    if (this.closed || this.persistence.now() < this.retryAt) return;
+    if (this.closed || this.running || this.suspended || this.persistence.now() < this.retryAt) return;
     try {
-      await this.tick();
+      const ran = await this.runTick();
+      if (!ran) return;
       this.transientFailures = 0;
       this.retryAt = 0;
       if (this.fatal) {
@@ -47,20 +48,29 @@ export class CollectionScheduler {
       if (this.closed) return;
       this.transientFailures = Math.min(this.transientFailures + 1, 8);
       this.retryAt = this.persistence.now() + Math.min(60_000, 2_000 * 2 ** (this.transientFailures - 1));
+      const changed = this.fatal !== 'COLLECTION_STATE_UNAVAILABLE';
       this.fatal = 'COLLECTION_STATE_UNAVAILABLE';
-      this.updated();
+      if (changed) this.updated();
     }
   }
   cancel(): void { this.cancelGeneration++;this.abort?.abort(); }
-  suspend(value:boolean):void {this.suspended=value;if(value)this.cancel();}
+  suspend(value:boolean):void {
+    this.suspended=value;
+    if(value)this.cancel();
+    else { this.transientFailures = 0; this.retryAt = 0; }
+  }
   status() {
     return {running: !!this.running, source: this.running ? this.last : null, fatal:this.fatal,
       channels: this.persistence.store.db.prepare("SELECT * FROM collection_progress ORDER BY source").all()};
   }
   async tick(): Promise<void> {
-    if (this.closed || this.running || this.suspended) return;
+    await this.runTick();
+  }
+  private async runTick(): Promise<boolean> {
+    if (this.closed || this.running || this.suspended) return false;
     const {collection, emergencyStopped} = this.persistence.state();
-    if (!collection || emergencyStopped) return;
+    if (emergencyStopped) return false;
+    if (!collection) return true;
     const progress = this.persistence.store.db.prepare("SELECT source,next_at,last_error FROM collection_progress").all() as {source: CollectionSource; next_at: number;last_error:string|null}[];
     const now=this.persistence.now();
     for(const row of progress){
@@ -85,8 +95,9 @@ export class CollectionScheduler {
     }
     const due = progress.filter(p => (p.source === "works" ? collection.comments : collection.inbox) && p.next_at <= this.persistence.now());
     const next = due.find(p => p.source !== this.last) ?? due[0];
-    if (!next) return;
+    if (!next) return true;
     await this.runTurn(next.source,'BACKGROUND',collection);
+    return true;
   }
   async runNow(source:CollectionSource,signal?:AbortSignal):Promise<{deferredCode:string|null}> {
     const generation=this.cancelGeneration;
@@ -142,6 +153,11 @@ export class CollectionScheduler {
       } else {
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_success=?,last_error=NULL,failures=0,elapsed_ms=? WHERE source=?")
           .run(now + interval, now, Math.max(0, now - started),source);
+      }
+      if(!cancelled&&(!error||objectDeferred)){
+        this.transientFailures=0;
+        this.retryAt=0;
+        this.fatal=null;
       }
       return {error,deferredCode:objectDeferred?error:null,cancelled};
     }).finally(() => {

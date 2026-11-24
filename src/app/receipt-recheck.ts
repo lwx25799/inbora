@@ -24,7 +24,7 @@ function dmCandidate(store:EventStore,event:StoredEvent,ownId:string,text:string
   const row=possible[0]!,message=new ChatMessageStore(store).get(row.id),p=message?.payload,time=Date.parse(p?.occurredAt??'');
   if(!message||!p||!isStrong(p)||p.kind!=='DM'||p.direction!=='OUTGOING'||p.accountId!==e.accountId||p.conversationId!==e.conversationId||
     message.ownId!==ownId||p.actorId!==ownId||!p.platformEventId||!/^[1-9]\d{0,63}$/u.test(p.platformEventId)||
-    !Number.isFinite(time)||time>now||time>boundary+120_000||row.observed_at<boundary)return;
+    !Number.isFinite(time)||time>now+dmClockToleranceMs||time>boundary+120_000||row.observed_at<boundary)return;
   const incoming=store.db.prepare("SELECT payload FROM inbound_events WHERE account_id=? AND channel='DIRECT_MESSAGE' AND json_extract(payload,'$.conversationId')=? LIMIT 1001")
     .all(e.accountId,e.conversationId) as {payload:string}[];
   if(incoming.length>1000)return;

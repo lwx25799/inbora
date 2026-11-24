@@ -15,6 +15,7 @@ import {
   claimFollowupVerification,
   commitFollowupVerificationFailure,
   commitFollowupVerificationResult,
+  extendFollowupVerificationDeadlines,
   type FollowupVerificationJob,
   type FollowupVerificationResult,
 } from "./followup-verification.js";
@@ -70,20 +71,26 @@ export class VerificationScheduler {
     this.data.store.db
       .prepare("UPDATE verification_jobs SET deadline=? WHERE state='PENDING' AND attempts<2 AND deadline<=?")
       .run(this.data.now() + 120_000, this.data.now());
+    extendFollowupVerificationDeadlines(this.data.store, this.data.now());
     this.timer = setInterval(() => void this.pulse(), 1000);
     this.timer.unref();
   }
   private async pulse(): Promise<void> {
-    if (this.closed || this.data.now() < this.retryAt) return;
+    if (this.closed) return;
+    if (this.running) {
+      if (this.data.now() >= this.activeDeadline) this.abort?.abort();
+      return;
+    }
+    if (this.suspended || this.data.now() < this.retryAt) return;
     try {
-      await this.tick();
+      const ran = await this.runTick();
+      if (!ran) return;
       this.transientFailures = 0;
       this.retryAt = 0;
     } catch {
       if (this.closed) return;
       this.transientFailures = Math.min(this.transientFailures + 1, 8);
       this.retryAt = this.data.now() + Math.min(60_000, 2_000 * 2 ** (this.transientFailures - 1));
-      this.updated();
     }
   }
   private async runFollowupJob(job: FollowupVerificationJob): Promise<void> {
@@ -120,11 +127,14 @@ export class VerificationScheduler {
     await task;
   }
   async tick(): Promise<void> {
+    await this.runTick();
+  }
+  private async runTick(): Promise<boolean> {
     if (this.running) {
       if (this.data.now() >= this.activeDeadline) this.abort?.abort();
-      return;
+      return false;
     }
-    if (this.closed || this.suspended || this.data.state().emergencyStopped) return;
+    if (this.closed || this.suspended || this.data.state().emergencyStopped) return false;
     const held = (["COMMENT_NOTIFICATION", "DIRECT_MESSAGE"] as const).filter((channel) =>
       readSecurityHold(this.data.store, channel),
     );
@@ -136,6 +146,7 @@ export class VerificationScheduler {
         )
         .run(this.data.now() + 120_000, channel);
     }
+    if (held.length) extendFollowupVerificationDeadlines(this.data.store, this.data.now(), held);
     this.data.store.db
       .prepare("UPDATE verification_jobs SET state='NOT_NEEDED' WHERE state='PENDING' AND intent_id IN (SELECT id FROM send_intents WHERE status='CONFIRMED')")
       .run();
@@ -152,13 +163,13 @@ export class VerificationScheduler {
       const followup = claimFollowupVerification(this.data.store, this.data.now(), held);
       if (followup) {
         await this.runFollowupJob(followup);
-        return;
+        return true;
       }
     }
     const supplemental = !job;
     job ??= claimDmContextVerification(this.data.store, this.data.now());
     job ??= claimReceiptRecheck(this.data.store, this.data.now());
-    if (!job) return;
+    if (!job) return true;
     const channel = this.data.store.event(job.event_id).payload.channel,
       security = securityRevision(this.data.store, channel);
     const repair = "recheckRevision" in job ? job : undefined;
@@ -283,6 +294,7 @@ export class VerificationScheduler {
                     "OBSERVATION_UNEXPECTED_ORIGIN",
                     "OBSERVATION_SECURITY_TITLE",
                     "OBSERVATION_SECURITY_COMPONENT",
+                    "OBSERVATION_SECURITY_SUSPECT",
                     "OBSERVATION_CONVERSATION_NOT_FOUND",
                     "COMMENT_REPLY_CANCELLED",
                     "COMMENT_REPLY_ROOT_NOT_FOUND",
@@ -308,6 +320,7 @@ export class VerificationScheduler {
       });
     this.running = task;
     await task;
+    return true;
   }
   cancel(): void {
     this.abort?.abort();
@@ -315,6 +328,10 @@ export class VerificationScheduler {
   suspend(value: boolean, cancelInFlight = true): void {
     this.suspended = value;
     if (value && cancelInFlight) this.cancel();
+    if (!value) {
+      this.transientFailures = 0;
+      this.retryAt = 0;
+    }
   }
   async drain(): Promise<void> {
     await this.running;
