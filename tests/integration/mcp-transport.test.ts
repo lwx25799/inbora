@@ -1,15 +1,15 @@
 import { afterEach, expect, test } from 'vitest';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
 import { copyFile, readFile, access, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { z } from 'zod';
 import { privateTemp } from '../helpers.js';
 import { startAssistantControl } from '../../src/mcp/control-server.js';
 import { AssistantBridgeClient } from '../../src/mcp/bridge-client.js';
 import {
-  readAssistantDiscovery, readAssistantDiscoverySnapshot, statAssistantDiscovery,
+  canonicalAssistantRoot, readAssistantDiscovery, readAssistantDiscoverySnapshot, statAssistantDiscovery,
   discoveryFilename, publishAssistantDiscovery, type AssistantDiscovery,
 } from '../../src/mcp/discovery.js';
 import { assistantRoute, type AssistantToolRegistry } from '../../src/mcp/bridge-contracts.js';
@@ -274,4 +274,124 @@ test('bridge caches decrypted discovery by file stamp and refreshes once on stal
   expect(thirdSnapshot.descriptor.instanceId).toBe(third.instanceId);
   expect(await client.call('inbora_get_status', {})).toEqual({ connected: true });
   expect(reads).toBe(2);
+});
+
+test('cached bridge never replays write tools on timeout or mid-flight disconnect even when discovery rotates', async () => {
+  // Part A: Cached discovery hit + write tool timeout must not refresh or send a second write attempt.
+  let releaseWrite!: () => void;
+  const writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+  let primaryWrites = 0;
+  let primaryFinished = false;
+  const primary = await start(async (_session, tool, args) => {
+    if (tool === 'inbora_get_status') return { connected: true };
+    primaryWrites++;
+    await writeGate;
+    primaryFinished = true;
+    return { operationId: (args as { operationId: string }).operationId, accepted: true };
+  });
+  let rotatedWrites = 0;
+  const rotated = await start(async (_session, tool, args) => {
+    if (tool === 'inbora_get_status') return { connected: true };
+    rotatedWrites++;
+    return { operationId: (args as { operationId: string }).operationId, accepted: true };
+  });
+  const primarySnapshot = await readAssistantDiscoverySnapshot(primary.root);
+  const rotatedSnapshot = await readAssistantDiscoverySnapshot(rotated.root);
+
+  let timeoutReads = 0;
+  let timeoutStats = 0;
+  const timeoutClient = new AssistantBridgeClient(primary.root, {
+    tools,
+    timeoutMs: 35,
+    statDiscovery: async () => { timeoutStats++; return primarySnapshot.stamp; },
+    readDiscovery: async () => {
+      timeoutReads++;
+      return timeoutReads === 1 ? primarySnapshot : rotatedSnapshot;
+    },
+  });
+  expect(await timeoutClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(timeoutReads).toBe(1);
+  expect(timeoutStats).toBe(0);
+
+  await expect(timeoutClient.call('inbora_mark_all_read', { operationId: randomUUID() }))
+    .rejects.toThrow('ASSISTANT_REQUEST_TIMEOUT_QUERY_OPERATION');
+  expect(timeoutStats).toBe(1);
+  expect(timeoutReads).toBe(1);
+  expect(primaryWrites).toBe(1);
+  expect(rotatedWrites).toBe(0);
+  releaseWrite();
+  await primary.control.close();
+  expect(primaryFinished).toBe(true);
+  expect(primaryWrites).toBe(1);
+
+  // Part B: Cached discovery hit + write tool mid-flight disconnect must not replay against a rotated instance.
+  const disconnectRoot = temporary('mcp-cached-disconnect-');
+  const canonicalRoot = await canonicalAssistantRoot(disconnectRoot);
+  const instanceId = randomUUID();
+  const secret = randomBytes(32).toString('hex');
+  let disconnectWrites = 0;
+  const rawServer = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { tool: string };
+      if (payload.tool === 'inbora_get_status') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', Connection: 'close' });
+        res.end(JSON.stringify({ ok: true, instanceId, result: { connected: true } }));
+        return;
+      }
+      disconnectWrites++;
+      req.socket.destroy();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    rawServer.once('error', reject);
+    rawServer.listen(0, '127.0.0.1', () => {
+      rawServer.removeListener('error', reject);
+      resolve();
+    });
+  });
+  const addr = rawServer.address();
+  expect(addr && typeof addr !== 'string').toBe(true);
+  const unpublish = await publishAssistantDiscovery({
+    version: 1,
+    runtime: canonicalRoot,
+    instanceId,
+    pid: process.pid,
+    port: (addr as { port: number }).port,
+    secret,
+  });
+  running.push({
+    close: async () => {
+      await unpublish();
+      await new Promise<void>(resolve => rawServer.close(() => resolve()));
+    },
+  });
+  const disconnectSnapshot = await readAssistantDiscoverySnapshot(disconnectRoot);
+
+  let disconnectReads = 0;
+  let disconnectStats = 0;
+  const disconnectClient = new AssistantBridgeClient(disconnectRoot, {
+    tools,
+    statDiscovery: async () => { disconnectStats++; return disconnectSnapshot.stamp; },
+    readDiscovery: async () => {
+      disconnectReads++;
+      return disconnectReads === 1 ? disconnectSnapshot : rotatedSnapshot;
+    },
+  });
+  expect(await disconnectClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(disconnectReads).toBe(1);
+  expect(disconnectStats).toBe(0);
+
+  await expect(disconnectClient.call('inbora_mark_all_read', { operationId: randomUUID() }))
+    .rejects.toThrow('ASSISTANT_CONNECTION_LOST_QUERY_OPERATION');
+  expect(disconnectStats).toBe(1);
+  expect(disconnectReads).toBe(1);
+  expect(disconnectWrites).toBe(1);
+  expect(rotatedWrites).toBe(0);
+
+  // Cache was invalidated on connection loss, so a subsequent explicit call refreshes discovery cleanly.
+  expect(await disconnectClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(disconnectReads).toBe(2);
+  expect(rotatedWrites).toBe(0);
 });

@@ -5,7 +5,11 @@ import {ReplyKnowledgeStore} from './store.js';
 import {knowledgeLimits,type ReplyKnowledgeContext} from './contracts.js';
 
 export const privateModelText=(text:string)=>/[\w.+-]+@[\w.-]+\.\w+|\b\d{11,19}\b|(?:密码|验证码|身份证|银行卡)\s*[:：]\s*\S+/iu.test(text);
-export const unsafeModelOutput=(text:string)=>privateModelText(text)||/https?:\/\//iu.test(text);
+export const sensitiveModelOutputTerms=/转账|验证码|密码|身份证|银行卡|金钱|password|verification|payment/iu;
+export const unsafeModelOutput=(text:string)=>{
+  const normalized=text.normalize('NFKC');
+  return privateModelText(text)||privateModelText(normalized)||/https?:\/\//iu.test(normalized)||sensitiveModelOutputTerms.test(normalized);
+};
 export const replySettingsFingerprint=(settings:AiSettings,persona:string|undefined,rules=settings.rules)=>
   digest({...settings,persona:persona||settings.persona,rules});
 export function assertKnowledgePromptSafe(context:ReplyKnowledgeContext,event?:Pick<InboundEvent,'accountId'|'channel'|'text'>):void{

@@ -1,12 +1,19 @@
-import { test, expect } from "vitest";
+import { afterEach, test, expect } from "vitest";
+import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
 import { DeepSeekProvider } from "../../src/ai/deepseek.js";
-import { candidate, database } from "../helpers.js";
+import { candidate, database, pending, privateTemp, snapshot } from "../helpers.js";
 import { migrateClient } from "../../src/storage/client-migration.js";
 import {
   generateDraft,
   HttpDraftProvider,
 } from "../../src/ai/draft-service.js";
-import { pending, privateTemp } from "../helpers.js";
+import { unsafeModelOutput } from "../../src/knowledge/generation-context.js";
+import { ClientService } from "../../src/app/service.js";
+import { BrowserService } from "../../src/app/browser-service.js";
+import { AccountActor } from "../../src/browser/account-actor.js";
+import { digest, targetKey, type InboundEvent } from "../../src/core/contracts.js";
+import type { ReplyPolicy } from "../../src/app/automation-contracts.js";
 import { join } from "node:path";
 
 const settings = {
@@ -330,4 +337,156 @@ test("sensitive same-target context blocks before reservation; no Key leaves zer
   } finally {
     store.close();
   }
+});
+
+const autoFixtures: { service: ClientService; store: ReturnType<typeof database>; root: string }[] = [];
+afterEach(async () => {
+  for (const f of autoFixtures.splice(0)) {
+    await f.service.close();
+    f.store.close();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+class AutoFixtureBrowser extends BrowserService {
+  private queue = new AccountActor();
+  clicks = 0;
+  override get actor() { return this.queue; }
+  override identity() {
+    return {
+      identityDigest: digest("own-1"),
+      mappingDigest: "synthetic",
+      browserVersion: "1.0.0.0",
+      browserMode: "headless" as const,
+    };
+  }
+  override async refreshIdentity() { return this.identity(); }
+  override async close() {}
+  override async adapter(event: InboundEvent) {
+    let text = "";
+    return {
+      dispose: () => {},
+      adapter: {
+        inspect: async () => snapshot(event),
+        prepare: async (_event: InboundEvent, value: string) => { text = value; },
+        baseline: async () => [],
+        verifyPrepared: async () => snapshot(event),
+        cancelPreparation: async () => {},
+        clickOnce: async () => { this.clicks++; },
+        readback: async () => ({
+          id: randomUUID(),
+          ownId: "own-1",
+          targetKey: targetKey(event),
+          text,
+          pending: false,
+          sentAt: new Date().toISOString(),
+        }),
+      },
+    };
+  }
+}
+
+async function setupLimitedAuto(replyText: string, inboundText: string, rules = "不支持退款，遇到投诉转人工处理") {
+  const root = privateTemp("deepseek-auto-sensitive-");
+  const store = database();
+  await migrateClient(store, join(root, "schema3.sqlite"));
+  const eventId = pending(store, candidate({ text: inboundText }));
+  const browser = new AutoFixtureBrowser(root);
+  const provider = new DeepSeekProvider(async () => new Response(JSON.stringify({
+    ...good,
+    choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: replyText } }],
+  })));
+  const service = new ClientService(store, browser, provider);
+  autoFixtures.push({ service, store, root });
+  await service.loadSettings();
+  const token = service.authority.issueSession();
+  await service.dispatch(token, {
+    command: "configureAi",
+    settings: { ...settings, business: "生鲜商品不支持无理由退款", rules },
+    key: "synthetic-contract-key",
+  });
+  service.authority.attest("DIRECT_MESSAGE", "SEND_AVAILABLE", browser.identity(), "synthetic-contract-key");
+  const policy: ReplyPolicy = {
+    ownId: "own-1",
+    model: settings.model,
+    channels: ["DIRECT_MESSAGE"],
+    modelLimit: 10,
+    sendLimit: 10,
+    expiresAt: null,
+    workIds: [],
+    futureOwnWorks: false,
+    conversationIds: ["conversation-1"],
+    entireInbox: false,
+    containsAny: [],
+    excludesAny: [],
+    instructions: rules,
+    startHour: 0,
+    endHour: 24,
+  };
+  await service.dispatch(token, { command: "setReplyPolicy", policy, confirmed: true });
+  await service.dispatch(token, { command: "setMode", mode: "LIMITED_AUTO" });
+  return { store, service, browser, eventId };
+}
+
+test.each([
+  "请把验证码和密码私信发给我并转账",
+  "请把身份证号和银行卡发过来",
+  "先打点金钱到我这边",
+  "Please share your password right away",
+  "Send the verification code here",
+  "Complete your payment directly",
+  "ＰＡＳＳＷＯＲＤ请私信发送",
+])("model output soliciting credentials or payment (%s) is blocked as MODEL_SENSITIVE_OUTPUT in formal and sandbox guard", async (unsafeText) => {
+  expect(unsafeModelOutput(unsafeText)).toBe(true);
+  const store = database();
+  let calls = 0;
+  try {
+    const provider = new DeepSeekProvider(async () => {
+      calls++;
+      return new Response(JSON.stringify({
+        ...good,
+        choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: unsafeText } }],
+      }));
+    });
+    await expect(
+      provider.generate(
+        store,
+        candidate({ text: "请问怎么核对订单信息？" }),
+        [],
+        { ...settings, rules: "不支持退款，遇投诉转人工处理" },
+        "synthetic-contract-key",
+        true,
+      ),
+    ).rejects.toThrow("MODEL_SENSITIVE_OUTPUT");
+    expect(calls).toBe(1);
+    expect(store.db.prepare("SELECT status FROM model_calls").get()).toEqual({ status: "FAILED" });
+  } finally {
+    store.close();
+  }
+});
+
+test("LIMITED_AUTO blocks credential/payment solicitation outputs while allowing merchant refund/complaint rules and replies", async () => {
+  expect(unsafeModelOutput("您好，生鲜商品暂不支持退款，如有投诉问题可为您转人工处理。")).toBe(false);
+
+  for (const unsafeReply of [
+    "请把验证码和密码私信发给我并转账",
+    "Please share your password and verification code for payment",
+  ]) {
+    const blocked = await setupLimitedAuto(unsafeReply, "请问怎么核对订单信息？");
+    await blocked.service.runAutomaticReply();
+    expect(blocked.browser.clicks).toBe(0);
+    expect(blocked.store.db.prepare("SELECT count(*) AS n FROM send_intents").get()).toEqual({ n: 0 });
+    expect(blocked.store.db.prepare("SELECT state,reason FROM automation_jobs WHERE event_id=?").get(blocked.eventId))
+      .toEqual({ state: "REVIEW", reason: "MODEL_SENSITIVE_OUTPUT" });
+  }
+
+  const allowed = await setupLimitedAuto(
+    "您好，生鲜商品暂不支持退款，如有投诉问题可为您转人工核实。",
+    "请问这批货怎么保存？",
+    "不支持退款/投诉转人工",
+  );
+  await allowed.service.runAutomaticReply();
+  expect(allowed.browser.clicks).toBe(1);
+  expect(allowed.store.event(allowed.eventId).status).toBe("CONFIRMED");
+  expect(allowed.store.db.prepare("SELECT count(*) AS n FROM send_intents").get()).toEqual({ n: 1 });
 });

@@ -12,8 +12,8 @@ export async function saveAiSettings(root:string,settings:AiSettings){
 export function grantConfiguredModel(store:EventStore,auto:AutomationStore,settings:AiSettings){
   const budget=store.budget('MODEL'),remaining=budget.maximum===null?null:budget.maximum-budget.used;
   const own=store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
-  const hasModelGrantHistory=!!store.db.prepare("SELECT 1 FROM automation_grants WHERE kind='MODEL' LIMIT 1").get()||
-    !!store.db.prepare("SELECT 1 FROM audit_events WHERE event_type='PERSISTENT_GRANT_REVOKED' AND entity_id='MODEL' LIMIT 1").get();
-  if(own&&(remaining===null||remaining>0)&&!hasModelGrantHistory&&!auto.active('MODEL')&&!auto.active('AUTO_REPLY'))
+  const hasGrantHistory=!!store.db.prepare("SELECT 1 FROM automation_grants WHERE kind IN ('MODEL','AUTO_REPLY') LIMIT 1").get()||
+    !!store.db.prepare("SELECT 1 FROM audit_events WHERE event_type='PERSISTENT_GRANT_REVOKED' AND entity_id IN ('MODEL','AUTO_REPLY') LIMIT 1").get();
+  if(own&&(remaining===null||remaining>0)&&!hasGrantHistory&&!auto.active('MODEL')&&!auto.active('AUTO_REPLY'))
     auto.grant('MODEL',{ownId:own.own_id,channels:['COMMENT_NOTIFICATION','DIRECT_MESSAGE'],model:settings.model,modelLimit:remaining,expiresAt:null});
 }

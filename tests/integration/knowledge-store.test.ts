@@ -286,4 +286,72 @@ test('incremental sample acceptance keeps holdout stable and never invalidates a
   }finally{f.close();}
 });
 
+test('deleting a source rebalances holdout so the last remaining active group is never trapped in holdout',async()=>{
+  const f=await fixture();try{
+    const s1=f.data.saveSource(account,{kind:'CHAT',title:'来源一'});
+    const s2=f.data.saveSource(account,{kind:'CHAT',title:'来源二'});
+    f.data.addSamples(account,[
+      {channel:'DIRECT_MESSAGE',prompt:'第一组问题',response:'第一组自然回复。',source:'IMPORTED',sourceId:s1.id,group:'group-one'},
+      {channel:'DIRECT_MESSAGE',prompt:'第二组问题',response:'第二组自然回复。',source:'IMPORTED',sourceId:s2.id,group:'group-two'},
+    ]);
+    const initialSamples=f.data.samples(account);
+    f.data.selectSamples(account,initialSamples.map(row=>row.id),true);
+    const before=f.data.learningSamples(account,[]);
+    expect(before.training).toHaveLength(1);
+    expect(before.evaluation).toHaveLength(1);
+    const trainingSourceId=before.training[0]!.sourceId;
+    const heldSampleId=before.evaluation[0]!.id;
+
+    // Delete the only training source; the sole surviving group must be released from holdout=1.
+    f.data.deleteSource(account,trainingSourceId);
+    const after=f.data.learningSamples(account,[]);
+    expect(after.training.map(row=>row.id)).toEqual([heldSampleId]);
+    expect(after.evaluation).toEqual([]);
+    expect(f.data.samples(account).find(row=>row.id===heldSampleId)?.holdout).toBe(false);
+    const saved=f.data.savePersona(account,'删除来源后仅剩单组也可保存人设。',[heldSampleId]);
+    expect(saved.sampleIds).toEqual([heldSampleId]);
+  }finally{f.close();}
+});
+
+test('deleting sources preserves surviving training groups and always retains at least one training group when multiple holdout groups remain',async()=>{
+  const f=await fixture();try{
+    const sources=Array.from({length:10},(_,index)=>f.data.saveSource(account,{kind:'CHAT',title:`多组来源${index}`}));
+    f.data.addSamples(account,sources.map((src,index)=>({
+      channel:'DIRECT_MESSAGE' as const,
+      prompt:`多组问题${index}`,
+      response:`多组回复${index}`,
+      source:'IMPORTED' as const,
+      sourceId:src.id,
+      group:`multi-group-${index}`,
+    })));
+    const all=f.data.samples(account);
+    f.data.selectSamples(account,all.map(row=>row.id),true);
+    const split=f.data.learningSamples(account,[]);
+    expect(split.training).toHaveLength(8);
+    expect(split.evaluation).toHaveLength(2);
+
+    // Pin a published persona to one training sample, then delete an unrelated training source.
+    const pinnedSample=split.training[0]!;
+    const published=f.data.savePersona(account,'已发布人设不应被无关删除影响。',[pinnedSample.id]);
+    f.data.publishPersona(account,published.id);
+    const unrelatedTraining=split.training[1]!;
+    f.data.deleteSource(account,unrelatedTraining.sourceId);
+    expect(f.data.overview(account).activePersona).toMatchObject({id:published.id,state:'PUBLISHED'});
+    expect(f.data.learningSamples(account,[]).training.map(row=>row.id)).toContain(pinnedSample.id);
+
+    // Delete all remaining training sources so only the 2 previously held-out groups survive;
+    // assignHoldout must release one group into training instead of leaving both trapped in holdout=1.
+    for(const row of split.training.filter(item=>item.id!==unrelatedTraining.id))f.data.deleteSource(account,row.sourceId);
+    const twoLeft=f.data.learningSamples(account,[]);
+    expect(twoLeft.training).toHaveLength(1);
+    expect(twoLeft.evaluation).toHaveLength(1);
+
+    // Deleting that promoted training source leaves only 1 group, which must also be released to holdout=0.
+    f.data.deleteSource(account,twoLeft.training[0]!.sourceId);
+    const oneLeft=f.data.learningSamples(account,[]);
+    expect(oneLeft.training).toHaveLength(1);
+    expect(oneLeft.evaluation).toEqual([]);
+  }finally{f.close();}
+});
+
 afterAll(()=>{process.stdout.write(JSON.stringify({knowledgeFixtureCleanup:{directories:cleanedDirectories,bytes:cleanedBytes}})+'\n');});

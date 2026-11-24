@@ -201,6 +201,7 @@ export class ReplyKnowledgeStore {
       WHERE m.id IS NULL OR m.accepted=0 OR m.excluded=1 OR m.holdout=1)`).run(accountId);
   }
   deleteSource(accountId:string,sourceId:string):void{
+    const ownId=this.own(accountId);
     this.requireSource(accountId,sourceId);
     this.store.db.transaction(()=>{
       const relatedTasks=this.store.db.prepare(`SELECT t.id FROM k_learning_tasks t WHERE t.account_id=? AND EXISTS(
@@ -211,12 +212,16 @@ export class ReplyKnowledgeStore {
       this.store.db.prepare('DELETE FROM k_knowledge WHERE source_id=?').run(sourceId);
       this.store.db.prepare('DELETE FROM k_sample_sources WHERE source_id=?').run(sourceId);
       const samples=this.store.db.prepare('SELECT id FROM k_samples WHERE source_id=?').all(sourceId) as {id:string}[];
+      const baseline=samples.length?snapshotHoldoutBaseline(this.store,accountId,ownId):undefined;
+      let deletedSamples=0;
       for(const item of samples){
         const other=this.store.db.prepare('SELECT source_id FROM k_sample_sources WHERE sample_id=? ORDER BY source_id LIMIT 1').get(item.id) as {source_id:string}|undefined;
         if(other)this.store.db.prepare('UPDATE k_samples SET source_id=? WHERE id=?').run(other.source_id,item.id);
-        else this.store.db.prepare('DELETE FROM k_samples WHERE id=?').run(item.id);
+        else{this.store.db.prepare('DELETE FROM k_samples WHERE id=?').run(item.id);deletedSamples++;}
       }
-      this.store.db.prepare('DELETE FROM k_sources WHERE id=?').run(sourceId);this.invalidatePersonas(accountId);
+      this.store.db.prepare('DELETE FROM k_sources WHERE id=?').run(sourceId);
+      if(deletedSamples>0)assignHoldout(this.store,accountId,ownId,baseline);
+      this.invalidatePersonas(accountId);
       const invalidPersonas=this.store.db.prepare(`SELECT t.id FROM k_learning_tasks t JOIN k_personas p ON p.id=t.persona_id
         WHERE t.account_id=? AND p.state='INVALID'`).all(accountId) as {id:string}[];
       for(const id of new Set([...relatedTasks,...invalidPersonas].map(row=>row.id))){
