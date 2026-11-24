@@ -6,7 +6,7 @@ import {knowledgeInputSchema,sampleInputSchema,knowledgeLimits,type KnowledgeInp
   type KnowledgeOverview,type KnowledgeSource,type SourceInput,type PersonaVersion,type SampleInput,type ReplySample,
   type ReplyKnowledgeContext,type StyleExample} from './contracts.js';
 import {chunkText,lexicalTerms,normalized,retrieveKnowledge} from './retrieval.js';
-import {assignHoldout,learningSelection,nativeCandidates,redactSampleText,safeStyleExample,sampleBlock,sampleDigest,sampleFromRow,type SampleRow} from './samples.js';
+import {assignHoldout,learningSelection,nativeCandidates,redactSampleText,safeStyleExample,sampleBlock,sampleDigest,sampleFromRow,snapshotHoldoutBaseline,type SampleRow} from './samples.js';
 
 interface SourceRow {id:string;kind:KnowledgeSource['kind'];title:string;created_at:number}
 interface EntryRow {id:string;source_id:string;title:string;topic:string;text:string;aliases_json:string;channels_json:string;
@@ -150,14 +150,15 @@ export class ReplyKnowledgeStore {
   selectSamples(accountId:string,ids:string[],accepted:boolean):void{
     const ownId=this.own(accountId);requireSafe(ids.length>0&&ids.length<=100000&&new Set(ids).size===ids.length,'PERSONA_SAMPLE_SELECTION_INVALID');
     this.store.db.transaction(()=>{
+      const baseline=snapshotHoldoutBaseline(this.store,accountId,ownId);
       for(const id of ids){
         const row=this.store.db.prepare(`SELECT m.* FROM k_samples m JOIN k_sources s ON s.id=m.source_id WHERE m.id=? AND m.account_id=? AND s.own_id=?`)
           .get(id,accountId,ownId) as SampleRow|undefined;
         requireSafe(row&&(!accepted||!row.excluded||row.reason==='USER_EXCLUDED'),'PERSONA_SAMPLE_SELECTION_INVALID');
         if(accepted)this.store.db.prepare('UPDATE k_samples SET accepted=1,excluded=0,reason=NULL WHERE id=?').run(id);
-        else if(!row.excluded||row.reason==='USER_EXCLUDED')this.store.db.prepare("UPDATE k_samples SET accepted=0,excluded=1,reason='USER_EXCLUDED' WHERE id=?").run(id);
+        else if(!row.excluded||row.reason==='USER_EXCLUDED')this.store.db.prepare("UPDATE k_samples SET accepted=0,excluded=1,holdout=0,reason='USER_EXCLUDED' WHERE id=?").run(id);
       }
-      assignHoldout(this.store,accountId,ownId);this.invalidatePersonas(accountId);
+      assignHoldout(this.store,accountId,ownId,baseline);this.invalidatePersonas(accountId);
       this.store.audit('PERSONA_SAMPLES_SELECTED',accountId,{count:ids.length,accepted});
     }).immediate();
   }

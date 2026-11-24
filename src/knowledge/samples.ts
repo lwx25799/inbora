@@ -27,15 +27,67 @@ export function safeStyleExample(sample:Pick<ReplySample,'prompt'|'response'>):b
     .test(sample.prompt+'\n'+sample.response);
 }
 
-/** A stable group split keeps whole conversations out of training; it is recalculated only on explicit selection. */
-export function assignHoldout(store:EventStore,accountId:string,ownId:string):void{
-  const rows=store.db.prepare(`SELECT m.id,m.group_key FROM k_samples m JOIN k_sources s ON s.id=m.source_id
-    WHERE m.account_id=? AND s.own_id=? AND m.accepted=1 AND m.excluded=0 ORDER BY m.created_at,m.id`).all(accountId,ownId) as {id:string;group_key:string}[];
-  const groups=[...new Set(rows.map(row=>row.group_key))].sort((a,b)=>digest(a).localeCompare(digest(b)));
-  const withheld=new Set(groups.slice(0,groups.length>1?Math.max(1,Math.round(groups.length*.2)):0));
-  store.db.prepare('UPDATE k_samples SET holdout=0 WHERE account_id=?').run(accountId);
+export interface HoldoutBaseline {
+  existingHoldoutGroups: Set<string>;
+  existingTrainingGroups: Set<string>;
+}
+
+/** Snapshot active group assignments before modifying sample selection so existing groups never drift into holdout. */
+export function snapshotHoldoutBaseline(store:EventStore,accountId:string,ownId:string):HoldoutBaseline{
+  const rows=store.db.prepare(`SELECT m.group_key,MAX(m.holdout) AS held FROM k_samples m JOIN k_sources s ON s.id=m.source_id
+    WHERE m.account_id=? AND s.own_id=? AND m.accepted=1 AND m.excluded=0 GROUP BY m.group_key`)
+    .all(accountId,ownId) as {group_key:string;held:number}[];
+  const existingHoldoutGroups=new Set<string>(),existingTrainingGroups=new Set<string>();
+  for(const row of rows){
+    if(row.held)existingHoldoutGroups.add(row.group_key);
+    else existingTrainingGroups.add(row.group_key);
+  }
+  return {existingHoldoutGroups,existingTrainingGroups};
+}
+
+/** A stable incremental group split keeps whole conversations intact without shifting existing training groups or published personas into holdout. */
+export function assignHoldout(store:EventStore,accountId:string,ownId:string,baseline?:HoldoutBaseline):void{
+  store.db.prepare(`UPDATE k_samples SET holdout=0
+    WHERE account_id=? AND (accepted=0 OR excluded=1)
+      AND source_id IN (SELECT id FROM k_sources WHERE account_id=? AND own_id=?)`)
+    .run(accountId,accountId,ownId);
+  const rows=store.db.prepare(`SELECT m.id,m.group_key,m.holdout FROM k_samples m JOIN k_sources s ON s.id=m.source_id
+    WHERE m.account_id=? AND s.own_id=? AND m.accepted=1 AND m.excluded=0 ORDER BY m.created_at,m.id`)
+    .all(accountId,ownId) as {id:string;group_key:string;holdout:number}[];
+  const activeGroups=[...new Set(rows.map(row=>row.group_key))];
   const update=store.db.prepare('UPDATE k_samples SET holdout=? WHERE id=?');
-  for(const row of rows)update.run(Number(withheld.has(row.group_key)),row.id);
+  if(activeGroups.length<=1){
+    for(const row of rows)if(row.holdout!==0)update.run(0,row.id);
+    return;
+  }
+  const referenced=store.db.prepare(`SELECT DISTINCT m.group_key FROM k_personas p,json_each(p.sample_ids_json) j
+    JOIN k_samples m ON m.id=j.value JOIN k_sources s ON s.id=m.source_id
+    WHERE p.account_id=? AND p.own_id=? AND p.state<>'INVALID' AND m.account_id=? AND s.own_id=?`)
+    .all(accountId,ownId,accountId,ownId) as {group_key:string}[];
+  const activeSet=new Set(activeGroups);
+  const lockedTraining=new Set<string>();
+  for(const row of referenced)if(activeSet.has(row.group_key))lockedTraining.add(row.group_key);
+  const keptHoldout=new Set<string>();
+  if(baseline){
+    for(const group of baseline.existingTrainingGroups)if(activeSet.has(group))lockedTraining.add(group);
+    for(const group of baseline.existingHoldoutGroups)if(activeSet.has(group)&&!lockedTraining.has(group))keptHoldout.add(group);
+  }else{
+    for(const row of rows)if(row.holdout&&!lockedTraining.has(row.group_key))keptHoldout.add(row.group_key);
+  }
+  if(keptHoldout.size>=activeGroups.length){
+    const ordered=[...keptHoldout].sort((a,b)=>digest(a).localeCompare(digest(b)));
+    keptHoldout.delete(ordered.at(-1)!);
+  }
+  const newGroups=activeGroups.filter(group=>!keptHoldout.has(group)&&!lockedTraining.has(group))
+    .sort((a,b)=>digest(a).localeCompare(digest(b)));
+  const target=Math.max(1,Math.round(activeGroups.length*.2));
+  const needed=Math.max(0,target-keptHoldout.size);
+  const maxSelectable=Math.max(0,activeGroups.length-keptHoldout.size-1);
+  const withheld=new Set<string>([...keptHoldout,...newGroups.slice(0,Math.min(needed,newGroups.length,maxSelectable))]);
+  for(const row of rows){
+    const next=Number(withheld.has(row.group_key));
+    if(row.holdout!==next)update.run(next,row.id);
+  }
 }
 export function learningSelection(rows:ReplySample[],sampleIds?:string[]):{training:ReplySample[];evaluation:ReplySample[]}{
   let selected=rows.filter(row=>row.accepted&&!row.excluded);

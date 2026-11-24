@@ -9,7 +9,8 @@ import { privateTemp } from '../helpers.js';
 import { startAssistantControl } from '../../src/mcp/control-server.js';
 import { AssistantBridgeClient } from '../../src/mcp/bridge-client.js';
 import {
-  readAssistantDiscovery, discoveryFilename, publishAssistantDiscovery, type AssistantDiscovery,
+  readAssistantDiscovery, readAssistantDiscoverySnapshot, statAssistantDiscovery,
+  discoveryFilename, publishAssistantDiscovery, type AssistantDiscovery,
 } from '../../src/mcp/discovery.js';
 import { assistantRoute, type AssistantToolRegistry } from '../../src/mcp/bridge-contracts.js';
 
@@ -206,4 +207,71 @@ test('closing cancels an incomplete unaccepted HTTP body without dispatching or 
     } finally { clearTimeout(watchdog); }
     expect(calls).toBe(0);
   } finally { req.destroy(); }
+});
+
+test('bridge caches decrypted discovery by file stamp and refreshes once on stale ECONNREFUSED or 401 without replaying accepted writes', async () => {
+  const { root, control } = await start();
+  let reads = 0;
+  let stats = 0;
+  const client = new AssistantBridgeClient(root, {
+    tools,
+    statDiscovery: async dir => { stats++; return statAssistantDiscovery(dir); },
+    readDiscovery: async dir => { reads++; return readAssistantDiscoverySnapshot(dir); },
+  });
+  expect(await client.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(await client.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(await client.call('inbora_get_status', {})).toEqual({ connected: true });
+  // Only the first call decrypts DPAPI; subsequent calls with unchanged mtimeMs+size hit memory cache.
+  expect(reads).toBe(1);
+  expect(stats).toBe(2);
+
+  // Rotate backend instance and simulate coarse Windows mtime collision by freezing stat stamp to the old values.
+  const staleStamp = await statAssistantDiscovery(root);
+  await control.close();
+  const replacement = await startAssistantControl({ root, tools, dispatch: async () => ({ connected: true }) });
+  running.push(replacement);
+  let phase = 0;
+  const rotatedClient = new AssistantBridgeClient(root, {
+    tools,
+    statDiscovery: async () => staleStamp,
+    readDiscovery: async dir => {
+      phase++;
+      const fresh = await readAssistantDiscoverySnapshot(dir);
+      return { stamp: staleStamp, descriptor: fresh.descriptor };
+    },
+  });
+  expect(await rotatedClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(phase).toBe(1);
+  // Swap running server while keeping stat stamp frozen so cache returns old port (ECONNREFUSED) -> clears cache and retries once.
+  await replacement.close();
+  const third = await startAssistantControl({ root, tools, dispatch: async () => ({ connected: true }) });
+  running.push(third);
+  expect(await rotatedClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(phase).toBe(2);
+
+  // Also test cached HTTP 401 -> clears cache, rereads fresh secret on same port, and succeeds on the single retry.
+  const thirdSnapshot = await readAssistantDiscoverySnapshot(root);
+  let authPhase = 0;
+  const authServer = await start(async () => ({ connected: true }));
+  const authClient = new AssistantBridgeClient(authServer.root, {
+    tools,
+    statDiscovery: async () => staleStamp,
+    readDiscovery: async dir => {
+      authPhase++;
+      const fresh = await readAssistantDiscoverySnapshot(dir);
+      return { stamp: staleStamp, descriptor: fresh.descriptor };
+    },
+  });
+  expect(await authClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(authPhase).toBe(1);
+  // Simulate cached descriptor secret mismatch (401) while stat stamp stays unchanged.
+  (authClient as unknown as { cached: { descriptor: AssistantDiscovery; stamp: typeof staleStamp } }).cached.descriptor = {
+    ...authServer.descriptor,
+    secret: '0'.repeat(64),
+  };
+  expect(await authClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(authPhase).toBe(2);
+  expect(thirdSnapshot.descriptor.instanceId).toBe(third.instanceId);
+  expect(await client.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(reads).toBe(2);
 });

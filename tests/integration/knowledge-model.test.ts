@@ -141,6 +141,7 @@ test('deleting a selected source during learning invalidates its task and discar
   const service=new LearningModelService(async()=>{if(deleting)f.knowledge.deleteSource('account_001',second.id);
     return answer(JSON.stringify({rules:'简短自然地回应。'}));});
   const initial=await service.analyze(f.context,{sampleIds:[rows.find(row=>row.source_id===first.id)!.id]});
+  expect(initial.calls).toBe(1);
   const originalOutputs=f.store.db.prepare('SELECT output_json FROM k_learning_batches WHERE task_id=?').all(initial.taskId);
   deleting=true;await expect(service.analyze(f.context,{sampleIds:[rows.find(row=>row.source_id===second.id)!.id]})).rejects.toThrow('PERSONA_TASK_SELECTION_CHANGED');
   const removed=f.store.db.prepare("SELECT id,state FROM k_learning_tasks WHERE id<>?").get(initial.taskId) as {id:string;state:string};
@@ -150,15 +151,18 @@ test('deleting a selected source during learning invalidates its task and discar
   const witness=f.store.db.prepare("SELECT snapshot_json FROM k_generation_contexts WHERE kind='learning' AND entity_id=?").get(removed.id) as {snapshot_json:string};
   expect(JSON.parse(witness.snapshot_json)).toMatchObject({accountId:'account_001',sourceIds:[second.id]});
   expect(witness.snapshot_json).not.toContain('材质问题');expect(witness.snapshot_json).not.toContain('柔软');
-  expect(f.store.budget('MODEL').used).toBe(3);expect(f.store.db.prepare('SELECT count(*) n FROM k_personas').get()).toEqual({n:1});
+  expect(f.store.budget('MODEL').used).toBe(2);expect(f.store.db.prepare('SELECT count(*) n FROM k_personas').get()).toEqual({n:1});
 });
 
 test('explicit sample IDs never expand to other accepted samples in the same conversation',async()=>{
   const f=fixture(),ids=accept(f,4),bodies:{messages:{content:string}[]}[]=[];
   const service=new LearningModelService(async(_url,input)=>{bodies.push(JSON.parse(String(input?.body)));return answer(JSON.stringify({rules:'短句自然。'}));});
   const result=await service.analyze(f.context,{sampleIds:[ids[0]!]});
+  expect(result.calls).toBe(1);
   expect(result.usedCount).toBe(1);expect(result.persona.sampleIds).toEqual([ids[0]!]);
   expect(JSON.parse(bodies[0]!.messages[1]!.content).samples).toHaveLength(1);
+  expect(f.store.db.prepare('SELECT purpose,count(*) n FROM k_model_purposes GROUP BY purpose').all())
+    .toEqual([{purpose:'PERSONA_ANALYSIS',n:1}]);
 });
 
 test('sandbox rejects conflicting or personal knowledge before allowance reservation and rejects a changed source after paid output',async()=>{
@@ -169,7 +173,7 @@ test('sandbox rejects conflicting or personal knowledge before allowance reserva
   const service=new LearningModelService(async()=>{calls++;f.knowledge.setKnowledgeState('account_001',entry.id,'DISABLED');return answer('冷水。');});
   await expect(service.tryReply(f.context,request)).rejects.toThrow('KNOWLEDGE_CONFLICT');expect(calls).toBe(0);
   f.knowledge.setKnowledgeState('account_001',conflicting.id,'DISABLED');
-  await expect(service.tryReply(f.context,request)).rejects.toThrow('MODEL_FAILED_NO_RETRY');expect(calls).toBe(1);
+  await expect(service.tryReply(f.context,request)).rejects.toThrow('KNOWLEDGE_CONTEXT_CHANGED');expect(calls).toBe(1);
   expect(f.store.budget('MODEL').used).toBe(1);expect(f.store.db.prepare('SELECT status FROM model_calls').get()).toEqual({status:'FAILED'});
 });
 
@@ -185,4 +189,36 @@ test('sandbox comparison rechecks the first selection after the second paid requ
   expect(calls).toBe(2);expect(f.store.budget('MODEL').used).toBe(2);
   expect(f.knowledge.context('account_001','DIRECT_MESSAGE','你好',{personaId:second.id}).personaId).toBe(second.id);
   expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});
+});
+
+test('single-batch persona learning requires only one call and skips redundant merge',async()=>{
+  const f=fixture();accept(f,10);
+  f.store.db.prepare("UPDATE budgets SET maximum=1 WHERE kind='MODEL'").run();
+  let calls=0;
+  const service=new LearningModelService(async()=>{calls++;return answer(JSON.stringify({rules:'简短自然回复。'}));});
+  const result=await service.analyze(f.context,{sampleIds:[]});
+  expect(result).toMatchObject({calls:1,usedCount:10,omittedCount:0,persona:{state:'DRAFT',text:'简短自然回复。'}});
+  expect(calls).toBe(1);expect(f.store.budget('MODEL').used).toBe(1);
+  expect(f.store.db.prepare('SELECT purpose,count(*) n FROM k_model_purposes GROUP BY purpose').all())
+    .toEqual([{purpose:'PERSONA_ANALYSIS',n:1}]);
+});
+
+test('sandbox tryReply shares replyStyleRules and surfaces whitelisted model error codes',async()=>{
+  const f=fixture();const systems:string[]=[];
+  const service=new LearningModelService(async(_url,input)=>{
+    const body=JSON.parse(String(input?.body)) as {messages:{content:string}[]};
+    systems.push(body.messages[0]!.content);return answer('冷水手洗即可。');
+  });
+  await service.tryReply(f.context,{channel:'DIRECT_MESSAGE',message:'怎么清洗？',sourceIds:[],personaVersionId:null});
+  for(const rule of ['回答对方原文中的具体问题或细节','不强行附和','不强行追问','不作无依据承诺','不重复历史回复的原句'])
+    expect(systems[0]).toContain(rule);
+  const authService=new LearningModelService(async()=>new Response('private-key-detail',{status:401}));
+  await expect(authService.tryReply(f.context,{channel:'DIRECT_MESSAGE',message:'你好',sourceIds:[],personaVersionId:null}))
+    .rejects.toThrow('MODEL_AUTH_FAILED');
+  const rateService=new LearningModelService(async()=>new Response('private-rate-detail',{status:429}));
+  await expect(rateService.tryReply(f.context,{channel:'DIRECT_MESSAGE',message:'你好',sourceIds:[],personaVersionId:null}))
+    .rejects.toThrow('MODEL_RATE_LIMITED');
+  const formatService=new LearningModelService(async()=>answer('not-json'));
+  accept(f,1);
+  await expect(formatService.analyze(f.context,{sampleIds:[]})).rejects.toThrow('PERSONA_MODEL_FORMAT_INVALID');
 });

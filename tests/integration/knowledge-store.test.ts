@@ -57,6 +57,10 @@ test('knowledge must be explicitly enabled and supports two-character aliases, c
     const conflict=enabled(f.data,'快递时效','普通订单需要十个工作日发出。','delivery');
     const blocked=f.data.context(account,'DIRECT_MESSAGE','快递');expect(blocked.conflicts).toEqual(['delivery']);expect(blocked.knowledge).toEqual([]);
     f.data.setKnowledgeState(account,conflict.id,'DISABLED');expect(f.data.context(account,'DIRECT_MESSAGE','快递').knowledge).toHaveLength(1);
+    // Complementary entries sharing a broad topic that do not match the same query must not raise a false conflict.
+    enabled(f.data,'包装说明','每盒采用独立真空小袋包装。','delivery');
+    const clean=f.data.context(account,'DIRECT_MESSAGE','快递');expect(clean.conflicts).toEqual([]);expect(clean.knowledge).toHaveLength(1);
+    const packaging=f.data.context(account,'DIRECT_MESSAGE','包装');expect(packaging.conflicts).toEqual([]);expect(packaging.knowledge[0]?.text).toContain('真空');
     f.advance(1000);expect(f.data.context(account,'DIRECT_MESSAGE','快递').knowledge).toHaveLength(0);
   }finally{f.close();}
 });
@@ -251,6 +255,34 @@ test('candidate collection uses confirmed matching revisions and never adopts AI
     expect(rows.every(row=>!row.accepted)).toBe(true);expect(rows.find(row=>row.source==='HUMAN_TYPED')?.excluded).toBe(false);
     expect(rows.find(row=>row.source==='AUTO_POLICY')?.excluded).toBe(true);expect(f.data.collectCandidates(account).added).toBe(0);
     expect(()=>f.data.context('another-account','DIRECT_MESSAGE','你好')).toThrow('KNOWLEDGE_ACCOUNT_REQUIRED');
+  }finally{f.close();}
+});
+
+test('incremental sample acceptance keeps holdout stable and never invalidates an existing published persona',async()=>{
+  const f=await fixture();try{
+    f.data.addSamples(account,Array.from({length:10},(_,index)=>({channel:'DIRECT_MESSAGE' as const,
+      prompt:`老问题${index}`,response:`老回复${index}`,source:'IMPORTED' as const,group:'initial-group-'+Math.floor(index/2)})));
+    const firstBatch=f.data.samples(account);
+    f.data.selectSamples(account,firstBatch.map(row=>row.id),true);
+    const beforeSplit=f.data.learningSamples(account,[]);
+    expect(beforeSplit.training).toHaveLength(8);expect(beforeSplit.evaluation).toHaveLength(2);
+    const published=f.data.savePersona(account,'已发布的线上人格规则。',beforeSplit.training.map(row=>row.id));
+    f.data.publishPersona(account,published.id);
+    // Accept 10 new groups incrementally; previously trained groups must never slide into holdout.
+    for(let batch=0;batch<5;batch++){
+      f.data.addSamples(account,Array.from({length:4},(_,index)=>({channel:'DIRECT_MESSAGE' as const,
+        prompt:`新增问题${batch}-${index}`,response:`新增回复${batch}-${index}`,source:'IMPORTED' as const,
+        group:`added-group-${batch}-${Math.floor(index/2)}`})));
+      const pendingIds=f.data.samples(account).filter(row=>!row.accepted&&!row.excluded).map(row=>row.id);
+      f.data.selectSamples(account,pendingIds,true);
+      const currentPersona=f.data.overview(account).activePersona;
+      expect(currentPersona).toMatchObject({id:published.id,state:'PUBLISHED',text:'已发布的线上人格规则。'});
+    }
+    const afterSplit=f.data.learningSamples(account,[]);
+    for(const sample of beforeSplit.training)expect(afterSplit.training.some(row=>row.id===sample.id)).toBe(true);
+    for(const sample of beforeSplit.evaluation)expect(afterSplit.evaluation.some(row=>row.id===sample.id)).toBe(true);
+    expect(afterSplit.training.every(row=>!afterSplit.evaluation.some(other=>other.group===row.group))).toBe(true);
+    expect(afterSplit.evaluation.length).toBeGreaterThanOrEqual(4);
   }finally{f.close();}
 });
 

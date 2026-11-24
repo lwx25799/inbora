@@ -70,6 +70,9 @@ test('model-only nullable scope and key saves preserve the explicit global choic
     expect(await service.dispatch(token,{command:'getStatus'})).toMatchObject({budgets:expect.arrayContaining([{kind:'MODEL',used:1,maximum:null}])});
     await service.dispatch(token,{command:'setModelGrant',scope:null,confirmed:true});
     await service.dispatch(token,{command:'configureAi',settings:{model:'deepseek-flash',persona:'',business:'',rules:''},key:'synthetic-only-key'});
+    expect(new AutomationStore(store).active('MODEL')).toBeNull();
+    expect(store.budget('MODEL')).toEqual({kind:'MODEL',used:1,maximum:null});
+    await service.dispatch(token,{command:'setModelGrant',scope:model,confirmed:true});
     expect(new AutomationStore(store).active('MODEL')!.scope.modelLimit).toBeNull();
     expect(store.db.prepare("SELECT used FROM budgets WHERE kind='MODEL'").get()).toEqual({used:1});
   }finally{await service.close();}

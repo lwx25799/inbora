@@ -58,9 +58,10 @@ export function retrieveKnowledge(db:Database.Database,accountId:string,channel:
       (aliases.some(alias=>normalized(alias).includes(term))?3:0),0);
   };
   const ranked=candidates.sort((a,b)=>rank(b)-rank(a)||a.id.localeCompare(b.id)||a.chunk_id.localeCompare(b.chunk_id)).slice(0,knowledgeLimits.candidates);
-  const topics=[...new Set(ranked.map(row=>row.topic))],conflicts:string[]=[],relevant:string[]=[];
-  const variants=topics.length?db.prepare(`SELECT k.id,k.text,k.version,k.topic FROM k_knowledge k JOIN k_sources s ON s.id=k.source_id
-    WHERE ${where} AND k.topic IN (${topics.map(()=>'?').join(',')}) ORDER BY k.id`).all(...args,...topics) as {id:string;text:string;version:number;topic:string}[]:[];
+  const entryIds=[...new Set(ranked.map(row=>row.id))],topics=[...new Set(ranked.map(row=>row.topic))],conflicts:string[]=[],relevant:string[]=[];
+  // Scope conflict checks to active entries actually matched by this query so complementary entries under one broad topic do not block each other.
+  const variants=entryIds.length?db.prepare(`SELECT k.id,k.text,k.version,k.topic FROM k_knowledge k JOIN k_sources s ON s.id=k.source_id
+    WHERE ${where} AND k.id IN (${entryIds.map(()=>'?').join(',')}) ORDER BY k.id`).all(...args,...entryIds) as {id:string;text:string;version:number;topic:string}[]:[];
   relevant.push(...variants.map(row=>digest([row.id,row.version,row.text])));
   for(const topic of topics)if(new Set(variants.filter(row=>row.topic===topic).map(row=>normalized(row.text))).size>1)conflicts.push(topic);
   const knowledge:KnowledgeHit[]=[];let budget:number=knowledgeLimits.knowledgeCharacters;

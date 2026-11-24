@@ -138,25 +138,47 @@ test("DeepSeek uses independent official messages/choices/usage contract and lim
   }
 });
 test.each([
-  "http",
-  "timeout",
-  "json",
-  "usage",
-  "truncated",
-  "sensitive-output",
+  ["http", "MODEL_RATE_LIMITED"],
+  ["auth", "MODEL_AUTH_FAILED"],
+  ["server", "MODEL_HTTP_ERROR"],
+  ["timeout-abort", "MODEL_TIMEOUT"],
+  ["timeout", "MODEL_FAILED_NO_RETRY"],
+  ["json", "MODEL_FAILED_NO_RETRY"],
+  ["usage", "MODEL_USAGE_INVALID"],
+  ["truncated", "MODEL_FAILED_NO_RETRY"],
+  ["sensitive-output", "MODEL_SENSITIVE_OUTPUT"],
+  ["duplicate-output", "MODEL_DUPLICATE_OUTPUT"],
 ] as const)(
-  "DeepSeek %s fails once, keeps budget reservation and returns no provider payload",
-  async (failure) => {
+  "DeepSeek %s fails once with %s, keeps budget reservation and returns no provider payload",
+  async (failure, expectedCode) => {
     const store = database();
     let calls = 0;
     try {
+      const priorOutgoing = candidate({
+        direction: "OUTGOING",
+        actorId: "own-1",
+        text: "收到，我会核实。",
+      });
       const provider = new DeepSeekProvider(async () => {
         calls++;
         if (failure === "timeout")
           throw new Error("synthetic-private-provider-error");
+        if (failure === "timeout-abort") {
+          const err = new Error("synthetic-private-provider-error");
+          err.name = "TimeoutError";
+          throw err;
+        }
         if (failure === "http")
           return new Response("synthetic-private-provider-error", {
             status: 429,
+          });
+        if (failure === "auth")
+          return new Response("synthetic-private-provider-error", {
+            status: 401,
+          });
+        if (failure === "server")
+          return new Response("synthetic-private-provider-error", {
+            status: 503,
           });
         if (failure === "json") return new Response("{");
         if (failure === "usage")
@@ -177,6 +199,8 @@ test.each([
               choices: [{ ...good.choices[0], finish_reason: "length" }],
             }),
           );
+        if (failure === "duplicate-output")
+          return new Response(JSON.stringify(good));
         return new Response(
           JSON.stringify({
             ...good,
@@ -197,12 +221,12 @@ test.each([
         provider.generate(
           store,
           candidate(),
-          [],
+          failure === "duplicate-output" ? [priorOutgoing] : [],
           settings,
           "synthetic-contract-key",
           true,
         ),
-      ).rejects.toThrow("MODEL_FAILED_NO_RETRY");
+      ).rejects.toThrow(expectedCode);
       expect(calls).toBe(1);
       expect(
         store.db.prepare("SELECT used FROM budgets WHERE kind=?").get("MODEL"),
@@ -218,6 +242,69 @@ test.each([
     }
   },
 );
+test("merchant rules mentioning refund or complaint work while inbound user sensitive text and private merchant data stay blocked", async () => {
+  const store = database();
+  let calls = 0;
+  const merchantSettings = {
+    model: "deepseek-flash",
+    persona: "耐心客服，遇投诉转人工处理",
+    business: "生鲜商品不支持无理由退款",
+    rules: "遇到退款或投诉咨询先说明不支持退款并引导联系人工客服",
+  };
+  const provider = new DeepSeekProvider(async () => {
+    calls++;
+    return new Response(
+      JSON.stringify({
+        ...good,
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: "您好，生鲜商品暂不支持退款，如有售后问题可以为您转人工核实。",
+            },
+          },
+        ],
+      }),
+    );
+  });
+  try {
+    const reply = await provider.generate(
+      store,
+      candidate({ text: "请问这批货怎么保存？" }),
+      [],
+      merchantSettings,
+      "synthetic-contract-key",
+      true,
+    );
+    expect(reply.text).toContain("暂不支持退款");
+    expect(calls).toBe(1);
+    await expect(
+      provider.generate(
+        store,
+        candidate({ text: "我要投诉退款" }),
+        [],
+        merchantSettings,
+        "synthetic-contract-key",
+        true,
+      ),
+    ).rejects.toThrow("SENSITIVE_MANUAL_HANDLING");
+    await expect(
+      provider.generate(
+        store,
+        candidate({ text: "请问怎么保存？" }),
+        [],
+        { ...merchantSettings, rules: "联系我 private@example.invalid" },
+        "synthetic-contract-key",
+        true,
+      ),
+    ).rejects.toThrow("SENSITIVE_MANUAL_HANDLING");
+    expect(calls).toBe(1);
+  } finally {
+    store.close();
+  }
+});
 test("sensitive same-target context blocks before reservation; no Key leaves zero calls", async () => {
   const store = database();
   let calls = 0;

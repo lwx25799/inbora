@@ -16,18 +16,42 @@ export const discoverySchema = z.object({
 export type AssistantDiscovery = z.infer<typeof discoverySchema>;
 export const discoveryFilename = 'local-assistant.dpapi';
 
+export interface AssistantDiscoveryStamp {
+  canonical: string;
+  mtimeMs: number;
+  size: number;
+}
+export interface AssistantDiscoverySnapshot {
+  descriptor: AssistantDiscovery;
+  stamp: AssistantDiscoveryStamp;
+}
+
 export async function canonicalAssistantRoot(root: string): Promise<string> {
   try { return await realpath(resolve(root)); }
   catch { throw new Blocked('APP_NOT_RUNNING'); }
 }
 
-export async function readAssistantDiscovery(root: string): Promise<AssistantDiscovery> {
+export async function statAssistantDiscovery(root: string): Promise<AssistantDiscoveryStamp> {
   const canonical = await canonicalAssistantRoot(root);
   const file = join(canonical, discoveryFilename);
+  try {
+    const info = await stat(file);
+    requireSafe(info.size <= 16_000, 'ASSISTANT_CREDENTIAL_INVALID');
+    return { canonical, mtimeMs: info.mtimeMs, size: info.size };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Blocked('APP_NOT_RUNNING');
+    if (error instanceof Blocked) throw error;
+    throw new Blocked('ASSISTANT_CREDENTIAL_UNAVAILABLE');
+  }
+}
+
+export async function readAssistantDiscoverySnapshot(root: string): Promise<AssistantDiscoverySnapshot> {
+  const stamp = await statAssistantDiscovery(root);
+  const file = join(stamp.canonical, discoveryFilename);
   let encrypted: Buffer;
   try {
-    requireSafe((await stat(file)).size <= 16_000, 'ASSISTANT_CREDENTIAL_INVALID');
     encrypted = await readFile(file);
+    requireSafe(encrypted.byteLength <= 16_000, 'ASSISTANT_CREDENTIAL_INVALID');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Blocked('APP_NOT_RUNNING');
     if (error instanceof Blocked) throw error;
@@ -40,9 +64,13 @@ export async function readAssistantDiscovery(root: string): Promise<AssistantDis
     catch { throw new Blocked('ASSISTANT_CREDENTIAL_INVALID'); }
     const checked = discoverySchema.safeParse(parsed);
     requireSafe(checked.success, 'ASSISTANT_CREDENTIAL_INVALID');
-    requireSafe(checked.data.runtime === canonical, 'ASSISTANT_RUNTIME_MISMATCH');
-    return checked.data;
+    requireSafe(checked.data.runtime === stamp.canonical, 'ASSISTANT_RUNTIME_MISMATCH');
+    return { descriptor: checked.data, stamp: { ...stamp, size: encrypted.byteLength } };
   } finally { plain.fill(0); encrypted.fill(0); }
+}
+
+export async function readAssistantDiscovery(root: string): Promise<AssistantDiscovery> {
+  return (await readAssistantDiscoverySnapshot(root)).descriptor;
 }
 
 /** Only the owning Sidecar writes discovery; the MCP client never creates a runtime. */
