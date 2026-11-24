@@ -39,8 +39,9 @@ export class EvidenceMaintenance {
     const task=(async()=>{
       const rootStat=await lstat(this.root);
       if(!rootStat.isDirectory()||rootStat.isSymbolicLink())throw new Error('EVIDENCE_DIRECTORY_UNSAFE');
-      const config=await loadRuntime(this.root),protection=collectEvidenceReferences(this.store,this.root);
-      const options={now:this.now(),signal:combined,protection,refreshProtection:()=>collectEvidenceReferences(this.store,this.root)};
+      const now=this.now(),config=await loadRuntime(this.root),retentionMs=config.evidenceRetentionDays*86_400_000;
+      const protection=collectEvidenceReferences(this.store,this.root,{retentionCutoffMs:now-retentionMs});
+      const options={now,signal:combined,protection,refreshProtection:()=>collectEvidenceReferences(this.store,this.root,{retentionCutoffMs:this.now()-retentionMs})};
       const result=await (remove?maintainEvidence:inspectEvidence)(join(this.root,'evidence'),config.evidenceRetentionDays,options);
       this.latest=result;this.failure=null;
       if(remove)this.nextAt=result.cancelled?this.now():this.now()+this.intervalMs;

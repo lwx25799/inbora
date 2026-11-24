@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
@@ -12,9 +12,10 @@ const {ObservedCommentReply}=await import(url('adapters/observed-comment-reply.j
 const {SendCoordinator}=await import(url('core/send-coordinator.js'));
 const {EventStore}=await import(url('storage/store.js'));
 const base=resolve('.local/comment-reply-smoke');await mkdir(base,{recursive:true});const dir=await mkdtemp(join(base,'run-'));
-const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
-const store=new EventStore(join(dir,'poc.sqlite'),true,()=> '2026-11-03T00:00:00Z');
+let server,owner,store;
 try{
+  server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
+  store=new EventStore(join(dir,'poc.sqlite'),true,()=> '2026-11-03T00:00:00Z');
   await mountCommentReply(owner,server.origin);const mapping=commentReplyMapping(server.origin);mapping.portalWorkIds=['10'];
   await owner.notification.locator('.reply-action').evaluate(action=>action.addEventListener('click',()=>{
     const controls=document.querySelector('#root-comment #reply-controls');if(controls)document.body.append(controls);
@@ -118,4 +119,4 @@ try{
     assert.equal(await owner.notification.evaluate(()=>window.commentClicks),0);
   }finally{emojiAdapter.dispose();}
   console.log(JSON.stringify({nativeCommentReplySmoke:'PASS',runtime:source?'tsx-source':'compiled-node',fixtureClicks:3,freshSenderRefreshes:1,reconciledRefreshes:1,emojiOriginalGuard:true,realSends:0,modelCalls:0}));
-}finally{store.close();await owner.close();await server.close();}
+}finally{store?.close();await owner?.close();await server?.close();assert.ok(dir.startsWith(`${base}\\`)||dir.startsWith(`${base}/`));await rm(dir,{recursive:true,force:true});}

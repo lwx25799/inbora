@@ -74,14 +74,34 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
       return true;
     },
     owned(root:Element,selector:string,visible=true):Element[]{return Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root&&(!visible||dom.visible(n)));},
+    commentIconIssue(node:Element):number {
+      const shapes=Array.from(node.querySelectorAll('*')),box=node.getBoundingClientRect();let issue=0;
+      if(node.textContent!=='')issue|=1;
+      if(shapes.length<1||shapes.length>8)issue|=2;
+      if(box.width<1||box.height<1||box.width>32||box.height>32)issue|=4;
+      if(!shapes.every(shape=>shape.namespaceURI===node.namespaceURI&&['g','path'].includes(shape.tagName)))issue|=8;
+      if(!shapes.some(shape=>shape.tagName==='path'))issue|=16;
+      for(const shape of [node,...shapes].slice(0,10))for(const attr of shape.attributes){
+        // An XML namespace identifies SVG; it is not an external resource reference.
+        if(attr.name==='xmlns'&&attr.value==='http://www.w3.org/2000/svg')continue;
+        if(/^on/i.test(attr.name))issue|=32;
+        if(/(?:^|:)(?:href|src)$/.test(attr.name))issue|=64;
+        if(['aria-label','aria-labelledby'].includes(attr.name))issue|=128;
+        if(attr.name==='role'&&!['none','presentation'].includes(attr.value))issue|=256;
+        if(/url\s*\(|(?:https?|data|javascript):/i.test(attr.value))issue|=512;
+      }
+      return issue;
+    },
     text(body:Element,row:Element):string|null {
       let count=0,length=0,images=0;
       const walk={read(node:Node):string|null {
         if(++count>200)return null;
         if(node.nodeType===Node.TEXT_NODE){length+=(node.nodeValue??'').length;return length<=10_000?node.nodeValue??'':null;}
-        if(!(node instanceof Element)||node.closest(s.commentRows)!==row||node.closest('[data-e2e="im-dialog"]')||
-          !['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S','A','IMG'].includes(node.tagName))return null;
+        if(!(node instanceof Element)||node.closest(s.commentRows)!==row||node.closest('[data-e2e="im-dialog"]'))return null;
+        const icon=node.namespaceURI==='http://www.w3.org/2000/svg'&&node.tagName==='svg';
+        if(!icon&&!['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S','A','IMG'].includes(node.tagName))return null;
         const style=getComputedStyle(node);if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return '';
+        if(icon)return dom.commentIconIssue(node)===0?'':null;
         if(node.tagName==='BR'){length++;return length<=10_000?'\n':null;}
         if(node.tagName==='IMG'){
           const alt=node.getAttribute('alt'),src=node.getAttribute('src');
@@ -122,7 +142,7 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
       const user=dom.data(native,'user'),authors=dom.owned(root!,s.commentAuthor),bodies=dom.owned(root!,s.commentText),tips=dom.owned(root!,s.commentTooltip,false);
       const href=authors.length===1?new URL(authors[0]!.getAttribute('href')??'',location.origin):null;
       const at=dom.data(native,'createTime'),millis=typeof at==='number'?at*1000:NaN;
-      dom.check(Number.isFinite(millis)&&millis>=Date.UTC(2000,0,1)&&millis<=Date.now(),'OBSERVATION_COMMENT_THREAD_CHANGED');const time=new Date(millis).toISOString();
+      dom.check(Number.isFinite(millis)&&millis>=Date.UTC(2000,0,1)&&millis<=Date.now()+2000,'OBSERVATION_COMMENT_THREAD_CHANGED');const time=new Date(millis).toISOString();
       dom.check(e.channel==='COMMENT_NOTIFICATION'&&e.kind==='COMMENT'&&dom.data(native,'cid')===e.commentId&&dom.data(props,'level')===1&&dom.data(native,'replyId')==='0'&&
         dom.data(dom.data(props,'awemeInfo'),'awemeId')===e.videoId&&dom.data(dom.data(props,'userInfo'),'uid')===m.self.uid&&
         dom.data(user,'uid')===e.actorId&&href?.origin===m.origin&&!href.username&&!href.password&&href.pathname===`/user/${String(dom.data(user,'secUid'))}`&&

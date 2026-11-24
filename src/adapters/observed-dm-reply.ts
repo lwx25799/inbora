@@ -151,7 +151,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     },
     time(value: unknown): string|null {
       let time=NaN;try{time=Date.prototype.getTime.call(value);}catch{/* no native date */}
-      return Number.isFinite(time)&&time>=Date.UTC(2000,0,1)&&time<=Date.now()?new Date(time).toISOString():null;
+      return Number.isFinite(time)&&time>=Date.UTC(2000,0,1)&&time<=Date.now()+2000?new Date(time).toISOString():null;
     },
     binding(e: InboundEvent): unknown[] {
       return[e.accountId,e.channel,e.platformEventId,e.actorId,e.text,e.occurredAt,e.videoId,e.commentId,e.conversationId,e.direction,e.kind];
@@ -694,7 +694,7 @@ export class ObservedDmReply implements ReplyAdapter {
       requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
       let frame=await this.frame(event,'proofs');
       const start=Date.parse(notBefore);
-      const possible=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&Date.parse(p.sentAt)>=start-dmClockToleranceMs&&Date.parse(p.sentAt)<=Date.now());
+      const possible=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&Date.parse(p.sentAt)>=start-dmClockToleranceMs&&Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs);
       if(!ackId)requireSafe(possible.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
       const skew=possible[0];
       if(!ackId&&!searched&&skew&&Date.parse(skew.sentAt)<=start&&frame.latestId===skew.id&&baselineContextDigest&&
@@ -704,7 +704,7 @@ export class ObservedDmReply implements ReplyAdapter {
       const matches=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&
         (ackId?p.id===ackId:Date.parse(p.sentAt)>start||Boolean(baselineContextDigest&&
           Date.parse(p.sentAt)>=start-dmClockToleranceMs&&frame.latestId===p.id&&
-          this.clockContext(frame,event,p.id,baselineContextDigest).matches))&&Date.parse(p.sentAt)<=Date.now());
+          this.clockContext(frame,event,p.id,baselineContextDigest).matches))&&Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs);
       requireSafe(matches.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
       const candidate=matches[0],proof=candidate&&!ackId&&Date.parse(candidate.sentAt)<=start?{...candidate,
         clockSkew:{boundary:notBefore,baselineContextDigest:baselineContextDigest!,

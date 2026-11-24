@@ -1,4 +1,5 @@
 import {expect,test} from 'vitest';
+import {readdirSync,utimesSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {MessageShareStore} from '../../src/storage/message-shares.js';
 import {candidate,database,privateTemp} from '../helpers.js';
@@ -32,4 +33,18 @@ test.each(['http://www.douyin.com/video/123','https://evil.test/video/123','http
   'javascript:alert(1)','https://www.douyin.com/video/124'])('share store rejects noncanonical or mismatched work link %s',url=>{
   const aux=new MessageShareStore(privateTemp('invalid-shared-work-'));
   expect(()=>aux.save(candidate({observationIssue:'DM_CONTENT_UNVERIFIED',contentType:'IMAGE'}),'own-1',{kind:'DOUYIN_WORK',url,workId:'123'})).toThrow('MESSAGE_SHARE_UNAVAILABLE');
+});
+
+test('share store caches runtime.json retention by mtimeMs and refreshes on update',()=>{
+  const root=privateTemp('share-retention-cache-'),runtimeFile=join(root,'runtime.json');
+  writeFileSync(runtimeFile,JSON.stringify({version:1,modelGrant:null,evidenceRetentionDays:14}));
+  const aux=new MessageShareStore(root),event=candidate({observationIssue:'DM_CONTENT_UNVERIFIED',contentType:'IMAGE'});
+  const share={kind:'DOUYIN_WORK' as const,url:'https://www.douyin.com/video/1234567890123456789',workId:'1234567890123456789'};
+  aux.save(event,'own-1',share);
+  const folder=join(root,'evidence','message-shares'),manifest=readdirSync(folder).find(name=>name.endsWith('.json'))!;
+  const twoDaysAgo=new Date(Date.now()-2*86_400_000);utimesSync(join(folder,manifest),twoDaysAgo,twoDaysAgo);
+  expect(aux.read(event,'own-1')).toEqual(share);
+  writeFileSync(runtimeFile,JSON.stringify({version:1,modelGrant:null,evidenceRetentionDays:1}));
+  const bumped=new Date(Date.now()+2000);utimesSync(runtimeFile,bumped,bumped);
+  expect(aux.read(event,'own-1')).toBeNull();
 });

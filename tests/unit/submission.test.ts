@@ -4,7 +4,7 @@ import {proofTimeValid,type SendProof} from '../../src/core/contracts.js';
 import {dmRequest,dmResponse,int} from '../fixtures/submission.js';
 import {EventEmitter} from 'node:events';
 import type {Page} from 'playwright';
-import {SubmissionResponse} from '../../src/adapters/submission-response.js';
+import {SubmissionResponse,defaultConfirmedCommentPublishStatuses} from '../../src/adapters/submission-response.js';
 import {observedMapping} from '../fixtures/observed-site.js';
 import {candidate} from '../helpers.js';
 
@@ -64,4 +64,39 @@ test.each(['valid','service-worker','navigation','wrong-body','missing-body','ol
   await new Promise(resolve=>setImmediate(resolve));
   expect(Boolean(observer.current())).toBe(kind==='valid');observer.dispose();
   expect(page.listenerCount('request')).toBe(0);expect(page.listenerCount('response')).toBe(0);
+});
+
+test.each([
+  {label:'local-slow-1500ms-direct',offsetMs:1500,withAck:false,expected:true},
+  {label:'local-slow-2000ms-edge',offsetMs:2000,withAck:false,expected:true},
+  {label:'local-slow-2001ms-rejected',offsetMs:2001,withAck:false,expected:false},
+  {label:'local-slow-1500ms-with-ack',offsetMs:1500,withAck:true,expected:true},
+  {label:'local-slow-2500ms-with-ack-rejected',offsetMs:2500,withAck:true,expected:false},
+])('bidirectional 2000ms clock tolerance handles slow local clock safely: $label',({offsetMs,withAck,expected})=>{
+  const now=Date.now(),boundary=new Date(now-50).toISOString();
+  const proof:SendProof={id:'new',ownId:'100',targetKey:'dm:conv-a',text:'test',pending:false,
+    sentAt:new Date(now+offsetMs).toISOString(),
+    ...(withAck?{submission:{boundary,requestAt:boundary,responseAt:new Date(now-1).toISOString(),requestDigest:'a'.repeat(64),responseDigest:'b'.repeat(64)}}:{})};
+  expect(proofTimeValid(proof,boundary)).toBe(expected);
+});
+
+test('comment publish confirmed status uses named default [7] and supports configured status sets',async()=>{
+  expect(defaultConfirmedCommentPublishStatuses).toEqual([7]);
+  for(const [configured,status,expected] of [[undefined,7,true],[undefined,1,false],[[7,1],1,true],[[7,1],7,true],[[7,1],0,false]] as const){
+    const page=new EventEmitter() as EventEmitter&{mainFrame:()=>unknown;url:()=>string},frame={};
+    page.mainFrame=()=>frame;page.url=()=>'https://www.douyin.com/video/10';
+    const observer=new SubmissionResponse(page as unknown as Page,observedMapping('https://www.douyin.com'),
+      configured?{confirmedCommentStatuses:configured}:undefined);
+    const e=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',videoId:'10',commentId:'11',conversationId:null}),text='synthetic';
+    const request={method:()=>'POST',frame:()=>frame,url:()=>'https://www.douyin.com/aweme/v1/web/comment/publish',redirectedFrom:()=>null,
+      postDataBuffer:()=>Buffer.from('aweme_id=10&reply_id=11&text='+text)};
+    observer.arm(e,text,new Date(Date.now()-1).toISOString());
+    page.emit('request',request);
+    page.emit('response',{request:()=>request,status:()=>200,fromServiceWorker:()=>false,headers:()=>({}),
+      body:async()=>Buffer.from(JSON.stringify({status_code:0,comment:{cid:'501',reply_id:'11',reply_to_reply_id:'0',
+        text,user:{uid:'100',sec_uid:'self-sec'},status,create_time:1793950000}}))});
+    await new Promise(resolve=>setImmediate(resolve));
+    expect(Boolean(observer.current())).toBe(expected);
+    observer.dispose();
+  }
 });

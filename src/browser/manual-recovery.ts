@@ -21,14 +21,14 @@ interface Lease {
   timer:ReturnType<typeof setInterval>|undefined;detach:()=>void;
   childEpochs:WeakMap<Frame,number>;
 }
-const idleTimeout=5*60_000,maximumDuration=15*60_000,frameLifetime=3000;
+const idleTimeout=5*60_000,maximumDuration=15*60_000,frameLifetime=12_000;
 
 /** An account-actor task owns the original page until this human session ends. */
 export class ManualRecovery {
   private lease:Lease|undefined;
   private pending=false;
   private generation=0;
-  constructor(private readonly onClosed:()=>void=()=>{}){}
+  constructor(private readonly onClosed:()=>void=()=>{},private readonly frameLifetimeMs=frameLifetime){}
   get active():boolean{return this.pending||!!this.lease;}
   status():{active:true;channel:Channel;incidentId:string}|null{
     return this.lease?{active:true,channel:this.lease.session.channel,incidentId:this.lease.session.incidentId}:null;
@@ -146,28 +146,37 @@ export class ManualRecovery {
         requireSafe(size.width>0&&size.height>0&&size.width<=16384&&size.height<=16384,'MANUAL_RECOVERY_IMAGE_TOO_LARGE');
         const array=await lease.page.evaluateHandle(manualRecoveryElements,{selectors:lease.options.selectors});
         const nodes:FrameBinding['nodes']=[];
+        const pendingHandles=new Set<{dispose():Promise<void>}>();
         try{
           const properties=await array.getProperties();
+          for(const value of properties.values())pendingHandles.add(value);
           for(const [key,value] of properties){
             const element=value.asElement() as ElementHandle<Element>|null;
-            if(!/^\d+$/u.test(key)||!element){await value.dispose();continue;}
+            if(!/^\d+$/u.test(key)||!element){pendingHandles.delete(value);await value.dispose().catch(()=>{});continue;}
             const inspected=await element.evaluate(inspectManualRecoveryElement,lease.options.document);
             if(inspected.documentMatches&&inspected.region){
               const child=await element.contentFrame();
+              pendingHandles.delete(value);
               nodes.push({element,region:inspected.region,child,childEpoch:child?lease.childEpochs.get(child)??0:0});
             }
-            else await element.dispose();
+            else{pendingHandles.delete(value);await element.dispose().catch(()=>{});}
           }
-        }catch(error){await Promise.all(nodes.map(node=>node.element.dispose()));throw error;}
-        finally{await array.dispose();}
+        }catch(error){
+          await Promise.all([
+            ...nodes.map(node=>node.element.dispose().catch(()=>{})),
+            ...[...pendingHandles].map(handle=>handle.dispose().catch(()=>{})),
+          ]);
+          throw error;
+        }
+        finally{await array.dispose().catch(()=>{});}
         let buffer:Buffer;
         try{
           buffer=await lease.page.screenshot({type:'jpeg',quality:55,scale:'css',fullPage:false,timeout:2000,
             caret:'initial',animations:'allow'});
           await this.check(lease,check,sessionId);
           requireSafe(buffer.length<=500_000,'MANUAL_RECOVERY_IMAGE_TOO_LARGE');
-        }catch(error){await Promise.all(nodes.map(node=>node.element.dispose()));throw error;}
-        const now=Date.now(),binding={id:randomUUID(),expiresAt:now+frameLifetime,nodes};
+        }catch(error){await Promise.all(nodes.map(node=>node.element.dispose().catch(()=>{})));throw error;}
+        const now=Date.now(),binding={id:randomUUID(),expiresAt:now+this.frameLifetimeMs,nodes};
         const expired=lease.frames.filter(frame=>frame.expiresAt<=now);
         lease.frames=lease.frames.filter(frame=>frame.expiresAt>now);lease.frames.push(binding);
         while(lease.frames.length>8)expired.push(lease.frames.shift()!);

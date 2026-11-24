@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir,mkdtemp } from 'node:fs/promises';
+import { mkdir,mkdtemp,rm } from 'node:fs/promises';
 import { join,resolve } from 'node:path';
 import { BrowserProfileOwner } from '../dist/browser/profile-owner.js';
 import { DomAdapter } from '../dist/adapters/dom-adapter.js';
@@ -11,10 +11,11 @@ import { fixtureServer,mapping,rowData } from '../tests/fixtures/site.ts';
 
 // Run compiled application modules under plain Node, without Vitest or tsx transforms.
 const base=resolve('.local/built-smoke');await mkdir(base,{recursive:true});const dir=await mkdtemp(join(base,'run-'));
-const server=await fixtureServer();assert.equal(new URL(server.origin).hostname,'127.0.0.1');
-const owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
-const store=new EventStore(join(dir,'poc.sqlite'),true,()=> '2026-11-03T00:00:00Z');
+let server,owner,store;
 try{
+  server=await fixtureServer();assert.equal(new URL(server.origin).hostname,'127.0.0.1');
+  owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
+  store=new EventStore(join(dir,'poc.sqlite'),true,()=> '2026-11-03T00:00:00Z');
   await owner.open(server.origin);const config=mapping(server.origin);
   const notification=new DomAdapter(owner.notification,'COMMENT_NOTIFICATION',config);
   const dm=new DomAdapter(owner.dm,'DIRECT_MESSAGE',config);
@@ -36,4 +37,4 @@ try{
   assert.equal(store.events().filter(event=>event.status==='CONFIRMED').length,2);
   const metrics=await browserMetrics();assert.ok(metrics?.browserProcesses>0);assert.ok(metrics?.workingSetBytes>0);
   console.log(JSON.stringify({compiledBrowserSmoke:'PASS',channels:2,browserVersion:owner.version(),browser:metrics,realSends:0,modelCalls:0}));
-}finally{store.close();await owner.close();await server.close();}
+}finally{store?.close();await owner?.close();await server?.close();assert.ok(dir.startsWith(`${base}\\`)||dir.startsWith(`${base}/`));await rm(dir,{recursive:true,force:true});}

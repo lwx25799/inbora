@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
@@ -11,11 +11,11 @@ const {BrowserProfileOwner}=await import(moduleUrl('browser/profile-owner.js'));
 const {captureObserved}=await import(moduleUrl('adapters/observed-reader.js'));
 const {inspectMessageImage,saveMessagePreviews}=await import(moduleUrl('adapters/message-preview.js'));
 const {MessagePreviewStore}=await import(moduleUrl('storage/message-previews.js'));
-const root=resolve('.local/message-preview-carrier-smoke',source?'source':'built');await mkdir(root,{recursive:true});
-const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
+const base=resolve('.local/message-preview-carrier-smoke');await mkdir(base,{recursive:true});const root=await mkdtemp(join(base,'run-'));
 const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jntkAAAAASUVORK5CYII=';
-let assertions=0;const equal=(actual,expected)=>{assert.deepEqual(actual,expected);assertions++;};
+let assertions=0,server,owner;const equal=(actual,expected)=>{assert.deepEqual(actual,expected);assertions++;};
 try{
+  server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
   const imageSource=server.origin+'/emoji.png';
   await owner.dm.route(imageSource,route=>route.fulfill({contentType:'image/png',body:Buffer.from(png.split(',')[1],'base64')}));
   for(const outgoing of [false,true]){
@@ -54,4 +54,4 @@ try{
     equal(foreground.obstruction.stack.treeOrder.foreign.display,'GRID');equal(foreground.obstruction.stack.treeOrder.image.display,'FLEX');
   }
   console.log(JSON.stringify({messagePreviewCarrierSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',assertions,realSends:0,modelCalls:0}));
-}finally{await owner.close();await server.close();}
+}finally{await owner?.close();await server?.close();assert.ok(root.startsWith(`${base}\\`)||root.startsWith(`${base}/`));await rm(root,{recursive:true,force:true});}

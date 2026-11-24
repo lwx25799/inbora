@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
@@ -14,9 +14,10 @@ const {validateDmReplyMapping}=await import(moduleUrl('config/site-mapping.js'))
 const {SendCoordinator}=await import(moduleUrl('core/send-coordinator.js'));
 const {EventStore}=await import(moduleUrl('storage/store.js'));
 const base=resolve('.local/dm-reply-smoke');await mkdir(base,{recursive:true});const dir=await mkdtemp(join(base,'run-'));
-const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
-const store=new EventStore(join(dir,'poc.sqlite'),true,()=> '2026-11-03T00:00:00Z');
+let server,owner,store;
 try{
+  server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
+  store=new EventStore(join(dir,'poc.sqlite'),true,()=> '2026-11-03T00:00:00Z');
   await mountDmReply(owner,server.origin);const mapping=validateDmReplyMapping(dmReplyMapping(server.origin),false);
   const batch=await owner.actor.run(()=>new ObservedReader(owner.dm,mapping.observation).dm(0));
   store.observe('DIRECT_MESSAGE','conv-a',[],'100','fixture');store.observe('DIRECT_MESSAGE','conv-a',batch.events,'100','fixture');
@@ -40,4 +41,4 @@ try{
   }finally{verifier.dispose();}
   assert.ok(store.db.prepare('SELECT used FROM budgets').all().every(row=>row.used===0));
   console.log(JSON.stringify({nativeDmReplySmoke:'PASS',runtime:source?'tsx-source':'compiled-node',fixtureClicks:1,realSends:0,modelCalls:0}));
-}finally{store.close();await owner.close();await server.close();}
+}finally{store?.close();await owner?.close();await server?.close();assert.ok(dir.startsWith(`${base}\\`)||dir.startsWith(`${base}/`));await rm(dir,{recursive:true,force:true});}

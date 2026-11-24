@@ -21,6 +21,14 @@ export class BrowserProfileOwner {
       // Do not navigate or reuse the notification page as the DM page.
       const dm = await context.newPage();
       for (const extra of context.pages()) if (extra !== notification && extra !== dm) await extra.close();
+      if (headless) {
+        context.on('page', page => {
+          if (page === notification || page === dm) return;
+          void page.opener().then(opener => {
+            if (opener && !page.isClosed()) return page.close();
+          }).catch(() => {});
+        });
+      }
       const owner=new BrowserProfileOwner(context, notification, dm, lock,headless);
       context.once('close',()=>{void owner.close().catch(()=>{});});
       return owner;

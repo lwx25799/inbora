@@ -154,22 +154,76 @@ export class ObservedReader {
         if(!freshDocumentReused)await this.navigate(work.url);
       }
     }
-    else await this.page.goto(work.url,{waitUntil:'domcontentloaded'});
+    else if(this.page.url()==='about:blank'){
+      const empty=await this.page.evaluate(()=>{
+        const visible={check(node:Element):boolean{
+          if(!node.isConnected||!node.getClientRects().length)return false;
+          for(let n:Element|null=node;n;n=n.parentElement){
+            const style=getComputedStyle(n);
+            if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return false;
+          }
+          return true;
+        }};
+        for(const editor of Array.from(document.querySelectorAll('[contenteditable="true"],textarea,input'))){
+          if(!visible.check(editor)||editor instanceof HTMLInputElement&&!['text','search','email','url','tel','password'].includes(editor.type))continue;
+          const text=editor instanceof HTMLInputElement||editor instanceof HTMLTextAreaElement?editor.value:editor.textContent??'';
+          if(editor.querySelector('img,video,audio,iframe,object,input,[data-slate-void="true"],[data-attachment]'))return false;
+          const marker=editor.matches('[data-slate-editor="true"][data-zone-container="*"]')&&editor.children.length===1&&
+            editor.firstElementChild?.matches('div.ace-line[data-node="true"]')&&editor.firstElementChild.children.length===1&&
+            editor.firstElementChild.firstElementChild?.matches('span[data-enter="true"][data-string="true"][data-leaf="true"]')&&text==='\u200B';
+          if(text.length!==0&&!marker)return false;
+          if(!Array.from(editor.querySelectorAll('*')).every(node=>['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S'].includes(node.tagName)))return false;
+        }
+        return true;
+      });
+      requireSafe(empty,'OBSERVATION_EXISTING_HUMAN_INPUT');
+      await this.page.goto(work.url,{waitUntil:'domcontentloaded'});
+    }
+    else await this.navigate(work.url);
     await this.guard();
-    if(allCommentAuthors)await this.capture('commentDocument',index);
+    await this.capture('commentDocument',index);
     await markCommentDocumentRead(this.page);
-    if (!await this.page.evaluate(selector=>Array.from(document.querySelectorAll(selector)).some(n=>n.getClientRects().length),this.mapping.selectors.commentList))
+    if (!await this.page.evaluate(selector=>{
+      const visible={check(node:Element):boolean{
+        if(!node.isConnected||!node.getClientRects().length)return false;
+        for(let n:Element|null=node;n;n=n.parentElement){
+          const style=getComputedStyle(n);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return false;
+        }
+        return true;
+      }};
+      return Array.from(document.querySelectorAll(selector)).some(visible.check);
+    },this.mapping.selectors.commentList))
       await this.page.locator(this.mapping.selectors.commentEntry).click();
-    await this.page.waitForFunction(selector=>Array.from(document.querySelectorAll(selector)).filter(n=>n.getClientRects().length).length===1,
-      this.mapping.selectors.commentList);
+    await this.page.waitForFunction(selector=>{
+      const visible={check(node:Element):boolean{
+        if(!node.isConnected||!node.getClientRects().length)return false;
+        for(let n:Element|null=node;n;n=n.parentElement){
+          const style=getComputedStyle(n);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return false;
+        }
+        return true;
+      }};
+      return Array.from(document.querySelectorAll(selector)).filter(visible.check).length===1;
+    },this.mapping.selectors.commentList);
     if(allCommentAuthors)await this.capture('commentReveal',index,{commentOffset:offset});
     try {
-      await this.page.waitForFunction(({rows,empty})=>{
-        const visible={check(node:Element):boolean{const r=node.getBoundingClientRect(),style=getComputedStyle(node);
-          return r.width>0&&r.height>0&&style.display!=='none'&&style.visibility!=='hidden';}};
-        return Array.from(document.querySelectorAll(rows)).some(visible.check)||
-          Boolean(empty&&Array.from(document.querySelectorAll(empty)).some(visible.check));
-      },{rows:this.mapping.selectors.commentRows,empty:this.mapping.selectors.commentEmpty},{timeout:15000});
+      await this.page.waitForFunction(({list,rows,empty})=>{
+        const visible={check(node:Element,requireBox=true):boolean{
+          if(!node.isConnected||!node.getClientRects().length)return false;
+          if(requireBox){const r=node.getBoundingClientRect();if(!(r.width>0&&r.height>0))return false;}
+          for(let n:Element|null=node;n;n=n.parentElement){
+            const style=getComputedStyle(n);
+            if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return false;
+          }
+          return true;
+        }};
+        const lists=Array.from(document.querySelectorAll(list)).filter(node=>visible.check(node,false));
+        if(lists.length!==1)return false;
+        const container=lists[0]!;
+        return Array.from(container.querySelectorAll(rows)).some(node=>visible.check(node))||
+          Boolean(empty&&Array.from(container.querySelectorAll(empty)).some(node=>visible.check(node)));
+      },{list:this.mapping.selectors.commentList,rows:this.mapping.selectors.commentRows,empty:this.mapping.selectors.commentEmpty},{timeout:15000});
     }catch{requireSafe(false,'OBSERVATION_COMMENTS_NOT_READY');}
     const read=()=>this.ready('comments',index,{allCommentAuthors});
     const batch=allCommentAuthors&&offset>0?await recoverCommentOffset(this.page,offset,

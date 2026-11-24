@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
@@ -10,8 +10,9 @@ const {captureCommentReply}=await import(url('adapters/observed-comment-reply.js
 const {captureObserved}=await import(url('adapters/observed-reader.js'));
 const {eventBinding,targetKey}=await import(url('core/contracts.js'));
 const base=resolve('.local/nested-native-author-smoke');await mkdir(base,{recursive:true});const root=await mkdtemp(join(base,'run-'));
-const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
+let server,owner;
 try{
+  server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
   await mountCommentReply(owner,server.origin);const mapping=commentReplyMapping(server.origin);
   mapping.observation.commentAuthors=[{uid:'201',secUid:'child-sec',title:'Child author'}];
   const at=Math.floor(Date.now()/1000)-10;
@@ -63,4 +64,4 @@ try{
   await owner.notification.evaluate(()=>{document.querySelectorAll('#child .author').forEach(n=>n.setAttribute('href','/user/context-sec'));});
   await assert.rejects(capture({action:'proofs'}));
   console.log(JSON.stringify({nestedNativeAuthorSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',assertions:16,syntheticClicks:1,realSends:0,modelCalls:0}));
-}finally{await owner.close();await server.close();}
+}finally{await owner?.close();await server?.close();assert.ok(root.startsWith(`${base}\\`)||root.startsWith(`${base}/`));await rm(root,{recursive:true,force:true});}

@@ -18,6 +18,8 @@ const {visibleStoredMessage}=await load('message-view-location');
 const {inspectSecuritySignal}=await load('security-inspection');
 const {claimFreshCommentDocument,markCommentDocumentRead}=await load('fresh-comment-document');
 const {inspectRecoveryNavigation}=await import(pathToFileURL(resolve(root,`app/browser-recovery-locations.${extension}`)).href);
+const {manualRecoveryElements,inspectManualRecoveryElement}=await import(pathToFileURL(resolve(root,`browser/manual-recovery-dom.${extension}`)).href);
+const {installMediaPauseDocument,releaseMediaPauseDocument}=await import(pathToFileURL(resolve(root,`browser/media-pause.${extension}`)).href);
 function context(title='',visibleBlocker=false,origin='https://www.douyin.com',width=320,height=180){
   const blocker={tagName:'IFRAME',id:'synthetic-security',isConnected:true,parentElement:null,childNodes:[],querySelectorAll:()=>[],
     getBoundingClientRect:()=>({left:0,top:0,right:width,bottom:height,width,height}),getClientRects:()=>[{left:0,top:0,right:width,bottom:height,width,height}]};
@@ -78,4 +80,42 @@ documentStartedAt=110_000;await markCommentDocumentRead(documentPage);await fres
 documentStartedAt=115_000;await fresh(false,'https://www.douyin.com/video/other');await fresh(true);
 documentStartedAt=116_000;documentNow=150_000;await fresh(false);
 documentNow=120_000;await fresh(true);await fresh(false);
+// Verify manual-recovery-dom serialized functions under both tsx and built Node.
+const challengeFrame={tagName:'IFRAME',isConnected:true,parentElement:null,
+  getBoundingClientRect:()=>({left:450,top:186,right:830,bottom:534,width:380,height:348}),
+  querySelectorAll:()=>[],contains:node=>node===challengeFrame};
+const recoveryEnv={innerWidth:1280,innerHeight:720,performance:{timeOrigin:1000},
+  location:{href:'https://www.douyin.com/video/work'},
+  document:{querySelectorAll:selector=>selector==='.security'?[challengeFrame]:[],
+    elementFromPoint:()=>challengeFrame,activeElement:challengeFrame},
+  getComputedStyle:()=>({display:'block',visibility:'visible',opacity:'1',overflowX:'visible',overflowY:'visible'})};
+const collectRecovery=runInNewContext(`(${manualRecoveryElements.toString()})`,recoveryEnv);
+const foundRecovery=collectRecovery({selectors:['.security']});
+assert.equal(foundRecovery.length,1);assert.equal(foundRecovery[0],challengeFrame);checked++;
+const inspectRecovery=runInNewContext(`(${inspectManualRecoveryElement.toString()})`,recoveryEnv);
+assert.deepEqual({...inspectRecovery(challengeFrame,{href:'https://www.douyin.com/video/work',started:1000,point:{x:480,y:215}}),
+  region:{...inspectRecovery(challengeFrame,{href:'https://www.douyin.com/video/work',started:1000,point:{x:480,y:215}}).region}},
+  {documentMatches:true,region:{x:450,y:186,width:380,height:348},permitted:true});checked++;
+assert.deepEqual({...inspectRecovery(challengeFrame,{href:'https://www.douyin.com/video/other',started:1000})},
+  {documentMatches:false,region:null,permitted:false});checked++;
+// Verify media-pause serialized functions under both tsx and built Node.
+function mediaEnv(origin){
+  let pauseCalls=0,disconnected=0;
+  class Element{}
+  class HTMLMediaElement extends Element{constructor(){super();this.isConnected=true;this.paused=false;}pause(){this.paused=true;pauseCalls++;}}
+  class Document{constructor(media){this.isConnected=true;this._media=media;}querySelectorAll(){return [this._media];}addEventListener(){}removeEventListener(){}}
+  class MutationObserver{observe(){}disconnect(){disconnected++;}}
+  const media=new HTMLMediaElement(),doc=new Document(media),win={addEventListener(){},removeEventListener(){}};
+  win.top=win;
+  return{env:{window:win,location:{origin},document:doc,Element,HTMLMediaElement,Document,MutationObserver,Symbol,Reflect,Object},
+    media,doc,state:()=>({pauseCalls,disconnected,installed:Reflect.has(doc,Symbol.for('inbora.media-pause.v1'))})};
+}
+const trusted=mediaEnv('https://www.douyin.com');
+runInNewContext(`(${installMediaPauseDocument.toString()})`,trusted.env)({trustedOrigin:'https://www.douyin.com'});
+assert.equal(trusted.media.paused,true);assert.deepEqual(trusted.state(),{pauseCalls:1,disconnected:0,installed:true});checked++;
+runInNewContext(`(${releaseMediaPauseDocument.toString()})`,trusted.env)();
+assert.deepEqual(trusted.state(),{pauseCalls:1,disconnected:1,installed:false});checked++;
+const untrusted=mediaEnv('https://example.invalid');
+runInNewContext(`(${installMediaPauseDocument.toString()})`,untrusted.env)({trustedOrigin:'https://www.douyin.com'});
+assert.equal(untrusted.media.paused,false);assert.deepEqual(untrusted.state(),{pauseCalls:0,disconnected:0,installed:false});checked++;
 console.log(`${source?'tsx source':'built Node'} serialized emergency guards passed: ${checked} checks; no browser, runtime or Profile accessed`);

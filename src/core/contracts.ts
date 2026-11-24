@@ -108,7 +108,7 @@ export interface SendProof {
 export const dmClockToleranceMs=2000;
 export function proofTimeValid(proof:SendProof,boundary:string):boolean{
   const at=Date.parse(proof.sentAt),start=Date.parse(boundary),now=Date.now();
-  if(!Number.isFinite(at)||at<Date.UTC(2000,0,1)||!Number.isFinite(start)||at>now)return false;
+  if(!Number.isFinite(at)||at<Date.UTC(2000,0,1)||!Number.isFinite(start)||at>now+dmClockToleranceMs)return false;
   if(!proof.submission){
     if(!proof.clockSkew)return at>start;
     const skew=proof.clockSkew;

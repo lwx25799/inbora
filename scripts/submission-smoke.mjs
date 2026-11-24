@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
@@ -14,8 +14,9 @@ const {BrowserProfileOwner}=await import(url('browser/profile-owner.js')),
   {SendCoordinator}=await import(url('core/send-coordinator.js')),
   {EventStore}=await import(url('storage/store.js'));
 const parent=resolve('.local/submission-smoke');await mkdir(parent,{recursive:true});const dir=await mkdtemp(join(parent,'run-'));
-const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(dir,'profile'),true),store=new EventStore(join(dir,'poc.sqlite'),true);
+let server,owner,store;
 try{
+  server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);store=new EventStore(join(dir,'poc.sqlite'),true);
   await mountDmReply(owner,server.origin);const dm=dmReplyMapping(server.origin);dm.submissionReceipts=true;
   const batch=await new ObservedReader(owner.dm,dm.observation).dm(0);
   store.observe('DIRECT_MESSAGE','conv-a',[],'100','fixture','2026-11-04T00:00:00Z');
@@ -44,4 +45,4 @@ try{
   store.approve(cd.id,await ca.inspect(store.event(cid).payload),cd.version,text);
   assert.equal(await new SendCoordinator(store,owner.actor).send(cd.id,ca,false),'CONFIRMED');ca.dispose();
   console.log(JSON.stringify({submissionSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',channels:2,refreshedCrossClockProofs:2,realSends:0,modelCalls:0}));
-}finally{store.close();await owner.close();await server.close();}
+}finally{store?.close();await owner?.close();await server?.close();assert.ok(dir.startsWith(`${parent}\\`)||dir.startsWith(`${parent}/`));await rm(dir,{recursive:true,force:true});}

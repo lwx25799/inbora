@@ -95,8 +95,11 @@ test('earlier displayed frames remain usable until expiry and input sequences ca
     await f.recovery.frame(session.sessionId,noop);await click(f.recovery,first,480,215,1);
     await expect(f.recovery.input(session.sessionId,first.frameId,2,{kind:'text',text:'duplicate'},noop))
       .rejects.toThrow('MANUAL_RECOVERY_INPUT_REPLAY');
-    const now=Date.now();vi.spyOn(Date,'now').mockReturnValue(now+4000);
-    await expect(f.recovery.input(session.sessionId,first.frameId,3,{kind:'text',text:'stale'},noop))
+    const now=Date.now();vi.spyOn(Date,'now').mockReturnValue(now+11_000);
+    await f.recovery.input(session.sessionId,first.frameId,3,{kind:'pointer',phase:'down',x:480,y:215},noop);
+    await f.recovery.input(session.sessionId,first.frameId,4,{kind:'pointer',phase:'up',x:480,y:215},noop);
+    vi.spyOn(Date,'now').mockReturnValue(now+13_000);
+    await expect(f.recovery.input(session.sessionId,first.frameId,5,{kind:'text',text:'stale'},noop))
       .rejects.toThrow('MANUAL_RECOVERY_FRAME_EXPIRED');
     vi.restoreAllMocks();expect(f.recovery.active).toBe(true);
   }finally{vi.restoreAllMocks();await f.cleanup();}

@@ -2,7 +2,7 @@ import {reportSecurityFailure} from './security-signal.js';
 import {randomUUID} from 'node:crypto';
 import type {Page} from 'playwright';
 import type {CommentReplyMapping} from '../config/site-mapping.js';
-import {digest,eventBinding,isStrong,requireSafe,targetKey,validText,
+import {digest,dmClockToleranceMs,eventBinding,isStrong,requireSafe,targetKey,validText,
   type InboundEvent,type ReplyAdapter,type SendProof,type TargetSnapshot} from '../core/contracts.js';
 import {ObservedReader} from './observed-reader.js';
 import {CommentResponses,type NativeCommentReply} from './comment-responses.js';
@@ -97,7 +97,7 @@ export function captureCommentReply(input:Input):Frame{
     },
     time(value:unknown):string|null{
       const at=typeof value==='number'?value*1000:NaN;
-      return Number.isFinite(at)&&at>=Date.UTC(2000,0,1)&&at<=Date.now()?new Date(at).toISOString():null;
+      return Number.isFinite(at)&&at>=Date.UTC(2000,0,1)&&at<=Date.now()+2000?new Date(at).toISOString():null;
     },
     owned(root:Element,selector:string):Element[]{
       return Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root);
@@ -358,7 +358,13 @@ export function captureCommentReply(input:Input):Frame{
       for(const editor of document.querySelectorAll('[contenteditable="true"],textarea,input')){
         if(!dom.visible(editor)||editor instanceof HTMLInputElement&&!['text','search','email','url','tel','password'].includes(editor.type))continue;
         const value=editor instanceof HTMLInputElement||editor instanceof HTMLTextAreaElement?editor.value:editor.textContent??'';
-        dom.check(value===''&&!editor.querySelector('img,video,audio,iframe,object,[data-slate-void="true"],[data-attachment]'),'COMMENT_REPLY_EXISTING_DRAFT');
+        dom.check(!editor.querySelector('img,video,audio,iframe,object,input,[data-slate-void="true"],[data-attachment]'),'COMMENT_REPLY_EXISTING_DRAFT');
+        const marker=editor.matches('[data-slate-editor="true"][data-zone-container="*"]')&&
+          editor.children.length===1&&editor.firstElementChild?.matches('div.ace-line[data-node="true"]')&&
+          editor.firstElementChild.children.length===1&&editor.firstElementChild.firstElementChild?.matches('span[data-enter="true"][data-string="true"][data-leaf="true"]')&&value==='\u200B';
+        dom.check(value.length===0||marker,'COMMENT_REPLY_EXISTING_DRAFT');
+        dom.check(Array.from(editor.querySelectorAll('*')).every(node=>['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S'].includes(node.tagName)),
+          'COMMENT_REPLY_EXISTING_DRAFT');
       }
       state.root.scrollIntoView({block:'center',behavior:'instant'});dom.check(dom.root().root===state.root,'COMMENT_REPLY_ORIGINAL_CHANGED');
     }
@@ -585,7 +591,7 @@ export class ObservedCommentReply implements ReplyAdapter{
     requireSafe(isStrong(event)&&Number.isFinite(Date.parse(notBefore)),'COMMENT_REPLY_SCOPE_REQUIRED');
     const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
     this.responses.watch(event);
-    await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).comments(index);
+    await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).comments(index,true,0,{holdScroll:true,stay:false});
     await this.locateRoot(event,index);
     await this.frame(event,'expand');
     return this.poll(event,text,[],notBefore,undefined,'VERIFY_EXISTING');
@@ -654,8 +660,8 @@ export class ObservedCommentReply implements ReplyAdapter{
       do{const frame=await this.frame(event,'proofs');dom=frame.readbackCounts;poll.snapshots++;poll.rawProofs=frame.proofs.length;
         const fresh=frame.proofs.filter(p=>!before.includes(p.id)),same=fresh.filter(p=>p.text===text);
         poll.newProofs=fresh.length;poll.sameText=same.length;poll.afterBoundary=same.filter(p=>Date.parse(p.sentAt)>Date.parse(notBefore)).length;
-        poll.notFuture=same.filter(p=>Date.parse(p.sentAt)<=Date.now()).length;poll.ackMatches=ackId?same.filter(p=>p.id===ackId).length:0;
-        const matches=same.filter(p=>(ackId?p.id===ackId:Date.parse(p.sentAt)>Date.parse(notBefore))&&Date.parse(p.sentAt)<=Date.now());
+        poll.notFuture=same.filter(p=>Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs).length;poll.ackMatches=ackId?same.filter(p=>p.id===ackId).length:0;
+        const matches=same.filter(p=>(ackId?p.id===ackId:Date.parse(p.sentAt)>Date.parse(notBefore))&&Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs);
         poll.eligibleProofs=matches.length;requireSafe(matches.length<=1,'COMMENT_REPLY_PROOF_AMBIGUOUS');const proof=matches[0];
         poll.stableSnapshots=proof?(digest(proof)===previous?2:1):0;
         if(proof&&poll.stableSnapshots===2){this.report({stage,reason:'VERIFIED',...(dom?{dom}:{}),poll});return proof;}

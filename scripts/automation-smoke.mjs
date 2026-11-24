@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
@@ -14,9 +14,9 @@ const {AutomationStore}=await import(moduleUrl('storage/automation-store.js'));
 const {InboxCollector}=await import(moduleUrl('app/inbox-collector.js'));
 const {CollectionScheduler}=await import(moduleUrl('app/collection-scheduler.js'));
 const base=resolve('.local/automation-smoke');await mkdir(base,{recursive:true});const dir=await mkdtemp(join(base,'run-'));
-const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(dir,'profile'),true),store=new EventStore(join(dir,'poc.sqlite'),true);
-let collector,scheduler;
+let server,owner,store,collector,scheduler;
 try{
+  server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);store=new EventStore(join(dir,'poc.sqlite'),true);
   await migrateClient(store,join(dir,'client-backup.sqlite'));await migrateAutomation(store,join(dir,'automation-backup.sqlite'));
   const data=new AutomationStore(store);data.initialize(Date.parse('2026-11-04T00:00:00Z'));store.bindAccount('100');
   data.configureCollection({ownId:'100',comments:false,inbox:true,commentIntervalMs:30000,dmIntervalMs:15000});
@@ -36,4 +36,4 @@ try{
   data.stop(true);store.db.prepare('UPDATE collection_progress SET next_at=0').run();await scheduler.tick();assert.equal(store.events().length,4);
   assert.equal(store.db.prepare('SELECT count(*) AS n FROM send_intents').get().n,0);assert.equal(store.db.prepare('SELECT count(*) AS n FROM model_calls').get().n,0);
   console.log(JSON.stringify({automationSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:4,mediaPreserved:true,realModels:0,realSends:0}));
-}finally{await scheduler?.close();collector?.dispose();store.close();await owner.close();await server.close();}
+}finally{await scheduler?.close();collector?.dispose();store?.close();await owner?.close();await server?.close();assert.ok(dir.startsWith(`${base}\\`)||dir.startsWith(`${base}/`));await rm(dir,{recursive:true,force:true});}

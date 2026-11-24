@@ -3,7 +3,7 @@ import { fork } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
-import { OwnerLock } from '../../src/browser/owner-lock.js';
+import { OwnerLock, ownerLockErrorCode, ownerLockPort, ownerLockPortBase, ownerLockPortSpan } from '../../src/browser/owner-lock.js';
 import { privateTemp } from '../helpers.js';
 import {existsSync} from 'node:fs';
 
@@ -26,4 +26,23 @@ test('second process is denied for same canonical owner directory; crash release
     const stopped = new Promise<void>(resolve => child.once('exit', () => resolve())); child.kill(); await stopped;
     const replacement = await OwnerLock.acquire(directory); await replacement.close();
   } finally { if (child.exitCode === null) child.kill(); }
+});
+
+test('close is idempotent, port avoids Windows dynamic range, and EACCES is distinct from EADDRINUSE', async () => {
+  const directory = privateTemp('owner-lock-hardening-');
+  const lock = await OwnerLock.acquire(directory);
+  expect(lock.port).toBeGreaterThanOrEqual(ownerLockPortBase);
+  expect(lock.port).toBeLessThan(ownerLockPortBase + ownerLockPortSpan);
+  expect(lock.port).toBeLessThan(49_152);
+  for (let i = 0; i < 200; i++) {
+    const port = ownerLockPort(`d:\\inbora\\synthetic-dir-${i}`);
+    expect(port).toBeGreaterThanOrEqual(20_000);
+    expect(port).toBeLessThanOrEqual(48_999);
+  }
+  expect(ownerLockErrorCode({ code: 'EADDRINUSE' })).toBe('OWNER_LOCKED_OR_PORT_UNAVAILABLE');
+  expect(ownerLockErrorCode({ code: 'EACCES' })).toBe('OWNER_PORT_RESERVED');
+  await Promise.all([lock.close(), lock.close()]);
+  await lock.close();
+  const reopened = await OwnerLock.acquire(directory, false);
+  await reopened.close();
 });

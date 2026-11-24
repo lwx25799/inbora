@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp,readFile} from 'node:fs/promises';
+import {mkdir,mkdtemp,readFile,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
@@ -10,8 +10,9 @@ const {ObservedReader}=await import(moduleUrl('adapters/observed-reader.js'));
 const {inspectMessageImage,saveMessagePreviews}=await import(moduleUrl('adapters/message-preview.js'));
 const {MessagePreviewStore}=await import(moduleUrl('storage/message-previews.js'));
 const base=resolve('.local/message-preview-canvas-smoke');await mkdir(base,{recursive:true});const root=await mkdtemp(join(base,'run-'));
-const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
+let server,owner;
 try{
+  server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
   await mountObserved(owner,server.origin);const mapping=observedMapping(server.origin),at=Date.now()-1000;
   const png=await owner.dm.evaluate(()=>{
     const canvas=document.createElement('canvas');canvas.width=1024;canvas.height=640;const context=canvas.getContext('2d');
@@ -37,4 +38,4 @@ try{
   const tainted=await owner.dm.evaluate(inspectMessageImage,{...input,mode:'CANVAS'});assert.equal(tainted.canvasTainted,true);assert.equal(tainted.reason,'MESSAGE_PREVIEW_OBSCURED');
   const diagnostics=await readFile(join(root,'evidence','message-preview-latest.json'),'utf8');assert.doesNotMatch(diagnostics,/cdn\.fixture|99001|conv-a|owned emoji/u);
   console.log(JSON.stringify({messagePreviewCanvasSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',assertions:12,realSends:0,modelCalls:0}));
-}finally{await owner.close();await server.close();}
+}finally{await owner?.close();await server?.close();assert.ok(root.startsWith(`${base}\\`)||root.startsWith(`${base}/`));await rm(root,{recursive:true,force:true});}

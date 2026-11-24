@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fixtureServer } from '../tests/fixtures/site.ts';
@@ -12,9 +12,10 @@ const {ObservedReader,captureObserved} = await import(moduleUrl('adapters/observ
 const {validateObservationMapping} = await import(moduleUrl('config/site-mapping.js'));
 const {EventStore} = await import(moduleUrl('storage/store.js'));
 const base=resolve('.local/observed-smoke');await mkdir(base,{recursive:true});const dir=await mkdtemp(join(base,'run-'));
-const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
-const store=new EventStore(join(dir,'poc.sqlite'),true,()=> '2026-11-03T00:00:00Z');
+let server,owner,store;
 try {
+  server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
+  store=new EventStore(join(dir,'poc.sqlite'),true,()=> '2026-11-03T00:00:00Z');
   await mountObserved(owner,server.origin);
   // Cover the real opening path: the permitted row is selected before delayed header metadata mounts.
   await owner.dm.evaluate(()=>{
@@ -139,4 +140,4 @@ try {
   await owner.notification.locator('#self').evaluate(node=>node.remove());
   await assert.rejects(owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-missing-identity'}),/OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_READY/);
   console.log(JSON.stringify({observedReaderSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:4,dmMediaPreserved:true,emojiVerified:true,unverifiedBodyPreserved:true,readStageCodes:true,sends:0}));
-} finally {store.close();await owner.close();await server.close();}
+} finally {store?.close();await owner?.close();await server?.close();assert.ok(dir.startsWith(`${base}\\`)||dir.startsWith(`${base}/`));await rm(dir,{recursive:true,force:true});}

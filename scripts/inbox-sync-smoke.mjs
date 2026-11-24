@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 
@@ -10,17 +10,19 @@ const {ClientService}=await import(moduleUrl('app/service.js'));
 const {BrowserService}=await import(moduleUrl('app/browser-service.js'));
 const {migrateClient}=await import(moduleUrl('storage/client-migration.js'));
 const parent=resolve('.local/inbox-sync-smoke');await mkdir(parent,{recursive:true});
-const root=await mkdtemp(join(parent,'run-')),store=new EventStore(join(root,'poc.sqlite'),true);
-await migrateClient(store,join(root,'backup.sqlite'));
-const calls=[];let release,gate=new Promise(r=>{release=r;});
-class FixtureBrowser extends BrowserService{
-  identity(){return{identityDigest:'synthetic-account',mappingDigest:'synthetic-mapping',browserMode:'headed',browserVersion:'fixture'};}
-  async refreshIdentity(){return this.identity();}
-  async observe(_store,source){calls.push(source);if(source==='works')await gate;}
-  async close(){}
-}
-const browser=new FixtureBrowser(root);let service=new ClientService(store,browser);
+const root=await mkdtemp(join(parent,'run-'));
+let store,service,release=()=>{};
 try{
+  store=new EventStore(join(root,'poc.sqlite'),true);
+  await migrateClient(store,join(root,'backup.sqlite'));
+  const calls=[];let gate=new Promise(r=>{release=r;});
+  class FixtureBrowser extends BrowserService{
+    identity(){return{identityDigest:'synthetic-account',mappingDigest:'synthetic-mapping',browserMode:'headed',browserVersion:'fixture'};}
+    async refreshIdentity(){return this.identity();}
+    async observe(_store,source){calls.push(source);if(source==='works')await gate;}
+    async close(){}
+  }
+  const browser=new FixtureBrowser(root);service=new ClientService(store,browser);
   const token=service.authority.issueSession();
   const started=await service.dispatch(token,{command:'syncInbox'});
   assert.equal(started.sync.running,true);assert.deepEqual(calls,['works']);
@@ -46,4 +48,4 @@ try{
   console.log(JSON.stringify({inboxSyncSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',serialChannels:2,
     duplicateCoalesced:true,statusWhileReading:true,emergencyStopBeforeNextChannel:true,restartNoReplay:true,
     synthetic:true,realSends:0,modelCalls:0}));
-}finally{release();await service.close();store.close();}
+}finally{release();await service?.close();store?.close();assert.ok(root.startsWith(`${parent}\\`)||root.startsWith(`${parent}/`));await rm(root,{recursive:true,force:true});}

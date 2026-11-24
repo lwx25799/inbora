@@ -28,10 +28,20 @@ function pngSize(bytes:Buffer):{width:number;height:number}|null {
 
 /** Local thumbnails are evidence of one exact native message, never trusted message text or provider context. */
 export class MessagePreviewStore {
+  private cachedRetention:{mtimeMs:number|null;size:number;ms:number}|null=null;
   constructor(readonly root:string){}
   private retentionMs():number {
     const file=join(this.root,'runtime.json');
-    return (existsSync(file)?runtimeSchema.parse(JSON.parse(readFileSync(file,'utf8'))).evidenceRetentionDays:14)*86_400_000;
+    let stat:ReturnType<typeof lstatSync>|null=null;
+    try{stat=lstatSync(file);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    if(!stat){
+      this.cachedRetention={mtimeMs:null,size:0,ms:14*86_400_000};
+      return this.cachedRetention.ms;
+    }
+    if(this.cachedRetention&&this.cachedRetention.mtimeMs===stat.mtimeMs&&this.cachedRetention.size===stat.size)return this.cachedRetention.ms;
+    const ms=runtimeSchema.parse(JSON.parse(readFileSync(file,'utf8'))).evidenceRetentionDays*86_400_000;
+    this.cachedRetention={mtimeMs:stat.mtimeMs,size:stat.size,ms};
+    return ms;
   }
   private key(event:InboundEvent,ownId:string):string {
     requireSafe(!!ownId&&event.channel==='DIRECT_MESSAGE'&&!!event.platformEventId&&!!event.conversationId&&!!event.actorId&&
@@ -86,27 +96,31 @@ export class MessagePreviewStore {
     }catch{requireSafe(false,'MESSAGE_PREVIEW_UNAVAILABLE');}
   }
   save(event:InboundEvent,ownId:string,images:CapturedMessageImage[]):void {
-    const key=this.key(event,ownId),directory=this.directory(true);this.prune(directory);
-    const previous=this.list(event,ownId),displayText=this.displayText(event,ownId);
-    let bytesOnDisk=readdirSync(directory).filter(name=>/^[a-f0-9]{64}\.png$/u.test(name)).reduce((total,name)=>{
-      const stat=lstatSync(join(directory,name));return total+(stat.isFile()&&!stat.isSymbolicLink()?stat.size:0);
-    },0);
-    const attachments:MessagePreviewAttachment[]=images.slice(0,4).map((image,index)=>{
-      const label=image.label?.replace(/[\u0000-\u001f\u007f]/gu,'').slice(0,120)||null;
-      const size=image.png?pngSize(image.png):null;
-      if(!image.png||!size){
-        const existing=previous[index];if(existing?.state==='READY'&&existing.label===label)return existing;
-        return {previewId:null,kind:'IMAGE',label,state:'UNAVAILABLE',reason:image.reason??'MESSAGE_PREVIEW_CAPTURE_FAILED'};
-      }
-      const previewId=digest([key,index,digest(image.png)]),file=join(directory,previewId+'.png');
-      if(!existsSync(file)){
-        if(bytesOnDisk+image.png.length>maximumCacheBytes)return {previewId:null,kind:'IMAGE',label,state:'UNAVAILABLE',reason:'MESSAGE_PREVIEW_CACHE_FULL'};
-        writeFileSync(file,image.png,{flag:'wx',mode:0o600});bytesOnDisk+=image.png.length;
-      }
-      return {previewId,kind:'IMAGE',label,state:'READY',width:size.width,height:size.height};
-    });
-    this.writeManifest(directory,manifestSchema.parse({version:1,key,attachments,...(displayText===null?{}:{displayText})}));
-    for(const old of previous)if(old.previewId&&!attachments.some(item=>item.previewId===old.previewId))this.removeImage(directory,old.previewId);
+    const key=this.key(event,ownId),directory=this.directory(true);
+    let previous:MessagePreviewAttachment[]=[],displayText:string|null=null;
+    try{const existing=this.manifest(event,ownId).manifest;previous=existing.attachments;displayText=existing.displayText??null;}
+    catch{/* Absent, expired or invalid prior manifest. */}
+    const created:string[]=[];
+    try{
+      const attachments:MessagePreviewAttachment[]=images.slice(0,4).map((image,index)=>{
+        const label=image.label?.replace(/[\u0000-\u001f\u007f]/gu,'').slice(0,120)||null;
+        const size=image.png?pngSize(image.png):null;
+        if(!image.png||!size){
+          const existing=previous[index];if(existing?.state==='READY'&&existing.label===label)return existing;
+          return {previewId:null,kind:'IMAGE',label,state:'UNAVAILABLE',reason:image.reason??'MESSAGE_PREVIEW_CAPTURE_FAILED'};
+        }
+        const previewId=digest([key,index,digest(image.png)]),file=join(directory,previewId+'.png');
+        if(!existsSync(file)){
+          writeFileSync(file,image.png,{flag:'wx',mode:0o600});created.push(previewId);
+        }
+        return {previewId,kind:'IMAGE',label,state:'READY',width:size.width,height:size.height};
+      });
+      this.writeManifest(directory,manifestSchema.parse({version:1,key,attachments,...(displayText===null?{}:{displayText})}));
+      for(const old of previous)if(old.previewId&&!attachments.some(item=>item.previewId===old.previewId))this.removeImage(directory,old.previewId);
+    }catch(error){
+      for(const id of created)this.removeImage(directory,id);
+      throw error;
+    }
     this.prune(directory);
   }
   private removeImage(directory:string,id:string):void {
@@ -114,24 +128,35 @@ export class MessagePreviewStore {
     try{const stat=lstatSync(file);if(stat.isFile()&&!stat.isSymbolicLink())unlinkSync(file);}catch{/* A rebuildable thumbnail may already be absent. */}
   }
   private prune(directory:string):void {
+    const entries=readdirSync(directory),pngSizes=new Map<string,number>();
+    for(const name of entries){
+      if(!/^[a-f0-9]{64}\.png$/u.test(name))continue;
+      try{const stat=lstatSync(join(directory,name));if(stat.isFile()&&!stat.isSymbolicLink())pngSizes.set(name.slice(0,-4),stat.size);}
+      catch{/* A rebuildable thumbnail may already be absent. */}
+    }
     const records:{file:string;modified:number;bytes:number;manifest:z.infer<typeof manifestSchema>}[]=[];
-    for(const name of readdirSync(directory)){
+    let invalidManifests=0;
+    for(const name of entries){
       if(!/^[a-f0-9]{64}\.json$/u.test(name))continue;
       try{
-        const file=join(directory,name),stat=lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink()||stat.size>65_536)continue;
-        const manifest=manifestSchema.parse(JSON.parse(readFileSync(file,'utf8')));if(name!==manifest.key+'.json')continue;
-        const bytes=manifest.attachments.reduce((total,item)=>{
-          if(!item.previewId)return total;try{const image=lstatSync(join(directory,item.previewId+'.png'));return total+(image.isFile()&&!image.isSymbolicLink()?image.size:0);}catch{return total;}
-        },stat.size);
+        const file=join(directory,name),stat=lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink()||stat.size>65_536){invalidManifests++;continue;}
+        const manifest=manifestSchema.parse(JSON.parse(readFileSync(file,'utf8')));if(name!==manifest.key+'.json'){invalidManifests++;continue;}
+        const bytes=manifest.attachments.reduce((total,item)=>total+(item.previewId?pngSizes.get(item.previewId)??0:0),stat.size);
         records.push({file,modified:stat.mtimeMs,bytes,manifest});
-      }catch{/* Unknown or invalid files are outside cache retention ownership. */}
+      }catch{invalidManifests++;/* Unknown or invalid files are outside cache retention ownership. */}
     }
     records.sort((a,b)=>a.modified-b.modified);let count=records.length,total=records.reduce((bytes,item)=>bytes+item.bytes,0);
-    const retentionMs=this.retentionMs();
+    const retentionMs=this.retentionMs(),now=Date.now(),evicted=new Set<string>();
     for(const record of records){
-      if(Date.now()-record.modified<=retentionMs&&count<=maximumMessages&&total<=maximumCacheBytes)break;
+      if(now-record.modified<=retentionMs&&count<=maximumMessages&&total<=maximumCacheBytes)break;
       for(const image of record.manifest.attachments)if(image.previewId)this.removeImage(directory,image.previewId);
-      unlinkSync(record.file);count--;total-=record.bytes;
+      unlinkSync(record.file);evicted.add(record.file);count--;total-=record.bytes;
+    }
+    if(invalidManifests===0){
+      const referenced=new Set<string>();
+      for(const record of records)if(!evicted.has(record.file))
+        for(const image of record.manifest.attachments)if(image.previewId)referenced.add(image.previewId);
+      for(const id of pngSizes.keys())if(!referenced.has(id))this.removeImage(directory,id);
     }
   }
 }
