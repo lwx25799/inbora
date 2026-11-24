@@ -793,7 +793,6 @@ export class ClientService {
     await resourcesClosed;
     if(!this.automation)this.store.db.prepare("UPDATE client_state SET paused=1 WHERE id=1").run();
     await this.drain();
-    await this.knowledge.close();
-    await this.browser.close();
+    await this.knowledge.close().finally(() => this.browser.close());
   }
 }

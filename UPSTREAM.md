@@ -1,5 +1,9 @@
 # 来源与许可
 
+## 2026-11-24 应用退出时关闭专属浏览器
+
+核对了 Apache-2.0 的 Playwright 1.64.1 固定提交 `cfe490d941f992655948eee8fd4fd94e1c4234bf` 中 `packages/playwright-core/src/server/utils/processLauncher.ts` 的 `gracefullyClose`，以及 MIT／Apache-2.0 的 Tauri 2.12.5 固定提交 `993038c49185307dfc895ab7657d77ca0d5ed7c7` 中 `crates/tauri/src/app.rs` 的 `AppHandle::exit` 和 `make_run_event_loop_callback`。沿用原生退出触发后端管道 EOF，以及 Playwright 关闭持久上下文并等待浏览器进程收尾的路径。项目在临时导入清理报错时仍关闭专属浏览器，随后完成助手控制端、数据库和运行锁收尾，并用非零退出状态记录失败。已有在途发送回读顺序保留。合成故障复现覆盖真实无头 Edge 和独立后端管道。上游代码和依赖许可继续沿用现有记录。
+
 ## 2026-11-16：在原无头页面内人工处理验证
 
 用户指出模式迁移不能承接原验证现场。本轮在实现前核对 Apache-2.0 `microsoft/playwright@cfe490d941f992655948eee8fd4fd94e1c4234bf` 的 `packages/playwright-core/src/server/input.ts`、`chromium/crInput.ts` 与 `screenshotter.ts`，并核对官方 [Mouse](https://playwright.dev/docs/api/class-mouse)、[Keyboard](https://playwright.dev/docs/api/class-keyboard) 及 [Page.screenshot](https://playwright.dev/docs/api/class-page#page-screenshot) 文档。鼠标采用主框架视口 CSS 坐标，按下、移动及抬起由同一 Page 保持状态；普通视口截图不采用会滚动的元素截图。使用已有 Playwright 公开接口，不复制上游源函数、不引入远程桌面服务或新依赖，原依赖许可保持。

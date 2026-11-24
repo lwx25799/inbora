@@ -126,24 +126,37 @@ async function connect(raw: unknown): Promise<unknown> {
 }
 async function closeServices():Promise<void>{
   const controlClosed=control?.close();
+  // Observe errors while the service drains, then propagate them once cleanup has finished.
+  void controlClosed?.catch(()=>{});
   service?.setAssistantConnection(null);
   // Service cancellation stops unsubmitted work; accepted submissions keep their existing readback.
-  await service?.close();
-  await assistant?.close();
-  await controlClosed;
-  assistant=undefined;control=undefined;
+  try {
+    await service?.close();
+  } finally {
+    try {
+      await assistant?.close();
+    } finally {
+      assistant=undefined;control=undefined;
+      await controlClosed;
+    }
+  }
 }
 async function close(): Promise<void> {
   if (closing) return;
   closing = true;
   // A connection can still create/load its service; let its cancellation cleanup finish first.
   // Other active requests remain cancellable by service.close(), so do not drain all requests here.
-  await connectionSettled;
-  await closeServices();
-  await Promise.allSettled([...active]);
-  store?.close();
-  await lock?.close();
-  process.exitCode = 0;
+  try {
+    await connectionSettled;
+    await closeServices();
+  } finally {
+    await Promise.allSettled([...active]);
+    try {
+      store?.close();
+    } finally {
+      await lock?.close();
+    }
+  }
 }
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 input.on("line", (line) => {
@@ -202,7 +215,7 @@ input.on("line", (line) => {
   void task.finally(() => active.delete(task));
 });
 input.on("close", () => {
-  void close();
+  void close().catch(() => { process.exitCode = 1; });
 });
 process.on("SIGTERM", () => {
   input.close();

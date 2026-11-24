@@ -1,13 +1,15 @@
 import {expect,test,vi} from 'vitest';
 import {EventEmitter} from 'node:events';
 import {join} from 'node:path';
-import {writeFile} from 'node:fs/promises';
+import {mkdir,rename,rm,writeFile} from 'node:fs/promises';
 import {BrowserService} from '../../src/app/browser-service.js';
 import {ClientService} from '../../src/app/service.js';
 import {AccountActor} from '../../src/browser/account-actor.js';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
+import {OwnerLock} from '../../src/browser/owner-lock.js';
 import {DomAdapter} from '../../src/adapters/dom-adapter.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
+import {EventStore} from '../../src/storage/store.js';
 import {database,privateTemp} from '../helpers.js';
 import {mapping} from '../fixtures/site.js';
 
@@ -57,4 +59,36 @@ test('natural context close during a real observation stops inbox sync without l
     expect(f.store.db.prepare("SELECT count(*) AS n FROM channel_capabilities WHERE state='SEND_AVAILABLE'").get()).toEqual({n:2});
     expect(await service.dispatch(token,{command:'getStatus'})).toMatchObject({sync:{running:false,results:[{state:'FAILED',error:'BROWSER_CLOSED'},{state:'SKIPPED'}]}});
   }finally{read.release();await service?.close();observe.mockRestore();f.close();}
+});
+
+test('application shutdown closes the running Edge and releases its profile even if an unfinished import cannot be removed',async()=>{
+  const root=privateTemp('exit-browser-'),profile=join(root,'profile');
+  const store=new EventStore(join(root,'poc.sqlite'),true);
+  let owner:BrowserProfileOwner|undefined;
+  let service:ClientService|undefined;
+  try{
+    await migrateClient(store,join(root,'backups','client.sqlite'));
+    owner=await BrowserProfileOwner.launch(profile,true);
+    const edge=owner.context.browser()!;
+    expect(edge.isConnected()).toBe(true);
+    await expect(OwnerLock.acquire(profile,false)).rejects.toThrow('OWNER_LOCKED_OR_PORT_UNAVAILABLE');
+    service=new ClientService(store,BrowserService.adopt(root,owner,'headless'));
+    await service.loadSettings();
+    const token=service.authority.issueSession();
+    const {id}=await service.dispatch(token,{command:'replyKnowledge',action:'importStart',
+      name:'sample.txt',bytes:1,kind:'KNOWLEDGE'}) as {id:string};
+    const upload=join(root,'reply-imports',`${id}.upload`);
+    await rename(upload,join(root,'retained-fixture-upload'));
+    await mkdir(upload);
+
+    await expect(service.close()).rejects.toMatchObject({code:'ERR_FS_EISDIR'});
+    expect(edge.isConnected()).toBe(false);
+    const reopened=await OwnerLock.acquire(profile,false);
+    await reopened.close();
+  }finally{
+    await service?.close().catch(()=>{});
+    await owner?.close();
+    store.close();
+    await rm(root,{recursive:true,force:true,maxRetries:4,retryDelay:100});
+  }
 });
