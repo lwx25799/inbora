@@ -204,7 +204,19 @@ async fn client_request(
 
 const MAX_SIDECAR_LINE_BYTES: usize = 2_000_000;
 const OVERSIZED_PREFIX_BYTES: usize = 256;
+const REQUEST_ID_PREFIX: &[u8] = b"{\"protocol\":1,\"requestId\":\"";
+const STRIPPED_SIDECAR_ENV_VARS: &[&str] = &[
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "INBORA_MODEL_KEY",
+    "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "GEMINI_API_KEY",
+];
 
+#[derive(Debug, PartialEq, Eq)]
 enum BoundedLine {
     Line(String),
     Oversized(Option<String>),
@@ -212,18 +224,33 @@ enum BoundedLine {
     Eof,
 }
 
+fn is_canonical_uuid_bytes(bytes: &[u8]) -> bool {
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, &byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
 fn extract_prefix_request_id(prefix: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(prefix).ok()?;
-    let marker = "\"requestId\":\"";
-    let start = text.find(marker)? + marker.len();
-    let rest = text.get(start..)?;
-    let end = rest.find('"')?;
-    let id = &rest[..end];
-    if id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
-        Some(id.to_string())
+    let rest = prefix.strip_prefix(REQUEST_ID_PREFIX)?;
+    if rest.len() < 38 || rest[36] != b'"' || !matches!(rest[37], b',' | b'}') {
+        return None;
+    }
+    let id = &rest[..36];
+    if is_canonical_uuid_bytes(id) {
+        std::str::from_utf8(id).ok().map(str::to_string)
     } else {
         None
     }
+}
+
+fn configure_sidecar_env<'a>(command: &'a mut Command, secret: &str) -> &'a mut Command {
+    command.env("INBORA_PIPE_NONCE", secret);
+    for name in STRIPPED_SIDECAR_ENV_VARS {
+        command.env_remove(name);
+    }
+    command
 }
 
 fn read_bounded_line(reader: &mut impl BufRead, max_bytes: usize) -> std::io::Result<BoundedLine> {
@@ -312,16 +339,7 @@ fn start_backend(app: &tauri::App) -> Result<Desktop, Box<dyn std::error::Error>
         packaged.arg(resources.join("dist/app/sidecar.js")).current_dir(&resources);
         packaged
     };
-    command
-        .env("INBORA_PIPE_NONCE", &secret)
-        .env_remove("NODE_OPTIONS")
-        .env_remove("NODE_PATH")
-        .env_remove("INBORA_MODEL_KEY")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("GOOGLE_GENERATIVE_AI_API_KEY")
-        .env_remove("GEMINI_API_KEY")
+    configure_sidecar_env(&mut command, &secret)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -440,4 +458,156 @@ fn main() {
                 shutdown(&handle.state::<Desktop>().0);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::io::Cursor;
+
+    const SAMPLE_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn extract_prefix_request_id_handles_utf8_mid_character_truncation() {
+        for pad in 0..4 {
+            let padding = "a".repeat(pad);
+            let line = format!(
+                "{{\"protocol\":1,\"requestId\":\"{SAMPLE_UUID}\",\"ok\":true,\"result\":{{\"pad\":\"{padding}\",\"text\":\"{}\"}}}}",
+                "你好世界😀".repeat(60)
+            );
+            let prefix = &line.as_bytes()[..OVERSIZED_PREFIX_BYTES];
+            assert_eq!(
+                extract_prefix_request_id(prefix).as_deref(),
+                Some(SAMPLE_UUID),
+                "failed for pad={pad}, valid_utf8={}",
+                std::str::from_utf8(prefix).is_ok()
+            );
+        }
+        // Explicitly verify a case where the 256-byte cut breaks a 3-byte Chinese UTF-8 sequence.
+        let chinese_line = format!(
+            "{{\"protocol\":1,\"requestId\":\"{SAMPLE_UUID}\",\"ok\":true,\"result\":{{\"text\":\"{}\"}}}}",
+            "你好世界".repeat(100)
+        );
+        let chinese_prefix = &chinese_line.as_bytes()[..OVERSIZED_PREFIX_BYTES];
+        assert!(
+            std::str::from_utf8(chinese_prefix).is_err(),
+            "test fixture must cut inside a multi-byte UTF-8 sequence"
+        );
+        assert_eq!(
+            extract_prefix_request_id(chinese_prefix).as_deref(),
+            Some(SAMPLE_UUID)
+        );
+    }
+
+    #[test]
+    fn extract_prefix_request_id_rejects_non_top_level_and_invalid_values() {
+        let nested = format!(
+            "{{\"protocol\":1,\"event\":{{\"requestId\":\"{SAMPLE_UUID}\"}},\"text\":\"{}\"}}",
+            "你好".repeat(100)
+        );
+        assert_eq!(extract_prefix_request_id(nested.as_bytes()), None);
+
+        let null_id = b"{\"protocol\":1,\"requestId\":null,\"ok\":false}";
+        assert_eq!(extract_prefix_request_id(null_id), None);
+
+        let wrong_protocol = format!(
+            "{{\"protocol\":2,\"requestId\":\"{SAMPLE_UUID}\",\"ok\":true}}"
+        );
+        assert_eq!(extract_prefix_request_id(wrong_protocol.as_bytes()), None);
+
+        let bad_uuid = b"{\"protocol\":1,\"requestId\":\"not-a-valid-uuid-at-all-000000000000\",\"ok\":true}";
+        assert_eq!(extract_prefix_request_id(bad_uuid), None);
+
+        let bad_delimiter = format!(
+            "{{\"protocol\":1,\"requestId\":\"{SAMPLE_UUID}\"garbage}}"
+        );
+        assert_eq!(extract_prefix_request_id(bad_delimiter.as_bytes()), None);
+
+        let closing_brace = format!("{{\"protocol\":1,\"requestId\":\"{SAMPLE_UUID}\"}}");
+        assert_eq!(
+            extract_prefix_request_id(closing_brace.as_bytes()).as_deref(),
+            Some(SAMPLE_UUID)
+        );
+    }
+
+    #[test]
+    fn read_bounded_line_recovers_request_id_on_over_2mb_chinese_response_and_continues() {
+        let huge_payload = "你好世界".repeat(200_000); // 2.4 MB UTF-8
+        let oversized = format!(
+            "{{\"protocol\":1,\"requestId\":\"{SAMPLE_UUID}\",\"ok\":true,\"result\":{{\"text\":\"{huge_payload}\"}}}}\n"
+        );
+        assert!(oversized.len() > MAX_SIDECAR_LINE_BYTES);
+        let next_line = "{\"protocol\":1,\"event\":{\"event\":\"status_updated\"}}\r\n";
+        let mut combined = Vec::with_capacity(oversized.len() + next_line.len());
+        combined.extend_from_slice(oversized.as_bytes());
+        combined.extend_from_slice(next_line.as_bytes());
+
+        let mut reader = BufReader::with_capacity(64, Cursor::new(combined));
+        let first = read_bounded_line(&mut reader, MAX_SIDECAR_LINE_BYTES).unwrap();
+        assert_eq!(first, BoundedLine::Oversized(Some(SAMPLE_UUID.to_string())));
+
+        let second = read_bounded_line(&mut reader, MAX_SIDECAR_LINE_BYTES).unwrap();
+        assert_eq!(
+            second,
+            BoundedLine::Line("{\"protocol\":1,\"event\":{\"event\":\"status_updated\"}}".into())
+        );
+
+        let third = read_bounded_line(&mut reader, MAX_SIDECAR_LINE_BYTES).unwrap();
+        assert_eq!(third, BoundedLine::Eof);
+    }
+
+    #[test]
+    fn read_bounded_line_handles_oversized_eof_nested_event_and_invalid_utf8() {
+        // Oversized response ending at EOF without newline
+        let oversized_eof = format!(
+            "{{\"protocol\":1,\"requestId\":\"{SAMPLE_UUID}\",\"ok\":true,\"result\":{{\"text\":\"{}\"}}}}",
+            "中文内容".repeat(40)
+        );
+        let mut reader = BufReader::with_capacity(32, Cursor::new(oversized_eof.into_bytes()));
+        assert_eq!(
+            read_bounded_line(&mut reader, 256).unwrap(),
+            BoundedLine::Oversized(Some(SAMPLE_UUID.to_string()))
+        );
+        assert_eq!(read_bounded_line(&mut reader, 256).unwrap(), BoundedLine::Eof);
+
+        // Oversized non-top-level event returns Oversized(None)
+        let oversized_event = format!(
+            "{{\"protocol\":1,\"event\":{{\"requestId\":\"{SAMPLE_UUID}\",\"data\":\"{}\"}}}}\n",
+            "中文内容".repeat(40)
+        );
+        let mut event_reader = BufReader::with_capacity(32, Cursor::new(oversized_event.into_bytes()));
+        assert_eq!(
+            read_bounded_line(&mut event_reader, 256).unwrap(),
+            BoundedLine::Oversized(None)
+        );
+
+        // Short invalid UTF-8 line returns InvalidUtf8, followed by Eof
+        let invalid = vec![0xff, 0xfe, b'\n'];
+        let mut invalid_reader = BufReader::new(Cursor::new(invalid));
+        assert_eq!(
+            read_bounded_line(&mut invalid_reader, 256).unwrap(),
+            BoundedLine::InvalidUtf8
+        );
+        assert_eq!(read_bounded_line(&mut invalid_reader, 256).unwrap(), BoundedLine::Eof);
+    }
+
+    #[test]
+    fn configure_sidecar_env_sets_nonce_and_strips_sensitive_vars() {
+        let mut command = Command::new("synthetic-node");
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        configure_sidecar_env(&mut command, secret);
+        let envs: HashMap<&OsStr, Option<&OsStr>> = command.get_envs().collect();
+        assert_eq!(
+            envs.get(OsStr::new("INBORA_PIPE_NONCE")).copied().flatten(),
+            Some(OsStr::new(secret))
+        );
+        for name in STRIPPED_SIDECAR_ENV_VARS {
+            assert_eq!(
+                envs.get(OsStr::new(name)),
+                Some(&None),
+                "expected {name} to be explicitly removed from child environment"
+            );
+        }
+    }
 }

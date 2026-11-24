@@ -5,6 +5,19 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+const MAX_SIDECAR_LINE_BYTES = 2_000_000;
+const REQUEST_ID_PREFIX = '{"protocol":1,"requestId":"';
+
+function extractPrefixRequestId(line) {
+  if (!line.startsWith(REQUEST_ID_PREFIX)) return null;
+  const start = REQUEST_ID_PREFIX.length;
+  const id = line.slice(start, start + 36);
+  const quote = line[start + 36];
+  const next = line[start + 37];
+  if (quote !== '"' || (next !== ',' && next !== '}')) return null;
+  return /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(id) ? id : null;
+}
+
 /** Development-only pipe supervisor. Reloads source; never queues or replays business commands. */
 export class DevelopmentSidecar {
   constructor({ root, secret, input = process.stdin, output = process.stdout,
@@ -78,8 +91,24 @@ export class DevelopmentSidecar {
 
   accept(owner, line) {
     if (this.current !== owner) return;
+    if (Buffer.byteLength(line) > MAX_SIDECAR_LINE_BYTES) {
+      const requestId = extractPrefixRequestId(line);
+      if (requestId) {
+        const item = this.pending.get(requestId);
+        if (item?.generation === owner.generation) {
+          this.pending.delete(requestId);
+          if (item.internal) {
+            item.resolve({ ok: false, error: 'SIDECAR_RESPONSE_TOO_LARGE' });
+            return;
+          }
+          if (!this.reloading && !this.closed) this.reply(requestId, 'SIDECAR_RESPONSE_TOO_LARGE');
+        }
+      }
+      if (!this.reloading && !this.closed) this.event('sidecar_response_too_large');
+      return;
+    }
     let value;
-    try { if (Buffer.byteLength(line) > 2_000_000) return; value = JSON.parse(line); } catch { return; }
+    try { value = JSON.parse(line); } catch { return; }
     if (value?.protocol !== 1) return;
     if (value.ready === true) { owner.readySeen = true; owner.ready(); return; }
     const item = this.pending.get(value.requestId);

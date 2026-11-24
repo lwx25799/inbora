@@ -44,6 +44,11 @@ async function fixture(paths:{trace:string;hold:string;release:string;owner:stri
       delayed.push({requestId:envelope.requestId});note('submitted');
     }else if(body.command==='fixtureExit'){
       note('crash');unlinkSync(paths.owner);process.exit(7);
+    }else if(body.command==='oversizedReply'){
+      reply({text:'你好世界'.repeat(200_000)});
+    }else if(body.command==='oversizedEvent'){
+      output({protocol:1,event:{requestId:body.fakeId,padding:'测试事件'.repeat(200_000)}});
+      reply({emitted:true});
     }else reply({connected,runtime,keyPresent,pid:process.pid,loadedVersion});
   });
   input.on('close',()=>{void(async()=>{
@@ -213,5 +218,28 @@ test('a connected ready child that exits abnormally remains blocked from startin
     expect(await f.request({command:'getStatus'}).reply()).toMatchObject({ok:false,error:'DEV_BACKEND_UNAVAILABLE_RESTART_REQUIRED'});
     expect((await f.records()).filter(record=>record.event==='start')).toHaveLength(1);
     expect((await f.records()).some(record=>record.event==='owner.overlap')).toBe(false);
+  }finally{await f.close();}
+});
+
+test('oversized >2MB child responses fail fast with SIDECAR_RESPONSE_TOO_LARGE, release pending slots and emit sidecar_response_too_large',async()=>{
+  const f=await harness();
+  try{
+    await f.supervisor.start();
+    const oversized=f.request({command:'oversizedReply'});
+    expect(await oversized.reply()).toEqual({protocol:1,requestId:oversized.id,ok:false,error:'SIDECAR_RESPONSE_TOO_LARGE'});
+    await expect.poll(()=>f.messages.some(message=>message.event?.event==='sidecar_response_too_large'),{timeout:5000}).toBe(true);
+    const pending=(f.supervisor as unknown as {pending:Map<string,unknown>}).pending;
+    expect(pending.size).toBe(0);
+    // Subsequent requests succeed without hitting leaked pending capacity.
+    expect(await f.request({command:'getStatus'}).reply()).toMatchObject({ok:true});
+
+    // Oversized event with a nested requestId must not fabricate a reply for the nested UUID.
+    const fakeId=randomUUID();
+    const beforeTooLarge=f.messages.filter(message=>message.event?.event==='sidecar_response_too_large').length;
+    expect(await f.request({command:'oversizedEvent',fakeId}).reply()).toMatchObject({ok:true,result:{emitted:true}});
+    await expect.poll(()=>f.messages.filter(message=>message.event?.event==='sidecar_response_too_large').length,{timeout:5000})
+      .toBe(beforeTooLarge+1);
+    expect(f.messages.some(message=>message.requestId===fakeId)).toBe(false);
+    expect(pending.size).toBe(0);
   }finally{await f.close();}
 });

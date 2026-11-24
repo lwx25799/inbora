@@ -123,7 +123,7 @@ export const errorMessages: Record<string, string> = {
 
   // Draft, takeover, followup & send
   PREPARING: '正在后台准备与核验',
-  INVALID_TEXT: '回复正文不能为空，且最多 2000 字。',
+  INVALID_TEXT: '回复正文不能为空，且最多 500 字。',
   EVENT_NOT_FOUND: '未找到对应消息记录，请刷新收件箱。',
   DRAFT_NOT_FOUND: '未找到对应草稿记录，请刷新后核对。',
   DRAFT_CHANGED: '草稿内容已变化，请重新核对。',

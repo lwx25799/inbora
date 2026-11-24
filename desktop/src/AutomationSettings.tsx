@@ -36,6 +36,7 @@ export function AutomationSettings({
     const next=collectionSnapshot(status);
     if(sameCollectionForm(latestCollection.current,syncedCollection.current)){
       syncedCollection.current=next;
+      latestCollection.current=next;
       setCollection(next);
     }
   },[collectionKey]);
@@ -48,9 +49,29 @@ export function AutomationSettings({
     const next=policySnapshot(status);
     if(samePolicyForm(latestPolicy.current,syncedPolicy.current)){
       syncedPolicy.current=next;
+      latestPolicy.current=next;
       setPolicyForm(next);
     }
   },[policyKey]);
+
+  const applyCollectionResponse=(submitted:CollectionForm,next:Status)=>{
+    const snap=collectionSnapshot(next);
+    syncedCollection.current=snap;
+    if(sameCollectionForm(latestCollection.current,submitted)){
+      latestCollection.current=snap;
+      setCollection(snap);
+    }
+    update(next);
+  };
+  const applyPolicyResponse=(submitted:PolicyForm,next:Status)=>{
+    const snap=policySnapshot(next);
+    syncedPolicy.current=snap;
+    if(samePolicyForm(latestPolicy.current,submitted)){
+      latestPolicy.current=snap;
+      setPolicyForm(snap);
+    }
+    update(next);
+  };
 
   const [ruleOpen,setRuleOpen]=useState(false);
   const {comments,inbox,commentSeconds,dmSeconds}=collection;
@@ -77,11 +98,9 @@ export function AutomationSettings({
         <label>私信轮询秒数<input type="number" min="15" max="3600" value={dmSeconds} onChange={e=>setCollectionField('dmSeconds',Number(e.target.value))}/></label></div>
     </details>
     <button disabled={!ownId||!!busy} onClick={()=>void act('保存收取范围',async()=>{
-      const next=await request<Status>({command:'configureCollection',settings:{ownId,comments,inbox,commentIntervalMs:commentSeconds*1000,dmIntervalMs:dmSeconds*1000}});
-      const snap=collectionSnapshot(next);
-      syncedCollection.current=snap;
-      setCollection(snap);
-      update(next);
+      const submitted=latestCollection.current;
+      const next=await request<Status>({command:'configureCollection',settings:{ownId,comments:submitted.comments,inbox:submitted.inbox,commentIntervalMs:submitted.commentSeconds*1000,dmIntervalMs:submitted.dmSeconds*1000}});
+      applyCollectionResponse(submitted,next);
     })}>保存收取范围</button>
     {state.emergencyStopped&&<p className="error">当前全局急停，保存范围不会恢复调度。请使用页面上方的“检查并恢复运行”。</p>}
     {state.collector.channels.map(c=><p className="hint" key={c.source}>{c.source==='dm'?'私信':'评论'}：{state.collector.running&&state.collector.source===c.source?'读取中':c.last_success?'最近成功 '+new Date(c.last_success).toLocaleTimeString('zh-CN'):'尚无成功轮次'}{c.elapsed_ms!==null?' · '+c.elapsed_ms+'ms':''}{c.last_error?' · '+c.last_error:''}</p>)}
@@ -100,8 +119,16 @@ export function AutomationSettings({
     <p className="hint">首次保存 API Key 会自动开启模型调用授权，撤销后再次保存不再自动恢复。自动回复由统一开关和已保存范围控制，累计额度不会重置。</p>
     <details><summary>仅生成 AI 建议（可选）</summary>
       <p className="hint">用于人工编辑时生成建议。下方规则自动回复已包含模型调用许可，无需先启用此项。</p>
-      <div className="row"><button disabled={!ownId||!channels.length||!!busy} onClick={()=>void act('启用持续模型授权',async()=>{update(await request<Status>({command:'setModelGrant',scope:{ownId,channels,model:status.settings.model,modelLimit:unlimitedModel?null:modelLimit,expiresAt:null},confirmed:true}));})}>仅启用模型授权</button>
-        <button disabled={!state.modelGrant||!!busy} onClick={()=>void act('撤销模型授权',async()=>update(await request<Status>({command:'setModelGrant',scope:null,confirmed:true})))}>撤销模型授权</button></div>
+      <div className="row"><button disabled={!ownId||!channels.length||!!busy} onClick={()=>void act('启用持续模型授权',async()=>{
+        const submitted=latestPolicy.current;
+        const next=await request<Status>({command:'setModelGrant',scope:{ownId,channels,model:status.settings.model,modelLimit:submitted.unlimitedModel?null:submitted.modelLimit,expiresAt:null},confirmed:true});
+        applyPolicyResponse(submitted,next);
+      })}>仅启用模型授权</button>
+        <button disabled={!state.modelGrant||!!busy} onClick={()=>void act('撤销模型授权',async()=>{
+          const submitted=latestPolicy.current;
+          const next=await request<Status>({command:'setModelGrant',scope:null,confirmed:true});
+          applyPolicyResponse(submitted,next);
+        })}>撤销模型授权</button></div>
     </details>
     <div className="policy-targets"><div>
     <label>允许回复的作品原生 ID（逗号或换行分隔）<textarea value={workIds} onChange={e=>setPolicyField('workIds',e.target.value)}/></label>
@@ -126,14 +153,16 @@ export function AutomationSettings({
     <p className="hint">一次启用即允许范围内模型调用与发送，并恢复普通发送暂停。人工接管、历史基线、我方消息、未知冻结和范围外任务均不自动外发；全局急停须先显式恢复。失败的模型调用不自动重试。</p>
     {!targetsValid&&<p className="hint">请为每个已选通道填写作品或会话 ID，或选择对应的新视频／收件箱覆盖范围；空范围不会自动回复。</p>}
     <div className="row"><button className="primary" disabled={!ownId||!channels.length||!targetsValid||!instructions.trim()||!!busy} onClick={()=>void act('启用规则自动回复',async()=>{
-      const policy:ReplyPolicy={ownId,channels,replyToNestedComments,model:status.settings.model,modelLimit:unlimitedModel?null:modelLimit,sendLimit:unlimitedSend?null:sendLimit,expiresAt:null,workIds:list(workIds),futureOwnWorks:future,conversationIds:list(conversations),entireInbox,containsAny:[],excludesAny:list(excludes),instructions,startHour,endHour};
+      const submitted=latestPolicy.current;
+      const policy:ReplyPolicy={ownId,channels,replyToNestedComments:submitted.replyToNestedComments,model:status.settings.model,modelLimit:submitted.unlimitedModel?null:submitted.modelLimit,sendLimit:submitted.unlimitedSend?null:submitted.sendLimit,expiresAt:null,workIds:list(submitted.workIds),futureOwnWorks:submitted.future,conversationIds:list(submitted.conversations),entireInbox:submitted.entireInbox,containsAny:[],excludesAny:list(submitted.excludes),instructions:submitted.instructions,startHour:submitted.startHour,endHour:submitted.endHour};
       const next=await request<Status>({command:'enableReplyPolicy',policy,confirmed:true});
-      const snap=policySnapshot(next);
-      syncedPolicy.current=snap;
-      setPolicyForm(snap);
-      update(next);
+      applyPolicyResponse(submitted,next);
     })}>按此范围启用规则自动回复</button>
-      <button disabled={!state.replyPolicy||!!busy} onClick={()=>void act('撤销自动回复策略',async()=>update(await request<Status>({command:'setReplyPolicy',policy:null,confirmed:true})))}>撤销自动回复策略</button></div>
+      <button disabled={!state.replyPolicy||!!busy} onClick={()=>void act('撤销自动回复策略',async()=>{
+        const submitted=latestPolicy.current;
+        const next=await request<Status>({command:'setReplyPolicy',policy:null,confirmed:true});
+        applyPolicyResponse(submitted,next);
+      })}>撤销自动回复策略</button></div>
     <p>自动回复（含模型调用）：{state.replyPolicy?'策略版本 '+state.replyPolicy.version:'关闭'} · 人工 AI 建议：{state.modelGrant?'授权版本 '+state.modelGrant.version:'关闭'}</p>
     {state.autoStopReason&&<p className="hint">自动回复等待：{reasons[state.autoStopReason]??state.autoStopReason}</p>}
     {state.unresolvedSends?.map(item=><p className="hint" key={item.channel}>{item.count} 条{item.channel==='DIRECT_MESSAGE'?'私信':'评论'}发送结果仍不明确，原记录保留且禁止重发。后续已核验的独立新消息继续处理；尚在发送或无法区分新旧时暂缓。</p>)}

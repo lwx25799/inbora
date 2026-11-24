@@ -46,7 +46,7 @@ CLI 默认数据目录为 `%LOCALAPPDATA%\inbora`，开发调试可通过 `--run
 
 | 文档 | 用途 |
 |---|---|
-| [架构决策与演进路线](docs/ARCHITECTURE-DECISIONS.md) | 唯一权威架构裁决（ADR-001 ~ ADR-004：修订版路线 A+、6 阶段路线、分域规则与硬安全红线） |
+| [架构决策与演进路线](docs/ARCHITECTURE-DECISIONS.md) | 唯一权威架构裁决（ADR-001 ~ ADR-005：修订版路线 A+、6 阶段路线、分域规则、硬安全红线与三轮审查纪律） |
 | [0.3.x 操作与恢复说明](docs/AUTOMATION-OPERATIONS.md) | 原无头页内安全验证、本机 MCP 16 工具接入、开发重载、日常操作与异常恢复 |
 | [知识与回复人格](docs/KNOWLEDGE-PERSONA.zh-CN.md) | 本地知识库导入、聊天样本采纳、人格学习、试聊对比及数据调用边界 |
 | [第三方来源与许可台账](UPSTREAM.md) | 依赖版本、开源实现核对记录与复用约束 |

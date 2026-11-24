@@ -20,6 +20,8 @@ const duration=(value:number|null)=>value===null?'未记录':`${Math.round(value
 const bytes=(value:number)=>value>=1024*1024?`${(value/1024/1024).toFixed(2)} MB`:value>=1024?`${(value/1024).toFixed(2)} KB`:`${value} B`;
 const reason=(code:string)=>reasons[code]??`后台保留处理中（${code}）`;
 
+const ignoredDiagnosticsEvents=new Set(['sidecar_response_too_large','knowledge_updated']);
+
 /** This component is mounted only on Settings; requests never load private bodies or invoke maintenance. */
 export function DiagnosticsPanel(){
   const [snapshot,setSnapshot]=useState<DiagnosticsView|null>(null),[failed,setFailed]=useState(false);
@@ -32,7 +34,9 @@ export function DiagnosticsPanel(){
     const focus=()=>refresh.schedule(['diagnostics']);
     window.addEventListener('focus',focus);
     void listen<{event?:unknown}>('inbora_status_updated',event=>{
-      if(!disposed&&typeof event.payload?.event==='string')refresh.schedule(['diagnostics']);
+      const name=event.payload?.event;
+      if(!disposed&&typeof name==='string'&&!ignoredDiagnosticsEvents.has(name))
+        refresh.schedule(['diagnostics']);
     }).then(stop=>{
       if(disposed)stop();else{stopListening=stop;refresh.schedule(['diagnostics'],0);}
     }).catch(()=>{if(!disposed)refresh.schedule(['diagnostics'],0);});

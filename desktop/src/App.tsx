@@ -378,7 +378,7 @@ export function App() {
     if (!status.operator.permissions.includes("SEND"))
       return "当前操作员没有发送权限";
     if (!text.trim()) return "请输入回复";
-    if (text.length > 2000) return "回复内容不能超过 2000 字";
+    if ([...text].length > 500) return "回复内容不能超过 500 字";
     return "";
   }
   async function toggleAuto(enabled:boolean){

@@ -59,7 +59,7 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
       {thread.draft
         ? draftOrigins.get(thread.draft.origin) ?? "来源待核对"
         : "尚未保存"}{" "}
-      · </>}{[...text].length}/2000 字
+      · </>}{[...text].length}/500 字
     </small>
   </div>
   <textarea

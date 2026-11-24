@@ -43,6 +43,7 @@ export function Settings({
   useEffect(() => {
     if (sameAiSettings(latestSettings.current, syncedSettings.current)) {
       syncedSettings.current = status.settings;
+      latestSettings.current = status.settings;
       setSettings(status.settings);
     }
   }, [settingsKey]);
@@ -80,7 +81,7 @@ export function Settings({
           <input
             value={settings.model}
             onChange={(e) =>
-              setSettings({ ...settings, model: e.target.value })
+              setSettings((current) => ({ ...current, model: e.target.value }))
             }
           />
         </label>
@@ -91,7 +92,7 @@ export function Settings({
             <textarea
               value={settings[field]}
               onChange={(e) =>
-                setSettings({ ...settings, [field]: e.target.value })
+                setSettings((current) => ({ ...current, [field]: e.target.value }))
               }
             />
           </label>
@@ -114,15 +115,19 @@ export function Settings({
           disabled={!!busy}
           onClick={() =>
             void act("保存 AI 配置", async () => {
+              const submittedSettings = latestSettings.current;
               const submitted = key;
               setKey("");
               const next = await request<Status>({
                 command: "configureAi",
-                settings,
+                settings: submittedSettings,
                 key: submitted,
               });
               syncedSettings.current = next.settings;
-              setSettings(next.settings);
+              if (sameAiSettings(latestSettings.current, submittedSettings)) {
+                latestSettings.current = next.settings;
+                setSettings(next.settings);
+              }
               update(next);
               setNotice?.("AI 配置已保存");
             })
