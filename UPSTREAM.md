@@ -4,6 +4,20 @@
 
 核对了 Apache-2.0 的 Playwright 1.64.1 固定提交 `cfe490d941f992655948eee8fd4fd94e1c4234bf` 中 `packages/playwright-core/src/server/utils/processLauncher.ts` 的 `gracefullyClose`，以及 MIT／Apache-2.0 的 Tauri 2.12.5 固定提交 `993038c49185307dfc895ab7657d77ca0d5ed7c7` 中 `crates/tauri/src/app.rs` 的 `AppHandle::exit` 和 `make_run_event_loop_callback`。沿用原生退出触发后端管道 EOF，以及 Playwright 关闭持久上下文并等待浏览器进程收尾的路径。项目在临时导入清理报错时仍关闭专属浏览器，随后完成助手控制端、数据库和运行锁收尾，并用非零退出状态记录失败。已有在途发送回读顺序保留。合成故障复现覆盖真实无头 Edge 和独立后端管道。上游代码和依赖许可继续沿用现有记录。
 
+## 2026-11-16：新界面与旧原生窗口的能力识别
+
+用户首次打开知识区时没有输入任何内容却提示输入错误。只读核对运行的17:24原生文件，含旧securityRecovery命令、不含replyKnowledge；当前48字节overview请求通过后端schema，旧原生白名单将其拒绝。检查锁定发布包 `@tauri-apps/api@2.12.4`（Apache-2.0 OR MIT）的 `core.js` invoke实现，SHA256 `956eba26ffeb23576f29f70813c272c2915722b3b19bf00f86718c335b313da0`，确认请求直接进入原生IPC，前端热更新不能更新已运行白名单。独立补原生只读能力标记与首次读取检查，不放宽白名单、权限或输入验证。
+
+启动复现另证明独立Vite占用1420，原开发入口会启动第二实例失败。按本项目现有Vite serve插件接口增加仅开发身份端点，返回本项目根摘要；开发启动器仅确认同项目服务后复用，空端口正常启动，异项目或不明响应拒绝。未复制上游源码、增加依赖、停止用户进程或改变正式构建。旧窗口提示和同项目服务身份均先红后绿；本人保存关闭后实际编译并通过根入口启动新原生程序；原运行目录的真实自动连接另行核对。界面视觉由本人验收，合成交互不冒称真实窗口截图。
+
+## 2026-11-16：本地知识、回复样例与人格草稿
+
+实施前核对 AnythingLLM 的 MIT 固定 `1626d971c73d70a68602a662e3baf52e160c62ff`，具体 [`collector/processRawText/index.js`](https://github.com/Mintplex-Labs/anything-llm/blob/1626d971c73d70a68602a662e3baf52e160c62ff/collector/processRawText/index.js) 的来源与文本组织；以及 LangChainJS 的 MIT 固定 `c266deb5c9afee8253dab0f1e92aec5727159150`，具体 [`libs/langchain-core/src/example_selectors/semantic_similarity.ts`](https://github.com/langchain-ai/langchainjs/blob/c266deb5c9afee8253dab0f1e92aec5727159150/libs/langchain-core/src/example_selectors/semantic_similarity.ts) 的输入/样例选择边界。采用来源可撤销、资料与会话分离、少量相关样例的机制，独立实现到现有 SQLite/模型/发送合同；未复制其宿主、框架、向量服务或发送代码，不以其能力声明代替本机验收。
+
+解析依赖固定为 `mammoth@1.13.0`（BSD-2-Clause，纯文本 DOCX）、`pdfjs-dist@6.5.438`（Apache-2.0，文字 PDF）和 `exceljs@4.4.0`（MIT，CSV/XLSX）。使用发布包 API，许可证随依赖保留，现有构建 notices 生成流程在获准打包时收录。无 OCR、宏、公式计算、外链下载或任意 URL 导入。保留 better-sqlite3 13.0.3 及禁止隐式 node-gyp 的策略；干净生产依赖安装、SQLite 持久化和纯构建 Node Worker 实际通过。
+
+本项目增补本地来源/样本/人格版本、中文二元 FTS 与三元 FTS、显式学习用途预算、人格基线试聊及最终意图前版本门禁。知识/样例作为不可信数据，账号及准确目标由原授权和协调器控制；学习和试聊没有发送入口。数据、模型、实际 ClientService 及合成 UI 的验证范围和剩余限制见 `docs/KNOWLEDGE-PERSONA.zh-CN.md`。无新增真实模型调用或真实发送作为测试，无安装包。
+
 ## 2026-11-16：在原无头页面内人工处理验证
 
 用户指出模式迁移不能承接原验证现场。本轮在实现前核对 Apache-2.0 `microsoft/playwright@cfe490d941f992655948eee8fd4fd94e1c4234bf` 的 `packages/playwright-core/src/server/input.ts`、`chromium/crInput.ts` 与 `screenshotter.ts`，并核对官方 [Mouse](https://playwright.dev/docs/api/class-mouse)、[Keyboard](https://playwright.dev/docs/api/class-keyboard) 及 [Page.screenshot](https://playwright.dev/docs/api/class-page#page-screenshot) 文档。鼠标采用主框架视口 CSS 坐标，按下、移动及抬起由同一 Page 保持状态；普通视口截图不采用会滚动的元素截图。使用已有 Playwright 公开接口，不复制上游源函数、不引入远程桌面服务或新依赖，原依赖许可保持。
@@ -34,6 +48,12 @@
 
 恢复页的正常列表 GET 可能早于本轮观察器，缺失 has_more 时保留分页补收、不推进完成水位，也不在同轮立即再导航；后续正常响应提供分页证明。正式合成回归在未修实现实际观察到首轮导航 2 次及缺证明仍推进水位的失败，修复后覆盖一次复用、后到新评论、已读文档失效、过期／异页、安全层／人稿及空／非空 backlog。源码 tsx 与构建 Node 分别执行序列化检查。无新增依赖、迁移或授权；真实平台是否仍要求验证单列实机差异。
 
+## 2026-11-16：恢复验证时保留准确故障页面
+
+复读已核对的 MIT LockyBee/dsh-douyin-agent@7989640e340f0fd79e2de9874880d5197546e755 的 chat-browser.mjs:247–252、tests/chat-browser.test.mjs:250–258。其中无文字、全屏可见 captcha 仍阻断，隐藏后通过；据此保留真实安全遮罩门禁，不把缺少外层文字当作没有验证。另核对 MIT miqian-nomad/dsh-douyin-watch@d1a14e3fc8d7a18089d412ae3479365974c069df 的 tools/work-comments.mjs:262–283，采用在目标作品触发并观察验证的排查思路；不采用其内部请求、UA、40px阈值或发送路线。来源与许可证沿用已有上游归档，本次未复制新上游代码或引入依赖。
+
+旧投影记录过安全容器与字节域名 iframe，但缺少足够现场关联，不能确认本次真实验证；另一个入口正常只证明该新文档。原恢复模式切换关闭两页后只打开 entryUrl，检查健康入口无法证明故障作品正常。新增本机私有、按绑定账号及准确授权作品重校验的位置记录；模式切换与后端重载保留故障作品，恢复回到该作品后检查，未保存人稿阻止导航。外站、其它账号、未授权作品及URL凭据不能恢复；正常关闭不写新的持久故障。沿用单持有者、无头默认、人工验证与未知不重发。
+
 ## 2026-11-16：验证码空壳误报修复
 
 实施前复读 MIT `LockyBee/dsh-douyin-agent` 固定提交 `7989640e340f0fd79e2de9874880d5197546e755` 的 `chat-browser.mjs:247–252`、`browser-launcher.mjs:107–109` 与 LICENSE，采用已映射安全组件须有实际显示面积的原则。实际 Edge 无头合成页面证明，零尺寸验证码空壳仍有一个 ClientRect，旧实现因此误报并触发全局急停。
@@ -41,6 +61,14 @@
 本项目最初实现覆盖自身、后代及直接文本的矩形和祖先裁剪，但没有视口过滤；本轮反例确认该条件过宽，已由上文活动内容与视口交集规则替代。正文、编辑器或身份可见性不改。收取、回复同步门禁、媒体查看、传统 DOM 适配器及显式恢复采用相同条件；占位空壳不再生成活动组件信号，可见未校准内容仍暂停相关动作。函数保持可独立序列化，来源许可证保留于 `third_party/LockyBee-dsh-douyin-agent-MIT.txt`。历史急停不自动解除。
 
 正式回归先在未修源码的独立合成浏览器页面观察到两项失败，再验证修复后的空壳不急停、可见子层/文本仍阻断和显式恢复。源码 CLI 与构建 Node 的序列化检查分别执行；真实作品页的再次运行需与这些合成证据分开记录。
+
+## 2026-11-13：无头业务页的媒体暂停与浏览器资源监测
+
+复读已核对的 MIT `LockyBee/dsh-douyin-agent@7989640e340f0fd79e2de9874880d5197546e755` 的 `browser-launcher.mjs:37–63`（https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/browser-launcher.mjs#L37-L63），采用安装、捕获播放事件、原生暂停、Observer 和释放机制；完整许可保留在 `third_party/LockyBee-dsh-douyin-agent-MIT.txt`。本项目只给无头 Owner 的两个业务 Page 在首次导航前注册脚本，限制当前可信入口 origin 的主 Frame。增量检查 addedNodes 及其媒体后代，跳过已暂停元素，不保存节点列表，Document 幂等，pagehide 停止监听和观察并在 pageshow 恢复。未复制上游宿主、接管或观看逻辑，不更改媒体源、预加载、位置、DOM、输入或媒体原型，不拦截网络。
+
+监测沿用本项目 OS 指标入口，独立实现 Sidecar 后代与父子创建时间归属、唯一 Edge 根、实际 Context 页数、单飞取消及隐藏子进程收尾。指标不进入账号队列、不调用页面或平台，诊断只读有界缓存；版本1可选资源块及严格 MCP 投影均不含 PID、命令行、URL 或消息正文。一个固定报告与一个临时文件原子替换，保留最近24小时和最多1440个样本。来源适配不改变单账号专属 Profile、单持有者、双 Page、30秒当前配置、单次提交和未知不重发合同，无新增依赖、数据库表或迁移。
+
+播放、释放、动态媒体、导航、Frame/origin 排除、人稿和预览 DOM、空媒体与节点回收以本地合成 Edge 验证；媒体函数分别经默认 tsx 源码链和编译后 Node 链实际运行。暂停能停止播放，不证明浏览器已释放缓冲、MSE 或网页堆；实际内存收益、自然波动及长期趋势另以分实例的私有数值报告核对，合成验证不冒称真实账号送达或24小时稳定。
 
 ## 2026-11-12：全局急停原因与显式恢复
 
@@ -54,7 +82,7 @@
 
 保留包内 Apache-2.0 及所含 MIT 过渡声明于 `third_party/modelcontextprotocol/LICENSE`，文件 SHA256 `0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a`。SDK 包声明 Node >=20、Zod ^4.2.0；本项目使用 Node 26.13.0、Zod 4.6.7、TypeScript 7.0.2。新增依赖只有上述 server 及其 core 传递包，不引入模型 SDK、浏览器持有者或第三方云服务。
 
-依照 [pnpm 官方设置说明](https://pnpm.io/settings)，11.x 的缓存与 store 设置写入 `pnpm-workspace.yaml`，本项目使用 `.local/pnpm-cache`、`.local/pnpm-store`；保留现有原生包安装脚本限制。干净依赖安装、实际 Windows Node-API SQLite 写入及关闭重开验证在隔离检出完成，普通开发入口继续复用这些项目内缓存。
+依照 [pnpm 官方设置说明](https://pnpm.io/settings)，11.x 的缓存与 store 设置写入 `pnpm-workspace.yaml`，本项目使用被忽略的本地目录保存 pnpm 缓存与 store；保留现有原生包安装脚本限制。干净依赖安装、实际 Windows Node-API SQLite 写入及关闭重开验证在隔离检出完成，普通开发入口继续复用这些项目内缓存。
 
 MCP stdio 只做严格工具适配，通过随机凭据访问现 Sidecar 的回环入口。凭据与模型 Key、桌面管道 nonce 分离，以 Windows CurrentUser DPAPI 加密，绑定真实运行目录、实例和进程；不会放入 Codex 配置或命令行。业务仍走现 `ClientService`、账号队列、持久命令/意图、单次发送协调器与回读，`LOCAL_ASSISTANT` 独立解析授权，不修改历史 MODEL/AUTO_REPLY 摘要。草稿来源 `MCP_ASSISTED` 不取得人工媒体资格。连接协议复用不代表页面字段、真实账号发送或 GUI 视觉已经验收。
 
@@ -72,7 +100,7 @@ Codex 安装字段依据[官方 MCP 配置文档](https://learn.chatgpt.com/docs
 
 补证与状态显示复读 MIT DSH 固定 `7989640e340f0fd79e2de9874880d5197546e755` 的 `receipt-baseline.mjs:62–91`、`comment-browser.mjs:344–373`，以及 Chatwoot 非 enterprise MIT Expat 固定 `625d5964e3cb3f1d917b43c3b8332219e525a4b8` 的 `app/models/message.rb:104`、`conversations/actions.js:406–435` 及各自许可。采用保持原基线、结果与处理状态分离的原则；本项目独立实现按每条意图的一次有界只读补证，继续使用准确账号、目标、批准全文、原生 ID 和现有回读证明。没有重建点击前基线、改写原收据或新增提交路线。
 
-实机根评论正文中的 SVG 路径图标暴露原有 DOM 正文重建限制。沿用既有 MIT 适配来源，独立支持准确正文内无文字、无外链、至多八个 g/path、尺寸不超过 32px 的 SVG；正常命名空间不作为资源 URL。带文字、标签、外部引用、未知元素和正文不一致仍拒绝。收取与发送前核验采用相同规则，源码 tsx 和构建 Node 各九项浏览器断言通过。实机只读补证共恢复七条记录；原业务账本摘要保持。详细证据与剩余边界见 [回执差异验收](docs/REPLY-RECEIPT-FIX-2026-11-11.zh-CN.md)。无新增依赖、版本号或安装包。
+实机根评论正文中的 SVG 路径图标暴露原有 DOM 正文重建限制。沿用既有 MIT 适配来源，独立支持准确正文内无文字、无外链、至多八个 g/path、尺寸不超过 32px 的 SVG；正常命名空间不作为资源 URL。带文字、标签、外部引用、未知元素和正文不一致仍拒绝。收取与发送前核验采用相同规则，源码 tsx 和构建 Node 各九项浏览器断言通过。实机只读补证共恢复七条记录；原业务账本摘要保持。详细证据与剩余边界见本机历史归档的 2026-11-11 回执差异验收记录。无新增依赖、版本号或安装包。
 
 ## 2026-11-11：表情预览、分享待办分类与全部已读
 
@@ -86,7 +114,7 @@ Codex 安装字段依据[官方 MCP 配置文档](https://learn.chatgpt.com/docs
 
 用户明确分享视频／图集不应作为待回复任务后，复用本项目已校准分享 manifest／固定已识别外壳原因：正常启动、收取及展示更新仅持久记录准确事件 binding 的分享类型，缓存过期不让其重新变待办。已回文字后仅有分享保持已回复，纯分享显示无需自动回复；准确绑定但不能自动处理的其它媒体显示需人工查看，有未回文字仍保留文字待办。身份碰撞、会话身份矛盾和未知提交继续等待；不新增模型或提交路线。分类三项与分享投影八项均有有效旧码红测，媒体另有五项目标红测和两项草稿续写红测，安全反例保留。私信会话保留最后确认之后的未提交人稿续写入口，分享不遮住已存草稿。首次夹具失败另存而不计为产品红测。
 
-当前运行差异、用户确认及剩余范围记在本机 `docs/INBOX-EMOJI-FIX-2026-11-11.zh-CN.md` 和当前验收总表；沿用已有许可文件，无新增依赖、安装包或版本号。
+当前运行差异、用户确认及剩余范围记在本机历史归档的 2026-11-11 表情修复记录和验收总表；沿用已有许可文件，无新增依赖、安装包或版本号。
 
 后续回归复读同一 DSH 固定提交 `tree/message-tracker.mjs:36–96`、`tree/outbound-send.mjs:70–96` 与 MIT 许可，采用入站及已确认出站分离的原则。本项目人工追加回复经既有统一协调器确认后，按完整审批、全文、准确账号／会话／事件、原生收据和时间核验纳入会话显示覆盖，保留逐事件原账本；只覆盖点击前已观察的无意图消息，新增文字与未知提交继续等待。独立“需人工查看”筛选沿用上述 Chatwoot 投影组织方式，已读后仍可查阅。评论补证回归覆盖最新结果、刷新通知及同根新增留言，保留准确父评论边界。
 
@@ -94,7 +122,7 @@ Codex 安装字段依据[官方 MCP 配置文档](https://learn.chatgpt.com/docs
 
 处理“评论同步完成；私信同步失败：私信正文正在加载，后台已保留收取进度”前，再读MIT固定 `4073159bea585de6d33a4747a475669440737932` 的 `lib/commands/get.js:26–76`（逐项组织、事务保存）及现有候选记录。上游没有本应用的准确会话DOM、首次起点和公平续查合同，本轮直接复用本项目已有 `InboxCollector` 与 `CollectionScheduler`，不另写宽松正文解析或照搬上游接口/ID转换。
 
-合成实测旧手动静态映射遇首条正文晚挂便中断后续会话，而持久收取器会保留对象退避并推进正常会话。现已启用来源的手动同步与后台共享有界调度、取消和持久水位，未启用来源保留有限映射；已保存的对象退避显示“后台继续收取”，成功只说明本轮。账号/平台门禁、网页人稿和未知不重发不变。红绿与实机边界见 私信同步修复记录（本机开发文档：`docs/DM-SYNC-FIX-2026-11-10.zh-CN.md`）。
+合成实测旧手动静态映射遇首条正文晚挂便中断后续会话，而持久收取器会保留对象退避并推进正常会话。现已启用来源的手动同步与后台共享有界调度、取消和持久水位，未启用来源保留有限映射；已保存的对象退避显示“后台继续收取”，成功只说明本轮。账号/平台门禁、网页人稿和未知不重发不变。红绿与实机边界见本机历史归档的 2026-11-10 私信同步修复记录。
 
 ## 2026-11-10：优化实施与直接复用
 
@@ -104,7 +132,7 @@ Codex 安装字段依据[官方 MCP 配置文档](https://learn.chatgpt.com/docs
 
 查询批量投影、六个兼容索引、事件刷新和引用保护为本项目适配实现，沿用准确目标、全文、持久意图和未知不重发合同。共享响应按具体 Response 只解析一次，再由消费者核验账号、页面代际、请求顺序和准确目标；2 MiB 限制是接受与 JSON 解析上限，Playwright 的正文缓冲及超时后底层读取不因此获得硬内存或取消保证。
 
-实施结果、可复现基准、离线与实机证据边界、差异人工检查和回退方式见 优化交付记录（本机开发文档：`docs/OPTIMIZATION-DELIVERY-2026-11-10.zh-CN.md`）。下文保留审查时点的历史结论，不将过去“尚未复制”解释为当前实施状态。
+实施结果、可复现基准、离线与实机证据边界、差异人工检查和回退方式见本机历史归档的 2026-11-10 优化交付记录。下文保留审查时点的历史结论，不将过去“尚未复制”解释为当前实施状态。
 
 ## 2026-11-10：douyin-cli 关键链路完整审查与直接复用计划
 
@@ -115,7 +143,7 @@ Codex 安装字段依据[官方 MCP 配置文档](https://learn.chatgpt.com/docs
 - `lib/server/router.js:320–364` 的WS超时转轮询可重复派发写表达式；`scripts/douyin.user.js:63–93`强制探测为空可保留旧账号缓存；三项本机纯合成probe验证ID失真、旧身份缓存与WS重投。当前油猴默认HTTP，不能把WS支持路径缺陷泛化为默认HTTP必重发。另有WS握手无token/origin校验、静态token、任意eval与公开账号状态等静态发现，原样Bridge不进入可信控制链。
 - 本地合成100/1k/10k事件、5次热运行中位数已量化全库查询与N+1成本；优先优化四条热读取、查询索引、已有Tauri事件，再按需适配上游模块。仅合成结论，不触真实库/Profile、GUI、模型或发送；未安装上游依赖或运行上游全套测试。
 
-详细候选/文件/固定链接、采用与不采用原因、实测基准、分批变更、验证及回滚见 douyin-cli 源码审查与优化计划（本机开发文档：`docs/DOUYIN-CLI-OPTIMIZATION-PLAN.zh-CN.md`）。只读检出保留于忽略的 `.local/douyin-cli`；最小复现及脱敏基准留于 `.local/tests/source-audit-20261110`。历史“未复制/未采用”记录保留原时点含义，不构成当前禁止源码复用的规则。
+详细候选/文件/固定链接、采用与不采用原因、实测基准、分批变更、验证及回滚见本机历史归档的 2026-11-10 `douyin-cli` 源码审查与优化计划。只读检出、最小复现及脱敏基准仅保存于被忽略的本机临时目录。历史“未复制/未采用”记录保留原时点含义，不构成当前禁止源码复用的规则。
 
 ## 2026-11-10：按用户要求追加核对评论增量候选
 
@@ -124,7 +152,7 @@ Codex 安装字段依据[官方 MCP 配置文档](https://learn.chatgpt.com/docs
 - [`hycarbon-b/crawl-douyin`](https://github.com/hycarbon-b/crawl-douyin/tree/cdde8d7bfec3b018454705240fa0df6550ece6db)，固定`cdde8d7bfec3b018454705240fa0df6550ece6db`：读`reply_comment.js:61–103`，按固定评论容器滚动800像素、固定等1500ms，最多10次；仓库树未发现明确LICENSE，代码不复制。它不提供本机第7层容器、渲染帧或跨导航持久恢复的证明。
 - MIT [`pcmxiao/dsh-douyin-bridge`](https://github.com/pcmxiao/dsh-douyin-bridge/tree/6e4bb7fb312ca980f500ce5eff9a714c2c78b560)，固定`6e4bb7fb312ca980f500ce5eff9a714c2c78b560`：读`lib/bridge.mjs:682–706,717–785`、`lib/state.mjs:139–174`与`lib/comment.mjs:417–478`及LICENSE/NOTICE。采用持久去重和首次基线的组织原则，保留本项目原生ID与全号持久起点；不采用仅显示名/方向/前80字指纹（会合并不同原生同文消息）、最多20条窗口、off连收取都停或超时后仍在运行的Promise.race组织。该候选评论读取只返回当前DOM索引/摘要，不提供本机所需的cid/时间/分页/根子定位证明，不能直接代替现有准确评论定位。
 
-上述具体源码和索引只保留于忽略的`.local/upstream-review/comments-20261110`，没有运行候选、安装依赖或把真实账号/Profile交给候选。采用结论落实到本轮持久未完分页、逐窗保存和混排回归；实机闭合单列，不把候选自述当本机已通过。
+上述具体源码和索引仅保留于被忽略的本机临时复核目录，没有运行候选、安装依赖或把真实账号/Profile交给候选。采用结论落实到本轮持久未完分页、逐窗保存和混排回归；实机闭合单列，不把候选自述当本机已通过。
 
 ## 2026-11-10：主评论分页与原生滚动恢复
 
@@ -242,7 +270,7 @@ Chatwoot固定非enterprise MIT Expat `625d5964e3cb3f1d917b43c3b8332219e525a4b8`
 
 ## 2026-11-09：开发模式重载及私信返回控件修复
 
-先读取本机固定副本`.local/upstream-review/dev-reload-20261109`的具体源码与许可：tsx 4.23.15固定提交`ca66105a17a2a4c6503fe3a12b5b9ec408286011`的`src/cli/run.ts`、`src/cli/watch/index.ts`及MIT许可；Tauri固定提交`993038c49185307dfc895ab7657d77ca0d5ed7c7`的`crates/tauri-cli/src/dev.rs`，文件声明MIT/Apache-2.0；Tauri文档固定提交`4bfa8a6162db1478aa10c3205f20ef0f25fa2e3b`的开发章节及MIT许可。采用Tauri已有devUrl、前端开发服务器和Rust变更重编译路线，不新增依赖。前端改动热更新或自动刷新，Node源码改动只重载后台，不为小修升版、重打安装包或要求退出当前客户端。
+先读取本机私有临时复核目录中对应固定提交的具体源码与许可：tsx 4.23.15固定提交`ca66105a17a2a4c6503fe3a12b5b9ec408286011`的`src/cli/run.ts`、`src/cli/watch/index.ts`及MIT许可；Tauri固定提交`993038c49185307dfc895ab7657d77ca0d5ed7c7`的`crates/tauri-cli/src/dev.rs`，文件声明MIT/Apache-2.0；Tauri文档固定提交`4bfa8a6162db1478aa10c3205f20ef0f25fa2e3b`的开发章节及MIT许可。采用Tauri已有devUrl、前端开发服务器和Rust变更重编译路线，不新增依赖。前端改动热更新或自动刷新，Node源码改动只重载后台，不为小修升版、重打安装包或要求退出当前客户端。
 
 tsx的run继承stdin，watch又将stdin data作为手动重启触发；watch重启先发SIGTERM，默认5秒后SIGKILL，等待退出期间再次触发也会强杀。它不能直接承载本项目的JSON业务管道或在途意图收尾。本项目只使用现有tsx加载器，独立实现开发专用监督进程：新请求在重载期间立即拒绝，不排队；关闭旧stdin后等待旧Sidecar安全退出且退出码为0，才创建新代际。仅重连之前成功连接的规范运行目录，不重放Key、保存、模型或发送命令；旧代际输出不回送，已就绪异常退出不盲目循环。未ready的新子进程尚不能接受运行目录，语法错误修正后允许恢复，不继承上代持有者身份；此点由已连接场景实际红绿及异常退出负例补强。默认内存Key随后台退出丢失，持续授权、累计预算、持久意图及未知记录仍在原库保留。EOF与初始化竞争、重载中再次保存、草稿保留及不重放分别有定向回归；实际原生开发QA的进程/权威版本、CSS更新及正常退出证明另见验收表。
 
@@ -262,7 +290,7 @@ tsx的run继承stdin，watch又将stdin data作为手动重启触发；watch重�
 
 SQLite使用已锁定better-sqlite3 v13.0.3；远程tag解引用提交为 `dbc2ea1165fef1f599b9be12faea33fa5e9d7ffb`。复读安装包 `lib/methods/backup.js:1-70`，并经Context7核对该版本官方 `docs/api.md` 的backup/transaction.immediate：异步备份不放进同步事务，升级前校验一致备份、私有试升级和恢复，额度及意图事务保持同步。沿用其MIT依赖许可，不复制实现源码。
 
-本切片仅落地持久合同、调度器和公平队列，尚未接入产品后台；测试及真实库私有副本迁移结果见 `docs/AUTOMATION-ACCEPTANCE.md`，不把上游能力或合成通过当作新作品/会话实机通过。
+本切片仅落地持久合同、调度器和公平队列，尚未接入产品后台；测试及真实库私有副本迁移结果见本机历史归档的自动化验收记录，不把上游能力或合成通过当作新作品/会话实机通过。
 
 ## 2026-11-07：自动收取、持续策略、人工单次操作与凭据接入
 
@@ -280,7 +308,7 @@ DeepSeek继续沿用锁定的官方Chat Completions/choices/usage合同，复核
 
 修改前重新核对两仓当前 SHA，读取固定源码，不以旧印象代替比较。MIT DSH [7989640e340f0fd79e2de9874880d5197546e755](https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/autonomous-watch.mjs#L125-L154) 的 `autonomous-watch.mjs:125-154` 使用 running/completion 防止重复启动、异步执行并立即返回 state；`:92-93` 暴露 phase，`:422-430` 处理停止。采用“单个后台操作、立即回状态、可查询阶段及完成”的组织方式，独立复用本项目现有 pending/drain 和账号 actor；不引入其自动观看、文件任务系统、AI 调用或发送路线。
 
-Chatwoot 非 enterprise 的 MIT Expat 源码固定 [625d5964e3cb3f1d917b43c3b8332219e525a4b8](https://github.com/chatwoot/chatwoot/blob/625d5964e3cb3f1d917b43c3b8332219e525a4b8/app/javascript/dashboard/store/modules/conversations/actions.js#L235-L279)，`syncActiveConversationMessages` 按会话保留已有记录、补齐消息并在末尾更新同步游标。采用“同步不清空已有收件箱”的交互，不采用其吞掉错误的 catch、客户端直接操作服务端接口或多人/已读流程。两个仓库 SHA 与本次核对一致，许可全文已读，原始源码存 `.local/upstream-review/2026-11-07-sync`，不复制源函数或新增依赖。
+Chatwoot 非 enterprise 的 MIT Expat 源码固定 [625d5964e3cb3f1d917b43c3b8332219e525a4b8](https://github.com/chatwoot/chatwoot/blob/625d5964e3cb3f1d917b43c3b8332219e525a4b8/app/javascript/dashboard/store/modules/conversations/actions.js#L235-L279)，`syncActiveConversationMessages` 按会话保留已有记录、补齐消息并在末尾更新同步游标。采用“同步不清空已有收件箱”的交互，不采用其吞掉错误的 catch、客户端直接操作服务端接口或多人/已读流程。两个仓库 SHA 与本次核对一致，许可全文已读，原始源码仅存于被忽略的本机临时复核目录，不复制源函数或新增依赖。
 
 本机用户反馈两个按钮互相禁用；源码证明二者共用 busy，act 等 observe 完成后才清理；只读库显示两条通道都留下新观察，不能把用户反馈推断成第二项永久失败。此次将作品补充评论与私信合并为后端一次串行读取，立即返回运行状态、分别保存内存进度及安全错误代码；WebView 重连取状态，不重放任务。普通读取失败按通道/当前浏览器模式隔离，平台停止、账号或安全验证错误停止后续读取；通知独立来源入口保持单列。已有任务与未保存人稿保留，不恢复账号、不启用发送、不调用模型。
 
@@ -292,11 +320,11 @@ Chatwoot 非 enterprise 的 MIT Expat 源码固定 [625d5964e3cb3f1d917b43c3b833
 
 修改前核对 Node.js v26.13.0 的 tag 对象 `daaa22aeddb87085542376ea1f4854dcea080baf`，解引用固定提交 [18b32a3b1552e199a01f1a8d9fd64aa756d3b75b](https://github.com/nodejs/node/tree/18b32a3b1552e199a01f1a8d9fd64aa756d3b75b)。阅读 MIT 核心源码 `lib/internal/fs/promises.js:1703` 的 mkdir 和 `:2105` 的 realpath，以及 `doc/api/errors.md:599-605` 的 ENOENT/ENOTDIR；官方当前错误/文件系统文档同步核对。采用公开 realpath 的不创建语义，现有 OwnerLock 增加是否允许创建目录参数，桌面入口仅显式初始化传 true，CLI/Profile 默认行为保持；不复制 Node 源码或新增依赖。连接边界仅把目录/配置缺失映射为固定安全代码，不回传原始路径和堆栈，不通过预先 access 判断来替代实际打开。
 
-用户 0.2.7 截图已证实原生窗口正常，首次错误是路径少分隔符，修正后已进入真实设置页；不继续归因为原生崩溃。源码先创建目录再读取 runtime.json 的顺序使未初始化连接也产生空目录，且客户端只得到通用错误。正式回归须先在旧源码失败，再验证不存在目录、既有空目录、文件路径拒绝不变更，以及显式初始化/原目录重连成功；所有夹具留 `.local`，不修改误输的项目外路径或正在使用的真实目录。
+用户 0.2.7 截图已证实原生窗口正常，首次错误是路径少分隔符，修正后已进入真实设置页；不继续归因为原生崩溃。源码先创建目录再读取 runtime.json 的顺序使未初始化连接也产生空目录，且客户端只得到通用错误。正式回归须先在旧源码失败，再验证不存在目录、既有空目录、文件路径拒绝不变更，以及显式初始化/原目录重连成功；所有夹具仅留存于被忽略的本机临时目录，不修改误输的项目外路径或正在使用的真实目录。
 
 ## 2026-11-07：延迟评论回执与通道状态取舍
 
-本轮在修改前重新查询三个仓库的实际分支 SHA，读取固定版本具体源码和许可，原始源码仅存 `.local/upstream-review/2026-11-07-receipts`。用户明确要求同时检查本应用是否过严，不能把更多校验等同于更可靠。
+本轮在修改前重新查询三个仓库的实际分支 SHA，读取固定版本具体源码和许可，原始源码仅存于被忽略的本机临时复核目录。用户明确要求同时检查本应用是否过严，不能把更多校验等同于更可靠。
 
 | 候选与固定提交 | 具体实现与许可 | 本轮取舍 |
 | --- | --- | --- |
@@ -354,14 +382,14 @@ Chatwoot 非 enterprise 的 MIT Expat 源码固定 [625d5964e3cb3f1d917b43c3b833
 
 原生首次测试暴露pnpm11布局差异后，先核对`pnpm/pnpm.io`固定`f9f6057f2cd214c4a0d743d1ba09d898197b55e0`的`docs/settings.md`、`docs/migration.md`和安装命令文档：仅认证/registry/TLS等仍读`.npmrc`，`nodeLinker`应在`pnpm-workspace.yaml`。据此修正暂存构建为hoisted真实目录；验证扩为导入完整ClientService/Playwright及SQLite，随后原生Tauri IPC实际连接、保存及重启通过。未复制pnpm源码或引入宿主。
 
-WebView2调试环境变量在本机提升权限宿主未生效后，核对已安装wry0.57.1的`src/webview2/mod.rs`中AdditionalBrowserArguments路径（crate来源SHA `2446feadae623d6f2ac8d2136e3ccef3d7197e0e`，包内vcs信息标记dirty，以Cargo.lock校验值为实际包依据）及微软[WebView2调试文档](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/debug-visual-studio-code)。单独QA配置通过Tauri公开additionalBrowserArgs API启用本地端口，未修改依赖源码或系统策略；正式包不含该配置。QA与正式包的证据边界见CLIENT-ACCEPTANCE。
+WebView2调试环境变量在本机提升权限宿主未生效后，核对已安装wry0.57.1的`src/webview2/mod.rs`中AdditionalBrowserArguments路径（crate来源SHA `2446feadae623d6f2ac8d2136e3ccef3d7197e0e`，包内vcs信息标记dirty，以Cargo.lock校验值为实际包依据）及微软[WebView2调试文档](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/debug-visual-studio-code)。单独QA配置通过Tauri公开additionalBrowserArgs API启用本地端口，未修改依赖源码或系统策略；正式包不含该配置。QA与正式包的证据边界见本机历史归档的 0.2.9 客户端验收记录。
 
 - 继续使用官方 Tauri 文档固定 `5e49cc6e48597060f1618e0b62cb91b071b1b4a9` 的 `develop/sidecar.mdx`、`develop/resources.mdx`、`learn/sidecar-nodejs.mdx`，本轮已下载逐项核对，MIT 全文保存在 `third_party/Tauri-docs-MIT.txt`。采用官方允许的“随包 Node + JS 资源”和 stdin/stdout 通信；使用 Rust 私有管道、受限业务命令和独立控制路径，不向前端开放 shell、文件系统或 SQL 插件。Node 原生依赖实际在暂存目录加载成功；这不替代 Tauri 原生启动验证。
 - React `v19.3.1` 固定提交 `61aa00df822d0eb76d0362eb8b6fdd3527693efe`，阅读 `packages/react-dom/src/client/ReactDOMRoot.js` 的 createRoot/render 生命周期；受控输入、异步 Effect 清理由官方 React 文档经 Context7 核对。采用标准受控表单和目标绑定的迟到结果丢弃，独立实现客服界面，不复制其他产品 UI。React 为 MIT，使用依赖包并保留其许可。
 - better-sqlite3 `v13.0.3` 的 tag 对象为 `0747dc94fb468715974716c6c54106ad6469d31b`，解引用提交为 `dbc2ea1165fef1f599b9be12faea33fa5e9d7ffb`。核对 `lib/methods/backup.js` 的一致性备份和错误处理，文件 SHA256 `ea29d34992bb02e006d0fdeda9675ac5d2bb227aaf57468decd997e9fc9c7dbf` 与已安装包一致。使用公开 backup API，在私有副本先验证恢复及试升级，再进行 schema 2→3 的附加迁移；不复制上游源码，不改写旧业务表/收据。
 - 再读既有 MIT DSH 固定 `7989640e340f0fd79e2de9874880d5197546e755` 的 `native-model-settings.mjs`、`tests/native-model-settings.test.mjs` 和 `tests/native-client.test.mjs`。采用配置与调用分离、内核状态权威、明确确认的组织方式；不引入 Cordis、模型目录服务或其发送实现。接管/版本/持久 commandId 按本项目 V2.1 合同独立实现。
 - DeepSeek 在本轮重新核对[接入页](https://api-docs.deepseek.com/)、[Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)及[思考模式](https://api-docs.deepseek.com/guides/thinking_mode/)。独立 fetch 适配官方 messages/choices/usage，固定官方 HTTPS 端点、非流式、max_tokens=512、thinking.disabled、30 秒超时且无自动重试；不复用旧 HttpDraftProvider 自定义请求，也不引入不必要的兼容 SDK。合成协议、错误、usage 和迟到建议测试已实际通过，真实请求仍为零。
-- 工具链重新核查后，本轮官方 rustup x64 下载与 SHA256 `38027d51d69a5d05493627a0634dbea52d6cd793c8f072d2373d3f4163eec7db` 一致；Rust 1.99.1 安装在项目 `.local/toolchains`，未改全局 PATH。Microsoft Build Tools 官方安装器 Authenticode 为 Valid / Microsoft Corporation，按最小 MSVC x64 与 Windows 10 SDK 组件准备环境。安装/原生构建的最终结果另记进度，不沿用历史拒绝作为当前结论。
+- 工具链重新核查后，本轮官方 rustup x64 下载与 SHA256 `38027d51d69a5d05493627a0634dbea52d6cd793c8f072d2373d3f4163eec7db` 一致；Rust 1.99.1 安装在被忽略的项目本地工具链目录，未改全局 PATH。Microsoft Build Tools 官方安装器 Authenticode 为 Valid / Microsoft Corporation，按最小 MSVC x64 与 Windows 10 SDK 组件准备环境。安装/原生构建的最终结果另记进度，不沿用历史拒绝作为当前结论。
 
 ## 2026-11-06：提前实现最小客户端前核对
 
@@ -379,7 +407,7 @@ WebView2调试环境变量在本机提升权限宿主未生效后，核对已安
 - [learn/sidecar-nodejs.mdx](https://github.com/tauri-apps/tauri-docs/blob/5e49cc6e48597060f1618e0b62cb91b071b1b4a9/src/content/docs/learn/sidecar-nodejs.mdx)：核对Node打包和随包附带运行时两类部署方式，以及stdin/stdout等通信方式。保留既有Node内核，不搬入示例应用或直接照搬示例打包依赖；本项目的Node/ESM/better-sqlite3适配须在P5实测后确定打包配置。
 - [LICENSE](https://github.com/tauri-apps/tauri-docs/blob/5e49cc6e48597060f1618e0b62cb91b071b1b4a9/LICENSE)：已读取，MIT。此次仅引用机制并独立编写范围文档，未复制示例代码、引入依赖或构建客户端；后续实际复用及分发仍保留对应许可与来源，核对真实锁定版本的传递依赖。
 
-核对结果支持“React界面 → Tauri受限命令 → Node sidecar共用业务服务”的小范围接入，范围见docs/MINIMAL-CLIENT.md。官方支持不代表本机Windows打包、SQLite原生模块、客户端重启或真实AI试用已通过；当前均未实现/未验证，P5在GO后启动。
+核对结果支持“React界面 → Tauri受限命令 → Node sidecar共用业务服务”的小范围接入，范围见本机历史归档的最小客户端方案。官方支持不代表本机Windows打包、SQLite原生模块、客户端重启或真实AI试用已通过；当前均未实现/未验证，P5在GO后启动。
 
 ## 2026-11-06：将请求关联路线落实前核对
 
@@ -391,7 +419,7 @@ WebView2调试环境变量在本机提升权限宿主未生效后，核对已安
 
 ## 2026-11-06：当前收据问题专项开源比较
 
-用户要求查看开源方案如何处理本轮时间矛盾。已联网核对六个候选的当前HEAD，下载并读固定源码与相关测试；详细文件、SHA、许可、采用/不采用原因、纯函数实测和后续验证方向见专项比较（本机开发文档：`docs/UPSTREAM-COMPARISON.md#2026-11-06发送时间矛盾与刷新误确认专项`）。LockyBee/dsh-douyin-agent仍为MIT `7989640e340f0fd79e2de9874880d5197546e755`；watch当前MIT `b3d5e36ed4ef9b8c1a7006ca2770309f820ffa46`；DouAi公开源码`f751fde0202a53c96cb14905e620ad5982d1be8f`未核准可复制许可，仅阅读，不复制或执行宿主代码。另重读crazyants、POKMJN、DMShoot原固定SHA的确认入口；未引入依赖、SDK、签名、原生hook或其他提交方式。
+用户要求查看开源方案如何处理本轮时间矛盾。已联网核对六个候选的当前HEAD，下载并读固定源码与相关测试；详细文件、SHA、许可、采用/不采用原因、纯函数实测和后续验证方向见本机历史归档的 2026-11-06 开源专项比较记录。LockyBee/dsh-douyin-agent仍为MIT `7989640e340f0fd79e2de9874880d5197546e755`；watch当前MIT `b3d5e36ed4ef9b8c1a7006ca2770309f820ffa46`；DouAi公开源码`f751fde0202a53c96cb14905e620ad5982d1be8f`未核准可复制许可，仅阅读，不复制或执行宿主代码。另重读crazyants、POKMJN、DMShoot原固定SHA的确认入口；未引入依赖、SDK、签名、原生hook或其他提交方式。
 
 直接运行上游评论基线纯函数的5项合成断言：正确新ID和基线未见的旧时间ID均确认，错误全文/pending/已知ID拒绝，证明该函数不负责严格时间门禁，而非现成本项目解法。较强可借鉴方向是具体请求业务回执与返回ID的因果关联，结合正常刷新同ID/准确目标核对；网页是否暴露足够字段尚待校准。本轮仅研究与记录，应用行为、旧收据、审批/冻结及发送预算不变，无真实页面/发送/模型请求。
 
@@ -425,13 +453,13 @@ WebView2调试环境变量在本机提升权限宿主未生效后，核对已安
 
 初始实现依据需求独立编写，没有搬入 POC-SPEC 第12节候选仓库的宿主代码。本轮已开始适配复用经过核对的MIT小段，具体文件、commit SHA、许可证及修改记录在下文；不能据此推定其他候选代码也已获许可或适用于本项目。
 
-当前直接依赖及开发依赖均通过 pnpm 锁文件精确固定，使用其公开包接口；许可证以实际安装包元数据为准。没有把 Electron、Python、DSH 宿主或非官方抖音协议层搬入应用。技术文档来源记录于 docs/PROGRESS.md，设计来源为用户提供的 POC-SPEC.md。
+当前直接依赖及开发依赖均通过 pnpm 锁文件精确固定，使用其公开包接口；许可证以实际安装包元数据为准。没有把 Electron、Python、DSH 宿主或非官方抖音协议层搬入应用。技术文档来源与早期设计规格留存于本机历史 PoC 归档目录。
 
 本次核对已安装包元数据：Playwright 1.64.1、TypeScript 7.0.2 为 Apache-2.0；better-sqlite3 13.0.3、zod 4.6.7、pino 10.4.0、Vitest 5.1.0、tsx 4.23.15 为 MIT。没有移除依赖包自带 LICENSE。未发布分发包，后续打包仍须核对全部传递依赖及原生模块许可与ABI。
 
 ## 2026-11-05：源码只读核对与字段路径借鉴
 
-按用户要求核对原方案候选源码，固定提交、实际处理方式及局限记录于 `docs/UPSTREAM-COMPARISON.md`。没有整套引入、安装或执行上游应用；其他候选本次仅阅读，不推定它们均有可复用许可。
+按用户要求核对原方案候选源码，固定提交、实际处理方式及局限记录于本机历史归档的开源对照汇总。没有整套引入、安装或执行上游应用；其他候选本次仅阅读，不推定它们均有可复用许可。
 
 其中 `LockyBee/dsh-douyin-agent` 的 `chat-browser.mjs` 与 `message-tracker.mjs`，提交 `7989640e340f0fd79e2de9874880d5197546e755`，根 LICENSE 已读取并确认为 MIT。本次借鉴当前已渲染组件的固定字段路径、会话交叉绑定及窗口身份分层思路，独立编写本机有界只读探针；未复制源函数、宿主依赖或发送实现。探针验证服务端 ID、会话 ID、创建时间和可见正文一致，真实值只留私有运行目录。正式适配器接入及后续实际移植应继续记录具体文件、测试与修改范围，不把本地指纹当平台 ID。
 
@@ -511,7 +539,7 @@ WebView2调试环境变量在本机提升权限宿主未生效后，核对已安
 
 ## 2026-11-09：评论表情正文、单行隔离与付费门禁
 
-用户提供已加载评论区截图并要求查开源方案后，先保留私有截图，使用合成页面复现IMG表情、纯表情、BR与单行冲突阻断整页读取；未把截图当作已取得网页DOM字段。修改前联网重新核对三个仓库HEAD并下载固定版本的具体源码/许可；文件SHA256索引只留`.local/upstream-review/collection-20261109/index.json`。
+用户提供已加载评论区截图并要求查开源方案后，先保留私有截图，使用合成页面复现IMG表情、纯表情、BR与单行冲突阻断整页读取；未把截图当作已取得网页DOM字段。修改前联网重新核对三个仓库HEAD并下载固定版本的具体源码/许可；文件 SHA256 索引仅留存于被忽略的本机临时复核目录。
 
 | 候选及固定SHA | 具体实现与许可 | 采用结论 |
 | --- | --- | --- |
@@ -686,32 +714,3 @@ UI 独立按准确存量 eventId 查看 IMAGE／MIXED／VIDEO／AUDIO，不扩�
 隔离原实现先出现17项有效失败、14项通过；自动文字恢复及 MCP 入站合同分别补一项有效红测。最终定向33/33、既有相关11文件112/112、另6文件92/92分别通过（集合有重叠，不累加）；会话UI按双方新预览调整定位后17/17，人工发送反馈18项通过。首次UI 13项失败为旧入站预览定位及既有评论按钮名称失配，保留日志；未删除业务断言。主目录类型、Node／Web构建及371代码文件行数通过，最大772行。开发版原生进程保留并安全重载，准确原事件 frozen:false、人工资格true；六表原有245条逐行摘要不变，MODEL37／SEND53保持，没有代理真实模型或发送。真实点击发送由本人继续操作，不能以合成确认冒称本轮实机送达。精简证据位于本机私有运行目录 evidence/inbox-reply-fix-20261111。
 
 推送前的完整集成检查发现，双向预览逐会话调用 timelinePage 破坏了既有批量读取约束：100 个会话实际执行 1017 条 SQL。复用既有查询索引和投影快照，并对照上述 Chatwoot 按双方消息时间排序原则，独立改为一次批量候选查询；私有媒体仅为当前页读取，原生身份、绑定、全文摘要和确认状态不放宽。合并同快照中重复的账号／意图补证／后续回复查询。保留15条查询上限，新增原生我方消息与已确认发送混合的40会话两页断言，实际查询均为15；完整集成最初896通过／2失败中的另一处为既有媒体状态筛选旧断言，按MANUAL_ONLY验证并保留“不进入PENDING”正反断言。相关88项、额外投影62项与类型检查通过，不修改数据库或授权。
-
-### 2026-11-13：无头业务页的媒体暂停与浏览器资源监测
-
-复读已核对的 MIT `LockyBee/dsh-douyin-agent@7989640e340f0fd79e2de9874880d5197546e755` 的 `browser-launcher.mjs:37–63`（https://github.com/LockyBee/dsh-douyin-agent/blob/7989640e340f0fd79e2de9874880d5197546e755/browser-launcher.mjs#L37-L63），采用安装、捕获播放事件、原生暂停、Observer 和释放机制；完整许可保留在 `third_party/LockyBee-dsh-douyin-agent-MIT.txt`。本项目只给无头 Owner 的两个业务 Page 在首次导航前注册脚本，限制当前可信入口 origin 的主 Frame。增量检查 addedNodes 及其媒体后代，跳过已暂停元素，不保存节点列表，Document 幂等，pagehide 停止监听和观察并在 pageshow 恢复。未复制上游宿主、接管或观看逻辑，不更改媒体源、预加载、位置、DOM、输入或媒体原型，不拦截网络。
-
-监测沿用本项目 OS 指标入口，独立实现 Sidecar 后代与父子创建时间归属、唯一 Edge 根、实际 Context 页数、单飞取消及隐藏子进程收尾。指标不进入账号队列、不调用页面或平台，诊断只读有界缓存；版本1可选资源块及严格 MCP 投影均不含 PID、命令行、URL 或消息正文。一个固定报告与一个临时文件原子替换，保留最近24小时和最多1440个样本。来源适配不改变单账号专属 Profile、单持有者、双 Page、30秒当前配置、单次提交和未知不重发合同，无新增依赖、数据库表或迁移。
-
-播放、释放、动态媒体、导航、Frame/origin 排除、人稿和预览 DOM、空媒体与节点回收以本地合成 Edge 验证；媒体函数分别经默认 tsx 源码链和编译后 Node 链实际运行。暂停能停止播放，不证明浏览器已释放缓冲、MSE 或网页堆；实际内存收益、自然波动及长期趋势另以分实例的私有数值报告核对，合成验证不冒称真实账号送达或24小时稳定。
-
-
-### 2026-11-16：恢复验证时保留准确故障页面
-
-复读已核对的 MIT LockyBee/dsh-douyin-agent@7989640e340f0fd79e2de9874880d5197546e755 的 chat-browser.mjs:247–252、tests/chat-browser.test.mjs:250–258（本地 .local/upstream-review/LockyBee__dsh-douyin-agent/tree）。其中无文字、全屏可见 captcha 仍阻断，隐藏后通过；据此保留真实安全遮罩门禁，不把缺少外层文字当作没有验证。另核对 MIT miqian-nomad/dsh-douyin-watch@d1a14e3fc8d7a18089d412ae3479365974c069df 的 tools/work-comments.mjs:262–283，采用在目标作品触发并观察验证的排查思路；不采用其内部请求、UA、40px阈值或发送路线。来源与许可证沿用已有上游归档，本次未复制新上游代码或引入依赖。
-
-旧投影记录过安全容器与字节域名 iframe，但缺少足够现场关联，不能确认本次真实验证；另一个入口正常只证明该新文档。原恢复模式切换关闭两页后只打开 entryUrl，检查健康入口无法证明故障作品正常。新增本机私有、按绑定账号及准确授权作品重校验的位置记录；模式切换与后端重载保留故障作品，恢复回到该作品后检查，未保存人稿阻止导航。外站、其它账号、未授权作品及URL凭据不能恢复；正常关闭不写新的持久故障。沿用单持有者、无头默认、人工验证与未知不重发。
-
-## 2026-11-16：本地知识、回复样例与人格草稿
-
-实施前核对 AnythingLLM 的 MIT 固定 `1626d971c73d70a68602a662e3baf52e160c62ff`，具体 [`collector/processRawText/index.js`](https://github.com/Mintplex-Labs/anything-llm/blob/1626d971c73d70a68602a662e3baf52e160c62ff/collector/processRawText/index.js) 的来源与文本组织；以及 LangChainJS 的 MIT 固定 `c266deb5c9afee8253dab0f1e92aec5727159150`，具体 [`libs/langchain-core/src/example_selectors/semantic_similarity.ts`](https://github.com/langchain-ai/langchainjs/blob/c266deb5c9afee8253dab0f1e92aec5727159150/libs/langchain-core/src/example_selectors/semantic_similarity.ts) 的输入/样例选择边界。采用来源可撤销、资料与会话分离、少量相关样例的机制，独立实现到现有 SQLite/模型/发送合同；未复制其宿主、框架、向量服务或发送代码，不以其能力声明代替本机验收。
-
-解析依赖固定为 `mammoth@1.13.0`（BSD-2-Clause，纯文本 DOCX）、`pdfjs-dist@6.5.438`（Apache-2.0，文字 PDF）和 `exceljs@4.4.0`（MIT，CSV/XLSX）。使用发布包 API，许可证随依赖保留，现有构建 notices 生成流程在获准打包时收录。无 OCR、宏、公式计算、外链下载或任意 URL 导入。保留 better-sqlite3 13.0.3 及禁止隐式 node-gyp 的策略；干净生产依赖安装、SQLite 持久化和纯构建 Node Worker 实际通过。
-
-本项目增补本地来源/样本/人格版本、中文二元 FTS 与三元 FTS、显式学习用途预算、人格基线试聊及最终意图前版本门禁。知识/样例作为不可信数据，账号及准确目标由原授权和协调器控制；学习和试聊没有发送入口。数据、模型、实际 ClientService 及合成 UI 的验证范围和剩余限制见 `docs/KNOWLEDGE-PERSONA.zh-CN.md`。无新增真实模型调用或真实发送作为测试，无安装包。
-
-### 2026-11-16：新界面与旧原生窗口的能力识别
-
-用户首次打开知识区时没有输入任何内容却提示输入错误。只读核对运行的17:24原生文件，含旧securityRecovery命令、不含replyKnowledge；当前48字节overview请求通过后端schema，旧原生白名单将其拒绝。检查锁定发布包 `@tauri-apps/api@2.12.4`（Apache-2.0 OR MIT）的 `core.js` invoke实现，SHA256 `956eba26ffeb23576f29f70813c272c2915722b3b19bf00f86718c335b313da0`，确认请求直接进入原生IPC，前端热更新不能更新已运行白名单。独立补原生只读能力标记与首次读取检查，不放宽白名单、权限或输入验证。
-
-启动复现另证明独立Vite占用1420，原开发入口会启动第二实例失败。按本项目现有Vite serve插件接口增加仅开发身份端点，返回本项目根摘要；开发启动器仅确认同项目服务后复用，空端口正常启动，异项目或不明响应拒绝。未复制上游源码、增加依赖、停止用户进程或改变正式构建。旧窗口提示和同项目服务身份均先红后绿；本人保存关闭后实际编译并通过根入口启动新原生程序；原运行目录的真实自动连接另行核对。界面视觉由本人验收，合成交互不冒称真实窗口截图。

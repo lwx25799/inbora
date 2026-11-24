@@ -6,7 +6,7 @@
   const B = (text, action, kind = '', icon = '') => P.btn(text, action, kind, icon);
   const tag = (text, tone = 'blue') => P.badge(text, tone);
   const STORE = 'inbora-html-prototype-settings-v1';
-  const PROFILE_PATH = String.raw`D:\Inbora\.local\real-acceptance`;
+  const PROFILE_PATH = String.raw`C:\Users\<用户名>\AppData\Local\inbora\demo-profile`;
   const defaultSettings = {
     startup: true, backup: true, updates: true, notifications: true,
     network: '智能选择（推荐）', retention: '30 天', evidence: '90 天',
