@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import { expect, test } from 'vitest';
 import { join } from 'node:path';
 import type { Page } from 'playwright';
@@ -34,7 +35,7 @@ test.each([
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp('comment-text-'),'profile'),true);
   try{
     await comments(owner.notification,server.origin,[row]);
-    const batch=await owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture',allCommentAuthors:true});
+    const batch=await owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture',allCommentAuthors:true});
     expect(batch.events).toHaveLength(1);expect(batch.events[0]!.text).toBe(row.text);
     expect(isStrong(batch.events[0]!)).toBe(true);expect(batch.unsupported).toBe(0);
   }finally{await owner.close();await server.close();}
@@ -52,7 +53,7 @@ test('unverified comment bodies are isolated for review while other new comments
       {html:'<video width="16" height="16"></video>',text:''},
       {html:'<img width="16" height="16" src="/emoji.png">',text:'[赞]',at:Math.floor(start/1000)-10},
     ]);
-    const batch=await owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture',allCommentAuthors:true});
+    const batch=await owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture',allCommentAuthors:true});
     expect(batch.events).toHaveLength(6);expect(batch.unsupported).toBe(5);
     expect(batch.events.slice(1).every(event=>!isStrong(event))).toBe(true);
     store.observe('COMMENT_NOTIFICATION','work:10',batch.events,'100','fixture',new Date().toISOString(),start);
@@ -82,7 +83,7 @@ test('comment reply inspection uses the same exact emoji text and rejects a chan
       root.querySelector('.body')!.innerHTML='root fixture input<img width="16" height="16" src="/emoji.png" alt="[赞]">';
     });
     const mapping=commentReplyMapping(server.origin);
-    const batch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,evidenceId:'fixture'});
+    const batch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture'});
     const event=batch.events[0]!;expect(isStrong(event)).toBe(true);
     adapter=new ObservedCommentReply(owner.notification,mapping);
     expect((await adapter.inspect(event)).targetKey).toBe('comment:10:11');
@@ -105,7 +106,7 @@ test('unsupported images and nested bodies cannot manufacture exact comment text
       {html:'<span class="comment">nested private body</span>',text:'native parent body'},
       {html:Array.from({length:9},()=>'<img width="16" height="16" src="/emoji.png" alt="[赞]">').join(''),text:'[赞]'.repeat(9)},
     ]);
-    const batch=await owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture',allCommentAuthors:true});
+    const batch=await owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture',allCommentAuthors:true});
     expect(batch.events).toHaveLength(8);expect(isStrong(batch.events[0]!)).toBe(true);
     expect(batch.events.slice(1).every(event=>!isStrong(event))).toBe(true);
     expect(batch.events[6]!.text).toBe('native parent body');
@@ -122,7 +123,7 @@ test.each(['body','tooltip','self','list','roots'] as const)('missing comment %s
     await owner.notification.locator(selector).evaluate(node=>node.remove());
     const expected={body:'OBSERVATION_COMMENT_TEXT_DOM_NOT_READY',tooltip:'OBSERVATION_COMMENT_TOOLTIP_DOM_NOT_READY',self:'OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_READY',
       list:'OBSERVATION_COMMENT_LIST_DOM_NOT_READY',roots:'OBSERVATION_COMMENT_ROOTS_DOM_NOT_READY'}[missing];
-    await expect(owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture',allCommentAuthors:true}))
+    await expect(owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture',allCommentAuthors:true}))
       .rejects.toThrow(expected);
   }finally{await owner.close();await server.close();}
 });

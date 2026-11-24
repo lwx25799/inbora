@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {afterAll,beforeAll,expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -57,7 +58,7 @@ function noExternal(store:EventStore){
 
 test('collection metadata covers every exact native row while the missing old voice is never invented as a text event',async()=>{
   const f=await setup();try{
-    const input:Parameters<typeof captureObserved>[0]={mapping:f.mapping,channel:'dm',index:0,evidenceId:'synthetic-old-gap',peer:f.mapping.peers[0]!,dmWindow:true,collectionPartial:true};
+    const input:Parameters<typeof captureObserved>[0]={mapping:f.mapping,channel:'dm',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-old-gap',peer:f.mapping.peers[0]!,dmWindow:true,collectionPartial:true};
     const batch=await owner.dm.evaluate(captureObserved,input);
     expect(batch).toMatchObject({loaded:2,incomplete:'CONTENT_NOT_READY'});expect(batch.events.map(event=>event.platformEventId)).toEqual(['6204']);
     expect(batch).toHaveProperty('dmCoverage',[{id:'6204',occurredAt:new Date(f.origin-2000).toISOString(),precisionMs:1,captured:true},

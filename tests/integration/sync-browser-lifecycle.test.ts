@@ -32,7 +32,7 @@ test('an in-flight actual BrowserService observation cannot replace CLOSED after
   const f=await fixture(),read=gate(),entered=gate();
   const observe=vi.spyOn(DomAdapter.prototype,'observeNotifications').mockImplementation(async()=>{entered.release();await read.promise;return{events:[],evidenceId:'synthetic-only',loaded:0};});
   const browser=BrowserService.adopt(f.root,f.owner,'headless');
-  let work:Promise<void>|undefined;
+  let work:ReturnType<BrowserService['observe']>|undefined;
   try{
     work=browser.observe(f.store,'notifications');const outcome=work.catch(error=>error);await entered.promise;
     const closing=browser.close();read.release();await outcome;await closing;
@@ -51,9 +51,10 @@ test('natural context close during a real observation stops inbox sync without l
     const normalObserve=browser.observe.bind(browser);
     vi.spyOn(browser,'observe').mockImplementation((store)=>normalObserve(store,'notifications'));
     service=new ClientService(f.store,browser);const token=service.authority.issueSession();
-    await service.dispatch(token,{command:'syncInbox'});await entered.promise;
+    await browser.open();
     for(const channel of ['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as const)
       service.authority.attest(channel,'SEND_AVAILABLE',browser.identity(channel)!,'synthetic-existing-capability');
+    await service.dispatch(token,{command:'syncInbox'});await entered.promise;
     f.context.emit('close');read.release();await service.drain();
     expect(launches).toBe(1);expect(browser.status()).toMatchObject({state:'CLOSED',version:null});
     expect(f.store.db.prepare("SELECT count(*) AS n FROM channel_capabilities WHERE state='SEND_AVAILABLE'").get()).toEqual({n:2});

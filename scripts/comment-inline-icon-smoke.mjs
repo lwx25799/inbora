@@ -6,6 +6,7 @@ import {fixtureServer} from '../tests/fixtures/site.ts';
 import {mountCommentReply,commentReplyMapping} from '../tests/fixtures/observed-site.ts';
 const source=process.argv[2]==='source',root=source?'src':'dist';
 const moduleUrl=name=>pathToFileURL(resolve(root,name.replace(/\.js$/,source?'.ts':'.js'))).href;
+const {DEFAULT_ACCOUNT_ID}=await import(moduleUrl('contracts/account.js'));
 const {BrowserProfileOwner}=await import(moduleUrl('browser/profile-owner.js'));
 const {captureObserved}=await import(moduleUrl('adapters/observed-reader.js'));
 const {captureCommentReply}=await import(moduleUrl('adapters/observed-comment-reply.js'));
@@ -28,7 +29,7 @@ try{
         status:1,user:{uid:'100',secUid:'self-sec'}}}}}});
     root.append(child);
   });
-  const read=()=>owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,evidenceId:'synthetic'});
+  const read=()=>owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic'});
   const batch=await read(),event=batch.events[0];
   checks.push(['incoming inline icon preserves exact text',isStrong(event)&&event.text==='root fixture input']);
   // Keep the proof check independent so a collection failure cannot mask a readback failure.

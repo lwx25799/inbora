@@ -16,7 +16,7 @@ async function fixture(read:(source:CollectionSource,signal:AbortSignal)=>Promis
   class Browser extends BrowserService{
     override identity(){return {identityDigest:digest('own-1'),mappingDigest:'synthetic',browserMode:'headless' as const,browserVersion:'fixture'};}
     override async refreshIdentity(){return this.identity();}
-    override async observe(_store:EventStore,source:string){legacy.push(source);}
+    override async observe(_store:EventStore,source:string){legacy.push(source);return {newEventIds:[]};}
     override async collect(_data:AutomationStore,source:CollectionSource,signal:AbortSignal){collected.push(source);await read(source,signal);}
     override async close(){}
   }

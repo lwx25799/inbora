@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {afterAll,beforeAll,beforeEach,expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -34,7 +35,7 @@ async function mountChild(fault='none'){
   },{fault,at:Math.floor(Date.now()/1000)-10});
 }
 function capture(){return owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'comments' as const,index:0,
-  evidenceId:'synthetic-nested',allCommentAuthors:true});}
+  accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-nested',allCommentAuthors:true});}
 
 test('automatic collection retains root and child separately, using exact native identity and persistent baseline',async()=>{
   await mountChild();const batch=await capture(),file=join(privateTemp('nested-comment-events-'),'poc.sqlite');let store=new EventStore(file,true);
@@ -76,7 +77,7 @@ test('hidden child never provides an inbound event',async()=>{
 
 test.each([true,false])('one exact native child author is selected among reply-context links (all authors: %s)',async allCommentAuthors=>{
   await mountChild('multi-author');const mapping=observedMapping(server.origin);mapping.commentAuthors=[{uid:'201',secUid:'child-sec',title:'Child author'}];
-  const value=await owner.notification.evaluate(captureObserved,{mapping,channel:'comments' as const,index:0,evidenceId:'synthetic-multi-author',allCommentAuthors});
+  const value=await owner.notification.evaluate(captureObserved,{mapping,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-multi-author',allCommentAuthors});
   const child=value.events.find(event=>event.commentId==='21')!;
   expect(child).toMatchObject({actorId:'201',actorName:'Child author',rootCommentId:'11',replyToCommentId:'21'});expect(isStrong(child)).toBe(true);
 });
@@ -92,7 +93,7 @@ test('malformed native secure identity cannot invoke a page object string conver
 
 test('comment child diagnostics expose only fixed identity shape and distinguish roots from children',async()=>{
   await mountChild('wrong-author');const value=await owner.notification.evaluate(captureObserved,{mapping:observedMapping(server.origin),channel:'diagnostic' as const,
-    diagnosticSource:'comments' as const,index:0,evidenceId:'synthetic-child-diagnostic'});
+    diagnosticSource:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-child-diagnostic'});
   expect(value.diagnostic?.commentChildren).toMatchObject({rootRows:1,childRows:1,samples:[{ownedAuthors:1,visibleProfiles:1,nativeUidPresent:true,
     nativeSecurePresent:true,profileMatchesNative:false,metadataReadable:true,hasRootNative:true,levelIs2:true,rootMatches:true,visibleBodies:1}]});
   expect(JSON.stringify(value.diagnostic?.commentChildren)).not.toMatch(/child-sec|other-sec|new child input|\/user\//);

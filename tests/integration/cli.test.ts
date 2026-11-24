@@ -48,10 +48,13 @@ test('CLI ordinary calls launch headless and label evidence with the actual mode
   writeFileSync(join(root,'observation-mapping.json'),JSON.stringify({...observedMapping('https://www.douyin.com'),environment:'douyin'}));
   const launchFile=join(root,'synthetic-launch.json'),preload=join(root,'mode-preload.mjs');
   writeFileSync(preload,`import {writeFileSync} from 'node:fs';
+    import {EventEmitter} from 'node:events';
     import {BrowserProfileOwner} from ${JSON.stringify(pathToFileURL(resolve('src/browser/profile-owner.ts')).href)};
     import {ObservedReader} from ${JSON.stringify(pathToFileURL(resolve('src/adapters/observed-reader.ts')).href)};
     BrowserProfileOwner.launch=async(_profile,headless)=>{writeFileSync(${JSON.stringify(launchFile)},JSON.stringify({headless}));
-      return {notification:{},dm:{},actor:{run:async action=>action()},open:async()=>{},close:async()=>{},version:()=> '123.0.0.0'};};
+      const page=()=>Object.assign(new EventEmitter(),{url:()=> 'https://www.douyin.com/'});
+      const notification=page(),dm=page(),context=Object.assign(new EventEmitter(),{pages:()=>[notification,dm]});
+      return {context,notification,dm,actor:{run:async action=>action()},open:async()=>{},close:async()=>{},version:()=> '123.0.0.0'};};
     ObservedReader.prototype.dm=async()=>({events:[],evidenceId:'synthetic-only',loaded:0,unsupported:0});`);
   const invoke=(args:string[])=>spawnSync(process.execPath,['--import','tsx','--import',pathToFileURL(preload).href,cli,...args,'--runtime',root,
     '--real-account','--private-access'],{encoding:'utf8',timeout:10000});

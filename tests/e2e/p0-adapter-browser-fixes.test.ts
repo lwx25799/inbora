@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test,vi} from 'vitest';
 import {rm} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -21,7 +22,7 @@ test('P0-5: verifyExisting and ObservedReader.comments guard unsent human drafts
     await mountCommentReply(owner,server.origin);
     await reloadableCommentReply(owner.notification,server.origin);
     const mapping=commentReplyMapping(server.origin);
-    const batch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,evidenceId:'fixture'});
+    const batch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture'});
     const event=batch.events[0]!;
     await owner.notification.evaluate(()=>{
       const draft=document.createElement('textarea');draft.id='human-comment-draft';draft.value='unsent webpage human draft';
@@ -46,7 +47,7 @@ test('comment-thread-capture allows decorative inline SVG and rejects non-decora
     await owner.notification.evaluate(()=>{
       document.querySelector('#root-comment .body')!.innerHTML='root <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><path d="M0 0L12 12"/></svg>fixture input';
     });
-    const event=(await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,evidenceId:'fixture'})).events[0]!;
+    const event=(await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture'})).events[0]!;
     expect(event.text).toBe('root fixture input');
     const thread=await owner.notification.evaluate(captureCommentThread,{mapping:mapping.observation,event,action:'inspect' as const,offset:0});
     expect(thread.total).toBe(0);
@@ -129,7 +130,7 @@ test('bidirectional 2000ms clock skew accepts +1000ms server-ahead replies in DM
 
     await mountCommentReply(owner,server.origin);
     const cmMap=commentReplyMapping(server.origin);
-    const cmEvent=(await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,evidenceId:'fixture'})).events[0]!;
+    const cmEvent=(await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture'})).events[0]!;
     const aheadSec=Math.floor((Date.now()+1000)/1000);
     await owner.notification.evaluate(({replyText,aheadSec})=>{
       const rootRow=document.querySelector('#root-comment')!,info=Object.getOwnPropertyDescriptor(rootRow,'__reactFiber$fixture')!.value.return.memoizedProps.commentInfo;
@@ -175,7 +176,7 @@ test('verifyExisting without baseline never misclassifies a pre-send +500ms mess
     await mountCommentReply(owner,server.origin);
     await reloadableCommentReply(owner.notification,server.origin);
     const cmMap=commentReplyMapping(server.origin);
-    const cmEvent=(await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,evidenceId:'fixture'})).events[0]!;
+    const cmEvent=(await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture'})).events[0]!;
     const replySec=Math.ceil((Date.now()+200)/1000);
     const cmBoundary=new Date(replySec*1000-500).toISOString();
     await owner.notification.addInitScript(({sameText,replySec})=>document.addEventListener('DOMContentLoaded',()=>{
@@ -205,14 +206,14 @@ test('captureObserved accepts +1500ms server-ahead timestamps for DM and comment
       const row=document.querySelector('.message')!;
       Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message.createdAt=new Date(aheadIso);
     },aheadIso);
-    const dmAhead=await owner.dm.evaluate(captureObserved,{mapping:dmMap.observation,channel:'dm' as const,index:0,evidenceId:'skew-dm-ok',peer:dmMap.observation.peers[0]!,collectionPartial:true});
+    const dmAhead=await owner.dm.evaluate(captureObserved,{mapping:dmMap.observation,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'skew-dm-ok',peer:dmMap.observation.peers[0]!,collectionPartial:true});
     expect(dmAhead.events[0]!.occurredAt).toBe(aheadIso);
     expect(dmAhead.dmCoverage).toBeDefined();
     await owner.dm.evaluate(()=>{
       const row=document.querySelector('.message')!;
       Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message.createdAt=new Date(Date.now()+5000);
     });
-    const dmFarFuture=await owner.dm.evaluate(captureObserved,{mapping:dmMap.observation,channel:'dm' as const,index:0,evidenceId:'skew-dm-far'});
+    const dmFarFuture=await owner.dm.evaluate(captureObserved,{mapping:dmMap.observation,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'skew-dm-far'});
     expect(dmFarFuture.events[0]!.occurredAt).toBeNull();
 
     await mountCommentReply(owner,server.origin);
@@ -222,13 +223,13 @@ test('captureObserved accepts +1500ms server-ahead timestamps for DM and comment
       const rootRow=document.querySelector('#root-comment')!;
       Object.getOwnPropertyDescriptor(rootRow,'__reactFiber$fixture')!.value.return.memoizedProps.commentInfo.createTime=aheadSec;
     },aheadSec);
-    const cmAhead=await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,evidenceId:'skew-cm-ok'});
+    const cmAhead=await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'skew-cm-ok'});
     expect(cmAhead.events[0]!.occurredAt).toBe(new Date(aheadSec*1000).toISOString());
     await owner.notification.evaluate(()=>{
       const rootRow=document.querySelector('#root-comment')!;
       Object.getOwnPropertyDescriptor(rootRow,'__reactFiber$fixture')!.value.return.memoizedProps.commentInfo.createTime=Math.floor((Date.now()+5000)/1000);
     });
-    const cmFarFuture=await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,evidenceId:'skew-cm-far'});
+    const cmFarFuture=await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'skew-cm-far'});
     expect(cmFarFuture.events[0]!.occurredAt).toBeNull();
   }finally{await owner.close();await server.close();await rm(root,{recursive:true,force:true});}
 });
@@ -241,7 +242,7 @@ test('ObservedCommentReply.verifyExisting ignores unrelated bystander comments l
     await mountCommentReply(owner,server.origin);
     await reloadableCommentReply(owner.notification,server.origin);
     const mapping=commentReplyMapping(server.origin);
-    const event=(await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,evidenceId:'fixture'})).events[0]!;
+    const event=(await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture'})).events[0]!;
     const replyText='bystander safe verified reply';
     const replySec=Math.floor((Date.now()-1000)/1000);
     const boundary=new Date(replySec*1000-3000).toISOString();

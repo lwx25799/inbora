@@ -6,12 +6,13 @@ import {fixtureServer} from '../tests/fixtures/site.ts';
 import {mountCommentReply,commentReplyMapping,reloadableCommentReply,mountFreshCommentPage} from '../tests/fixtures/observed-site.ts';
 const source=process.argv[2]==='source',root=source?'src':'dist';
 const url=name=>pathToFileURL(resolve(root,name.replace(/\.js$/,source?'.ts':'.js'))).href;
+const {DEFAULT_ACCOUNT_ID}=await import(url('contracts/account.js'));
 const {BrowserProfileOwner}=await import(url('browser/profile-owner.js'));
 const {captureObserved}=await import(url('adapters/observed-reader.js'));
 const {ObservedCommentReply}=await import(url('adapters/observed-comment-reply.js'));
 const {SendCoordinator}=await import(url('core/send-coordinator.js'));
 const {EventStore}=await import(url('storage/store.js'));
-const base=resolve('.local/comment-reply-smoke');await mkdir(base,{recursive:true});const dir=await mkdtemp(join(base,'run-'));
+const base=resolve('.local/tests/comment-reply-smoke');await mkdir(base,{recursive:true});const dir=await mkdtemp(join(base,'run-'));
 let server,owner,store;
 try{
   server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
@@ -20,7 +21,7 @@ try{
   await owner.notification.locator('.reply-action').evaluate(action=>action.addEventListener('click',()=>{
     const controls=document.querySelector('#root-comment #reply-controls');if(controls)document.body.append(controls);
   }));
-  const batch=await owner.actor.run(()=>owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,evidenceId:'fixture-root-snapshot'}));
+  const batch=await owner.actor.run(()=>owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-root-snapshot'}));
   store.observe('COMMENT_NOTIFICATION','work:10',[],'100','fixture');store.observe('COMMENT_NOTIFICATION','work:10',batch.events,'100','fixture');
   const event=store.events()[0],draft=store.saveDraft(event.id,'local fixture parent reply','mock'),adapter=new ObservedCommentReply(owner.notification,mapping);
   const snapshot=await owner.actor.run(()=>adapter.inspect(event.payload));
@@ -110,7 +111,7 @@ try{
     Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture').value.return.memoizedProps.commentInfo.text='root fixture input[赞]';
     root.querySelector('.body').innerHTML='root fixture input<img width="16" height="16" src="/emoji.png" alt="[赞]">';
   });
-  const emojiBatch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,evidenceId:'fixture-emoji'});
+  const emojiBatch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-emoji'});
   const emojiAdapter=new ObservedCommentReply(owner.notification,mapping);
   try{
     assert.equal((await emojiAdapter.inspect(emojiBatch.events[0])).targetKey,'comment:10:11');

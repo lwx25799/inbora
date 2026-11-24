@@ -48,7 +48,7 @@ test('manual sync preserves a delayed peer and reuses collection progress to rea
     // Only configuration transport is synthetic; native identity/body/row guards and collector persistence are real.
     vi.spyOn(runtime,'loadObservationMapping').mockResolvedValue(mapping);
     const browser=BrowserService.adopt(root,owner,'headless'),observe=browser.observe.bind(browser);
-    const observed=vi.spyOn(browser,'observe').mockImplementation((store,source)=>source==='works'?Promise.resolve():observe(store,source));
+    const observed=vi.spyOn(browser,'observe').mockImplementation((store,source)=>source==='works'?Promise.resolve({newEventIds:[]}):observe(store,source));
     const collected=vi.spyOn(browser,'collect');
     service=new ClientService(store,browser,undefined,()=>now,origin);await service.loadSettings();
     const data=new AutomationStore(store,()=>now);store.bindAccount('100');

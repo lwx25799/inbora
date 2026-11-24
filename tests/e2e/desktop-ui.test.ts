@@ -79,6 +79,7 @@ test.each([
         if(source==='works')pending(store,candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',conversationId:null,
           platformEventId:'ui-synced-comment',videoId:'ui-sync-work',commentId:'ui-sync-parent',actorName:'同步新增评论',text:'评论读取完成后可立即查看的合成任务',occurredAt:'2026-11-04T01:00:10Z'}));
         if(source==='dm')pending(store,candidate({platformEventId:'ui-synced-event',conversationId:'ui-synced-conversation',actorName:'同步新增任务',text:'同步后应自动出现的合成任务',occurredAt:'2026-11-04T01:00:10Z'}));
+        return { newEventIds: [] };
       }
       override async adapter(e: InboundEvent) {
         let text = "";

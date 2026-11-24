@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {afterAll,beforeAll,expect,test,vi} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -43,7 +44,7 @@ async function mount(spec:Spec={awemeType:0}){
   },{spec,origin});
 }
 function capture(){const mapping=observedMapping(server.origin),input:Parameters<typeof captureObserved>[0]=
-  {mapping,channel:'dm',index:0,evidenceId:'synthetic-share-shell',peer:mapping.peers[0]!,dmWindow:true};return owner.dm.evaluate(captureObserved,input);}
+  {mapping,channel:'dm',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-share-shell',peer:mapping.peers[0]!,dmWindow:true};return owner.dm.evaluate(captureObserved,input);}
 function noExternal(store:EventStore){
   expect(store.db.prepare('SELECT kind,used FROM budgets ORDER BY kind').all()).toEqual([{kind:'MODEL',used:0},{kind:'SEND',used:0}]);
   expect(store.db.prepare('SELECT count(*) AS n FROM model_calls').get()).toEqual({n:0});

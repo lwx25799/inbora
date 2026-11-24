@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test} from 'vitest';
 import {rm,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -68,7 +69,7 @@ async function fixture(){
   const dm=dmReplyMapping(origin),comment=commentReplyMapping(origin);
   for(const mapping of [dm,comment])mapping.observation.securityBlockers=observedSecurityBlockers;
   const dmBatch=await new ObservedReader(owner.dm,dm.observation).dm(0);
-  const comments=await owner.notification.evaluate(captureObserved,{mapping:comment.observation,channel:'comments' as const,index:0,evidenceId:'synthetic'});
+  const comments=await owner.notification.evaluate(captureObserved,{mapping:comment.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic'});
   const dmAdapter=new ObservedDmReply(owner.dm,dm,250),commentAdapter=new ObservedCommentReply(owner.notification,comment,250);
   return {root,origin,owner,dm,comment,dmEvent:dmBatch.events[0]!,commentEvent:comments.events[0]!,dmAdapter,commentAdapter,
     close:async()=>{dmAdapter.dispose();commentAdapter.dispose();await owner.close();await rm(root,{recursive:true});}};
@@ -156,7 +157,7 @@ test('legacy login, challenge and stop checks agree with their final synchronous
       const current=new DomAdapter(owner.dm,'DIRECT_MESSAGE',scoped);
       for(const shape of ['zero','hidden-ancestor','visible-child','contents','offscreen','scaled-clip'] as const){
         await safetyShape(owner.dm,shape);const blocked=shape==='visible-child'||shape==='contents'||shape==='scaled-clip';
-        const capture=()=>owner.dm.evaluate(captureAndGuard,{mapping:scoped,channel:'DIRECT_MESSAGE' as const,event,text:null,token:null});
+        const capture=()=>owner.dm.evaluate(captureAndGuard,{mapping:scoped,channel:'DIRECT_MESSAGE' as const,accountId:DEFAULT_ACCOUNT_ID,event,text:null,token:null});
         if(blocked){await expect(current.guard()).rejects.toThrow(code);await expect(capture()).rejects.toThrow('CLICK_DOM_GUARD_BLOCKED');}
         else{await expect(current.guard()).resolves.toBeUndefined();await expect(capture()).resolves.toMatchObject({targetKey:'dm:conversation-1'});}
       }
@@ -168,7 +169,7 @@ test('legacy login, challenge and stop checks agree with their final synchronous
 test('preview, share and stored-message views use rendered safety geometry before reading the exact native message',async()=>{
   const f=await fixture();
   try{
-    const input={mapping:f.dm.observation,event:f.dmEvent,peer:f.dm.observation.peers[0]!};
+    const input={mapping:f.dm.observation,accountId:DEFAULT_ACCOUNT_ID,event:f.dmEvent,peer:f.dm.observation.peers[0]!};
     for(const shape of ['zero','empty-box','empty-descendant','clipped-hidden','clipped-clip','partial-clip','visible-child','contents-clip','offscreen','scaled-clip'] as const){
       await safetyShape(f.owner.dm,shape);
       const blocked=['partial-clip','visible-child','contents-clip','scaled-clip'].includes(shape);
@@ -202,7 +203,7 @@ test('initial suspect evidence is preserved and sanitized before the account tas
     expect(captured).toMatchObject({scope:'TARGET',target:{conversationId:f.dm.observation.peers[0]!.conversationId}});
     expect(captured!.matches.some(match=>match.visible)).toBe(true);
     const pageMapping=structuredClone(f.dm.observation);pageMapping.selectors.chat='#not-mounted-synthetic-chat';
-    await expect(f.owner.dm.evaluate(captureObserved,{mapping:pageMapping,channel:'identity' as const,index:0,evidenceId:'synthetic-only'})
+    await expect(f.owner.dm.evaluate(captureObserved,{mapping:pageMapping,channel:'identity' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-only'})
       .catch(error=>reportSecurityFailure(f.owner.dm,error))).rejects.toThrow('OBSERVATION_SECURITY_SUSPECT');
     expect(captured).toMatchObject({scope:'ACCOUNT_PAGE'});expect(captured!.target).toBeUndefined();
     await f.owner.dm.evaluate(()=>{document.title='安全验证';document.querySelector('#synthetic-security-root')?.remove();});

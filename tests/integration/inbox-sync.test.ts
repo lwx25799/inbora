@@ -15,7 +15,7 @@ async function fixture(read:(source:Source)=>Promise<void>){
     closes=0;
     override identity(){return{identityDigest:digest('own-1'),mappingDigest:'sync-fixture',browserMode:'headless' as const,browserVersion:'fixture'};}
     override async refreshIdentity(){return this.identity();}
-    override async observe(_store:EventStore,source:Source){calls.push(source);await read(source);}
+    override async observe(_store:EventStore,source:Source){calls.push(source);await read(source);return {newEventIds:[]};}
     override async close(){this.closes++;}
   }
   const browser=new SyncBrowser(root),service=new ClientService(store,browser),token=service.authority.issueSession();

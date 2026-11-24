@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {afterEach,expect,test,vi} from 'vitest';
 import {captureObserved,type CaptureInput} from '../../src/adapters/observed-capture.js';
 import {captureCommentThread,type CommentThreadInput} from '../../src/adapters/comment-thread-capture.js';
@@ -14,7 +15,7 @@ function setup(title='',visibleBlocker=false,origin='https://www.douyin.com'){
   vi.stubGlobal('getComputedStyle',()=>({visibility:'visible',display:'block',opacity:'1'}));
   const mapping={origin:'https://www.douyin.com',securityBlockers:'.security',works:[{id:'work',url:'https://www.douyin.com/video/work'}],
     selectors:{selfAvatar:'.self'}} as CaptureInput['mapping'];
-  const observed=()=>captureObserved({mapping,channel:'identity',index:0,evidenceId:'synthetic-only'});
+  const observed=()=>captureObserved({mapping,channel:'identity',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-only'});
   const thread=()=>captureCommentThread({mapping,event:{videoId:'work'},action:'inspect',offset:0} as CommentThreadInput);
   return {observed,thread};
 }

@@ -7,11 +7,12 @@ import { observedMapping, mountObserved, mountVirtualizedConversations, mountCom
 
 const source = process.argv[2] === 'source', root = source ? 'src' : 'dist';
 const moduleUrl = name => pathToFileURL(resolve(root,name.replace(/\.js$/,source?'.ts':'.js'))).href;
+const {DEFAULT_ACCOUNT_ID}=await import(moduleUrl('contracts/account.js'));
 const {BrowserProfileOwner} = await import(moduleUrl('browser/profile-owner.js'));
 const {ObservedReader,captureObserved} = await import(moduleUrl('adapters/observed-reader.js'));
 const {validateObservationMapping} = await import(moduleUrl('config/site-mapping.js'));
 const {EventStore} = await import(moduleUrl('storage/store.js'));
-const base=resolve('.local/observed-smoke');await mkdir(base,{recursive:true});const dir=await mkdtemp(join(base,'run-'));
+const base=resolve('.local/tests/observed-smoke');await mkdir(base,{recursive:true});const dir=await mkdtemp(join(base,'run-'));
 let server,owner,store;
 try {
   server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
@@ -59,14 +60,16 @@ try {
   assert.ok(await owner.dm.evaluate(()=>window.listScrolls>0));
   await mountCommentReply(owner,server.origin);
   await owner.notification.locator('#comment-list').evaluate(node=>node.style.marginTop='818px');
-  await owner.notification.evaluate(captureObserved,{mapping:config,channel:'commentReveal',index:0,evidenceId:'fixture-reveal'});
+  await owner.notification.evaluate(captureObserved,{mapping:config,channel:'commentReveal',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-reveal'});
   assert.ok(await owner.notification.evaluate(()=>scrollY>0&&document.querySelector('#comment-list').getBoundingClientRect().top<innerHeight));
   await owner.notification.evaluate(()=>{
     const root=document.querySelector('#root-comment');
     Object.getOwnPropertyDescriptor(root,'__reactFiber$fixture').value.return.memoizedProps.commentInfo.text='root fixture input[赞]';
     root.querySelector('.body').innerHTML='root fixture input<img width="16" height="16" src="/emoji.png" alt="[赞]">';
   });
-  const emoji=await owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-emoji'});
+  const alternateAccount='fixture-comment-account';
+  const emoji=await owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,accountId:alternateAccount,evidenceId:'fixture-emoji'});
+  assert.equal(emoji.events[0].accountId,alternateAccount);
   assert.equal(emoji.events[0].text,'root fixture input[赞]');assert.equal(emoji.events[0].observationIssue,undefined);
   const diagnostic=await new ObservedReader(owner.notification,config).diagnostic('comments');
   assert.equal(diagnostic.source,'comments');assert.ok(diagnostic.samples.length>0);
@@ -114,9 +117,9 @@ try {
   await owner.dm.evaluate(()=>{Object.getOwnPropertyDescriptor(document.querySelector('.message'),'__reactProps$fixture').value.children.props.message.type=77;});
   const kind77Diagnostic=await new ObservedReader(owner.dm,config).diagnostic('dm',0,uncalibratedPeer);
   assert.equal(kind77Diagnostic.messageSamples[0].nativeKind,77);assert.deepEqual(kind77Diagnostic.messageSamples[0].nativeShare,nativeDiagnostic.messageSamples[0].nativeShare);
-  await assert.rejects(owner.dm.evaluate(captureObserved,{mapping:config,channel:'dm',index:0,evidenceId:'fixture-kind77-gap',peer:uncalibratedPeer,dmWindow:true}),/OBSERVATION_DM_CONTENT_DOM_NOT_READY/);
+  await assert.rejects(owner.dm.evaluate(captureObserved,{mapping:config,channel:'dm',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-kind77-gap',peer:uncalibratedPeer,dmWindow:true}),/OBSERVATION_DM_CONTENT_DOM_NOT_READY/);
   await owner.dm.evaluate(()=>{Object.getOwnPropertyDescriptor(document.querySelector('.message'),'__reactProps$fixture').value.children.props.message.type=800;});
-  await assert.rejects(owner.dm.evaluate(captureObserved,{mapping:config,channel:'dm',index:0,evidenceId:'fixture-window-gap',peer:config.peers[0],dmWindow:true}),/OBSERVATION_DM_CONTENT_DOM_NOT_READY/);
+  await assert.rejects(owner.dm.evaluate(captureObserved,{mapping:config,channel:'dm',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-window-gap',peer:config.peers[0],dmWindow:true}),/OBSERVATION_DM_CONTENT_DOM_NOT_READY/);
   await new ObservedReader(owner.dm,config).scrollDm(config.peers[0],windowed.dmViewport.maximum);
   const backDiagnostic=dmDiagnostic.back;
   assert.equal(backDiagnostic.count,1);assert.equal(backDiagnostic.nodes[0].tag,'BUTTON');
@@ -131,13 +134,13 @@ try {
   assert.equal(await owner.dm.evaluate(()=>window.svgBackClicks),1);
   assert.equal(await owner.dm.locator('#chat').isVisible(),false);
   await owner.notification.locator('.body img').evaluate(node=>node.removeAttribute('alt'));
-  const unverified=await owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-review'});
+  const unverified=await owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-review'});
   assert.equal(unverified.events[0].observationIssue,'COMMENT_TEXT_UNVERIFIED');
   store.observe('COMMENT_NOTIFICATION','work:10',unverified.events,'100','fixture',new Date().toISOString(),Date.UTC(2026,0,1));
   assert.equal(store.events().at(-1).status,'MANUAL_REVIEW');
   await owner.notification.locator('.body').evaluate(node=>node.remove());
-  await assert.rejects(owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-missing-body'}),/OBSERVATION_COMMENT_TEXT_DOM_NOT_READY/);
+  await assert.rejects(owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-missing-body'}),/OBSERVATION_COMMENT_TEXT_DOM_NOT_READY/);
   await owner.notification.locator('#self').evaluate(node=>node.remove());
-  await assert.rejects(owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,evidenceId:'fixture-missing-identity'}),/OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_READY/);
+  await assert.rejects(owner.notification.evaluate(captureObserved,{mapping:config,channel:'comments',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-missing-identity'}),/OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_READY/);
   console.log(JSON.stringify({observedReaderSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',events:4,dmMediaPreserved:true,emojiVerified:true,unverifiedBodyPreserved:true,readStageCodes:true,sends:0}));
 } finally {store?.close();await owner?.close();await server?.close();assert.ok(dir.startsWith(`${base}\\`)||dir.startsWith(`${base}/`));await rm(dir,{recursive:true,force:true});}

@@ -1,29 +1,30 @@
 import {expect,test,vi} from 'vitest';
 import {EventEmitter} from 'node:events';
 import {join} from 'node:path';
-import {writeFile} from 'node:fs/promises';
+import {rm,writeFile} from 'node:fs/promises';
+import {runInNewContext} from 'node:vm';
 import {BrowserService} from '../../src/app/browser-service.js';
+import {BrowserRecoveryLocations,inspectRecoveryNavigation} from '../../src/app/browser-recovery-locations.js';
 import {ClientService} from '../../src/app/service.js';
 import {ObservedReader} from '../../src/adapters/observed-reader.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
+import {EventStore} from '../../src/storage/store.js';
 import {AccountActor} from '../../src/browser/account-actor.js';
 import type {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
 import {mapping} from '../fixtures/site.js';
-import {privateTemp,database,pending} from '../helpers.js';
+import {privateTemp,pending} from '../helpers.js';
 import {observedMapping} from '../fixtures/observed-site.js';
 
 interface FakePage {
   dirty:boolean;
   url():string;
   goto(url:string):Promise<void>;
-  evaluate():Promise<{originMatches:boolean;empty:boolean}>;
-  locator():{evaluateAll():Promise<boolean>};
+  evaluate(fn?:typeof inspectRecoveryNavigation,input?:Parameters<typeof inspectRecoveryNavigation>[0]):Promise<{originMatches:boolean;empty:boolean}>;
 }
 function fakePage():FakePage{
   let currentUrl='about:blank';
   return {dirty:false,url:()=>currentUrl,goto:async(url:string)=>{currentUrl=url;},
-    async evaluate(){return {originMatches:true,empty:!this.dirty};},
-    locator(){return {evaluateAll:async()=>!this.dirty};}};
+    async evaluate(){return {originMatches:true,empty:!this.dirty};}};
 }
 
 test('ordinary open ignores the legacy headed choice and reconnects in headless mode',async()=>{
@@ -58,9 +59,14 @@ async function recoveryFixture(beforeLaunch?:(headless:boolean)=>Promise<void>){
       sequence.push('close');state.closed=true;context.emit('close');
     }} as unknown as BrowserProfileOwner;
   });
-  await writeFile(join(root,'site-mapping.json'),JSON.stringify({...mapping('https://www.douyin.com'),environment:'douyin',ownId:'100'}));
-  await writeFile(join(root,'observation-mapping.json'),JSON.stringify({...observedMapping('https://www.douyin.com'),environment:'douyin'}));
-  return {root,browser,launches,owners,sequence};
+  try{
+    await writeFile(join(root,'site-mapping.json'),JSON.stringify({...mapping('https://www.douyin.com'),environment:'douyin',ownId:'100'}));
+    await writeFile(join(root,'observation-mapping.json'),JSON.stringify({...observedMapping('https://www.douyin.com'),environment:'douyin'}));
+    return {root,browser,launches,owners,sequence};
+  }catch(error){
+    try{await browser.close();}finally{await rm(root,{recursive:true,force:true});}
+    throw error;
+  }
 }
 
 test('a manual visible window stays open even when the bound account is already verified',async()=>{
@@ -84,6 +90,68 @@ test.each([0,1])('returning from a manual visible window preserves webpage input
     expect(f.owners[1]!.closed).toBe(false);expect(f.launches).toEqual([true,false]);
     expect(f.browser.status()).toMatchObject({mode:'headed',state:'MANUAL_VISIBLE',loginRecovery:true});
   }finally{await f.browser.close();}
+});
+
+test.each(['navigation','mode switch'] as const)('%s preserves a folded mapped editor holding an attachment',async operation=>{
+  const origin='https://www.douyin.com',f=await recoveryFixture();
+  try{
+    await f.browser.open();
+    const owner=f.owners[0]!,notification=owner.pages[0]!,dm=owner.pages[1]!;
+    const mapped=mapping(origin).targets.COMMENT_NOTIFICATION.composer;
+    const editor={textContent:'',getBoundingClientRect:()=>({width:0,height:0}),querySelector:()=>({tagName:'IMG'})};
+    const env={location:{origin},document:{querySelectorAll:(selector:string)=>selector===mapped?[editor]:[]},
+      HTMLInputElement:class{},HTMLTextAreaElement:class{},getComputedStyle:()=>({display:'none',visibility:'hidden'})};
+    notification.evaluate=async(fn,input)=>runInNewContext(`(${fn!.toString()})`,env)(input);
+    const goto=vi.spyOn(notification,'goto');
+    if(operation==='navigation'){
+      const locations=new BrowserRecoveryLocations(f.root);
+      const profile={notification,dm,actor:new AccountActor()} as unknown as BrowserProfileOwner;
+      await locations.capture(profile);
+      await notification.goto(origin+'/video/other');
+      goto.mockClear();
+      await expect(locations.restore(profile)).rejects.toThrow('BROWSER_HAS_HUMAN_INPUT');
+      expect(goto).not.toHaveBeenCalled();
+      expect(notification.url()).toBe(origin+'/video/other');
+    }else{
+      await expect(f.browser.beginLoginRecovery()).rejects.toThrow('BROWSER_HAS_HUMAN_INPUT');
+      expect(f.launches).toEqual([true]);
+      expect(owner.closed).toBe(false);
+    }
+  }finally{try{await f.browser.close();}finally{await rm(f.root,{recursive:true,force:true});}}
+});
+
+test.each(['notification','dm'] as const)('opening keeps both pages in place when %s has a folded draft',async dirtyPage=>{
+  const root=privateTemp('launch-with-draft-'),origin='https://www.douyin.com',config=mapping(origin);
+  const notification=fakePage(),dm=fakePage(),actor=new AccountActor();
+  const owner={context:new EventEmitter(),actor,notification,dm,version:()=> 'synthetic-mode',
+    open:vi.fn(async()=>{}),close:vi.fn(async()=>{editor.textContent='';})};
+  const browser=new BrowserService(root,async()=>owner as unknown as BrowserProfileOwner);
+  const composer=config.targets[dirtyPage==='notification'?'COMMENT_NOTIFICATION':'DIRECT_MESSAGE'].composer;
+  const editor={textContent:'unsent draft',getBoundingClientRect:()=>({width:0,height:0}),matches:()=>false,querySelector:()=>null};
+  const env={location:{origin},document:{querySelectorAll:(selector:string)=>selector===composer?[editor]:[]},
+    HTMLInputElement:class{},HTMLTextAreaElement:class{},getComputedStyle:()=>({display:'none',visibility:'hidden'})};
+  owner[dirtyPage].evaluate=async(fn,input)=>runInNewContext(`(${fn!.toString()})`,env)(input);
+  try{
+    await writeFile(join(root,'site-mapping.json'),JSON.stringify({...config,environment:'douyin'}));
+    await writeFile(join(root,'browser-recovery-locations.json'),JSON.stringify({
+      version:1,ownId:config.ownId,notification:origin+'/',dm:origin+'/',
+    }));
+    const currentUrl=origin+'/video/current';
+    await notification.goto(currentUrl);
+    await dm.goto(currentUrl);
+    const navigation=vi.spyOn(notification,'goto'),dmNavigation=vi.spyOn(dm,'goto');
+    const opened=await browser.open().catch(error=>error);
+    expect(navigation).not.toHaveBeenCalled();
+    expect(dmNavigation).not.toHaveBeenCalled();
+    expect(owner.close).not.toHaveBeenCalled();
+    expect(editor.textContent).toBe('unsent draft');
+    expect(opened).toBeUndefined();
+    expect(notification.url()).toBe(currentUrl);
+    expect(dm.url()).toBe(currentUrl);
+    expect(browser.actor).toBe(actor);
+    expect(browser.status()).toMatchObject({state:'OPEN_IDENTITY_UNVERIFIED',mode:'headless'});
+    expect(browser.identity('DIRECT_MESSAGE')?.browserMode).toBe('headless');
+  }finally{try{await browser.close();}finally{await rm(root,{recursive:true,force:true});}}
 });
 
 test('closing a manual visible window restores verified headless operation without reopening headed',async()=>{
@@ -143,11 +211,14 @@ test('closing the visible login window only reopens headless and keeps recovery 
 });
 
 test('only the explicit login request is headed and service recovery preserves scopes, budgets and model prohibition',async()=>{
-  const f=await recoveryFixture(),store=database();await migrateClient(store,join(f.root,'backup.sqlite'));
-  pending(store);store.db.prepare("UPDATE accounts SET own_id='100'").run();let now=Date.now();
-  const service=new ClientService(store,f.browser,undefined,()=>now);await service.loadSettings();const token=service.authority.issueSession();
-  let identified=false;const guard=vi.spyOn(ObservedReader.prototype,'guard').mockImplementation(async()=>{if(!identified)throw Error('LOGIN_REQUIRED');});
+  const f=await recoveryFixture();
+  let store:EventStore|undefined,service:ClientService|undefined,guard:ReturnType<typeof vi.spyOn>|undefined;
   try{
+    store=new EventStore(join(f.root,'poc.sqlite'),true,()=> '2026-11-03T00:00:00Z');
+    await migrateClient(store,join(f.root,'backup.sqlite'));
+    pending(store);store.db.prepare("UPDATE accounts SET own_id='100'").run();let now=Date.now();
+    service=new ClientService(store,f.browser,undefined,()=>now);await service.loadSettings();const token=service.authority.issueSession();
+    let identified=false;guard=vi.spyOn(ObservedReader.prototype,'guard').mockImplementation(async()=>{if(!identified)throw Error('LOGIN_REQUIRED');});
     await service.dispatch(token,{command:'browser',open:true,mode:'headed'});expect(f.launches).toEqual([true]);
     service.authority.attest('DIRECT_MESSAGE','SEND_AVAILABLE',{...f.browser.identity('DIRECT_MESSAGE')!,browserMode:'headed'},'synthetic-headed-only');
     const status=await service.dispatch(token,{command:'getStatus'}) as {capabilities:{channel:string;state:string}[]};
@@ -162,5 +233,14 @@ test('only the explicit login request is headed and service recovery preserves s
     expect(store.db.prepare('SELECT count(*) AS n FROM send_intents').get()).toEqual({n:0});
     identified=true;now+=30_001;service.startOnline();await service.drain();
     expect(f.launches).toEqual([true,false,true]);expect(service.authority.paused()).toBe(false);
-  }finally{guard.mockRestore();await service.close();store.close();}
+  }finally{
+    try{guard?.mockRestore();}
+    finally{
+      try{await service?.close();}
+      finally{
+        try{await f.browser.close();}
+        finally{try{store?.close();}finally{await rm(f.root,{recursive:true,force:true});}}
+      }
+    }
+  }
 });

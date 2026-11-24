@@ -1,15 +1,26 @@
 import {expect,test} from 'vitest';
+import {rmSync} from 'node:fs';
+import {join} from 'node:path';
+import {EventStore} from '../../src/storage/store.js';
 import {AccountActor} from '../../src/browser/account-actor.js';
 import {ManualCommentRetry} from '../../src/core/manual-comment-retry.js';
 import {SendCoordinator} from '../../src/core/send-coordinator.js';
 import {digest,type ReplyAdapter} from '../../src/core/contracts.js';
-import {candidate,database,approved,snapshot} from '../helpers.js';
+import {holdSecurityChannel} from '../../src/storage/security-holds.js';
+import {candidate,privateTemp,approved,snapshot} from '../helpers.js';
 
 function setup(){
-  const store=database(),event=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',platformEventId:'comment-1',videoId:'video-1',commentId:'comment-1',conversationId:null});
-  const draftId=approved(store,event),draft=store.draft(draftId),priorId=store.recordIntent(draftId,snapshot(event),true);
-  store.receipt(priorId,'UNCERTAIN','NO_PROOF');
-  return{store,event,draftId,draft,priorId,grant:()=>store.authorizeCommentRetry(draftId,snapshot(event),'explicit synthetic human approval')};
+  const root=privateTemp('manual-comment-retry-');
+  let opened:EventStore|undefined,ready=false;
+  const close=()=>{try{opened?.close();}finally{rmSync(root,{recursive:true,force:true});}};
+  try{
+    const store=opened=new EventStore(join(root,'poc.sqlite'),true);
+    const event=candidate({channel:'COMMENT_NOTIFICATION',kind:'COMMENT',platformEventId:'comment-1',videoId:'video-1',commentId:'comment-1',conversationId:null});
+    const draftId=approved(store,event),draft=store.draft(draftId),priorId=store.recordIntent(draftId,snapshot(event),true);
+    store.receipt(priorId,'UNCERTAIN','NO_PROOF');
+    ready=true;
+    return{store,event,draftId,draft,priorId,grant:()=>store.authorizeCommentRetry(draftId,snapshot(event),'explicit synthetic human approval'),close};
+  }finally{if(!ready)close();}
 }
 function reply(overrides:Partial<ReplyAdapter>={}):ReplyAdapter{return{
   inspect:async e=>snapshot(e),prepare:async()=>{},verifyPrepared:async e=>snapshot(e),baseline:async()=>['old'],clickOnce:async()=>{},
@@ -26,7 +37,7 @@ test('explicit retry records a separate durable intent, budgets once and never c
     await expect(retry.send(grant,a,true)).rejects.toThrow('ALREADY_ATTEMPTED');expect(clicks).toBe(1);
     expect(()=>f.grant()).toThrow('ALREADY_ATTEMPTED');
     await expect(new SendCoordinator(f.store,new AccountActor()).send(f.draftId,a,true)).rejects.toThrow();
-  }finally{f.store.close();}
+  }finally{f.close();}
 });
 test.each(['no-proof','wrong-target','old-time','click-error'])('manual retry %s is unknown and remains consumed across recovery',async failure=>{
   const f=setup();try{
@@ -35,7 +46,7 @@ test.each(['no-proof','wrong-target','old-time','click-error'])('manual retry %s
         text,pending:false,sentAt:'2020-01-01T00:00:00Z'}});
     const retry=new ManualCommentRetry(f.store,new AccountActor());expect(await retry.send(grant,a,true)).toBe('UNCERTAIN');
     expect(f.store.recover()).toBe(0);await expect(retry.send(grant,a,true)).rejects.toThrow('ALREADY_ATTEMPTED');expect(clicks).toBe(1);
-  }finally{f.store.close();}
+  }finally{f.close();}
 });
 test('missing authorization, changed context, pause/resume and database refusal prevent retry clicks',async()=>{
   const f=setup();try{
@@ -46,14 +57,14 @@ test('missing authorization, changed context, pause/resume and database refusal 
     await expect(retry.send(grant,a,true)).rejects.toThrow('AUTHORIZATION_REVOKED');
     const replacement=f.grant();f.store.db.pragma('query_only=ON');await expect(retry.send(replacement,a,true)).rejects.toThrow();
     expect(clicks).toBe(0);expect(f.store.stats().manualRetries).toEqual([]);
-  }finally{f.store.close();}
+  }finally{f.close();}
 });
 test('two authorized retry commands serialize and original intent limits all grants to one attempt',async()=>{
   const f=setup();try{
     const one=f.grant(),two=f.grant(),retry=new ManualCommentRetry(f.store,new AccountActor());let clicks=0;
     const result=await Promise.allSettled([retry.send(one,reply({clickOnce:async()=>{clicks++;}}),true),retry.send(two,reply(),true)]);
     expect(result[0]!.status).toBe('fulfilled');expect(result[1]!.status).toBe('rejected');expect(clicks).toBe(1);
-  }finally{f.store.close();}
+  }finally{f.close();}
 });
 test('unfinished manual intent recovers to unknown and budget failure is atomic',()=>{
   const f=setup();try{
@@ -65,7 +76,19 @@ test('unfinished manual intent recovers to unknown and budget failure is atomic'
     expect(f.store.stats().manualRetries).toMatchObject([{result:'UNCERTAIN'}]);
     expect(()=>f.store.recordCommentRetryIntent(grant,snapshot(f.event),true)).toThrow('ALREADY_ATTEMPTED');
     expect(digest(f.store.event(f.draft.eventId).payload)).toBe(digest(f.event));
-  }finally{f.store.close();}
+  }finally{f.close();}
+});
+
+test('a hold appearing after preflight blocks the manual retry intent and budget',()=>{
+  const f=setup();
+  try{
+    const grant=f.grant(),approved=snapshot(f.event),budget=f.store.budget('SEND');
+    expect(f.store.assertCommentRetryAvailable(grant).eventId).toBe(f.draft.eventId);
+    holdSecurityChannel(f.store,f.event.channel,{incidentId:'retry-hold',reason:'OBSERVATION_SECURITY_SUSPECT',mode:'headless'});
+    expect(()=>f.store.recordCommentRetryIntent(grant,approved,true)).toThrow('SECURITY_CHANNEL_HELD');
+    expect(f.store.stats().manualRetries).toEqual([]);
+    expect(f.store.budget('SEND')).toEqual(budget);
+  }finally{f.close();}
 });
 test('a changed preflight consumes the approval even when the old context later returns',async()=>{
   const f=setup();try{
@@ -73,7 +96,7 @@ test('a changed preflight consumes the approval even when the old context later 
     await expect(retry.send(grant,reply({inspect:async e=>({...snapshot(e),contextDigest:'changed'})}),true)).rejects.toThrow('TARGET_CHANGED');
     await expect(retry.send(grant,reply(),true)).rejects.toThrow('AUTHORIZATION_REVOKED');
     expect(f.store.stats().manualRetries).toEqual([]);
-  }finally{f.store.close();}
+  }finally{f.close();}
 });
 test('an observed original collision invalidates an unconsumed retry approval',async()=>{
   const f=setup();try{
@@ -82,5 +105,5 @@ test('an observed original collision invalidates an unconsumed retry approval',a
     expect(f.store.draft(f.draftId).approval).toBeNull();
     await expect(new ManualCommentRetry(f.store,new AccountActor()).send(grant,reply(),true)).rejects.toThrow('AUTHORIZATION_REVOKED');
     expect(f.store.stats().manualRetries).toEqual([]);
-  }finally{f.store.close();}
+  }finally{f.close();}
 });

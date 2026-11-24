@@ -5,11 +5,12 @@ import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
 import {mountCommentReply,commentReplyMapping} from '../tests/fixtures/observed-site.ts';
 const source=process.argv[2]==='source',directory=source?'src':'dist',url=name=>pathToFileURL(resolve(directory,name.replace(/\.js$/,source?'.ts':'.js'))).href;
+const {DEFAULT_ACCOUNT_ID}=await import(url('contracts/account.js'));
 const {BrowserProfileOwner}=await import(url('browser/profile-owner.js'));
 const {captureCommentReply}=await import(url('adapters/observed-comment-reply.js'));
 const {captureObserved}=await import(url('adapters/observed-reader.js'));
 const {eventBinding,targetKey}=await import(url('core/contracts.js'));
-const base=resolve('.local/nested-native-author-smoke');await mkdir(base,{recursive:true});const root=await mkdtemp(join(base,'run-'));
+const base=resolve('.local/tests/nested-native-author-smoke');await mkdir(base,{recursive:true});const root=await mkdtemp(join(base,'run-'));
 let server,owner;
 try{
   server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
@@ -44,7 +45,7 @@ try{
   const event={accountId:'account_001',channel:'COMMENT_NOTIFICATION',platformEventId:'21',actorId:'201',actorName:'Child author',text:'exact child smoke',
     occurredAt:new Date(at*1000).toISOString(),videoId:'10',commentId:'21',conversationId:null,direction:'INCOMING',kind:'REPLY',evidenceId:'synthetic-nested',rootCommentId:'11',replyToCommentId:'21'};
   const baseInput={mapping,event,text:null,token:null,before:null,shape:null},capture=overrides=>owner.notification.evaluate(captureCommentReply,{...baseInput,...overrides});
-  const collected=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,evidenceId:'synthetic-native-author',allCommentAuthors:true});
+  const collected=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-native-author',allCommentAuthors:true});
   assert.equal(collected.events.length,2);assert.equal(collected.events[1].actorId,'201');assert.equal(collected.events[1].actorName,'Child');
   await capture({action:'open'});const before=await capture({action:'snapshot'});assert.equal(before.editorText,'');
   assert.deepEqual((await capture({action:'diagnostic'})).qualification,{composerCount:1,metadataReady:true,level:2,cidMatches:true,rootMatches:true,workMatches:true,rowOwned:true});

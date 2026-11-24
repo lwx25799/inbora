@@ -43,7 +43,7 @@ test.each(['init', 'runtime', 'client', 'automation', 'settings', 'control', 're
       export const runtimeRoot=(value:string)=>resolve(value);
       export const initRuntime=()=>gate('init'),loadRuntime=()=>gate('runtime');
       export const migrateClient=()=>gate('client'),migrateAutomation=()=>gate('automation');
-      export class BrowserService {constructor(readonly root:string){note('browser.created');}}
+      export class BrowserService {constructor(readonly root:string,_launch:unknown,readonly accountId:string){note('browser.created');}}
       export class ClientService {
         statuses=0;cancelRequest:(()=>void)|undefined;
         events=new EventEmitter();

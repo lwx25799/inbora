@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -19,7 +20,7 @@ async function setup(){
     const native=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
     native.serverId='77201';native.createdAt=new Date(at);native.type=7;native._parsedContent.text='PRIVATE_EXACT_TEXT';
   },at);
-  const capture={mapping,channel:'dm' as const,index:0,evidenceId:'synthetic-text-ownership',peer:mapping.peers[0]!,dmWindow:true};
+  const capture={mapping,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-text-ownership',peer:mapping.peers[0]!,dmWindow:true};
   const batch=await owner.dm.evaluate(captureObserved,capture),event=batch.events[0]!;
   return {owner,mapping,event,capture,close:async()=>{await owner.close();await server.close();}};
 }

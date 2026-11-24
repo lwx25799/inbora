@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
 import {readFile} from 'node:fs/promises';
@@ -25,7 +26,7 @@ test('ordinary successful comment windows pass fixed relation shapes to the priv
         Object.defineProperty(row,'__reactFiber$fixture',{value:{return:{memoizedProps:{commentInfo:native,level:2,levelOneCid:'11',awemeInfo:{awemeId:'10'}}}}});root.append(row);
       }
     });
-    const batch=await owner.notification.evaluate(captureObserved,{mapping,channel:'comments' as const,index:0,evidenceId:'synthetic-relation-shape',allCommentAuthors:true});
+    const batch=await owner.notification.evaluate(captureObserved,{mapping,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-relation-shape',allCommentAuthors:true});
     expect(batch.events).toHaveLength(5);expect(batch.commentRelations).toMatchObject({sampled:3,truncated:true,samples:[
       {own:false,rootBound:true,replyToReplyId:{type:'STRING',zero:true,child:false}},
       {own:true,rootBound:true,replyToReplyId:{type:'STRING',nativeId:true,child:true,root:false,self:false},replyToReplyID:{type:'STRING',root:true,child:false}},

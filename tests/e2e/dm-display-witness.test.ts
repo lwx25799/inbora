@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -26,7 +27,7 @@ test('ordinary enrichment displays exact native text beside unknown media and on
    const native=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
    native.serverId='99881';native.type=7;native.createdAt=new Date(at);native._parsedContent.text='EXACT PRIVATE [微笑]\nbody';
   },at);
-  const input={mapping,channel:'dm' as const,index:0,evidenceId:'synthetic-display-witness',peer:mapping.peers[0]!,dmWindow:true};
+  const input={mapping,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-display-witness',peer:mapping.peers[0]!,dmWindow:true};
   const batch=await owner.dm.evaluate(captureObserved,input),event=batch.events[0]!,original=JSON.stringify(event),cache=new MessagePreviewStore(root),signal=new AbortController().signal;
   expect(event.observationIssue).toBe('DM_CONTENT_UNVERIFIED');
   const inspected=await owner.dm.evaluate(inspectMessageShare,{mapping,event,peer:mapping.peers[0]!});

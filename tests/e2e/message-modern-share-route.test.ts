@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {afterAll,beforeAll,expect,test} from 'vitest';
 import {join,resolve} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -34,7 +35,7 @@ test.each(cases)('$name uses only exact schema/native identity proof',async spec
     native.serverId='99781';native.type=110;native.createdAt=new Date(Date.now()-1000);
     native._parsedContent={item_id:'123456',schema,aweme_info:info};
   },{schema:spec.schema,info:spec.info});
-  const batch=await owner.dm.evaluate(captureObserved,{mapping,channel:'dm' as const,index:0,evidenceId:'synthetic-modern-share',peer:mapping.peers[0]!,dmWindow:true});
+  const batch=await owner.dm.evaluate(captureObserved,{mapping,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-modern-share',peer:mapping.peers[0]!,dmWindow:true});
   const event=batch.events[0]!,before=JSON.stringify(event),report=await owner.dm.evaluate(inspectMessageShare,{mapping,event,peer:mapping.peers[0]!});
   expect(event.observationIssue).toBe('DM_CONTENT_UNVERIFIED');
   expect(report.share).toEqual(spec.route?{kind:'DOUYIN_WORK',url:'https://www.douyin.com/'+spec.route+'/123456',workId:'123456'}:null);
@@ -53,7 +54,7 @@ test('accessor IDs, conflicting camel IDs and invalid slides never produce moder
     native._parsedContent={item_id:'123456',schema:'https://www.douyin.com/video/123456'};
     Object.defineProperty(native._parsedContent,'aweme_info',{configurable:true,get(){throw Error('GETTER_MUST_NOT_RUN');}});
   });
-  const event=(await owner.dm.evaluate(captureObserved,{mapping,channel:'dm' as const,index:0,evidenceId:'synthetic-modern-conflict',peer:mapping.peers[0]!,dmWindow:true})).events[0]!;
+  const event=(await owner.dm.evaluate(captureObserved,{mapping,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-modern-conflict',peer:mapping.peers[0]!,dmWindow:true})).events[0]!;
   const input={mapping,event,peer:mapping.peers[0]!};expect((await owner.dm.evaluate(inspectMessageShare,input)).share).toBeNull();
   await owner.dm.evaluate(()=>{
     const parsed=Object.getOwnPropertyDescriptor(document.querySelector('.message')!,'__reactProps$fixture')!.value.children.props.message._parsedContent;

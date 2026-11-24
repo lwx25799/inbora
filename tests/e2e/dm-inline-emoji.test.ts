@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -37,7 +38,7 @@ test.each(cases)('mapped native DM $name retains exact text only with complete i
       native.serverId='88101';native.type=nativeKind;native.serverStatus=0;native.createdAt=new Date(at);native._parsedContent.text=text;
       document.querySelector('#dm-panel')!.setAttribute('data-e2e','im-dialog');
     },{html:spec.html,text:spec.native,extra:'extra'in spec?spec.extra:'',at,nativeKind:'nativeKind'in spec?spec.nativeKind:7});
-    const input={mapping:mapping.observation,channel:'dm' as const,index:0,evidenceId:'synthetic-inline-emoji',peer:mapping.observation.peers[0]!,dmWindow:true};
+    const input={mapping:mapping.observation,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-inline-emoji',peer:mapping.observation.peers[0]!,dmWindow:true};
     const batch=await owner.dm.evaluate(captureObserved,input),event=batch.events[0]!;
     expect(batch.events).toHaveLength(1);
     if(spec.strong){
