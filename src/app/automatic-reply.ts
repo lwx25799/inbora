@@ -4,7 +4,7 @@ import type {EventStore} from '../storage/store.js';
 import type {AutomationStore} from '../storage/automation-store.js';
 import type {DeepSeekProvider} from '../ai/deepseek.js';
 import type {WorkbenchAuthority} from './authority.js';
-import type {BrowserService} from './browser-service.js';
+import type {PlatformConnector} from '../platform/platform-connector.js';
 import type {HumanReplyWorkflow} from './human-reply-workflow.js';
 import type {AiSettings,SendParams} from './contracts.js';
 import type {Grant,ReplyPolicy} from './automation-contracts.js';
@@ -18,7 +18,7 @@ import type {ReplyKnowledgeContext} from '../knowledge/contracts.js';
 import {assertReplyKnowledgeCurrent,bindReplyKnowledge,replySettingsFingerprint} from '../knowledge/generation-context.js';
 
 interface AutomaticReplyContext {
-  store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore;browser:BrowserService;
+  store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore;browser:PlatformConnector;
   provider:DeepSeekProvider;humanReplies:HumanReplyWorkflow;settings:AiSettings;key:string;
   modelPending:Set<string>;automaticSignal:AbortSignal;modelSignal:AbortSignal;
   isClosing():boolean;updated():void;stop(code:string):void;beforeWork():void;statusUpdated():void;errorCode(error:unknown):string;
@@ -35,7 +35,7 @@ async function qualifyPolicyTarget(c:AutomaticReplyContext,grant:Grant<ReplyPoli
     requireSafe(proof.ownId===grant.scope.ownId&&identity.identityDigest===digest(proof.ownId),'ACCOUNT_CHANGED');
     requireSafe(proof.accountId===event.payload.accountId&&proof.eventBinding===event.binding&&
       proof.targetKey===targetKey(event.payload)&&proof.composerKey===proof.targetKey,'TARGET_CHANGED');
-  });}finally{handle.dispose();}
+  });}finally{await handle.dispose();}
 }
 
 /** Consume the existing one-time unpaid qualification before a fresh read. No old intent or paid generation can enter. */

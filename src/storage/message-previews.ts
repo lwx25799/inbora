@@ -4,11 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { digest,eventBinding,requireSafe,type InboundEvent } from '../core/contracts.js';
 import { runtimeSchema } from '../config/runtime.js';
+import type {MessagePreviewAttachment, MessagePreviewData} from '../contracts/inbox.js';
+export type {MessagePreviewAttachment, MessagePreviewData} from '../contracts/inbox.js';
 
-export interface MessagePreviewAttachment {
-  previewId:string|null;kind:'IMAGE';label:string|null;state:'READY'|'UNAVAILABLE';reason?:string|undefined;width?:number|undefined;height?:number|undefined;
-}
-export interface MessagePreviewData {previewId:string;mime:'image/png';dataUrl:string;width:number;height:number}
 export interface CapturedMessageImage {label:string|null;reason?:string;png?:Buffer;width?:number;height?:number}
 export const maximumPreviewBytes=160*1024;
 const maximumMessages=500,maximumCacheBytes=80*1024*1024;

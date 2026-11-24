@@ -4,7 +4,7 @@ import {SendCoordinator} from '../core/send-coordinator.js';
 import type {EventStore} from '../storage/store.js';
 import {assertSecurityChannelClear} from '../storage/security-holds.js';
 import type {WorkbenchAuthority} from './authority.js';
-import type {BrowserService} from './browser-service.js';
+import type {PlatformConnector} from '../platform/platform-connector.js';
 import type {z} from 'zod';
 import type {humanReplySchema} from './contracts.js';
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
@@ -16,9 +16,10 @@ interface Turn {command_id:string;event_id:string;target_key:string;operator_id:
   status:string;approval:string|null;intent_id:string|null;attempt_started_at:string|null;reason:string|null;proof_ref:string|null;
   verified_at:string|null;native_id_digest:string|null;created_at:number}
 interface NextDraft {event_id:string;id:string;text:string;version:number;operator_id:string;saved_at:number}
+export type FollowupConnector = Pick<PlatformConnector,'accountId'|'loginRecovery'|'adapter'|'actor'|'identity'|'refreshIdentity'>;
 
 export class HumanFollowups {
-  constructor(readonly store:EventStore,readonly authority:WorkbenchAuthority,readonly browser:BrowserService,
+  constructor(readonly store:EventStore,readonly authority:WorkbenchAuthority,readonly browser:FollowupConnector,
     readonly closing:()=>boolean,readonly emit:()=>void,readonly errorCode:(e:unknown)=>string){}
   present(){return !!this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get();}
   originalConfirmed(eventId:string):boolean {
@@ -126,7 +127,7 @@ export class HumanFollowups {
     }).immediate();
   }
   async prepare(token:string,id:string){
-    let dispose=()=>{};
+    let dispose:()=>void|Promise<void>=()=>{};
     try{
       const pending=this.turn(id);requireSafe(pending,'COMMAND_NOT_FOUND');const params=JSON.parse(pending.params) as QueuedInput,event=this.store.event(pending.event_id);
       if(params.queueContext){
@@ -144,8 +145,8 @@ export class HumanFollowups {
         const capabilities=digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel));
         const snapshot=await handle.adapter.inspect(event.payload),identity=await this.browser.refreshIdentity(event.payload.channel);
         this.guard(token,id);requireSafe(identity&&digest(identity)===before,'CAPABILITY_CHANGED_DURING_CHECK');
-        const own=(this.store.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(event.payload.accountId) as {own_id:string}).own_id;
-        requireSafe(snapshot.ownId===own&&identity.identityDigest===digest(own)&&snapshot.accountId===event.payload.accountId&&
+        const own=this.store.accountOwnId(this.browser.accountId);
+        requireSafe(own&&snapshot.ownId===own&&identity.identityDigest===digest(own)&&snapshot.accountId===event.payload.accountId&&
           snapshot.eventBinding===event.binding&&snapshot.targetKey===row.target_key&&snapshot.composerKey===row.target_key,'TARGET_CHANGED');
         if(!isStrong(event.payload))requireSafe(validManualMediaProof(event.payload,snapshot),'HUMAN_MEDIA_APPROVAL_REQUIRED');
         requireSafe(capabilities===digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel)),'CAPABILITY_CHANGED_DURING_CHECK');
@@ -154,7 +155,14 @@ export class HumanFollowups {
           .run(JSON.stringify({version:row.version,textDigest:digest(row.text),snapshot}),id);
       });
       const ledger=this.ledger(id);
-      await new SendCoordinator(ledger,this.browser.actor).send(id,handle.adapter,true,{check:()=>this.guard(token,id,true),committed:()=>{},manualMedia:()=>{
+      await new SendCoordinator(ledger,this.browser.actor,this.browser.accountId).send(id,handle.adapter,true,{check:()=>this.guard(token,id,true),committed:()=>{},beforeSubmit:()=>{
+        requireSafe(!this.closing(),'CLIENT_CLOSING');
+        if(event.payload.channel==='COMMENT_NOTIFICATION'){
+          this.store.assertTargetUnpaused(targetKey(event.payload));
+          requireSafe(this.authority.ownership(event).generation===params.generation,'OWNERSHIP_CHANGED');
+          requireSafe(!this.authority.paused(),'ACCOUNT_PAUSED');
+        }
+      },manualMedia:()=>{
         requireSafe(humanReplyEligibility(this.store,event).eligible,'HUMAN_MEDIA_APPROVAL_REQUIRED');
       }});
     }catch(error){
@@ -164,10 +172,11 @@ export class HumanFollowups {
         if(updated.changes===1)this.store.db.prepare("UPDATE human_reply_drafts SET text=?,version=version+1,saved_at=? WHERE event_id=? AND text='' AND version=?")
           .run(row.text,this.authority.now(),row.event_id,row.version+1);
       }).immediate();
-    }finally{dispose();this.emit();}
+    }finally{await dispose();this.emit();}
   }
   private ledger(id:string){
     return {
+      accountId:this.store.accountId,db:this.store.db,
       draft:(_draftId:string):Draft=>{
         const r=this.turn(id)!;return {id,eventId:r.event_id,text:r.text,version:r.version,model:'human',status:r.status==='APPROVED'?'APPROVED':'DRAFT',
           approval:r.approval?JSON.parse(r.approval):null};
@@ -189,6 +198,12 @@ export class HumanFollowups {
           .run(intent,new Date(this.authority.now()).toISOString(),id);this.store.audit('HUMAN_FOLLOWUP_CLICK_INTENT',id);authority.committed(intent);return intent;
       }).immediate(),
       intentBoundary:(_intentId:string)=>{const r=this.turn(id);requireSafe(r?.attempt_started_at,'INTENT_NOT_FOUND');return r.attempt_started_at;},
+      assertIntentDispatch:(intentId:string,draft:Draft,snapshot:TargetSnapshot)=>{
+        const row=this.turn(id);
+        requireSafe(row?.intent_id===intentId&&row.status==='INTENT_RECORDED'&&row.event_id===draft.eventId&&
+          row.target_key===snapshot.targetKey&&row.version===draft.version&&row.text===draft.text&&
+          !!row.approval&&digest(JSON.parse(row.approval))===digest(draft.approval),'INTENT_BINDING_CHANGED');
+      },
       receipt:(_intentId:string,result:'CONFIRMED'|'UNCERTAIN',ref:string,proof?:SendProof)=>this.receipt(id,result,ref,proof),
     };
   }

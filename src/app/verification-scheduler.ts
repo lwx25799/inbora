@@ -3,6 +3,7 @@ import { Blocked, requireSafe, targetKey } from "../core/contracts.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import { shouldStopGlobally } from "../core/emergency-stop.js";
 import { readSecurityHold, assertSecurityRevision, securityRevision } from "../storage/security-holds.js";
+import type { FollowupVerificationResult, VerificationResult } from "../platform/platform-connector.js";
 import { claimDmContextVerification, type VerificationJob } from "./dm-context-verification.js";
 import {
   claimReceiptRecheck,
@@ -17,7 +18,6 @@ import {
   commitFollowupVerificationResult,
   extendFollowupVerificationDeadlines,
   type FollowupVerificationJob,
-  type FollowupVerificationResult,
 } from "./followup-verification.js";
 
 /** Append-only follow-up evidence for an existing intent. This worker has no sending capability. */
@@ -39,7 +39,7 @@ export class VerificationScheduler {
     private readonly verify: (
       eventId: string,
       signal: AbortSignal,
-    ) => Promise<{ verified: boolean; evidenceId: string; nativeIdDigest?: string }>,
+    ) => Promise<VerificationResult>,
     private readonly updated: () => void = () => {},
     private readonly verifyFollowup?: (commandId: string, signal: AbortSignal) => Promise<FollowupVerificationResult>,
   ) {}

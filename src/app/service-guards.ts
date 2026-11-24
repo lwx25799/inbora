@@ -2,7 +2,7 @@ import { requireSafe } from "../core/contracts.js";
 import type { EventStore } from "../storage/store.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type { WorkbenchAuthority } from "./authority.js";
-import type { BrowserService } from "./browser-service.js";
+import type { PlatformConnector } from "../platform/platform-connector.js";
 import { CredentialStore } from "./credentials.js";
 import { grantConfiguredModel, saveAiSettings } from "./ai-configuration.js";
 import { configureAssistantConnection } from "./local-assistant-connection.js";
@@ -207,7 +207,7 @@ export async function handleConfigWriteCommand(
         ctx.setKeyStored(false);
         ctx.setKeyStorageError(null);
       }
-      ctx.store.audit("MODEL_KEY_CLEARED", "account_001");
+      ctx.store.audit("MODEL_KEY_CLEARED", ctx.store.accountId);
       ctx.emit("status_updated");
       return ctx.status(token);
     }
@@ -230,7 +230,7 @@ export async function handleConfigWriteCommand(
         }
       }
       ctx.setKeyStorageError(null);
-      ctx.store.audit("MODEL_KEY_STORAGE_CHANGED", "account_001", { stored: ctx.getKeyStored() });
+      ctx.store.audit("MODEL_KEY_STORAGE_CHANGED", ctx.store.accountId, { stored: ctx.getKeyStored() });
       ctx.emit("status_updated");
       return ctx.status(token);
     }
@@ -257,7 +257,7 @@ export async function handleConfigWriteCommand(
       requireSafe(!ctx.automation, "USE_PERSISTENT_MODEL_GRANT");
       requireSafe(!c.authorized || ctx.getKey(), "MODEL_KEY_REQUIRED");
       ctx.setModelAuthorized(c.authorized);
-      ctx.store.audit(c.authorized ? "DEEPSEEK_AUTHORIZED" : "DEEPSEEK_REVOKED", "account_001");
+      ctx.store.audit(c.authorized ? "DEEPSEEK_AUTHORIZED" : "DEEPSEEK_REVOKED", ctx.store.accountId);
       ctx.emit("status_updated");
       return ctx.status(token);
   }
@@ -266,7 +266,7 @@ export async function handleConfigWriteCommand(
 export interface LifecycleControlContext {
   store: EventStore;
   authority: WorkbenchAuthority;
-  browser: BrowserService;
+  browser: PlatformConnector;
   automation: AutomationStore | null;
   isClosing(): boolean;
   bumpInboxRevision(): void;
@@ -360,10 +360,19 @@ export async function handleLifecycleControlCommand(
         ctx.abortModel();
       }
       if (c.command === "resume" && c.eventId === null) {
-        await ctx.browser.recoverSecurityHolds(true);
-        ctx.automation?.stop(false);
-        ctx.resetAutomaticAbortIfLimitedAuto();
-        ctx.keepOnline();
+        const signal = ctx.resetOnlineAbort();
+        try {
+          await ctx.browser.recoverSecurityHolds(true, signal, () => {
+            requireSafe(!ctx.isClosing(), "CLIENT_CLOSING");
+            ctx.authority.operator(token, "CONTROL");
+          });
+        } catch (error) {
+          if (!signal.aborted || !ctx.automation?.state().emergencyStopped) throw error;
+        }
+        if (!ctx.automation?.state().emergencyStopped) {
+          ctx.resetAutomaticAbortIfLimitedAuto();
+          ctx.keepOnline();
+        }
       }
       ctx.emit("takeover_updated");
       ctx.emit("send_status_updated");

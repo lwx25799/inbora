@@ -2,22 +2,22 @@ import {requireSafe} from '../core/contracts.js';
 import type {EventStore} from '../storage/store.js';
 import type {AutomationStore} from '../storage/automation-store.js';
 import type {WorkbenchAuthority} from './authority.js';
-import type {BrowserService} from './browser-service.js';
+import type {PlatformConnector} from '../platform/platform-connector.js';
 
 /** A failed, cancelled or stale read-only check must never clear a persistent stop. */
 export async function recoverEmergency(input:{store:EventStore;data:AutomationStore;authority:WorkbenchAuthority;
-  browser:BrowserService;token:string;signal:AbortSignal;closing:()=>boolean}):Promise<void>{
+  browser:Pick<PlatformConnector,'accountId'|'verifyEmergencyRecovery'>;token:string;signal:AbortSignal;closing:()=>boolean}):Promise<void>{
   const {store,data,authority,browser,token,signal}=input;
   authority.operator(token,'CONTROL');
   const revision=data.emergencyRevision();
-  const own=(store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined)?.own_id;
+  const own=store.accountOwnId(browser.accountId);
   requireSafe(own,'ACCOUNT_NOT_VERIFIED');
   const check=()=>{
     authority.operator(token,'CONTROL');
     requireSafe(data.state().emergencyStopped&&data.emergencyRevision()===revision,'EMERGENCY_RECOVERY_CHANGED');
     requireSafe(!input.closing()&&!signal.aborted,
       signal.reason instanceof Error&&signal.reason.name==='TimeoutError'?'EMERGENCY_RECOVERY_TIMEOUT':'EMERGENCY_RECOVERY_CANCELLED');
-    requireSafe((store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined)?.own_id===own,'ACCOUNT_CHANGED');
+    requireSafe(store.accountOwnId(browser.accountId)===own,'ACCOUNT_CHANGED');
   };
   check();
   let committed=false;

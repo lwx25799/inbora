@@ -11,7 +11,7 @@ import { migrateLocalAssistant } from "../storage/local-assistant-migration.js";
 import type { ReplyKnowledgeService } from "../knowledge/service.js";
 import { runtimePerformance } from "../observability/runtime-performance.js";
 import type { WorkbenchAuthority } from "./authority.js";
-import type { BrowserService } from "./browser-service.js";
+import type { PlatformConnector } from "../platform/platform-connector.js";
 import type { HumanFollowups } from "./human-followup.js";
 import { BrowserDraftRecovery } from "./browser-draft-recovery.js";
 import { classifyStoredShares } from "./message-disposition.js";
@@ -22,7 +22,7 @@ import { settingsSchema, type AiSettings } from "./contracts.js";
 export interface BootstrapInput {
   store: EventStore;
   authority: WorkbenchAuthority;
-  browser: BrowserService;
+  browser: PlatformConnector;
   knowledge: ReplyKnowledgeService;
   followups: HumanFollowups;
   startedAt: number;
@@ -49,14 +49,14 @@ export async function bootstrapAutomationRuntime(input: BootstrapInput): Promise
   await migrateLocalAssistant(store, backup("local-assistant"));
   await input.knowledge.initialize();
   input.followups.recover();
-  const automation = new AutomationStore(store, authority.now);
+  const automation = new AutomationStore(store, authority.now, browser.accountId);
   automation.initialize(input.startedAt);
   classifyStoredShares(store, browser.root);
   const hasStartupRecoveryCandidate = new BrowserDraftRecovery(store, authority, browser).hasStartupCandidate();
   if (authority.mode() === "LIMITED_AUTO") authority.resumeIdleAutomation();
   if (!automation.state().emergencyStopped && authority.paused()) {
     store.db.prepare("UPDATE client_state SET paused=0 WHERE id=1").run();
-    store.audit("SINGLE_ACCOUNT_ONLINE_RESTORED", "account_001");
+    store.audit("SINGLE_ACCOUNT_ONLINE_RESTORED", authority.accountId);
   }
   store.db
     .prepare(

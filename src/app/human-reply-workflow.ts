@@ -2,7 +2,7 @@ import {digest,requireSafe,targetKey,isManualMediaCandidate,validManualMediaProo
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
 import type {EventStore} from '../storage/store.js';
 import type {WorkbenchAuthority} from './authority.js';
-import type {BrowserService} from './browser-service.js';
+import type {PlatformConnector} from '../platform/platform-connector.js';
 import {humanReplySchema,type SendParams} from './contracts.js';
 import type {z} from 'zod';
 import {captureHumanQueueContext,recordHumanQueueContext} from './human-queue-context.js';
@@ -10,7 +10,7 @@ import {assertDraftLearningCurrent} from '../knowledge/generation-context.js';
 
 /** One explicit human request, durable latest text, backend qualification, then the shared send coordinator. */
 export class HumanReplyWorkflow {
-  constructor(readonly store:EventStore,readonly authority:WorkbenchAuthority,readonly browser:BrowserService,
+  constructor(readonly store:EventStore,readonly authority:WorkbenchAuthority,readonly browser:PlatformConnector,
     readonly isClosing:()=>boolean,readonly deliver:(token:string,id:string,params:SendParams)=>Promise<void>,
     readonly emit:(event:string)=>void,readonly errorCode:(error:unknown)=>string){}
   queue(token:string,id:string,input:z.infer<typeof humanReplySchema>):boolean {
@@ -43,7 +43,7 @@ export class HumanReplyWorkflow {
   }
   async prepare(token:string,id:string):Promise<void> {
     const row=this.authority.command(id),params=JSON.parse(row.params) as SendParams,event=this.store.event(params.eventId);
-    let dispose=()=>{};
+    let dispose:()=>void|Promise<void>=()=>{};
     try {
       requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
       const manualMedia=isManualMediaCandidate(event.payload)&&!!this.store.db.prepare('SELECT command_id FROM manual_send_inputs WHERE command_id=?').get(id)&&
@@ -64,8 +64,8 @@ export class HumanReplyWorkflow {
         this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
         const identity=await this.browser.refreshIdentity(event.payload.channel);
         requireSafe(digest(identity)===priorIdentity,'CAPABILITY_CHANGED_DURING_CHECK');
-        const account=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string};
-        requireSafe(identity&&snapshot.ownId===account.own_id&&identity.identityDigest===digest(account.own_id)&&snapshot.accountId===event.payload.accountId&&
+        const ownId=this.store.accountOwnId(this.browser.accountId);
+        requireSafe(identity&&ownId&&snapshot.ownId===ownId&&identity.identityDigest===digest(ownId)&&snapshot.accountId===event.payload.accountId&&
           snapshot.eventBinding===event.binding&&snapshot.targetKey===targetKey(event.payload)&&snapshot.composerKey===snapshot.targetKey,'TARGET_CHANGED');
         if(manualMedia)requireSafe(validManualMediaProof(event.payload,snapshot),'HUMAN_MEDIA_APPROVAL_REQUIRED');
         requireSafe(before===digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel)),'CAPABILITY_CHANGED_DURING_CHECK');
@@ -73,11 +73,11 @@ export class HumanReplyWorkflow {
         this.store.audit('READ_ONLY_SEND_CONTRACT_VERIFIED',id);
         this.authority.approvePreparedCommand(token,id,snapshot,identity);
       });
-      dispose();dispose=()=>{};
+      await dispose();dispose=()=>{};
       await this.deliver(token,id,params);
     }catch(error){
       if(this.authority.command(id).intent_id===null)this.authority.finish(id,'FAILED_BEFORE_CLICK',this.errorCode(error));
       this.emit('send_status_updated');
-    }finally{dispose();}
+    }finally{await dispose();}
   }
 }

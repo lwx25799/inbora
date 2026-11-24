@@ -1,8 +1,9 @@
 import Database from "better-sqlite3";
 import { copyFile, mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-import { digest, requireSafe } from "../core/contracts.js";
+import { requireSafe } from "../core/contracts.js";
 import type { EventStore } from "./store.js";
+import { migrationInventory } from './migration-inventory.js';
 
 const sql = `
 CREATE TABLE automation_state (id INTEGER PRIMARY KEY CHECK(id=1), started_at INTEGER NOT NULL,
@@ -56,10 +57,6 @@ ALTER TABLE automation_schema RENAME TO automation_schema_previous;
 CREATE TABLE automation_schema(version INTEGER PRIMARY KEY CHECK(version=3));
 INSERT INTO automation_schema VALUES(3);DROP TABLE automation_schema_previous;`;
 
-function inventory(db: Database.Database, names: string[]): string {
-  return digest(names.map(name => [name, db.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}" ORDER BY rowid`).all()]));
-}
-
 /** Additive extension of schema3; backup and restore are checked before the owner database changes. */
 export async function migrateAutomation(store: EventStore, backupFile: string): Promise<boolean> {
   requireSafe(store.db.pragma("user_version", { simple: true }) === 3, "CLIENT_MIGRATION_REQUIRED");
@@ -78,7 +75,7 @@ export async function migrateAutomation(store: EventStore, backupFile: string): 
   }
   const upgradeSql=(versions.length?'':sql)+((versions[0]?.version??0)<2?chatSql:'')+budgetSql;
   const names = (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {name: string}[]).map(x => x.name);
-  const before = inventory(store.db, names),preserved=names.filter(name=>name!=='automation_schema'),preservedBefore=inventory(store.db,preserved);
+  const before = migrationInventory(store.db, names),preserved=names.filter(name=>name!=='automation_schema'),preservedBefore=migrationInventory(store.db,preserved);
   await mkdir(dirname(backupFile), { recursive: true });
   await store.db.backup(backupFile);
   const trialFile = `${backupFile}.trial`;
@@ -86,16 +83,16 @@ export async function migrateAutomation(store: EventStore, backupFile: string): 
   try {
     const backup = new Database(backupFile, {readonly: true});
     try {
-      requireSafe(backup.pragma("quick_check", {simple: true}) === "ok" && inventory(backup, names) === before, "MIGRATION_BACKUP_RESTORE_FAILED");
+      requireSafe(backup.pragma("quick_check", {simple: true}) === "ok" && migrationInventory(backup, names) === before, "MIGRATION_BACKUP_RESTORE_FAILED");
     } finally { backup.close(); }
     const trial = new Database(trialFile);
     try {
       trial.pragma("foreign_keys = ON");
       trial.transaction(() => trial.exec(upgradeSql)).immediate();
-      requireSafe(trial.pragma("quick_check", {simple: true}) === "ok" && inventory(trial, preserved) === preservedBefore&&
+      requireSafe(trial.pragma("quick_check", {simple: true}) === "ok" && migrationInventory(trial, preserved) === preservedBefore&&
         (trial.prepare('SELECT version FROM automation_schema').get() as {version:number}).version===3, "MIGRATION_TRIAL_FAILED");
     } finally { trial.close(); }
-    requireSafe(inventory(store.db, names) === before, "DATABASE_CHANGED_DURING_MIGRATION");
+    requireSafe(migrationInventory(store.db, names) === before, "DATABASE_CHANGED_DURING_MIGRATION");
     store.db.transaction(() => store.db.exec(upgradeSql)).immediate();
     store.audit("AUTOMATION_SCHEMA_UPGRADED", "automation-3");
     return true;

@@ -16,7 +16,7 @@ export function requireSuggestionAuthorization(store:EventStore,automation:Autom
   requireSafe(state.modelAuthorized||grant,'REAL_MODEL_AUTHORIZATION_REQUIRED');
   if(grant){
     automation!.requireAccount(grant.scope.ownId);
-    requireSafe(event.payload.accountId==='account_001'&&grant.scope.model===state.settings.model&&grant.scope.channels.includes(event.payload.channel),'MODEL_OUTSIDE_GRANT');
+    requireSafe(event.payload.accountId===automation!.accountId&&grant.scope.model===state.settings.model&&grant.scope.channels.includes(event.payload.channel),'MODEL_OUTSIDE_GRANT');
     if(policy)requireSafe(automation!.policyScopeMatches(grant as Grant<ReplyPolicy>,event),'MODEL_OUTSIDE_GRANT');
     if(checkAllowance)requireSafe(automation!.allowance(grant.version,'MODEL'),'MODEL_GRANT_EXHAUSTED');
   }else if(checkAllowance){const budget=store.budget('MODEL');requireSafe(budget.maximum===null||budget.used<budget.maximum,'MODEL_GRANT_EXHAUSTED');}

@@ -7,14 +7,13 @@ import {
   targetKey,
   type Channel,
   type Draft,
-  type SendProof,
 } from "../core/contracts.js";
 import type { EventStore } from "../storage/store.js";
-import { assertSecurityRevision, securityRevision } from "../storage/security-holds.js";
-import { ObservedCommentReply } from "../adapters/observed-comment-reply.js";
-import { ObservedDmReply } from "../adapters/observed-dm-reply.js";
+import { assertSecurityRevision, securityHoldEntity, securityRevision } from "../storage/security-holds.js";
 import { recordEvidence } from "../observability/evidence.js";
-import type { BrowserService } from "./browser-service.js";
+import type { FollowupVerificationResult, PlatformConnector, VerificationOptions, VerificationResult } from "../platform/platform-connector.js";
+import { readExistingReply } from "../platform/read-existing-reply.js";
+export type { FollowupVerificationResult } from "../platform/platform-connector.js";
 
 const hash64 = /^[a-f0-9]{64}$/u;
 const attemptAuditType = "HUMAN_FOLLOWUP_VERIFICATION_ATTEMPT";
@@ -55,13 +54,6 @@ export interface FollowupVerificationJob {
   approvalDigest: string;
   attempts: number;
   deadline: number;
-}
-
-export interface FollowupVerificationResult {
-  verified: boolean;
-  evidenceId: string;
-  proofDigest?: string;
-  nativeIdDigest?: string;
 }
 
 function hasFollowupTables(store: EventStore): boolean {
@@ -166,7 +158,7 @@ function securityHoldDeadline(store: EventStore, channel: Channel, baseAt: numbe
     .prepare(
       "SELECT event_type,time,detail_redacted FROM audit_events WHERE entity_id=? AND event_type IN ('SECURITY_CHANNEL_HELD','SECURITY_CHANNEL_RESOLVED') ORDER BY rowid",
     )
-    .all("account_001:" + channel) as { event_type: string; time: string; detail_redacted: string }[];
+    .all(securityHoldEntity(store.accountId, channel)) as { event_type: string; time: string; detail_redacted: string }[];
   let deadline = currentDeadline;
   let heldAt: number | null = null;
   for (const row of rows) {
@@ -390,10 +382,10 @@ export function commitFollowupVerificationFailure(
 
 /** Read-only verification against the live browser page for an UNCERTAIN human followup turn. */
 export async function verifyFollowupInBrowser(
-  browser: BrowserService,
+  browser: Pick<PlatformConnector, "root" | "open" | "status" | "adapter" | "actor" | "identity">,
   store: EventStore,
   commandId: string,
-  options: { signal?: AbortSignal; background?: boolean } = {},
+  options: VerificationOptions = {},
 ): Promise<FollowupVerificationResult> {
   requireSafe(!options.signal?.aborted, "COLLECTION_CANCELLED");
   const turn = readTurn(store, commandId);
@@ -410,22 +402,10 @@ export async function verifyFollowupInBrowser(
     ...(options.signal ? { readonlySignal: options.signal } : {}),
   });
   try {
-    const proof: SendProof | null = await browser.actor.run(
+    const proof = await browser.actor.run(
       async () => {
         requireSafe(!options.signal?.aborted, "COLLECTION_CANCELLED");
-        if (handle.adapter instanceof ObservedCommentReply) {
-          return handle.adapter.verifyExisting(event.payload, turn.text, turn.attempt_started_at!);
-        }
-        if (handle.adapter instanceof ObservedDmReply) {
-          return handle.adapter.verifyExisting(
-            event.payload,
-            turn.text,
-            turn.attempt_started_at!,
-            approval.snapshot.contextDigest,
-          );
-        }
-        await handle.adapter.inspect(event.payload);
-        return handle.adapter.readback(event.payload, turn.text, [], turn.attempt_started_at!);
+        return readExistingReply(handle.adapter, event.payload, turn.text, turn.attempt_started_at!, approval.snapshot.contextDigest);
       },
       options.background ? "background" : "interactive",
     );
@@ -450,7 +430,7 @@ export async function verifyFollowupInBrowser(
       ...(proof ? { proofDigest: digest(proof), nativeIdDigest: digest(proof.id) } : {}),
     };
   } finally {
-    handle.dispose();
+    await handle.dispose();
   }
 }
 
@@ -466,11 +446,12 @@ export function findUncertainFollowupForEvent(store: EventStore, eventId: string
 /** Explicit read-only reconciliation for an UNCERTAIN human followup turn. */
 export async function reconcileUncertainFollowup(
   store: EventStore,
-  browser: BrowserService,
+  browser: Pick<PlatformConnector, "accountId" | "verifyExistingFollowup">,
   turn: FollowupTurnRow,
   now: () => number,
   emit: () => void,
-): Promise<{ verified: boolean; evidenceId: string; nativeIdDigest?: string }> {
+): Promise<VerificationResult> {
+  store.assertAccount(browser.accountId);
   const approval = parseApproval(turn.approval);
   requireSafe(turn.intent_id && turn.attempt_started_at && approval, "INTENT_REQUIRED");
   const event = store.event(turn.event_id);
@@ -487,7 +468,7 @@ export async function reconcileUncertainFollowup(
     attempts: 0,
     deadline: now() + 30_000,
   };
-  const result = await verifyFollowupInBrowser(browser, store, turn.command_id);
+  const result = await browser.verifyExistingFollowup(store, turn.command_id);
   const verified = commitFollowupVerificationResult(store, now(), job, security, result, false);
   emit();
   return {

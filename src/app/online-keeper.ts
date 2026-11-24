@@ -3,13 +3,13 @@ import { shouldStopGlobally } from "../core/emergency-stop.js";
 import type { EventStore } from "../storage/store.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type { WorkbenchAuthority } from "./authority.js";
-import type { BrowserService } from "./browser-service.js";
+import type { PlatformConnector } from "../platform/platform-connector.js";
 import { BrowserDraftRecovery } from "./browser-draft-recovery.js";
 
 export interface OnlineKeeperHost {
   store: EventStore;
   authority: WorkbenchAuthority;
-  browser: BrowserService;
+  browser: PlatformConnector;
   getAutomation(): AutomationStore | null;
   isClosing(): boolean;
   onStopForGlobalFailure(code: string): void;
@@ -41,6 +41,7 @@ export class OnlineKeeper {
     this.retryAt = 0;
   }
   resetAbort(): AbortSignal {
+    this.abortController.abort();
     this.abortController = new AbortController();
     return this.abortController.signal;
   }
@@ -69,18 +70,16 @@ export class OnlineKeeper {
       this.task ||
       !automation ||
       automation.state().emergencyStopped ||
-      !this.host.store.db.prepare("SELECT id FROM accounts WHERE id='account_001'").get() ||
       this.host.authority.now() < this.retryAt
     ) {
       return;
     }
+    const ownId = this.host.store.accountOwnId(this.host.browser.accountId);
+    if (!ownId) return;
     if (this.host.browser.loginRecovery) {
       this.retryAt = this.host.authority.now() + 30_000;
-      const own = this.host.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {
-        own_id: string;
-      };
       const task = this.host.browser
-        .completeLoginIfVerified(own.own_id)
+        .completeLoginIfVerified(ownId)
         .then((done) => {
           if (done) this.host.onResumeAfterLogin();
         })

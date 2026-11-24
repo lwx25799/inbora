@@ -3,8 +3,9 @@ import type { AutomationStore } from "../storage/automation-store.js";
 import type {CollectionSettings} from './automation-contracts.js';
 import {platformStopCodes,securityCandidateCodes,shouldStopGlobally} from '../core/emergency-stop.js';
 import {readSecurityHold} from '../storage/security-holds.js';
+import type { CollectionSource } from '../platform/platform-connector.js';
 
-export type CollectionSource = "works" | "dm";
+export type { CollectionSource } from '../platform/platform-connector.js';
 export type CollectionTrigger = 'BACKGROUND'|'MANUAL';
 interface TurnResult {error:string|null;deferredCode:string|null;cancelled:boolean}
 /** An object-specific failure was persisted; the channel can serve a different object next turn. */

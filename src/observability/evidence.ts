@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto';
 import {setImmediate} from 'node:timers/promises';
 import { z } from 'zod';
 import {digest,requireSafe} from '../core/contracts.js';
+import type {EvidenceCapacity, EvidenceRetentionReport} from '../contracts/diagnostics.js';
+export type {EvidenceCapacity, EvidenceRetentionReport} from '../contracts/diagnostics.js';
 
 export const caseIds = ['L01','L02','L03','N01','N02','N03','N04','N05','N06','N07','D01','D02','D03','D04','D05',
   'S01','S02','S03','S04','H01','H02','H03','M01','C01','C02','C03','C04','C05','C06'] as const;
@@ -25,12 +27,6 @@ export async function recordEvidence(directory: string, input: EvidenceInput): P
   return evidence.id;
 }
 export interface EvidenceProtection {ids:ReadonlySet<string>;complete:boolean;unknownReferences:number}
-export interface EvidenceCapacity {files:number;bytes:number}
-export interface EvidenceRetentionReport {
-  scope:'EVIDENCE_METADATA';retentionDays:number;referencesComplete:boolean;unknownReferences:number;cancelled:boolean;
-  total:EvidenceCapacity;recognized:EvidenceCapacity;expired:EvidenceCapacity;protected:EvidenceCapacity;
-  eligible:EvidenceCapacity;unknown:EvidenceCapacity;deleted:EvidenceCapacity;remainingEligible:EvidenceCapacity;
-}
 export interface EvidenceRetentionOptions {
   protection?:EvidenceProtection;refreshProtection?:()=>EvidenceProtection;signal?:AbortSignal;now?:number;
 }

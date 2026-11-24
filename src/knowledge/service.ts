@@ -25,13 +25,13 @@ export class ReplyKnowledgeService {
   async initialize(){await migrateReplyKnowledge(this.store,join(this.root,'backups',`knowledge-${randomUUID()}.sqlite`));await this.imports.cleanup();}
   collectIfDue(){
     if(Date.now()-this.lastCollected<60_000||!this.data.available()||this.state().automation?.state().emergencyStopped)return;
-    this.lastCollected=Date.now();this.data.collectCandidates('account_001');
+    this.lastCollected=Date.now();this.data.collectCandidates(this.authority.accountId);
   }
   async dispatch(token:string,command:KnowledgeCommand):Promise<unknown>{
     const check=()=>{
       this.authority.operator(token,'CONTROL');requireSafe(this.authority.assistantVersion(token)===null,'KNOWLEDGE_GUI_ONLY');
       requireSafe(!this.state().closing,'CLIENT_CLOSING');requireSafe(this.data.available(),'KNOWLEDGE_NOT_READY');
-    };check();const accountId='account_001';
+    };check();const accountId=this.authority.accountId;
     switch(command.action){
       case 'overview':return this.data.overview(accountId,command.page);
       case 'saveKnowledge':return this.data.saveKnowledge(accountId,command.input);

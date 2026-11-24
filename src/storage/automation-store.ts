@@ -2,15 +2,21 @@ import { digest, isStrong, requireSafe, targetKey, type StoredEvent } from "../c
 import { collectionSchema, modelGrantSchema, replyPolicySchema, type CollectionSettings, type Grant, type ModelGrant, type ReplyPolicy } from "../app/automation-contracts.js";
 import type { EventStore } from "./store.js";
 import type {EmergencySource} from '../core/emergency-stop.js';
-import {readEmergencyStop,recordEmergencyStop,emergencyRevision,resumeEmergency} from './emergency-stop.js';
+import {readEmergencyStop,recordEmergencyStop,emergencyRevision,isEmergencyStopped,resumeEmergency} from './emergency-stop.js';
 import {readSecurityHold,assertSecurityChannelClear} from './security-holds.js';
+import type { AccountId } from "../contracts/account.js";
 
 export class AutomationStore {
-  constructor(readonly store: EventStore, readonly now: () => number = Date.now) {}
+  constructor(readonly store: EventStore, readonly now: () => number = Date.now,
+    readonly accountId: AccountId = store.accountId) {
+    store.assertAccount(accountId);
+  }
   initialize(startedAt: number): void {
     requireSafe(Number.isSafeInteger(startedAt) && startedAt > 0 && startedAt <= this.now(), "AUTOMATION_START_INVALID");
-    this.store.db.prepare("INSERT OR IGNORE INTO automation_state(id,started_at,collection_json) VALUES(1,?,?)")
-      .run(startedAt, JSON.stringify(null));
+    this.store.db.transaction(()=>{
+      this.store.db.prepare("INSERT OR IGNORE INTO automation_state(id,started_at,collection_json,emergency_stopped) VALUES(1,?,?,?)")
+        .run(startedAt, JSON.stringify(null), Number(isEmergencyStopped(this.store)));
+    }).immediate();
     for (const source of ["works", "dm"])
       this.store.db.prepare("INSERT OR IGNORE INTO collection_progress(source) VALUES(?)").run(source);
   }
@@ -24,8 +30,8 @@ export class AutomationStore {
       collection: raw === null ? null : collectionSchema.parse(raw) };
   }
   requireAccount(ownId: string): void {
-    const row = this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id: string} | undefined;
-    requireSafe(row?.own_id === ownId, "ACCOUNT_NOT_VERIFIED");
+    const bound = this.store.accountOwnId(this.accountId);
+    requireSafe(bound && bound === ownId, "ACCOUNT_NOT_VERIFIED");
   }
   configureCollection(settings: CollectionSettings): void {
     const parsed = collectionSchema.parse(settings);
@@ -115,7 +121,7 @@ export class AutomationStore {
     }).immediate();
   }
   policyMatches(grant: Grant<ReplyPolicy>, e: StoredEvent, status: 'NEW'|'DRAFT'='NEW'): boolean {
-    if(readSecurityHold(this.store,e.payload.channel))return false;
+    if(e.payload.accountId!==this.accountId||readSecurityHold(this.store,e.payload.channel))return false;
     const active = this.active("AUTO_REPLY");
     if (active?.version !== grant.version || this.state().emergencyStopped || !isStrong(e.payload) ||
       !(status==='NEW'?['AWAITING_DRAFT']:['AWAITING_APPROVAL','APPROVED']).includes(e.status)) return false;
@@ -128,13 +134,14 @@ export class AutomationStore {
     if (this.store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(e.id)||this.store.sendFrozen(e.id)) return false;
     const paused = this.store.db.prepare("SELECT paused FROM pauses WHERE target_key=?").get(targetKey(e.payload)) as {paused: number} | undefined;
     // Only an active editing lease pauses a conversation; merely viewing it must not leave a persistent handoff.
-    const owner = this.store.db.prepare("SELECT operator_id,lease_expires_at FROM thread_ownership WHERE target_key=?").get(targetKey(e.payload)) as {operator_id: string | null;lease_expires_at:number} | undefined;
+    const owner = this.store.db.prepare("SELECT operator_id,lease_expires_at FROM thread_ownership WHERE account_id=? AND channel=? AND target_key=?")
+      .get(this.accountId,e.payload.channel,targetKey(e.payload)) as {operator_id: string | null;lease_expires_at:number} | undefined;
     if (paused?.paused || owner?.operator_id&&owner.lease_expires_at>this.now()) return false;
     return this.policyScopeMatches(grant,e);
   }
   /** Authorization scope only; explicit human suggestions do not inherit automatic scheduling gates. */
   policyScopeMatches(grant:Grant<ReplyPolicy>,e:StoredEvent):boolean {
-    if(readSecurityHold(this.store,e.payload.channel))return false;
+    if(e.payload.accountId!==this.accountId||readSecurityHold(this.store,e.payload.channel))return false;
     const active=this.active('AUTO_REPLY');
     if(active?.version!==grant.version||this.state().emergencyStopped||!isStrong(e.payload))return false;
     const p=active.scope as ReplyPolicy;this.requireAccount(p.ownId);

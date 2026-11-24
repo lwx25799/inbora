@@ -14,14 +14,10 @@ import {globalStopCodes,platformStopCodes,securityCandidateCodes,shouldStopGloba
 import {assertSecurityChannelClear,securityRevision,assertSecurityRevision,holdSecurityChannel,resolveSecurityHold,readSecurityHold} from '../storage/security-holds.js';
 import {ManualRecovery} from '../browser/manual-recovery.js';
 import {manualRecoveryElements,inspectManualRecoveryElement} from '../browser/manual-recovery-dom.js';
+import type {SecurityRuntime} from '../contracts/diagnostics.js';
+export type {SecurityRuntime} from '../contracts/diagnostics.js';
 
 export const securityRuleVersion='2026-11-16.2';
-export interface SecurityRuntime {
-  ruleVersion:string;
-  fingerprint:string;
-  instanceId:string|null;
-}
-
 // Fixed when this module loads. File timestamps or later disk edits cannot change this instance's claim.
 const fingerprint=createHash('sha256').update(JSON.stringify({
   ruleVersion:securityRuleVersion,

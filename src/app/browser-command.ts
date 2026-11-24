@@ -1,12 +1,12 @@
 import type {ClientCommand} from './contracts.js';
-import type {BrowserService} from './browser-service.js';
+import type {PlatformConnector} from '../platform/platform-connector.js';
 import type {EventStore} from '../storage/store.js';
 import type {WorkbenchAuthority} from './authority.js';
 import {BrowserDraftRecovery} from './browser-draft-recovery.js';
 
 /** Browser controls share lifecycle callbacks with temporary human recovery. */
 export async function handleBrowserCommand(input:{command:Extract<ClientCommand,{command:'browser'}>;token:string;
-  store:EventStore;authority:WorkbenchAuthority;browser:BrowserService;suspend:()=>void;resume:()=>void;cancel:()=>void;
+  store:EventStore;authority:WorkbenchAuthority;browser:PlatformConnector;suspend:()=>void;resume:()=>void;cancel:()=>void;
   resetRetry:()=>void}):Promise<{value?:unknown;status:boolean}>{
   const {command:c,token,browser}=input;
   input.authority.operator(token,'CONTROL');

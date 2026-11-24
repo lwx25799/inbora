@@ -4,7 +4,7 @@ import {ChatMessageStore} from '../storage/chat-messages.js';
 import {MessagePreviewStore} from '../storage/message-previews.js';
 import {MessageShareStore} from '../storage/message-shares.js';
 import type {AutomationStore} from '../storage/automation-store.js';
-import type {BrowserService} from './browser-service.js';
+import type {PlatformConnector,PreviewDisplayTarget} from '../platform/platform-connector.js';
 import type {Page} from 'playwright';
 import type {ObservationMapping} from '../config/site-mapping.js';
 import type {DiscoveredPeer,ObservationBatch} from '../adapters/observed-reader.js';
@@ -12,14 +12,14 @@ import {saveMessagePreviews} from '../adapters/message-preview.js';
 import {resolveStoredDmMessage} from './message-view.js';
 import {classifyStoredShares} from './message-disposition.js';
 
-export interface PreviewDisplayTarget {eventId:string;source:'INBOUND'|'CHAT';purpose:'DISPLAY'}
+export type {PreviewDisplayTarget} from '../platform/platform-connector.js';
 export function resolvePreviewDisplay(store:EventStore,eventId:string,source?:PreviewDisplayTarget['source']){
   const resolved=resolveStoredDmMessage(store,eventId,source),{event,ownId}=resolved;
   requireSafe(event.observationIssue==='DM_CONTENT_UNVERIFIED'&&['IMAGE','MIXED'].includes(event.contentType??''),'MESSAGE_PREVIEW_UNAVAILABLE');
   return {event,ownId,target:{eventId,source:resolved.source,purpose:'DISPLAY'} as PreviewDisplayTarget};
 }
 
-export function readOrRefreshPreview(store:EventStore,browser:BrowserService,data:AutomationStore|null,control:()=>void,
+export function readOrRefreshPreview(store:EventStore,browser:PlatformConnector,data:AutomationStore|null,control:()=>void,
   request:{eventId:string;refresh?:true|undefined;previewId?:string|undefined}){
   if(request.refresh===true){
     control();requireSafe(data,'AUTOMATION_NOT_READY');

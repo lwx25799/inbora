@@ -2,6 +2,7 @@ import {reportSecurityFailure} from './security-signal.js';
 import {randomUUID} from 'node:crypto';
 import type {Page} from 'playwright';
 import type {ObservationMapping} from '../config/site-mapping.js';
+import {DEFAULT_ACCOUNT_ID,type AccountId} from '../contracts/account.js';
 import {eventSchema,requireSafe,type InboundEvent} from '../core/contracts.js';
 import {captureCommentThread} from './comment-thread-capture.js';
 import {recoverCommentOffset} from './comment-offset-recovery.js';
@@ -13,11 +14,12 @@ export type {CaptureInput,CaptureOptions,DiscoveredPeer,CollectionReadDiagnostic
 
 /** AccountActor owns the entire call, including opening and switching the permitted chat. */
 export class ObservedReader {
-  constructor(readonly page: Page, readonly mapping: ObservationMapping,private readonly collectionOrigin?:number,private readonly signal?:AbortSignal) {}
+  constructor(readonly page: Page, readonly mapping: ObservationMapping,private readonly collectionOrigin?:number,private readonly signal?:AbortSignal,
+    readonly accountId:AccountId=DEFAULT_ACCOUNT_ID) {}
   private async capture(channel: CaptureInput['channel'], index: number, selection: CaptureOptions = {}): Promise<ObservationBatch> {
     requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
     try {
-      const result = await this.page.evaluate(captureObserved,{mapping:this.mapping,channel,index,evidenceId:randomUUID(),...selection}).catch(error=>reportSecurityFailure(this.page,error));
+      const result = await this.page.evaluate(captureObserved,{mapping:this.mapping,channel,index,accountId:this.accountId,evidenceId:randomUUID(),...selection}).catch(error=>reportSecurityFailure(this.page,error));
       requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
       return {...result,events:result.events.map(e=>eventSchema.parse(e))};
     } catch(error) {
@@ -230,7 +232,7 @@ export class ObservedReader {
       top=>this.capture('commentScroll',index,top===undefined?{commentStay:true}:{commentOffset:top}),
       read,collection?.onRestoreWindow,this.signal):await read();
     if(allCommentAuthors) {
-      const input:CaptureInput={mapping:this.mapping,channel:'commentScroll',index,evidenceId:randomUUID(),...(collection?{commentStay:collection.holdScroll}:{})};
+      const input:CaptureInput={mapping:this.mapping,channel:'commentScroll',index,accountId:this.accountId,evidenceId:randomUUID(),...(collection?{commentStay:collection.holdScroll}:{})};
       const next=await this.page.evaluate(captureObserved,input).catch(error=>reportSecurityFailure(this.page,error));if(next.scroll)batch.scroll=next.scroll;
     }
     return freshDocumentReused?{...batch,freshDocumentReused:true}:batch;

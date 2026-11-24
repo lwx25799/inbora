@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {lstat,readFile,rename,unlink,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {z} from 'zod';
-import {loadMapping,loadObservationMapping} from '../config/runtime.js';
+import {loadCommentReplyMapping,loadDmReplyMapping,loadMapping,loadObservationMapping} from '../config/runtime.js';
 import {requireSafe,type Channel} from '../core/contracts.js';
 import type {BrowserProfileOwner} from '../browser/profile-owner.js';
 import type {EventStore} from '../storage/store.js';
@@ -13,20 +13,43 @@ const savedSchema=z.object({version:z.literal(1),ownId:z.string().min(1).max(128
 type Locations=z.infer<typeof savedSchema>;
 interface Scope {ownId:string;origin:string;entry:string;notification:Set<string>;dm:Set<string>}
 
-/** Serialized read-only guard: changing a recovery location must not discard a web draft. */
-export function inspectRecoveryNavigation(origin:string):{originMatches:boolean;empty:boolean}{
-  if(location.origin!==origin)return {originMatches:false,empty:false};
-  for(const editor of document.querySelectorAll('[contenteditable="true"],textarea,input')){
-    const style=getComputedStyle(editor),rect=editor.getBoundingClientRect();
-    if(style.display==='none'||style.visibility==='hidden'||rect.width<=0||rect.height<=0)continue;
+export async function recoveryComposerSelectors(root:string):Promise<Record<Channel,string[]>&{nativeDmComposer:string|undefined}>{
+  const [legacy,comment,dm]=await Promise.all([
+    loadMapping(root).catch(error=>{if((error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error;}),
+    loadCommentReplyMapping(root),loadDmReplyMapping(root),
+  ]);
+  return {
+    COMMENT_NOTIFICATION:[legacy?.targets.COMMENT_NOTIFICATION.composer,comment?.composer].filter(value=>value!==undefined),
+    DIRECT_MESSAGE:[legacy?.targets.DIRECT_MESSAGE.composer,dm?.composer].filter(value=>value!==undefined),
+    nativeDmComposer:dm?.composer,
+  };
+}
+
+/** Serialized read-only draft check for navigation and browser mode changes. */
+export function inspectRecoveryNavigation(input:{origin?:string;composers:string[];nativeDmComposer?:string|undefined}):{originMatches:boolean;empty:boolean}{
+  if(input.origin!==undefined&&location.origin!==input.origin)return {originMatches:false,empty:false};
+  const mapped=new Set<Element>();
+  for(const selector of input.composers)for(const editor of document.querySelectorAll(selector))mapped.add(editor);
+  const editors=new Set(mapped);
+  for(const editor of document.querySelectorAll('[contenteditable=""],[contenteditable="true"],[contenteditable="plaintext-only"],[data-slate-editor="true"],textarea,input')){
     if(editor instanceof HTMLInputElement&&!['text','search','email','url','tel','password'].includes(editor.type))continue;
+    editors.add(editor);
+  }
+  for(const editor of editors){
     const text=editor instanceof HTMLInputElement||editor instanceof HTMLTextAreaElement?editor.value:editor.textContent??'';
-    if(editor.querySelector('img,video,audio,iframe,object,input,[data-slate-void="true"],[data-attachment]'))
+    if(editor.querySelector('img,video,audio,iframe,object,input,[data-slate-void="true"],[data-attachment]')||
+      editor.matches('[data-slate-void="true"],[data-attachment]'))
       return {originMatches:true,empty:false};
-    const marker=editor.matches('[data-slate-editor="true"][data-zone-container="*"]')&&editor.children.length===1&&
-      editor.firstElementChild?.matches('div.ace-line[data-node="true"]')&&editor.firstElementChild.children.length===1&&
-      editor.firstElementChild.firstElementChild?.matches('span[data-enter="true"][data-string="true"][data-leaf="true"]')&&text==='\u200B';
-    if(text.length&&!marker)return {originMatches:true,empty:false};
+    const line=editor.firstElementChild,leaf=line?.firstElementChild;
+    const marker=editor.matches('[data-slate-editor="true"][data-zone-container="*"]')&&editor.childNodes.length===1&&
+      line?.matches('div.ace-line[data-node="true"]')&&line.childNodes.length===1&&
+      leaf?.matches('span[data-enter="true"][data-string="true"][data-leaf="true"]')&&
+      leaf.childNodes.length===1&&leaf.firstChild?.nodeType===Node.TEXT_NODE&&leaf.firstChild.textContent==='\u200B';
+    // The native DM editor can also expose its caret placeholder as a single text node.
+    const nativeDmPlaceholder=/^\u200B+$/u.test(text)&&input.nativeDmComposer!==undefined&&
+      editor.matches(input.nativeDmComposer)&&editor.matches('div[contenteditable=""],div[contenteditable="true"],div[contenteditable="plaintext-only"]')&&
+      editor.childNodes.length===1&&editor.firstChild?.nodeType===Node.TEXT_NODE;
+    if(text.length&&!marker&&!nativeDmPlaceholder)return {originMatches:true,empty:false};
     for(const node of editor.querySelectorAll('*'))if(!['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S'].includes(node.tagName))
       return {originMatches:true,empty:false};
   }
@@ -61,12 +84,12 @@ export class BrowserRecoveryLocations {
     const entry=this.normalize(observed?.entryUrl??origin,origin);
     const home=this.normalize(origin,origin);requireSafe(entry&&home,'BROWSER_RECOVERY_SCOPE_UNAVAILABLE');
     const notification=new Set([home,entry]),dm=new Set([home,entry]);
-    const account=this.store?.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
-    if(this.store&&!account)return null;
-    requireSafe(!account||account.own_id===ownId,'ACCOUNT_CHANGED');
+    const boundOwnId=this.store?.accountOwnId();
+    if(this.store&&!boundOwnId)return null;
+    requireSafe(!boundOwnId||boundOwnId===ownId,'ACCOUNT_CHANGED');
     if(observed){
       for(const work of observed.works){const url=this.normalize(work.url,origin);if(url)notification.add(url);}
-      if(account&&this.store?.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='discovered_works'").get()){
+      if(boundOwnId&&this.store?.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='discovered_works'").get()){
         const works=this.store.db.prepare("SELECT id,url FROM discovered_works WHERE own_id=? AND state='INCLUDED'")
           .all(ownId) as {id:string;url:string}[];
         for(const work of works){
@@ -142,13 +165,21 @@ export class BrowserRecoveryLocations {
       const scope=await this.scope();if(!scope)return;
       const valid=this.validate(locations,scope);
       const current=valid??{notification:scope.entry,dm:scope.entry};
-      for(const [page,url] of [[owner.notification,current.notification],[owner.dm,current.dm]] as const){
-        if(!allowHeld&&this.store&&readSecurityHold(this.store,page===owner.dm?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION'))continue;
+      let composers:Awaited<ReturnType<typeof recoveryComposerSelectors>>|undefined;
+      const pending:[typeof owner.notification,string][]=[];
+      for(const [channel,page,url] of [['COMMENT_NOTIFICATION',owner.notification,current.notification],['DIRECT_MESSAGE',owner.dm,current.dm]] as const){
+        if(!allowHeld&&this.store&&readSecurityHold(this.store,channel))continue;
         requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
         if(page.url()===url)continue;
-        const navigation=await page.evaluate(inspectRecoveryNavigation,scope.origin);
+        composers??=await recoveryComposerSelectors(this.root);
+        const navigation=await page.evaluate(inspectRecoveryNavigation,{
+          origin:scope.origin,composers:composers[channel],nativeDmComposer:composers.nativeDmComposer,
+        });
         requireSafe(navigation.originMatches,'UNEXPECTED_ORIGIN');
         requireSafe(navigation.empty,'BROWSER_HAS_HUMAN_INPUT');
+        pending.push([page,url]);
+      }
+      for(const [page,url] of pending){
         requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
         await page.goto(url,{waitUntil:'domcontentloaded'});
       }

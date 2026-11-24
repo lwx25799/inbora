@@ -3,7 +3,7 @@ import type {InboundEvent} from '../core/contracts.js';
 import type {DiscoveredPeer} from './observed-reader.js';
 
 /** Viewing-only native identity. Body/media readiness is intentionally not a reply or delivery proof. */
-export function visibleStoredMessage(input:{mapping:ObservationMapping;event:InboundEvent;peer:DiscoveredPeer}):boolean{
+export function visibleStoredMessage(input:{mapping:ObservationMapping;accountId:InboundEvent['accountId'];event:InboundEvent;peer:DiscoveredPeer}):boolean{
   const {mapping:m,event,peer}=input,s=m.selectors;
   const dom={
     securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
@@ -87,7 +87,7 @@ export function visibleStoredMessage(input:{mapping:ObservationMapping;event:Inb
   const first=dom.data(nativeChat,'conversationId'),second=dom.data(nativeChat,'id');
   dom.check((first===undefined||second===undefined||first===second)&&(first??second)===event.conversationId&&event.conversationId===peer.conversationId&&
     dom.data(nativeChat,'_toParticipantSecUserId')===peer.secUid&&dom.one(chat,s.chatTitle).textContent?.trim()===peer.title);
-  dom.check(event.accountId==='account_001'&&event.channel==='DIRECT_MESSAGE'&&event.kind==='DM'&&event.videoId===null&&event.commentId===null&&
+  dom.check(event.accountId===input.accountId&&event.channel==='DIRECT_MESSAGE'&&event.kind==='DM'&&event.videoId===null&&event.commentId===null&&
     event.rootCommentId===undefined&&event.replyToCommentId===undefined&&(event.occurredAtPrecisionMs??1)===1);
   const rows=Array.from(chat.querySelectorAll(s.messages)).filter(dom.visible);dom.check(rows.length<=100);
   const matches=rows.filter(row=>dom.data(dom.data(dom.props(row),'message'),'serverId')===event.platformEventId);dom.check(matches.length<=1);

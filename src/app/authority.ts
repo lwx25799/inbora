@@ -22,6 +22,7 @@ import {
   type AuthorityInternalHooks,
 } from "./authority-guards.js";
 import { cancelUnsubmittedFollowups } from "./followup-verification.js";
+import type { AccountId } from "../contracts/account.js";
 
 export type Permission = "READ" | "EDIT" | "APPROVE" | "SEND" | "CONTROL";
 export interface Operator {
@@ -57,7 +58,9 @@ export class WorkbenchAuthority {
   constructor(
     readonly store: EventStore,
     readonly now: () => number = Date.now,
+    readonly accountId: AccountId = store.accountId,
   ) {
+    store.assertAccount(accountId);
     this.channels = new ChannelAuthority(store, now);
     this.assistant = new LocalAssistantStore(store, now);
     requireSafe(store.db.pragma("user_version", { simple: true }) === 3, "CLIENT_MIGRATION_REQUIRED");
@@ -411,7 +414,7 @@ export class WorkbenchAuthority {
             this.invalidate(e);
           }
         }
-        this.store.audit(paused ? "ACCOUNT_STOPPED" : "ACCOUNT_RESUMED", "account_001");
+        this.store.audit(paused ? "ACCOUNT_STOPPED" : "ACCOUNT_RESUMED", this.accountId);
       })
       .immediate();
   }
@@ -592,6 +595,16 @@ export class WorkbenchAuthority {
         const snapshot = JSON.parse(this.approval(id).snapshot) as TargetSnapshot;
         if (snapshot.manualObservation) assertManualMediaApprovalImpl(this, token, id, snapshot, identity());
         this.store.db.prepare("UPDATE manual_send_commands SET status='PREFLIGHT' WHERE command_id=?").run(id);
+      },
+      beforeSubmit: (intentId: string) => {
+        const row = this.command(id), params = JSON.parse(row.params) as SendParams;
+        requireSafe(row.status === "SENDING" && row.intent_id === intentId && row.event_id === params.eventId &&
+          row.params_digest === digest(params) && row.operator_id === this.operator(token, "SEND").id, "COMMAND_INTENT_CHANGED");
+        const event = this.store.event(row.event_id), draft = this.store.draft(params.draftId);
+        requireSafe(draft.eventId === event.id && draft.version === params.draftVersion && draft.text === params.text, "COMMAND_INTENT_CHANGED");
+        this.store.assertTargetUnpaused(targetKey(event.payload));
+        requireSafe(this.ownership(event).generation === params.generation, "OWNERSHIP_CHANGED");
+        requireSafe(!this.paused(), "ACCOUNT_PAUSED");
       },
       committed: (intentId: string) => {
         this.assistant.commitCommand(id, this.store.event(this.command(id).event_id));

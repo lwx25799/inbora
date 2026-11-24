@@ -2,6 +2,7 @@ import {reportSecurityFailure} from './security-signal.js';
 import { randomUUID } from 'node:crypto';
 import type { Page } from 'playwright';
 import type { DmReplyMapping } from '../config/site-mapping.js';
+import {DEFAULT_ACCOUNT_ID,type AccountId} from '../contracts/account.js';
 import { digest, dmClockToleranceMs, eventBinding, isStrong, isManualMediaCandidate, proofTimeValid, requireSafe, targetKey, validText,
   type InboundEvent, type ReplyAdapter, type SendProof, type TargetSnapshot } from '../core/contracts.js';
 import { ObservedReader } from './observed-reader.js';
@@ -489,9 +490,10 @@ export class ObservedDmReply implements ReplyAdapter {
   private readbackAck=false;
   private readonly submission:SubmissionResponse|null;
   constructor(readonly page:Page,readonly mapping:DmReplyMapping,private readonly receiptTimeoutMs=5000,
-    private readonly options:{manualMedia?:boolean;onContextChanged?:(report:DmContextChange)=>void;onReadbackDiagnostic?:(report:DmReadbackDiagnostic)=>void;readonlySignal?:AbortSignal}={}){
+    private readonly options:{accountId?:AccountId;manualMedia?:boolean;onContextChanged?:(report:DmContextChange)=>void;onReadbackDiagnostic?:(report:DmReadbackDiagnostic)=>void;readonlySignal?:AbortSignal}={}){
     this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;
   }
+  private get accountId(){return this.options.accountId??DEFAULT_ACCOUNT_ID;}
   dispose():void{
     this.submission?.dispose();this.inspectedContext=null;this.preparedContext=null;
     this.preparationToken=null;this.prepared=null;this.pendingEvent=null;this.gateToken=null;
@@ -514,6 +516,7 @@ export class ObservedDmReply implements ReplyAdapter {
   }
   private async frame(event:InboundEvent,action:ReplyCaptureInput['action']='snapshot',text:string|null=null,token:string|null=null,
     before:ReplyCaptureInput['before']=null,editorShape:string|null=null):Promise<ReplyFrame>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
     try{const frame=await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape,manualMedia:this.options.manualMedia===true,preparationToken:this.preparationToken}).catch(error=>reportSecurityFailure(this.page,error));
       requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');return frame;}
@@ -528,20 +531,22 @@ export class ObservedDmReply implements ReplyAdapter {
         nativeKind:frame.media.nativeKind,mediaDigest:digest(frame.media.witness),freshExact:true as const}}:{})};
   }
   async inspect(event:InboundEvent):Promise<TargetSnapshot>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     this.gateToken=null;
     const o=this.mapping.observation,index=o.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
     requireSafe(event.channel==='DIRECT_MESSAGE'&&(isStrong(event)||this.options.manualMedia===true&&isManualMediaCandidate(event))&&index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
-    await new ObservedReader(this.page,o,undefined,this.options.readonlySignal).dm(index,o.peers[index],true);
+    await new ObservedReader(this.page,o,undefined,this.options.readonlySignal,this.accountId).dm(index,o.peers[index],true);
     const frame=await this.frame(event);
     requireSafe(frame.editorText===''||this.prepared?.binding===eventBinding(event)&&this.prepared.text===frame.editorText,'NATIVE_REPLY_EXISTING_DRAFT');
     this.inspectedContext=frame.context;
     return this.snapshot(event,frame);
   }
   async locateSavedDraft(event:InboundEvent,signal:AbortSignal):Promise<void>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     requireSafe(!signal.aborted,'BROWSER_DRAFT_INSPECTION_CANCELLED');
     const o=this.mapping.observation,index=o.peers.findIndex(peer=>peer.uid===event.actorId&&peer.conversationId===event.conversationId);
     requireSafe(event.channel==='DIRECT_MESSAGE'&&isStrong(event)&&index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
-    await new ObservedReader(this.page,o,undefined,signal).dm(index,o.peers[index],true);
+    await new ObservedReader(this.page,o,undefined,signal,this.accountId).dm(index,o.peers[index],true);
     requireSafe(!signal.aborted,'BROWSER_DRAFT_INSPECTION_CANCELLED');
   }
   async prepare(event:InboundEvent,text:string):Promise<void>{
@@ -583,7 +588,8 @@ export class ObservedDmReply implements ReplyAdapter {
     await this.frame(event,'clearSaved',text);
     requireSafe((await this.frame(event)).editorText==='','NATIVE_REPLY_SAVED_DRAFT_NOT_CLEARED');
   }
-  async clickOnce(notBefore?:string):Promise<void>{
+  async clickOnce(notBefore?:string,check?:()=>void):Promise<void>{
+    check?.();
     this.submissionStarted=true;
     const token=this.gateToken;this.gateToken=null;requireSafe(token,'NATIVE_REPLY_NOT_PREPARED');
     if(this.submission){requireSafe(notBefore&&this.pendingEvent&&this.prepared,'NATIVE_REPLY_INTENT_REQUIRED');
@@ -608,6 +614,7 @@ export class ObservedDmReply implements ReplyAdapter {
     }catch(error){this.readFailure(error);throw error;}
   }
   async verifyExisting(event:InboundEvent,text:string,notBefore:string,baselineContextDigest?:string):Promise<SendProof|null>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     this.proofWindowReads=0;this.readbackAck=false;this.readbackStage='RESELECT';
     try{
     requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
@@ -628,7 +635,7 @@ export class ObservedDmReply implements ReplyAdapter {
     this.readbackStage='REFRESH';await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15_000}),this.frame(event,'refresh')]);
     const index=this.mapping.observation.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
     requireSafe(index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
-    this.readbackStage='RESELECT';await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).dm(index,this.mapping.observation.peers[index],true);
+    this.readbackStage='RESELECT';await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal,this.accountId).dm(index,this.mapping.observation.peers[index],true);
     this.readbackStage='REFRESH_POLL';
     const refreshed=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest,hasBaseline);
     if(ack&&this.submission!.current()!==ack)return null;
@@ -671,7 +678,7 @@ export class ObservedDmReply implements ReplyAdapter {
   private async seekClockContext(event:InboundEvent,frame:ReplyFrame,candidate:SendProof,expected:string):Promise<{frame:ReplyFrame;restore:()=>Promise<void>}|null>{
     const viewport=frame.scroll,peer=this.mapping.observation.peers.find(peer=>peer.uid===event.actorId&&peer.conversationId===event.conversationId);
     if(!viewport||!peer||frame.editorText!=='')return null;
-    const reader=new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal),step=Math.max(1,Math.floor(viewport.viewport*0.8));
+    const reader=new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal,this.accountId),step=Math.max(1,Math.floor(viewport.viewport*0.8));
     const candidates=[Math.max(viewport.minimum,viewport.top-step),Math.min(viewport.maximum,viewport.top+step)];
     for(const top of new Set(candidates)){
       if(top===viewport.top||this.proofWindowReads>=2)continue;this.proofWindowReads++;this.readDiagnostic('CONTEXT_WINDOW','CONTEXT_INCOMPLETE');

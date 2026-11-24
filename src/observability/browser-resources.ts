@@ -2,10 +2,9 @@ import {lstat,mkdir,rename,unlink,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {performance} from 'node:perf_hooks';
 import {BrowserProcessSampler,type BrowserProcessResult} from './browser-metrics.js';
-import {browserResourceReasons,type BrowserResourceLatest,type BrowserResourceReason,type BrowserResourcesSnapshot,type BrowserResourceWindow} from './browser-resource-contracts.js';
+import {browserResourceReasons,type BrowserResourceIdentity,type BrowserResourceLatest,type BrowserResourceReason,type BrowserResourcesSnapshot,type BrowserResourceWindow} from './browser-resource-contracts.js';
 
-export type {BrowserResourcesSnapshot} from './browser-resource-contracts.js';
-export interface BrowserResourceIdentity {open:boolean;epoch:number;mode:'headed'|'headless';pageCount:number}
+export type {BrowserResourceIdentity,BrowserResourcesSnapshot} from './browser-resource-contracts.js';
 export interface BrowserResourcesOptions {
   root:string;identity:()=>BrowserResourceIdentity;now?:()=>number;
   sample?:(signal:AbortSignal)=>Promise<BrowserProcessResult>;onUpdated?:()=>void;

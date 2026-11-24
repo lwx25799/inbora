@@ -9,6 +9,9 @@ import { migrateAutomation } from "../storage/automation-migration.js";
 import { runtimeRoot, initRuntime, loadRuntime } from "../config/runtime.js";
 import { requireSafe } from "../core/contracts.js";
 import { BrowserService } from "./browser-service.js";
+import { DEFAULT_ACCOUNT_ID } from "../contracts/account.js";
+import { DouyinPlatformConnector } from "../platform/douyin-platform-connector.js";
+import { PlatformConnectorRegistry } from "../platform/platform-connector-registry.js";
 import { ClientService, clientError } from "./service.js";
 import { isReadOnlySidecarCommand } from "./service-guards.js";
 import { protocolVersion,commandSchema } from "./contracts.js";
@@ -86,7 +89,7 @@ async function connect(raw: unknown): Promise<unknown> {
     }
     await loadRuntime(root);
     requireSafe(!closing, 'CLIENT_CLOSING');
-    store = new EventStore(join(root, "poc.sqlite"), c.initialize);
+    store = new EventStore(join(root, "poc.sqlite"), c.initialize, undefined, DEFAULT_ACCOUNT_ID);
     await migrateClient(
       store,
       join(root, "backups", `client-v2-${randomUUID()}.sqlite`),
@@ -94,7 +97,10 @@ async function connect(raw: unknown): Promise<unknown> {
     requireSafe(!closing, 'CLIENT_CLOSING');
     await migrateAutomation(store,join(root,'backups',`automation-before-${randomUUID()}.sqlite`));
     requireSafe(!closing, 'CLIENT_CLOSING');
-    service = new ClientService(store, new BrowserService(root), undefined, Date.now, firstRunAt);
+    const connector = new DouyinPlatformConnector(new BrowserService(root, undefined, store.accountId));
+    const registry = new PlatformConnectorRegistry();
+    registry.register(connector);
+    service = new ClientService(store, registry.resolve(connector.platformId, store.accountId), undefined, Date.now, firstRunAt);
     await service.loadSettings();
     requireSafe(!closing, 'CLIENT_CLOSING');
     assistant=new AssistantFacade(service);

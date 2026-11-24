@@ -1,10 +1,11 @@
 import type { ObservationMapping } from '../config/site-mapping.js';
+import type { AccountId } from '../contracts/account.js';
 import type {InboundEvent} from '../core/contracts.js';
 import type {CommentThreadWindow} from './comment-thread-capture.js';
 
 export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string;activity?:string }
 export interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'commentDocument' | 'diagnostic' | 'dmScroll'; index: number;
-  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; commentStay?:boolean;
+  accountId: AccountId; evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; commentStay?:boolean;
   commentRootId?:string;commentChildOffset?:number;conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number; collectionPartial?:boolean }
 export type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'|'collectionPartial'|'navigationUrl'|'commentRootId'|'commentChildOffset'|'commentOffset'|'commentStay'>;
 interface CommentScrollShape {depth:number;tag:string;overflowY:string;clientHeight:number;scrollHeight:number;scrollTop:number;visible:boolean;containsList:boolean}
@@ -46,7 +47,7 @@ export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; 
 
 /** Fixed paths in the currently rendered, authorized components; never calls website functions or getters. */
 export function captureObserved(input: CaptureInput): ObservationBatch {
-  const { mapping: m, channel, index, evidenceId } = input; const s = m.selectors;
+  const { mapping: m, channel, index, accountId, evidenceId } = input; const s = m.selectors;
   const dom = {
     securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
       if(value)return;
@@ -696,7 +697,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
         const parsed=dom.data(message,'_parsedContent');
         dom.check(text===dom.data(parsed,'text'),'OBSERVATION_MESSAGE_TEXT_CONFLICT');
       }
-      events.push({ accountId:'account_001',channel:'DIRECT_MESSAGE',platformEventId:dom.id(dom.data(message,'serverId')),
+      events.push({ accountId,channel:'DIRECT_MESSAGE',platformEventId:dom.id(dom.data(message,'serverId')),
         actorId:sender as string,actorName:fromMe ? null : peer!.title,text,occurredAt:dom.time(dom.data(message,'createdAt'),false),
         videoId:null,commentId:null,conversationId:peer!.conversationId,direction:fromMe?'OUTGOING':'INCOMING',kind:'DM',
         evidenceId,discovery:'DIRECT_MESSAGE',...(contentType?{contentType,observationIssue:'DM_CONTENT_UNVERIFIED' as const}:{}) });
@@ -758,7 +759,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       if(parent&&parentVerified&&verified)relationRows.push({native:comment,id:id!,root:rootId!,own:nativeUid===m.self.uid});
       if(!verified||!parentVerified)unsupported++;
       bindings.push({targetKey:`comment:${work!.id}:${id}`,uid:peer.uid,secUid:peer.secUid,title:peer.title,conversationId:null});
-      events.push({ accountId:'account_001',channel:'COMMENT_NOTIFICATION',platformEventId:id,actorId:peer.uid,
+      events.push({ accountId,channel:'COMMENT_NOTIFICATION',platformEventId:id,actorId:peer.uid,
         actorName:peer.title,text,occurredAt:dom.time(dom.data(comment,'createTime'),true),occurredAtPrecisionMs:1000,videoId:work!.id,commentId:id,
         conversationId:null,direction:'INCOMING',kind:parent?'REPLY':'COMMENT',evidenceId,discovery:'ALLOWED_WORK',
         ...(parent&&parentVerified?{rootCommentId:rootId!,replyToCommentId:id!}:{}),

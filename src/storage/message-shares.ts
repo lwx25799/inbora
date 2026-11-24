@@ -4,8 +4,9 @@ import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
 import {digest,requireSafe,type InboundEvent} from '../core/contracts.js';
 import {runtimeSchema} from '../config/runtime.js';
+import type {MessageShare} from '../contracts/inbox.js';
+export type {MessageShare} from '../contracts/inbox.js';
 
-export interface MessageShare {kind:'DOUYIN_WORK';url:string;workId:string}
 const shareSchema=z.object({kind:z.literal('DOUYIN_WORK'),url:z.string().regex(/^https:\/\/www\.douyin\.com\/(?:video|note)\/[0-9]{1,64}$/u),
   workId:z.string().regex(/^[0-9]{1,64}$/u)}).strict().refine(value=>value.url.endsWith('/'+value.workId));
 const manifestSchema=z.object({version:z.literal(1),key:z.string().regex(/^[a-f0-9]{64}$/u),share:shareSchema}).strict();

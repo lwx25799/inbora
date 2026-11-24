@@ -8,7 +8,9 @@ import { HumanFollowups } from "./human-followup.js";
 import { WorkbenchQueries } from "./workbench-queries.js";
 import { readOrRefreshPreview } from "./media-preview-request.js";
 import { WorkbenchAuthority } from "./authority.js";
-import { BrowserService } from "./browser-service.js";
+import type { BrowserService } from "./browser-service.js";
+import { DouyinPlatformConnector } from "../platform/douyin-platform-connector.js";
+import type { PlatformConnector } from "../platform/platform-connector.js";
 import { DeepSeekProvider } from "../ai/deepseek.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type { CollectionScheduler } from "./collection-scheduler.js";
@@ -49,6 +51,8 @@ export function clientError(error: unknown): string {
 
 /** Transport-neutral application service. Short controls never wait behind browser/model operations. */
 export class ClientService {
+  readonly browser: PlatformConnector;
+  readonly accountId: PlatformConnector["accountId"];
   private readonly knowledge: ReplyKnowledgeService;
   private readonly followups: HumanFollowups;
   private readonly queries: WorkbenchQueries;
@@ -88,11 +92,14 @@ export class ClientService {
   };
   constructor(
     readonly store: EventStore,
-    readonly browser: BrowserService,
+    connection: BrowserService | PlatformConnector,
     private readonly provider = new DeepSeekProvider(),
     now: () => number = Date.now,
     startedAt = now(),
   ) {
+    const browser = this.browser = "platformId" in connection ? connection : new DouyinPlatformConnector(connection);
+    this.accountId = browser.accountId;
+    store.assertAccount(this.accountId);
     this.startedAt = startedAt;
     browser.bindStore(store);
     browser.onManualRecoveryClosed = () => {
@@ -107,7 +114,7 @@ export class ClientService {
         if (!this.closing) this.emit("diagnostics_updated");
       },
     });
-    this.authority = new WorkbenchAuthority(store, now);
+    this.authority = new WorkbenchAuthority(store, now, this.accountId);
     this.authority.recover();
     this.knowledge = new ReplyKnowledgeService(store, this.authority, browser.root, () => ({
       settings: this.settings,
@@ -242,7 +249,7 @@ export class ClientService {
       try {
         this.knowledge.collectIfDue();
       } catch {
-        this.store.audit("KNOWLEDGE_COLLECTION_DEFERRED", "account_001");
+        this.store.audit("KNOWLEDGE_COLLECTION_DEFERRED", this.accountId);
       }
     }
     const idle =
@@ -724,13 +731,15 @@ export class ClientService {
     });
   }
   private deliver(token: string, id: string, p: SendParams): Promise<void> {
-    return deliverCommand(this.deliveryContext(), token, id, p);
+    const automatic=this.automation&&this.store.db.prepare('SELECT command_id FROM policy_commands WHERE command_id=?').get(id);
+    return deliverCommand(this.deliveryContext(),token,id,p,automatic?this.automaticAbort.signal:undefined);
   }
   async drain(): Promise<void> {
     await Promise.allSettled([...this.pending]);
   }
   async close(): Promise<void> {
     this.closing = true;
+    this.onlineKeeper.abort();
     await this.knowledge.cancelActiveParse();
     await this.browser.closeManualRecovery();
     const resourcesClosed = this.browserResources.close();
@@ -740,7 +749,6 @@ export class ClientService {
     this.key = "";
     this.modelAuthorized = false;
     this.modelAbort.abort();
-    this.onlineKeeper.abort();
     clearInterval(this.leaseTimer);
     this.dialogs.clear();
     clearInterval(this.autoTimer);

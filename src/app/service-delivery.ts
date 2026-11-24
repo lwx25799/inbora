@@ -4,7 +4,7 @@ import type { EventStore } from "../storage/store.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import { runtimePerformance } from "../observability/runtime-performance.js";
 import type { WorkbenchAuthority } from "./authority.js";
-import type { BrowserService } from "./browser-service.js";
+import type { PlatformConnector } from "../platform/platform-connector.js";
 import type { VerificationScheduler } from "./verification-scheduler.js";
 import type { SendParams } from "./contracts.js";
 import { findUncertainFollowupForEvent, reconcileUncertainFollowup } from "./followup-verification.js";
@@ -12,7 +12,7 @@ import { findUncertainFollowupForEvent, reconcileUncertainFollowup } from "./fol
 export interface DeliveryContext {
   store: EventStore;
   authority: WorkbenchAuthority;
-  browser: BrowserService;
+  browser: PlatformConnector;
   getAutomation(): AutomationStore | null;
   getVerification(): VerificationScheduler | null;
   isClosing(): boolean;
@@ -29,21 +29,34 @@ export async function deliverCommand(
   token: string,
   id: string,
   p: SendParams,
+  signal?:AbortSignal,
 ): Promise<void> {
-  let dispose = () => {};
+  let dispose:()=>void|Promise<void> = () => {};
   const end = runtimePerformance.start("DELIVERY", ctx.store.event(p.eventId).payload.channel);
   try {
     const e = ctx.store.event(p.eventId);
-    const handle = await ctx.browser.adapter(e.payload, ctx.store, undefined, {
+    const epoch = ctx.browser.ownerEpoch;
+    const handle = await ctx.browser.adapter(e.payload, ctx.store, signal, {
       manualMedia: !!ctx.store.draft(p.draftId).approval?.snapshot.manualObservation,
     });
     dispose = handle.dispose;
     await ctx.browser.refreshIdentity(e.payload.channel);
-    const outcome = await new SendCoordinator(ctx.store, ctx.browser.actor).send(
+    requireSafe(ctx.browser.ownerEpoch === epoch, "BROWSER_CLOSED");
+    const guard = ctx.authority.dispatchGuard(token, id, () => ctx.browser.identity(e.payload.channel));
+    const outcome = await new SendCoordinator(ctx.store, ctx.browser.actor, ctx.browser.accountId).send(
       p.draftId,
       handle.adapter,
       true,
-      ctx.authority.dispatchGuard(token, id, () => ctx.browser.identity(e.payload.channel)),
+      { ...guard, beforeSubmit: intentId => {
+        requireSafe(!ctx.isClosing(), 'CLIENT_CLOSING');
+        requireSafe(!signal?.aborted,'COLLECTION_CANCELLED');
+        requireSafe(ctx.browser.ownerEpoch === epoch, "BROWSER_CLOSED");
+        if(e.payload.channel==="COMMENT_NOTIFICATION")guard.beforeSubmit(intentId);
+      }, check: () => {
+        requireSafe(!ctx.isClosing(), 'CLIENT_CLOSING');
+        requireSafe(ctx.browser.ownerEpoch === epoch, "BROWSER_CLOSED");
+        guard.check();
+      } },
     );
     const receipt = ctx.store.receiptForEvent(e.id) as { proof_ref: string } | undefined;
     ctx.authority.finish(id, outcome, outcome === "UNCERTAIN" ? (receipt?.proof_ref ?? null) : null);
@@ -65,7 +78,7 @@ export async function deliverCommand(
       if (d.status === "APPROVED") ctx.store.invalidateApproval(d.id);
     }
   } finally {
-    dispose();
+    await dispose();
     ctx.emit("send_status_updated");
   }
 }
@@ -117,7 +130,7 @@ export async function openTargetCommand(
     await ctx.browser.actor.run(() => handle.adapter.inspect(event.payload));
     return { opened: true };
   } finally {
-    handle.dispose();
+    await handle.dispose();
   }
 }
 
@@ -142,7 +155,7 @@ export async function previewSendCommand(
       account: snapshot.ownId,
     };
   } finally {
-    handle.dispose();
+    await handle.dispose();
   }
 }
 

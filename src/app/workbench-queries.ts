@@ -2,13 +2,13 @@ import { isStrong, targetKey, type Channel } from '../core/contracts.js';
 import type { EventStore } from '../storage/store.js';
 import type { AutomationStore } from '../storage/automation-store.js';
 import type { WorkbenchAuthority } from './authority.js';
-import type { BrowserService } from './browser-service.js';
+import type { PlatformConnector } from '../platform/platform-connector.js';
 import type { AiSettings, InboxSync, ClientCommand } from './contracts.js';
 import type { CollectionScheduler } from './collection-scheduler.js';
 import {InboxQueries,inboxGroupKey} from './inbox-queries.js';
 import {InboxProjection,type ReplyStatus} from './inbox-projection.js';
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
-import {HumanFollowups} from './human-followup.js';
+import {HumanFollowups,type FollowupConnector} from './human-followup.js';
 import {readCommentThreadContext,commentThreadPage,commentThreadGroupKey} from '../storage/comment-thread-context.js';
 import {hasSuggestionAuthorization,suggestionEligibility,type SuggestionState} from './suggestion-eligibility.js';
 import {readVerificationView} from './verification-view.js';
@@ -30,7 +30,8 @@ interface ViewState {
 
 /** Read-only product views; raw intents, receipts and freezes remain authoritative. */
 export class WorkbenchQueries {
-  constructor(readonly store: EventStore, readonly authority: WorkbenchAuthority, readonly browser: BrowserService) {}
+  constructor(readonly store: EventStore, readonly authority: WorkbenchAuthority,
+    readonly browser: FollowupConnector & Pick<PlatformConnector, 'root' | 'status'>) {}
   replyStatus(eventId:string,_status:string):ReplyStatus {
     const event=this.store.event(eventId);
     return new InboxProjection(this.store,event.payload.channel,{key:targetKey(event.payload),accountId:event.payload.accountId,
@@ -112,16 +113,14 @@ export class WorkbenchQueries {
         {event_id:string;id:string;version:number;text:string;channel:Channel}[]).some(row=>
           this.authority.trialAvailable(row.event_id,row.id,row.version,row.text,this.browser.identity(row.channel)));
     const effectiveMode=['MANUAL','AI_ASSISTED'].includes(configuredMode)&&!anySendAvailable?'DRAFT_ONLY':configuredMode;
-    const account = this.store.db
-      .prepare("SELECT own_id FROM accounts WHERE id=?")
-      .get("account_001") as { own_id: string } | undefined;
+    const ownId = this.store.accountOwnId(this.authority.accountId);
     return {
       runtime: this.browser.root,
       securityRuntime:securityRuntime(null),
       securityHolds:(['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as const).flatMap(channel=>{
         const hold=readSecurityHold(this.store,channel);return hold?[hold]:[];
       }),
-      account: account ? { id: "account_001", identity: account.own_id } : null,
+      account: ownId ? { id: this.authority.accountId, identity: ownId } : null,
       operator: {
         id: op.id,
         permissions: op.permissions,

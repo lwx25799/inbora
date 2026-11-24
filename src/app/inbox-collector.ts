@@ -98,14 +98,14 @@ export class InboxCollector {
     if(display&&(display.purpose!=='DISPLAY'||trigger!=='SELECTION'||this.priority))return false;
     if(this.disposed||state.emergencyStopped||!state.collection?.inbox||state.collection.ownId!==ownId||ownId!==this.mapping.self.uid||
       this.lastPriority?.id===conversationId&&this.data.now()-this.lastPriority.at<objectRetryMs)return false;
-    const own=this.data.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
+    const boundOwnId=this.data.store.accountOwnId(this.data.accountId);
     const peer=this.data.store.db.prepare('SELECT own_id,sec_uid FROM discovered_conversations WHERE id=?').get(conversationId) as {own_id:string;sec_uid:string}|undefined;
     const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
-    if(own?.own_id!==ownId||peer?.own_id!==ownId||!peer.sec_uid||cursor.deferred.some(item=>item.id===conversationId&&item.until>this.data.now()))return false;
+    if(boundOwnId!==ownId||peer?.own_id!==ownId||!peer.sec_uid||cursor.deferred.some(item=>item.id===conversationId&&item.until>this.data.now()))return false;
     if(eventId){
       let event;try{event=display?resolvePreviewDisplay(this.data.store,eventId,display.source).event:this.data.store.event(eventId).payload;}catch{return false;}
-      if(event.accountId!=='account_001'||event.channel!=='DIRECT_MESSAGE'||event.kind!=='DM'||!display&&event.direction!=='INCOMING'||
+      if(event.accountId!==this.data.accountId||event.channel!=='DIRECT_MESSAGE'||event.kind!=='DM'||!display&&event.direction!=='INCOMING'||
         event.conversationId!==conversationId||!event.actorId||!display&&event.actorId===ownId||!event.platformEventId||
         !/^[1-9]\d{0,63}$/u.test(event.platformEventId)||!event.occurredAt)return false;
     }
@@ -120,7 +120,7 @@ export class InboxCollector {
     const current=this.data.store.db.prepare('SELECT uid,sec_uid,title FROM discovered_conversations WHERE own_id=? AND id=?')
       .get(this.mapping.self.uid,id) as {uid:string|null;sec_uid:string;title:string}|undefined;
     requireSafe(current,'OBSERVATION_CONVERSATION_CHANGED');
-    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal),peer={uid:current.uid,secUid:current.sec_uid,title:current.title,conversationId:id};
+    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal,this.data.accountId),peer={uid:current.uid,secUid:current.sec_uid,title:current.title,conversationId:id};
     let top:number|undefined,canRestore=false,restoring=false;
     let targetResult:PreviewTargetResult={found:false,windows:0,persisted:0,reason:'INTERRUPTED'};
     try{
@@ -184,7 +184,7 @@ export class InboxCollector {
         this.mapping.self.uid,evidence,new Date(this.data.now()).toISOString(),this.data.state().startedAt);
       qualifyLateArrivals(this.data,{source,scope,ownId:this.mapping.self.uid,workIds:this.mapping.works.map(work=>work.id),events:batch.events,evidence,signal});
       if(source==='dm')new ChatMessageStore(this.data.store).observe(batch.events,this.mapping.self.uid,this.data.state().startedAt,this.data.now());
-      if(displayChanged)this.data.store.audit('MESSAGE_DISPLAY_CHANGED',digest(['account_001','dm:'+scope]));
+      if(displayChanged)this.data.store.audit('MESSAGE_DISPLAY_CHANGED',digest([this.data.accountId,'dm:'+scope]));
     }).immediate();
     if(source==='dm')classifyStoredShares(this.data.store,this.root,scope);
     requireSafe(!batch.incomplete||!!dmWindowCoverage(batch,this.data.state().startedAt),'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
@@ -331,7 +331,7 @@ export class InboxCollector {
     return reader.dmWindow(peer,top,true);
   }
   private async dm(signal:AbortSignal):Promise<void> {
-    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal);
+    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal,this.data.accountId);
     const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
     const park=(sweep:DmSweep)=>{cursor.parked=cursor.parked.filter(item=>item.peer.conversationId!==sweep.peer.conversationId);cursor.parked.push(sweep);};
@@ -442,7 +442,7 @@ export class InboxCollector {
     const row=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='works'").get() as {cursor_json:string};
     const cursor=worksCursorSchema.parse(JSON.parse(row.cursor_json));
     if(cursor.phase==='discovery') {
-      const reader=new ObservedReader(this.owner.notification,this.mapping,undefined,signal);
+      const reader=new ObservedReader(this.owner.notification,this.mapping,undefined,signal,this.data.accountId);
       const result=await this.discovery.scan(reader,cursor.first,signal,cursor.pending as PendingWork[]);
       this.check('works',signal);
       for(const work of result.works)this.data.registerWork(work);
@@ -473,7 +473,7 @@ export class InboxCollector {
           if(typeof more==='boolean')this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
         };
         let batch:ObservationBatch|undefined,threadsPending=false,persisted=false,freshDocumentReused=false;
-        const reader=new ObservedReader(this.owner.notification,mapping,undefined,signal);
+        const reader=new ObservedReader(this.owner.notification,mapping,undefined,signal,this.data.accountId);
         try{
         try{
           const read=await reader.comments(0,true,headRead?0:progress?.scroll_top??0,{holdScroll:true,

@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import { z } from 'zod';
 import {readCommentThreadContext} from './comment-thread-context.js';
 import {assertSecurityChannelClear} from './security-holds.js';
+import { DEFAULT_ACCOUNT_ID, type AccountId } from '../contracts/account.js';
 import {
   digest, dmClockToleranceMs, eventBinding, eventSchema, isEligible, isManualMediaCandidate, isStrong, requireSafe, targetKey, validText,
   validManualMediaProof,
@@ -12,8 +13,13 @@ import {
 } from '../core/contracts.js';
 
 export interface EventRow { id: string; payload: string; binding: string; status: StoredEvent['status'] }
-export function decodeEventRow(row:EventRow):StoredEvent {
-  return {id:row.id,payload:eventSchema.parse(JSON.parse(row.payload)),binding:row.binding,status:row.status};
+function decodeAccountEvent(payload: string, accountId: AccountId): InboundEvent {
+  const event = eventSchema.parse(JSON.parse(payload));
+  requireSafe(event.accountId === accountId, 'ACCOUNT_CHANGED');
+  return event;
+}
+export function decodeEventRow(row:EventRow, accountId: AccountId = DEFAULT_ACCOUNT_ID):StoredEvent {
+  return {id:row.id,payload:decodeAccountEvent(row.payload, accountId),binding:row.binding,status:row.status};
 }
 interface DraftRow { id: string; event_id: string; text: string; model: string; version: number;
   status: Draft['status']; approval: string | null }
@@ -24,7 +30,10 @@ export type RetryGrant=z.infer<typeof retryGrantSchema>;
 
 export class EventStore {
   readonly db: Database.Database;
-  constructor(file: string, initialize = false, private readonly now: () => string = () => new Date().toISOString()) {
+  constructor(file: string, initialize = false, private readonly now: () => string = () => new Date().toISOString(),
+    readonly accountId: AccountId = DEFAULT_ACCOUNT_ID) {
+    // Both legacy schema versions have the same single-account storage constraint.
+    requireSafe(accountId === DEFAULT_ACCOUNT_ID, 'ACCOUNT_UNSUPPORTED_SCHEMA3');
     requireSafe(initialize || existsSync(file), 'DATABASE_MISSING_USE_INIT');
     if (initialize) mkdirSync(dirname(file), { recursive: true });
     this.db = new Database(file, { fileMustExist: !initialize });
@@ -76,12 +85,25 @@ export class EventStore {
     }).immediate();
   }
   close(): void { this.db.close(); }
-  bindAccount(ownId: string): void {
-    requireSafe(ownId.length > 0, 'ACCOUNT_REQUIRED');
+  assertAccount(accountId: AccountId): void {
+    requireSafe(accountId === this.accountId, 'ACCOUNT_CHANGED');
+  }
+  accountOwnId(accountId: AccountId = this.accountId): string | undefined {
+    this.assertAccount(accountId);
+    const row = this.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(accountId) as { own_id: string } | undefined;
+    return row?.own_id;
+  }
+  bindAccount(ownId: string): void;
+  bindAccount(accountId: AccountId, ownId: string): void;
+  bindAccount(id: string, identity?: string): void {
+    const accountId = arguments.length === 1 ? this.accountId : id;
+    const ownId = arguments.length === 1 ? id : identity;
+    this.assertAccount(accountId);
+    requireSafe(typeof ownId === 'string' && ownId.trim().length > 0, 'ACCOUNT_REQUIRED');
     this.db.transaction(() => {
-      const row = this.db.prepare('SELECT own_id FROM accounts WHERE id=?').get('account_001') as { own_id: string } | undefined;
-      requireSafe(!row || row.own_id === ownId, 'ACCOUNT_CHANGED');
-      this.db.prepare('INSERT OR IGNORE INTO accounts VALUES (?,?)').run('account_001', ownId);
+      const bound = this.accountOwnId(accountId);
+      requireSafe(bound === undefined || bound === ownId, 'ACCOUNT_CHANGED');
+      this.db.prepare('INSERT OR IGNORE INTO accounts VALUES (?,?)').run(accountId, ownId);
     }).immediate();
   }
   audit(code: string, id: string, detail: Record<string, number | boolean> = {}): void {
@@ -90,8 +112,9 @@ export class EventStore {
   }
   observe(channel: Channel, scope: string, candidates: InboundEvent[], ownId: string, evidenceRef: string, observedAt = this.now(), firstBoundary?: number): string[] {
     return this.db.transaction(() => {
-      this.bindAccount(ownId);
+      this.bindAccount(this.accountId, ownId);
       const events = candidates.map(e => eventSchema.parse(e));
+      for (const event of events) this.assertAccount(event.accountId);
       requireSafe(events.every(e => e.channel === channel), 'CHANNEL_MISMATCH');
       const cursor = this.db.prepare('SELECT cursor_data FROM cursors WHERE channel=? AND scope=?').get(channel, scope) as {cursor_data:string}|undefined;
       const priorWatermark = cursor ? z.object({baselineTime:z.number().finite(),highWater:z.number().finite(),bindings:z.array(z.string())}).parse(JSON.parse(cursor.cursor_data)) : null;
@@ -161,11 +184,13 @@ export class EventStore {
     }).immediate();
   }
   event(id: string): StoredEvent {
-    const row = this.db.prepare('SELECT id,payload,binding,status FROM inbound_events WHERE id=?').get(id) as EventRow | undefined;
+    const row = this.db.prepare('SELECT id,payload,binding,status FROM inbound_events WHERE id=? AND account_id=?')
+      .get(id, this.accountId) as EventRow | undefined;
     requireSafe(row, 'EVENT_NOT_FOUND');
-    return decodeEventRow(row);
+    return decodeEventRow(row, this.accountId);
   }
   assertModelObservation(event:InboundEvent):void {
+    this.assertAccount(event.accountId);
     const dm=event.channel==='DIRECT_MESSAGE';
     // DM quality belongs to one native message; callers separately validate every bounded history item.
     const scope=dm?'e.source_key=?':'e.target_key=?';
@@ -177,17 +202,18 @@ export class EventStore {
     requireSafe(!event.observationIssue&&!event.contentType&&!unresolved,dm?'DM_CONTENT_UNVERIFIED':'COMMENT_TEXT_UNVERIFIED');
   }
   events(): StoredEvent[] {
-    return (this.db.prepare('SELECT id,payload,binding,status FROM inbound_events ORDER BY rowid').all() as EventRow[]).map(decodeEventRow);
+    return (this.db.prepare('SELECT id,payload,binding,status FROM inbound_events WHERE account_id=? ORDER BY rowid')
+      .all(this.accountId) as EventRow[]).map(row => decodeEventRow(row, this.accountId));
   }
   firstAutomaticCandidate(channels:Channel[],matches:(event:StoredEvent)=>boolean):StoredEvent|undefined {
     const statement=this.db.prepare(`SELECT e.id,e.payload,e.binding,e.status FROM inbound_events e
-      WHERE e.status='AWAITING_DRAFT' AND e.channel IN (${channels.map(()=>'?').join(',')})
+      WHERE e.account_id=? AND e.status='AWAITING_DRAFT' AND e.channel IN (${channels.map(()=>'?').join(',')})
       AND NOT EXISTS(SELECT 1 FROM automation_jobs j WHERE j.event_id=e.id)
       AND NOT EXISTS(SELECT 1 FROM reply_drafts d WHERE d.event_id=e.id)
       AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id) ORDER BY e.rowid`);
     // A for-of return closes the SQLite iterator before its caller writes a job or starts I/O.
-    for(const row of statement.iterate(...channels) as IterableIterator<EventRow>){
-      const event=decodeEventRow(row);if(matches(event))return event;
+    for(const row of statement.iterate(this.accountId,...channels) as IterableIterator<EventRow>){
+      const event=decodeEventRow(row, this.accountId);if(matches(event))return event;
     }
     return undefined;
   }
@@ -223,8 +249,8 @@ export class EventStore {
       requireSafe(d.version === expectedVersion && d.text === expectedText, 'DRAFT_CHANGED');
       requireSafe(snapshot.accountId === e.payload.accountId && snapshot.targetKey === targetKey(e.payload) &&
         snapshot.eventBinding === e.binding && (isStrong(e.payload)||media), 'TARGET_CHANGED');
-      const account = this.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(e.payload.accountId) as { own_id: string };
-      requireSafe(snapshot.ownId === account.own_id, 'ACCOUNT_CHANGED');
+      const ownId = this.accountOwnId(e.payload.accountId);
+      requireSafe(ownId && snapshot.ownId === ownId, 'ACCOUNT_CHANGED');
       const approval = { snapshot, textDigest: digest(d.text), version: d.version };
       this.db.prepare("UPDATE reply_drafts SET status='APPROVED',approval=?,approved_at=? WHERE id=?")
         .run(JSON.stringify(approval), new Date().toISOString(), id);
@@ -302,11 +328,14 @@ export class EventStore {
     });
   }
   assertSendable(eventId: string): void {
-    const e = this.event(eventId); const key = targetKey(e.payload);
-    requireSafe(!(this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as { paused: number } | undefined)?.paused, 'TARGET_PAUSED');
+    const e = this.event(eventId);
+    this.assertTargetUnpaused(targetKey(e.payload));
     requireSafe(e.status === 'APPROVED', 'EVENT_NOT_APPROVED');
     requireSafe(!this.sendFrozen(eventId), 'TARGET_FROZEN');
     requireSafe(!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(eventId), 'INTENT_EXISTS');
+  }
+  assertTargetUnpaused(key:string):void {
+    requireSafe(!(this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as {paused:number}|undefined)?.paused,'TARGET_PAUSED');
   }
   hasIntentForDraft(draftId:string):boolean {
     return !!this.db.prepare('SELECT id FROM send_intents WHERE draft_id=?').get(draftId);
@@ -396,6 +425,16 @@ export class EventStore {
     const row=this.db.prepare('SELECT attempt_started_at FROM send_intents WHERE id=?').get(intentId) as {attempt_started_at:string}|undefined;
     requireSafe(row,'INTENT_NOT_FOUND');return row.attempt_started_at;
   }
+  assertIntentDispatch(intentId:string,draft:Draft,snapshot:TargetSnapshot):void{
+    const event=this.event(draft.eventId),current=this.draft(draft.id);
+    this.assertTargetUnpaused(targetKey(event.payload));
+    requireSafe(event.status==='INTENT_RECORDED'&&event.binding===snapshot.eventBinding&&
+      current.status==='APPROVED'&&current.version===draft.version&&current.text===draft.text&&
+      digest(current.approval)===digest(draft.approval)&&
+      this.db.prepare(`SELECT id FROM send_intents WHERE id=? AND event_id=? AND draft_id=? AND target_key=?
+        AND target_digest=? AND text_digest=? AND status='INTENT_RECORDED'`)
+        .get(intentId,event.id,draft.id,snapshot.targetKey,digest(snapshot),digest(draft.text)), 'INTENT_BINDING_CHANGED');
+  }
   private retryAudit(id:string,type:string,entityId:string,detail:Record<string,unknown>):void{
     this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)').run(id,new Date().toISOString(),type,entityId,JSON.stringify(detail));
   }
@@ -420,9 +459,9 @@ export class EventStore {
         'MANUAL_RETRY_REQUIRES_UNKNOWN_COMMENT');
       requireSafe(snapshot.accountId===event.payload.accountId&&snapshot.eventBinding===event.binding&&snapshot.targetKey===key&&snapshot.composerKey===key,
         'MANUAL_RETRY_BINDING_CHANGED');
-      requireSafe((this.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(event.payload.accountId) as {own_id:string}|undefined)?.own_id===snapshot.ownId,
+      requireSafe(this.accountOwnId(event.payload.accountId)===snapshot.ownId,
         'MANUAL_RETRY_ACCOUNT_CHANGED');
-      requireSafe(!(this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as {paused:number}|undefined)?.paused,'TARGET_PAUSED');
+      this.assertTargetUnpaused(key);
       requireSafe(!this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_INTENT' AND json_extract(detail_redacted,'$.previousIntentId')=?").get(prior.id),
         'MANUAL_RETRY_ALREADY_ATTEMPTED');
       const id=randomUUID(),grant:RetryGrant={eventId:event.id,draftId:draft.id,previousIntentId:prior.id,version:draft.version,
@@ -438,16 +477,25 @@ export class EventStore {
       this.retryAudit(id,'MANUAL_RETRY_INTENT',grantId,{...grant,real});return id;
     }).immediate();
   }
-  assertCommentRetryAvailable(grantId:string):RetryGrant{
+  assertCommentRetryAvailable(grantId:string,recordedIntentId?:string):RetryGrant{
     requireSafe(this.db.pragma('user_version',{simple:true})!==3,'CLIENT_UNKNOWN_READ_ONLY');
     const grant=this.retryGrant(grantId),draft=this.draft(grant.draftId),event=this.event(grant.eventId),key=targetKey(event.payload);
+    assertSecurityChannelClear(this,event.payload.channel);
     const prior=this.db.prepare('SELECT status,event_id FROM send_intents WHERE id=?').get(grant.previousIntentId) as {status:string;event_id:string}|undefined;
     requireSafe(event.status==='UNCERTAIN'&&prior?.status==='UNCERTAIN'&&prior.event_id===event.id,'MANUAL_RETRY_PREVIOUS_STATE_CHANGED');
     requireSafe(draft.eventId===event.id&&draft.version===grant.version&&digest(draft.text)===grant.textDigest,'MANUAL_RETRY_BINDING_CHANGED');
-    requireSafe(!(this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as {paused:number}|undefined)?.paused,'TARGET_PAUSED');
+    this.assertTargetUnpaused(key);
     requireSafe(!this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_REVOKED' AND entity_id=?").get(grantId),'MANUAL_RETRY_AUTHORIZATION_REVOKED');
-    requireSafe(!this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_INTENT' AND json_extract(detail_redacted,'$.previousIntentId')=?")
-      .get(grant.previousIntentId),'MANUAL_RETRY_ALREADY_ATTEMPTED');return grant;
+    const intent=this.db.prepare("SELECT id,entity_id,detail_redacted FROM audit_events WHERE event_type='MANUAL_RETRY_INTENT' AND json_extract(detail_redacted,'$.previousIntentId')=?")
+      .get(grant.previousIntentId) as {id:string;entity_id:string;detail_redacted:string}|undefined;
+    if(recordedIntentId===undefined)requireSafe(!intent,'MANUAL_RETRY_ALREADY_ATTEMPTED');
+    else {
+      requireSafe(intent?.id===recordedIntentId&&intent.entity_id===grantId&&
+        digest(retryGrantSchema.parse(JSON.parse(intent.detail_redacted)))===digest(grant),'MANUAL_RETRY_BINDING_CHANGED');
+      requireSafe(!this.db.prepare("SELECT id FROM audit_events WHERE event_type='MANUAL_RETRY_RECEIPT' AND entity_id=?").get(recordedIntentId),
+        'MANUAL_RETRY_RECEIPT_EXISTS');
+    }
+    return grant;
   }
   commentRetryBoundary(id:string):string{
     const row=this.db.prepare("SELECT time FROM audit_events WHERE id=? AND event_type='MANUAL_RETRY_INTENT'").get(id) as {time:string}|undefined;
@@ -462,28 +510,29 @@ export class EventStore {
     }).immediate();
   }
   history(e: InboundEvent): InboundEvent[] {
+    this.assertAccount(e.accountId);
     if(e.channel==='COMMENT_NOTIFICATION'&&e.kind==='REPLY'){
       const context=readCommentThreadContext(this,e),recent=context.items.filter(item=>!item.isRoot&&
         !(item.direction==='INCOMING'&&item.payload.commentId===e.commentId)).slice(-6);
       return [...(context.root?[context.root.payload]:[]),...recent.map(item=>item.payload)];
     }
     const incoming = (this.db.prepare('SELECT id,payload,binding,status FROM inbound_events WHERE account_id=? AND channel=? AND target_key=? ORDER BY rowid')
-      .all(e.accountId,e.channel,targetKey(e)) as EventRow[]).map(decodeEventRow).filter(item => targetKey(item.payload) === targetKey(e))
+      .all(e.accountId,e.channel,targetKey(e)) as EventRow[]).map(row => decodeEventRow(row, e.accountId)).filter(item => targetKey(item.payload) === targetKey(e))
       .map(item => item.payload).filter((item): item is InboundEvent & { occurredAt: string } => item.occurredAt !== null);
     const outgoing = this.db.prepare(`SELECT e.payload,d.text,i.id,r.verified_at FROM send_intents i
       JOIN inbound_events e ON e.id=i.event_id JOIN reply_drafts d ON d.id=i.draft_id
-      JOIN delivery_receipts r ON r.send_intent_id=i.id WHERE i.target_key=? AND r.result='CONFIRMED'
-      ORDER BY r.rowid DESC LIMIT 6`).all(targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[];
+      JOIN delivery_receipts r ON r.send_intent_id=i.id WHERE e.account_id=? AND i.target_key=? AND r.result='CONFIRMED'
+      ORDER BY r.rowid DESC LIMIT 6`).all(e.accountId,targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[];
     const retried=this.db.prepare(`SELECT e.payload,d.text,i.id,r.time AS verified_at FROM audit_events i
       JOIN audit_events r ON r.entity_id=i.id AND r.event_type='MANUAL_RETRY_RECEIPT'
       JOIN inbound_events e ON e.id=json_extract(i.detail_redacted,'$.eventId')
       JOIN reply_drafts d ON d.id=json_extract(i.detail_redacted,'$.draftId')
-      WHERE i.event_type='MANUAL_RETRY_INTENT' AND json_extract(r.detail_redacted,'$.result')='CONFIRMED' AND e.target_key=?
-      ORDER BY r.rowid DESC LIMIT 6`).all(targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[];
+      WHERE i.event_type='MANUAL_RETRY_INTENT' AND json_extract(r.detail_redacted,'$.result')='CONFIRMED' AND e.account_id=? AND e.target_key=?
+      ORDER BY r.rowid DESC LIMIT 6`).all(e.accountId,targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[];
     const followups=this.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get()?this.db.prepare(`SELECT e.payload,t.text,t.command_id AS id,t.verified_at
-      FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id WHERE t.target_key=? AND t.status='CONFIRMED' ORDER BY t.rowid DESC LIMIT 6`)
-      .all(targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[]:[];
-    const combined = [...incoming,...[...outgoing,...retried,...followups].map(row => ({...eventSchema.parse(JSON.parse(row.payload)),text:row.text,
+      FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id WHERE e.account_id=? AND t.target_key=? AND t.status='CONFIRMED' ORDER BY t.rowid DESC LIMIT 6`)
+      .all(e.accountId,targetKey(e)) as {payload:string;text:string;id:string;verified_at:string}[]:[];
+    const combined = [...incoming,...[...outgoing,...retried,...followups].map(row => ({...decodeAccountEvent(row.payload, e.accountId),text:row.text,
       direction:'OUTGOING' as const,platformEventId:row.id,occurredAt:row.verified_at}))]
       .sort((a,b) => a.occurredAt.localeCompare(b.occurredAt));
     // Reserve bounded context for confirmed outgoing replies even during incoming bursts.

@@ -4,14 +4,14 @@ import { shouldStopGlobally } from "../core/emergency-stop.js";
 import type { EventStore } from "../storage/store.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type { WorkbenchAuthority } from "./authority.js";
-import type { BrowserService } from "./browser-service.js";
+import type { PlatformConnector } from "../platform/platform-connector.js";
 import type { CollectionScheduler } from "./collection-scheduler.js";
 import type { InboxSync } from "./contracts.js";
 
 export interface InboxSyncHost {
   store: EventStore;
   authority: WorkbenchAuthority;
-  browser: BrowserService;
+  browser: PlatformConnector;
   getAutomation(): AutomationStore | null;
   getCollector(): CollectionScheduler | null;
   isClosing(): boolean;

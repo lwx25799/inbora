@@ -1,12 +1,7 @@
 import { digest, requireSafe, isStrong, targetKey, validText, type Channel, type TargetSnapshot } from '../core/contracts.js';
 import type { EventStore } from '../storage/store.js';
-
-export interface CapabilityIdentity {
-  identityDigest: string;
-  mappingDigest: string;
-  browserVersion: string;
-  browserMode: "headed" | "headless";
-}
+import type { CapabilityIdentity } from '../platform/platform-connector.js';
+export type { CapabilityIdentity } from '../platform/platform-connector.js';
 /** Channel evidence and historical controlled trials; independent from operator/session ownership. */
 export class ChannelAuthority {
   constructor(readonly store: EventStore, readonly now: () => number) {}

@@ -137,7 +137,7 @@ export class LocalAssistantStore {
   }
   inScope(grant:LocalAssistantGrant,event:StoredEvent):boolean{
     const e=event.payload,time=Date.parse(e.occurredAt??'');
-    if(!(e.accountId==='account_001'&&grant.scope.channels.includes(e.channel)&&e.direction==='INCOMING'&&
+    if(!(e.accountId===this.store.accountId&&grant.scope.channels.includes(e.channel)&&e.direction==='INCOMING'&&
       e.actorId!==grant.scope.ownId&&Number.isFinite(time)&&time>grant.scope.collection.startedAt&&time<=this.now()&&event.status!=='BASELINE'))return false;
     const row=this.store.db.prepare('SELECT scope,binding FROM inbound_events WHERE id=?').get(event.id) as {scope:string;binding:string}|undefined;
     if(!row||row.binding!==event.binding||eventBinding(e)!==event.binding)return false;

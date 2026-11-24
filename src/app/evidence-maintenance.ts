@@ -4,6 +4,7 @@ import {lstat} from 'node:fs/promises';
 import {loadRuntime} from '../config/runtime.js';
 import {inspectEvidence,maintainEvidence,type EvidenceRetentionReport} from '../observability/evidence.js';
 import {collectEvidenceReferences} from './evidence-references.js';
+import type {EvidenceMaintenanceStatus} from '../contracts/diagnostics.js';
 
 type Store={db:Database.Database};
 interface Options {now?:()=>number;intervalMs?:number}
@@ -21,7 +22,7 @@ export class EvidenceMaintenance {
   constructor(private readonly store:Store,private readonly root:string,options:Options={}){
     this.now=options.now??Date.now;this.intervalMs=options.intervalMs??24*3600_000;
   }
-  status(){return {running:this.active!==null,nextAt:this.nextAt,error:this.failure,report:this.latest};}
+  status():EvidenceMaintenanceStatus{return {running:this.active!==null,nextAt:this.nextAt,error:this.failure,report:this.latest};}
   report(signal?:AbortSignal):Promise<EvidenceRetentionReport>{return this.run(false,signal);}
   prune(signal?:AbortSignal):Promise<EvidenceRetentionReport>{return this.run(true,signal);}
   async runIfDue(idle:boolean):Promise<EvidenceRetentionReport|null>{

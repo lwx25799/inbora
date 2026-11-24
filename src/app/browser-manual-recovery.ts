@@ -7,7 +7,7 @@ import {loadObservationMapping} from '../config/runtime.js';
 import type {EventStore} from '../storage/store.js';
 import {readSecurityHold,securityRevision,resolveSecurityHold} from '../storage/security-holds.js';
 import type {BrowserSafety} from './browser-safety.js';
-import type {ManualRecoveryCommand} from './manual-recovery-contracts.js';
+import type {ManualRecoveryCommand,ManualRecoveryResult} from './manual-recovery-contracts.js';
 
 interface BrowserBinding {owner:BrowserProfileOwner|undefined;epoch:number;mode:'headed'|'headless';transitioning:boolean}
 
@@ -27,7 +27,7 @@ export class BrowserManualRecovery {
   get active(){return this.starting||this.controller.active;}
   status(){return this.controller.status();}
   shutdown(){return this.controller.shutdown();}
-  async handle(command:ManualRecoveryCommand,token:string,permitted:()=>void):Promise<unknown>{
+  async handle(command:ManualRecoveryCommand,token:string,permitted:()=>void):Promise<ManualRecoveryResult>{
     permitted();
     if(command.action==='close'){
       requireSafe(this.requester===null||this.requester===token,'MANUAL_RECOVERY_OPERATOR_CHANGED');
@@ -81,7 +81,7 @@ export class BrowserManualRecovery {
         try{
           const clear=await this.safety.recover(current.owner,command.channel,AbortSignal.timeout(30_000),true,false,false,unchanged);unchanged();
           requireSafe(clear&&readSecurityHold(this.store,command.channel)?.revision===previousHold.revision,'MANUAL_RECOVERY_SECURITY_CHANGED');
-          requireSafe(resolveSecurityHold(this.store,command.channel,previousHold.revision),'MANUAL_RECOVERY_SECURITY_CHANGED');
+          requireSafe(resolveSecurityHold(this.store,command.channel,previousHold.revision,undefined,unchanged),'MANUAL_RECOVERY_SECURITY_CHANGED');
           this.store.audit('SECURITY_MANUAL_RECOVERY_RECHECK_CLEAR',previousHold.incidentId);
           return{state:'CLEARED'};
         }catch(error){
@@ -116,8 +116,8 @@ export class BrowserManualRecovery {
           'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
         requireSafe(readSecurityHold(this.store,command.channel)?.revision===hold.revision&&
           securityRevision(this.store,command.channel)===revision,'MANUAL_RECOVERY_SECURITY_CHANGED');
-        const own=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
-        requireSafe(own?.own_id===ownId,'ACCOUNT_CHANGED');
+        const boundOwnId=this.store.accountOwnId();
+        requireSafe(boundOwnId===ownId,'ACCOUNT_CHANGED');
       };
       this.permitted=permitted;check();this.requester=token;this.mappingDigest=digest(mapping);this.recreated=recreated;
       try{const session=await this.controller.start(current.owner,{channel:command.channel,epoch:current.epoch,
@@ -143,7 +143,7 @@ export class BrowserManualRecovery {
     await this.controller.finish(command.sessionId,permitted,async()=>{
       const hold=readSecurityHold(this.store,session.channel);requireSafe(hold,'MANUAL_RECOVERY_SECURITY_CHANGED');
       requireSafe(await this.safety.recover(current.owner!,session.channel,undefined,true,true,false),'SECURITY_RECOVERY_NOT_VERIFIED');
-      return()=>requireSafe(resolveSecurityHold(this.store,session.channel,hold.revision),'MANUAL_RECOVERY_SECURITY_CHANGED');
+      return()=>requireSafe(resolveSecurityHold(this.store,session.channel,hold.revision,undefined,permitted),'MANUAL_RECOVERY_SECURITY_CHANGED');
     });
   }
 }

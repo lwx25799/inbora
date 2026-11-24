@@ -9,8 +9,7 @@ interface ChatRow {id:string;payload:string;binding:string;own_id:string;histori
 export class ChatMessageStore {
   constructor(readonly store:EventStore){}
   observe(events:InboundEvent[],ownId:string,origin:number,observedAt=Date.now()):void {
-    const own=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
-    requireSafe(own?.own_id===ownId,'ACCOUNT_CHANGED');
+    requireSafe(this.store.accountOwnId()===ownId&&events.every(event=>event.accountId===this.store.accountId),'ACCOUNT_CHANGED');
     requireSafe(Number.isSafeInteger(origin)&&origin>0&&origin<=observedAt,'OBSERVATION_BOUNDARY_INVALID');
     for(const input of events){
       if(input.channel!=='DIRECT_MESSAGE'||input.direction!=='OUTGOING'||input.actorId!==ownId)continue;
@@ -28,10 +27,11 @@ export class ChatMessageStore {
   }
   get(id:string):ChatMessage|null {
     if(!this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='chat_messages'").get())return null;
-    const row=this.store.db.prepare('SELECT id,payload,binding,own_id,historical FROM chat_messages WHERE id=? AND conflicted=0').get(id) as ChatRow|undefined;
+    const row=this.store.db.prepare('SELECT id,payload,binding,own_id,historical FROM chat_messages WHERE id=? AND account_id=? AND conflicted=0')
+      .get(id,this.store.accountId) as ChatRow|undefined;
     if(!row)return null;
-    const payload=eventSchema.parse(JSON.parse(row.payload)),own=this.store.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(payload.accountId) as {own_id:string}|undefined;
-    requireSafe(own?.own_id===row.own_id&&payload.actorId===own.own_id&&payload.direction==='OUTGOING'&&eventBinding(payload)===row.binding,'MESSAGE_PREVIEW_UNAVAILABLE');
+    const payload=eventSchema.parse(JSON.parse(row.payload)),ownId=this.store.accountOwnId(payload.accountId);
+    requireSafe(ownId&&ownId===row.own_id&&payload.actorId===ownId&&payload.direction==='OUTGOING'&&eventBinding(payload)===row.binding,'MESSAGE_PREVIEW_UNAVAILABLE');
     return {id:row.id,payload,binding:row.binding,ownId:row.own_id,historical:!!row.historical};
   }
 }

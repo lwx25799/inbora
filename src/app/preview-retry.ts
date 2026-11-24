@@ -22,9 +22,9 @@ export function preparePreviewRetry(data:AutomationStore,root:string,canSchedule
   if(state.emergencyStopped||!state.collection?.inbox||!ownId)return cursor.previewRetryNeedsNormal;
   data.requireAccount(ownId);
   const prior=new Map(cursor.previewRetries.map(item=>[item.eventId,item])),previews=new MessagePreviewStore(root),shares=new MessageShareStore(root);
-  const rows=data.store.db.prepare(`SELECT id FROM inbound_events WHERE account_id='account_001' AND channel='DIRECT_MESSAGE' AND status<>'BASELINE'
+  const rows=data.store.db.prepare(`SELECT id FROM inbound_events WHERE account_id=? AND channel='DIRECT_MESSAGE' AND status<>'BASELINE'
     AND json_extract(payload,'$.observationIssue')='DM_CONTENT_UNVERIFIED' AND json_extract(payload,'$.contentType') IN ('IMAGE','MIXED')
-    ORDER BY rowid DESC LIMIT 100`).all() as {id:string}[];
+    ORDER BY rowid DESC LIMIT 100`).all(data.accountId) as {id:string}[];
   cursor.previewRetries=[];
   for(const row of rows){
     const event=data.store.event(row.id).payload,at=Date.parse(event.occurredAt??'');
@@ -40,8 +40,8 @@ export function preparePreviewRetry(data:AutomationStore,root:string,canSchedule
   cursor.previewRetries.sort((a,b)=>a.lastAttempt-b.lastAttempt||a.eventId.localeCompare(b.eventId));
   if(canSchedule&&!cursor.previewRetryNeedsNormal)for(const retry of cursor.previewRetries){
     const latest=data.store.db.prepare(`SELECT COALESCE(max(json_extract(a.detail_redacted,'$.attemptedAt')),0) AS at FROM audit_events a
-      JOIN inbound_events e ON e.id=a.entity_id WHERE a.event_type='MESSAGE_PREVIEW_RETRY' AND e.account_id='account_001' AND e.target_key=?`)
-      .get('dm:'+retry.conversationId) as {at:number};
+      JOIN inbound_events e ON e.id=a.entity_id WHERE a.event_type='MESSAGE_PREVIEW_RETRY' AND e.account_id=? AND e.target_key=?`)
+      .get(data.accountId,'dm:'+retry.conversationId) as {at:number};
     if(latest.at&&data.now()-latest.at<interval||!prioritize(retry.conversationId,retry.eventId))continue;
     retry.attempts++;retry.lastAttempt=data.now();cursor.previewRetryNeedsNormal=true;
     data.store.db.transaction(()=>{data.store.audit('MESSAGE_PREVIEW_RETRY',retry.eventId,{attempt:retry.attempts,attemptedAt:retry.lastAttempt});save(data,cursor);}).immediate();

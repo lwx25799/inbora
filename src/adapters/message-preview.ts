@@ -436,7 +436,7 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
       }
       if(typeof inspected.displayText==='string'){
         inspectionStage='VERIFY_BINDING';
-        const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'message-preview-only',dmWindow:true,peer};
+        const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,accountId:event.accountId,evidenceId:'message-preview-only',dmWindow:true,peer};
         const current=await page.evaluate(captureObserved,input).catch(error=>reportSecurityFailure(page,error)),matching=current.events.filter(item=>item.platformEventId===event.platformEventId);
         const fresh=matching.length===1?matching[0]:undefined;
         const identity=(item:InboundEvent)=>JSON.stringify([item.accountId,item.channel,item.platformEventId,item.actorId,item.conversationId,
@@ -488,7 +488,7 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
           images.push({label:before.label,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'});break;
         }
         stage='VERIFY_BINDING';
-        const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'message-preview-only',dmWindow:true,peer};
+        const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,accountId:event.accountId,evidenceId:'message-preview-only',dmWindow:true,peer};
         const final=await page.evaluate(captureObserved,input).catch(error=>reportSecurityFailure(page,error));
         const matching=final.events.filter(item=>item.platformEventId===event.platformEventId);
         if(matching.length!==1||eventBinding(matching[0]!)!==observedBinding){images.push({label:before.label,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'});break;}

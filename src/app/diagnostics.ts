@@ -1,22 +1,8 @@
 import type Database from 'better-sqlite3';
-import type {BrowserResourcesSnapshot} from '../observability/browser-resource-contracts.js';
+import type {DiagnosticsSnapshot, DiagnosticBlocker, ModelUsageSummary, ModelUsageGroup} from '../contracts/diagnostics.js';
+export type {DiagnosticsSnapshot, DiagnosticBlocker, ModelUsageSummary, ModelUsageGroup} from '../contracts/diagnostics.js';
 
 type Store = {db:Database.Database};
-export interface ModelUsageSummary {
-  requests:number;knownUsageRequests:number;unknownUsageRequests:number;inputTokens:number;outputTokens:number;
-  elapsedSamples:number;averageElapsedMs:number|null;p95ElapsedMs:number|null;
-}
-export interface ModelUsageGroup extends ModelUsageSummary {model:string;status:string}
-export interface DiagnosticBlocker {source:string;code:string;count:number}
-export interface DiagnosticsSnapshot {
-  version:1;timeRangeSupported:false;
-  browserResources?:BrowserResourcesSnapshot;
-  model:{total:ModelUsageSummary;groups:ModelUsageGroup[]};
-  blockers:DiagnosticBlocker[];
-  collection:{channels:{source:string;nextAt:number;lastSuccess:number|null;lastError:string|null;failures:number;elapsedMs:number|null}[];
-    works:{included:number;historical:number;review:number};conversations:{total:number;neverRead:number}};
-}
-
 const normalizedCalls=`SELECT
   CASE WHEN length(model) BETWEEN 1 AND 100 AND model NOT GLOB '*[^A-Za-z0-9._:-]*' THEN model ELSE 'UNKNOWN_MODEL' END AS model,
   CASE WHEN status IN ('STARTED','SUCCEEDED','FAILED') THEN status ELSE 'UNKNOWN' END AS status,

@@ -2,6 +2,7 @@ import {reportSecurityFailure} from './security-signal.js';
 import {randomUUID} from 'node:crypto';
 import type {Page} from 'playwright';
 import type {CommentReplyMapping} from '../config/site-mapping.js';
+import {DEFAULT_ACCOUNT_ID,type AccountId} from '../contracts/account.js';
 import {digest,dmClockToleranceMs,eventBinding,isStrong,proofTimeValid,requireSafe,targetKey,validText,
   type InboundEvent,type ReplyAdapter,type SendProof,type TargetSnapshot} from '../core/contracts.js';
 import {ObservedReader} from './observed-reader.js';
@@ -451,7 +452,7 @@ export function captureCommentReply(input:Input):Frame{
   }
   if(input.action==='arm'){
     dom.check(input.token&&input.text===state.editorText&&input.shape===state.shape,'COMMENT_REPLY_PREPARED_CHANGED');
-    host.__inboraCommentGate?.remove();const editor=state.editor,button=state.button,root=state.root,shape=state.shape,context=JSON.stringify(state.context);
+    const previous=host.__inboraCommentGate,editor=state.editor,button=state.button,root=state.root,shape=state.shape,context=JSON.stringify(state.context);
     const gate={token:input.token!,enabled:false,used:false,blocked:false,attempted:false,securityFailure:null as string|null,
       validate():void{const now=dom.capture();dom.check(dom.visible(button),'COMMENT_REPLY_SEND_NOT_READY');dom.check(now.root===root&&now.editor===editor&&now.button===button&&now.shape===shape&&
         now.editorText===input.text&&JSON.stringify(now.context)===context&&!button.closest('[disabled],[aria-disabled="true"],.disabled')&&
@@ -464,7 +465,11 @@ export function captureCommentReply(input:Input):Frame{
         try{button.click();}finally{gate.enabled=false;gate.remove();}if(gate.securityFailure)throw Error(gate.securityFailure);return gate.used&&!gate.blocked;},
       remove():void{window.removeEventListener('click',gate.handle,true);button.removeEventListener('click',gate.handle,true);},
     };
-    gate.validate();window.addEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);host.__inboraCommentGate=gate;
+    gate.validate();
+    try{
+      window.addEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);
+    }catch(error){gate.remove();throw error;}
+    host.__inboraCommentGate=gate;previous?.remove();
   }
   return dom.frame(state);
 }
@@ -477,14 +482,26 @@ export class ObservedCommentReply implements ReplyAdapter{
   private pendingEvent:InboundEvent|null=null;
   private readingBack=false;
   constructor(readonly page:Page,readonly mapping:CommentReplyMapping,private readonly timeoutMs=5000,
-    private readonly options:{signal?:AbortSignal;readonlySignal?:AbortSignal;onQualification?:(report:CommentQualification)=>void;onReadbackDiagnostic?:(report:CommentReadbackDiagnostic)=>void}={}){this.responses=new CommentResponses(page,mapping);
+    private readonly options:{accountId?:AccountId;signal?:AbortSignal;readonlySignal?:AbortSignal;onQualification?:(report:CommentQualification)=>void;onReadbackDiagnostic?:(report:CommentReadbackDiagnostic)=>void}={}){this.responses=new CommentResponses(page,mapping);
     this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;}
-  dispose():void{this.responses.dispose();this.submission?.dispose();}
+  private get accountId(){return this.options.accountId??DEFAULT_ACCOUNT_ID;}
+  async dispose():Promise<void>{this.responses.dispose();this.submission?.dispose();await this.cancelPreparation();}
+  async cancelPreparation():Promise<void>{
+    const token=this.token;this.token=null;
+    if(token)await this.removeGate(token);
+  }
+  private async removeGate(token:string):Promise<void>{
+    await this.page.evaluate(token=>{
+      const host=window as unknown as {__inboraCommentGate?:Gate},gate=host.__inboraCommentGate;
+      if(gate?.token===token){gate.remove();delete host.__inboraCommentGate;}
+    },token).catch(()=>{});
+  }
   private report(report:Omit<CommentReadbackDiagnostic,'responses'|'submissionEnabled'>):void {
     try{this.options.onReadbackDiagnostic?.({...report,submissionEnabled:!!this.submission,responses:this.responses.diagnostics()});}catch{/* Diagnostics cannot change a receipt. */}
   }
   private async frame(event:InboundEvent,action:Input['action']='snapshot',text:string|null=null,token:string|null=null,
     before:Input['before']=null,shape:string|null=null):Promise<Frame>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     const signal=this.readingBack?this.options.readonlySignal:this.options.signal;
     requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');
     try{const value=await this.page.evaluate(captureCommentReply,{mapping:this.mapping,event,action,text,token,before,shape,receipts:this.responses.snapshot(event)}).catch(error=>reportSecurityFailure(this.page,error));
@@ -496,7 +513,7 @@ export class ObservedCommentReply implements ReplyAdapter{
   private async locateRoot(event:InboundEvent,index:number):Promise<void>{
     const requested=this.readingBack?this.options.readonlySignal:this.options.signal;
     const deadline=Date.now()+30_000,timeout=AbortSignal.timeout(30_000),signal=requested?AbortSignal.any([requested,timeout]):timeout;
-    const reader=new ObservedReader(this.page,this.mapping.observation,undefined,signal);
+    const reader=new ObservedReader(this.page,this.mapping.observation,undefined,signal,this.accountId);
     const check=()=>{requireSafe(!requested?.aborted,'COMMENT_REPLY_CANCELLED');requireSafe(!signal.aborted&&Date.now()<deadline,'COMMENT_REPLY_LOCATE_TIMEOUT');};
     const found=async()=>{check();const count=(await this.frame(event,'locateRoot')).rootCount;check();return count===1;};
     check();
@@ -514,11 +531,12 @@ export class ObservedCommentReply implements ReplyAdapter{
     }
   }
   async inspect(event:InboundEvent):Promise<TargetSnapshot>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     this.readingBack=false;
     let stage:CommentQualification['stage']='EXPAND',verified=false,code:string|null=null;
     try{
     this.responses.watch(event);
-    this.token=null;const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);
+    await this.cancelPreparation();const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);
     requireSafe(isStrong(event)&&index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
     await this.locateRoot(event,index);
     await this.frame(event,'expand');
@@ -573,30 +591,46 @@ export class ObservedCommentReply implements ReplyAdapter{
     return this.responses.clockLag()!==null;
   }
   async verifyPrepared(event:InboundEvent,text:string):Promise<TargetSnapshot>{
-    requireSafe(this.prepared?.binding===eventBinding(event)&&this.prepared.text===text,'COMMENT_REPLY_NOT_PREPARED');
-    if(!this.submission&&this.mapping.observation.environment!=='fixture'){
-      requireSafe(await this.waitForClock(),'COMMENT_REPLY_CLOCK_UNVERIFIED');
+    const previous=this.token,token=randomUUID();
+    try{
+      requireSafe(this.prepared?.binding===eventBinding(event)&&this.prepared.text===text,'COMMENT_REPLY_NOT_PREPARED');
+      if(!this.submission&&this.mapping.observation.environment!=='fixture'){
+        requireSafe(await this.waitForClock(),'COMMENT_REPLY_CLOCK_UNVERIFIED');
+      }
+      const deadline=Date.now()+5000;
+      for(;;){
+        requireSafe(this.token===previous,'COMMENT_REPLY_CANCELLED');
+        let state:Frame;
+        try{state=await this.frame(event,'arm',text,token,null,this.prepared.shape);}catch(error){
+          if(!(error instanceof Error)||!error.message.includes('COMMENT_REPLY_SEND_NOT_READY')||Date.now()>=deadline)throw error;
+          await new Promise(resolve=>setTimeout(resolve,50));continue;
+        }
+        requireSafe(this.token===previous,'COMMENT_REPLY_CANCELLED');
+        this.token=token;
+        return this.snapshot(event,state);
+      }
+    }catch(error){
+      if(this.token===previous||this.token===token)this.token=null;
+      await this.removeGate(token);
+      if(previous)await this.removeGate(previous);
+      throw error;
     }
-    const token=randomUUID(),deadline=Date.now()+5000;let state:Frame;
-    for(;;)try{state=await this.frame(event,'arm',text,token,null,this.prepared.shape);break;}catch(error){
-      if(!(error instanceof Error)||!error.message.includes('COMMENT_REPLY_SEND_NOT_READY')||Date.now()>=deadline)throw error;
-      await new Promise(resolve=>setTimeout(resolve,50));
-    }
-    this.token=token;return this.snapshot(event,state);
   }
   async baseline(event:InboundEvent):Promise<string[]>{return(await this.frame(event)).ids;}
   async verifyExisting(event:InboundEvent,text:string,notBefore:string):Promise<SendProof|null>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     this.readingBack=true;
     requireSafe(!this.options.readonlySignal?.aborted,'COMMENT_REPLY_CANCELLED');
     requireSafe(isStrong(event)&&Number.isFinite(Date.parse(notBefore)),'COMMENT_REPLY_SCOPE_REQUIRED');
     const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
     this.responses.watch(event);
-    await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).comments(index,false,0,{holdScroll:true,stay:false});
+    await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal,this.accountId).comments(index,false,0,{holdScroll:true,stay:false});
     await this.locateRoot(event,index);
     await this.frame(event,'expand');
     return this.poll(event,text,[],notBefore,undefined,'VERIFY_EXISTING');
   }
-  async clickOnce(notBefore?:string):Promise<void>{const token=this.token;this.token=null;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
+  async clickOnce(notBefore?:string,check?:()=>void):Promise<void>{const token=this.token;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
+    try{
     if(this.submission){requireSafe(notBefore&&this.pendingEvent&&this.prepared,'COMMENT_REPLY_INTENT_REQUIRED');
       this.submission.arm(this.pendingEvent,this.prepared.text,notBefore);
     }else{
@@ -606,9 +640,15 @@ export class ObservedCommentReply implements ReplyAdapter{
     while(Date.now()<=deadline){requireSafe(deadline-Date.now()<=7000,'COMMENT_REPLY_CLOCK_UNVERIFIED');
       await new Promise(resolve=>setTimeout(resolve,Math.max(1,deadline-Date.now()+1)));}
     }
-    const accepted=await this.page.evaluate(token=>{const gate=(window as unknown as {__inboraCommentGate?:Gate}).__inboraCommentGate;
-      if(!gate||gate.token!==token)throw Error('COMMENT_REPLY_NOT_PREPARED');try{return gate.submit();}finally{gate.remove();}},token).catch(error=>reportSecurityFailure(this.page,error));
+    requireSafe(!this.options.signal?.aborted,'COMMENT_REPLY_CANCELLED');check?.();
+    const accepted=await this.page.evaluate(token=>{
+      const host=window as unknown as {__inboraCommentGate?:Gate},gate=host.__inboraCommentGate;
+      if(!gate||gate.token!==token)throw Error('COMMENT_REPLY_NOT_PREPARED');
+      try{return gate.submit();}finally{gate.remove();if(host.__inboraCommentGate===gate)delete host.__inboraCommentGate;}
+    },token).catch(error=>reportSecurityFailure(this.page,error));
     requireSafe(accepted,'COMMENT_REPLY_CLICK_BLOCKED');
+    }catch(error){await this.removeGate(token);throw error;}
+    finally{if(this.token===token)this.token=null;}
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
     this.readingBack=true;
@@ -636,7 +676,7 @@ export class ObservedCommentReply implements ReplyAdapter{
   private async refreshComments(event:InboundEvent):Promise<void>{
     try{
       const signal=this.readingBack?this.options.readonlySignal:this.options.signal;
-      requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');await new ObservedReader(this.page,this.mapping.observation,undefined,signal).guard();
+      requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');await new ObservedReader(this.page,this.mapping.observation,undefined,signal,this.accountId).guard();
       const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
       const s=this.mapping.observation.selectors,list=this.page.locator(s.commentList).filter({visible:true});
       if(!await list.count())await this.page.locator(s.commentEntry).click();
