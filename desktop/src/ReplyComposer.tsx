@@ -23,9 +23,18 @@ const suggestionMessages:Record<string,string>={
 };
 
 export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
-  const {thread,status,busy,act,setNotice,readOnly,saving,dirty,error,notice,text,setText,setSuggestionId,setReview,refreshThread,block,send,sendCurrentText}=props;
+  const {thread,status,busy,act,setNotice,readOnly,saving,dirty,error,notice,text,setText,setSuggestionId,refreshThread,block,send,sendCurrentText}=props;
   const completed=completedReply(thread);
   const submitted=hasReplyHistory(thread);
+  const hasHumanOwnership=thread.ownership.isMine&&thread.ownership.lease_expires_at>Date.now();
+  const quoteDisabled=readOnly||!!thread.intent||!hasHumanOwnership;
+  const quoteReason=readOnly
+    ?(status.mode==='OBSERVE'?'当前为观察模式，切换工作模式后可引用':'正在恢复连接，暂不能引用')
+    :thread.intent
+      ?'此条消息已有发送意图，暂不能引用建议'
+      :!hasHumanOwnership
+        ?'当前未持有人工接管，点击输入框进入编辑后可引用'
+        :'';
   const suggestionReason=busy?'SUGGESTION_BUSY':readOnly||status.mode==='OBSERVE'?'MODEL_PAUSED':status.modelBusy?'MODEL_ALREADY_PENDING':
     submitted?'SUGGESTION_ALREADY_SUBMITTED':!thread.strong||thread.event.status==='MANUAL_REVIEW'?thread.event.payload.observationIssue??'TARGET_NEEDS_REVIEW':
     thread.suggestionEligibility?(thread.suggestionEligibility.eligible?null:thread.suggestionEligibility.reason??'SUGGESTION_NOT_AVAILABLE'):
@@ -50,7 +59,7 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
       {thread.draft
         ? draftOrigins.get(thread.draft.origin) ?? "来源待核对"
         : "尚未保存"}{" "}
-      · </>}{[...text].length}/500 字
+      · </>}{[...text].length}/2000 字
     </small>
   </div>
   <textarea
@@ -66,7 +75,6 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
     onChange={(e) => {
       if(canContinueReply(thread)&&!thread.ownership.isMine)void act('准备人工输入',props.openDialog);
       setText(e.target.value);
-      setReview(null);
     }}
     onKeyDown={event=>{
       if(event.ctrlKey&&event.key==='Enter'&&!readOnly&&!block&&!busy){event.preventDefault();void act('发送中',sendCurrentText);}
@@ -79,7 +87,6 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
         onClick={() => {
           setText("");
           setSuggestionId(null);
-          setReview(null);
         }}
       >
         清空
@@ -125,11 +132,11 @@ export function ReplyComposer(props:ReplyViewProps & {thread:Thread}) {
     </h3>
     <p>{s.text}</p>
     <button
-      disabled={readOnly}
+      disabled={quoteDisabled}
+      title={quoteReason || undefined}
       onClick={() => {
         setText(s.text);
         setSuggestionId(s.id);
-        setReview(null);
       }}
     >
       引用到编辑器

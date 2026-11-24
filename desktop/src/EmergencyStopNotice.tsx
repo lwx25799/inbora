@@ -24,6 +24,7 @@ const stopReasons:Record<string,string>={
   COMMENT_REPLY_ACCOUNT_CHANGED:'评论页面账号与绑定账号不一致。',
   ACCOUNT_NOT_VERIFIED:'当前账号身份未通过核验。',
   OWNER_LOCKED_OR_PORT_UNAVAILABLE:'专属浏览器被占用或连接不可用。',
+  OWNER_PORT_RESERVED:'本机独占锁端口被系统保留或拒绝绑定，请检查端口策略或稍后重试。',
   NATIVE_REPLY_PAGE_BLOCKED:'私信页面的登录或安全检查未通过。',
   COMMENT_REPLY_PAGE_BLOCKED:'评论页面的登录或安全检查未通过。',
 };
@@ -56,6 +57,15 @@ export function EmergencyStopNotice({status,busy,act,update}:{status:Status;busy
     onClick={()=>void openOriginal(hold.channel)}>
     {holds.length>1?`${hold.channel==='DIRECT_MESSAGE'?'私信':'评论'}：`:''}处理原验证页面</button>);
   let notice=null;
+  if(!stopped&&!holds.length&&recovery){
+    notice=<section className="emergency-stop-notice headed-mode-notice" aria-label="有头浏览器运行提示" aria-live="polite">
+      <div className="headed-mode-bar">
+        <strong>当前处于有头窗口，后台收取与自动回复已暂停</strong>
+        <button className="primary" disabled={!!busy} onClick={()=>void act('返回无头运行',async()=>update(
+          await request<Status>({command:'browser',open:true,mode:'headless'})))}>返回无头运行</button>
+      </div>
+    </section>;
+  }
   if(!stopped&&holds.length){
     notice=<section className="emergency-stop-notice" aria-label="通道安全状态待核验" aria-live="polite">
       <div className="emergency-stop-heading"><strong>页面安全状态待核验</strong></div>

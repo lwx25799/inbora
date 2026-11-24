@@ -41,8 +41,33 @@
   background: var(--green);
 }
 
+.headed-mode-notice {
+  padding: 5px 24px;
+}
+
+.headed-mode-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 16px;
+}
+
+.headed-mode-bar strong {
+  font-size: 12px;
+}
+
+.headed-mode-bar button {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
 @media (max-width: 1050px) {
   .emergency-stop-notice {
     padding: 10px 18px;
+  }
+
+  .headed-mode-notice {
+    padding: 5px 18px;
   }
 }

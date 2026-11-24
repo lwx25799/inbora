@@ -38,7 +38,7 @@ function MessageView({eventId}:{eventId:string}){
 }
 
 export function DirectMessageChat(props:ReplyViewProps & {thread:Thread}){
-  const {thread,status,busy,act,setNotice}=props;
+  const {thread,status}=props;
   const group=thread.groupKey??JSON.stringify([thread.event.payload.accountId,thread.event.payload.conversationId]);
   const revision=`${group}:${thread.timeline?.projectionRevision??''}:${thread.frozen}:${thread.verification?.verified??''}`;
   const [view,setView]=useState({key:revision,timeline:thread.timeline??empty,expanded:false});
@@ -79,14 +79,15 @@ export function DirectMessageChat(props:ReplyViewProps & {thread:Thread}){
       <span className="badge">{replyStatusLabel(['NOT_REQUIRED','MANUAL_ONLY'].includes(thread.replyStatus)?thread.replyStatus:thread.conversationReplyStatus??thread.replyStatus)}</span>
       <details className="chat-information"><summary>会话信息</summary>
         <p>本人：{status.account?.identity??'已绑定账号'}<br/>对方：{thread.event.payload.actorId??'身份待核对'}<br/>会话：{thread.event.payload.conversationId}</p>
-        {status.browser.mode==='headed'&&!status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('打开准确会话',async()=>{await request({command:'openTarget',eventId:thread.event.id});setNotice('已在专属浏览器中定位，未填写或发送');})}>在专属浏览器查看原对象</button>}
       </details>
     </header>
     <div ref={scroll} className="chat-messages scroll" role="log" aria-label="私信消息流" aria-live="polite"
       onScroll={()=>{const container=scroll.current;if(container)nearBottom.current=container.scrollHeight-container.scrollTop-container.clientHeight<60;}}>
       {visible.hasMore&&<button className="load-earlier" disabled={loading} onClick={()=>void loadOlder()}>{loading?'正在读取更早消息':'加载更早消息'}</button>}
       {error&&<p role="alert" className="hint">{error}</p>}
-      {!visible.items.length&&<p className="empty">正在读取会话消息</p>}
+      {!visible.items.length&&(loading||!thread.timeline
+        ?<p className="empty">正在读取会话消息…</p>
+        :<p className="empty">当前会话暂无可显示的消息记录。</p>)}
       {visible.items.map(message=><article key={message.id} className={'chat-message '+(message.direction==='OUTGOING'?'outgoing':'incoming')}>
         <small>{message.direction==='OUTGOING'?message.origin==='CONFIRMED'?'我方已回复':'我方消息':'对方'} · {time(message.occurredAt)}{message.historical?' · 历史消息':''}
           {message.direction==='INCOMING'&&message.eventId===thread.event.id?['NOT_REQUIRED','MANUAL_ONLY'].includes(thread.replyStatus)?' · 当前查看消息':' · 当前回复消息':''}</small>

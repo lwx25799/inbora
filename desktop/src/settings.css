@@ -171,6 +171,21 @@
   margin-bottom: 12px;
 }
 
+.settings-dialog .dialog-feedback {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #edf3eb;
+  font-size: 12px;
+}
+
+.settings-dialog .dialog-feedback.error {
+  border-color: #e5c4bf;
+  color: #a63734;
+  background: #fff2ef;
+}
+
 .settings-dialog .settings-rule textarea {
   min-height: 240px;
   max-height: 50vh;

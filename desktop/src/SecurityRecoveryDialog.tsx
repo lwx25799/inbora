@@ -141,12 +141,13 @@ export function SecurityRecoveryDialog({session,update,onClosed}:{session:Manual
       if(active.current&&!stopped.current)timer=setTimeout(()=>void poll(),500);
     };
     void poll();
-    const blur=()=>closeAction.current(),visibility=()=>{if(document.hidden)closeAction.current();};
-    window.addEventListener('blur',blur);document.addEventListener('visibilitychange',visibility);
+    // Do not close on window blur or visibility change so switching apps for SMS codes or IME focus never drops the session.
+    const pageHide=()=>closeAction.current();
+    window.addEventListener('pagehide',pageHide);
     return()=>{
       active.current=false;stopped.current=true;
       if(timer)clearTimeout(timer);if(moveTimer.current)clearTimeout(moveTimer.current);
-      window.removeEventListener('blur',blur);document.removeEventListener('visibilitychange',visibility);
+      window.removeEventListener('pagehide',pageHide);
       queue.current=[];pendingMove.current=null;
       if(previousFocus?.isConnected)previousFocus.focus();
       if(!finalized.current){finalized.current=true;void request({command:'securityRecovery',action:'close',sessionId:session.sessionId}).catch(()=>{});}

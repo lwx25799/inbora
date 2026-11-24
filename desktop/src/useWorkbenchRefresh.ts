@@ -44,7 +44,12 @@ export function useWorkbenchRefresh(view:RefreshView):void {
     queue.current=refresh;
     // Capture a fresh snapshot after asynchronous listener registration, including events during setup.
     const unlisten=listen<{event?:unknown}>('inbora_status_updated',event=>{
-      if(alive()&&typeof event.payload?.event==='string')refresh.schedule(refreshTargets(event.payload.event));
+      if(!alive()||typeof event.payload?.event!=='string')return;
+      if(event.payload.event==='sidecar_response_too_large'){
+        latest.current.setError(explain('SIDECAR_RESPONSE_TOO_LARGE'));
+        return;
+      }
+      refresh.schedule(refreshTargets(event.payload.event));
     });
     void unlisten.then(stop=>{if(disposed)stop();else{stopListening=stop;refresh.schedule(allReads);}}).catch(()=>{});
     const focus=()=>refresh.schedule(allReads);

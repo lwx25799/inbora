@@ -104,9 +104,23 @@ export class DevelopmentSidecar {
 
   async boot(restoring) {
     this.starting = true;
+    const strippedEnv = new Set([
+      'NODE_OPTIONS',
+      'NODE_PATH',
+      'INBORA_MODEL_KEY',
+      'DEEPSEEK_API_KEY',
+      'OPENAI_API_KEY',
+      'ANTHROPIC_API_KEY',
+      'GOOGLE_GENERATIVE_AI_API_KEY',
+      'GEMINI_API_KEY',
+    ]);
+    const childEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([name]) => !strippedEnv.has(name.toUpperCase())),
+    );
+    childEnv.INBORA_PIPE_NONCE = this.secret;
     const child = spawn(process.execPath, ['--import', pathToFileURL(join(this.root, 'node_modules/tsx/dist/loader.mjs')).href, this.entry], {
       cwd: this.root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, INBORA_PIPE_NONCE: this.secret, NODE_OPTIONS: '', NODE_PATH: '', INBORA_MODEL_KEY: '', DEEPSEEK_API_KEY: '' },
+      env: childEnv,
     });
     let ready, failReady, closed;
     const owner = { child, generation: ++this.generation, readySeen: false };

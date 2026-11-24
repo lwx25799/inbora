@@ -118,7 +118,7 @@
 }
 .chat-detail > .reply-composer {
   flex: none;
-  max-height: 54%;
+  max-height: 62%;
   padding: 10px 24px 12px;
   border-top: 1px solid var(--line);
   overflow: auto;

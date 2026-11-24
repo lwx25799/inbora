@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AutomationSettings } from './AutomationSettings';
 import {LocalAssistantSettings} from './LocalAssistantSettings';
 import { BrowserDraftRecovery } from './BrowserDraftRecovery';
@@ -6,6 +6,7 @@ import {DiagnosticsPanel} from './DiagnosticsPanel';
 import {KnowledgeSettings} from './KnowledgeSettings';
 import { request, closeDesktop, reasons, capabilityNames, type Status } from './api';
 import { modes } from './presentation';
+import { sameAiSettings } from './settings-form-sync';
 import {SettingsDialog} from './SettingsDialog';
 import './settings.css';
 
@@ -13,6 +14,9 @@ export function Settings({
   status,
   runtime,
   busy,
+  error = '',
+  notice = '',
+  setNotice,
   act,
   update,
   stop,
@@ -22,15 +26,33 @@ export function Settings({
   status: Status;
   runtime: string;
   busy: string;
+  error?: string;
+  notice?: string;
+  setNotice?: (message: string) => void;
   act: (s: string, f: () => Promise<void>) => Promise<void>;
   update: (s: Status) => void;
   stop:()=>void;
   toggleAuto:(enabled:boolean)=>Promise<void>;
   pendingAutoReply:boolean|null;
 }) {
-  const [settings, setSettings] = useState(status.settings),
-    [key, setKey] = useState("");
+  const [settings, setSettings] = useState(status.settings);
+  const syncedSettings = useRef(status.settings);
+  const latestSettings = useRef(settings);
+  latestSettings.current = settings;
+  const settingsKey = JSON.stringify(status.settings);
+  useEffect(() => {
+    if (sameAiSettings(latestSettings.current, syncedSettings.current)) {
+      syncedSettings.current = status.settings;
+      setSettings(status.settings);
+    }
+  }, [settingsKey]);
+  const [key, setKey] = useState("");
   const [modelOpen,setModelOpen]=useState(false);
+  const [faultOpen, setFaultOpen] = useState(Boolean(status.automation?.emergencyStopped));
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  useEffect(() => {
+    if (status.automation?.emergencyStopped) setFaultOpen(true);
+  }, [status.automation?.emergencyStopped]);
   return (
     <section className="settings scroll settings-compact">
       <div className="settings-section settings-daily"><h2>自动回复</h2>
@@ -41,7 +63,7 @@ export function Settings({
       </div>
       <div className="settings-columns">
         <div className="settings-column">
-      {status.automation&&<AutomationSettings status={status} busy={busy} act={act} update={update}/>}
+      {status.automation&&<AutomationSettings status={status} busy={busy} error={error} notice={notice} act={act} update={update}/>}
         </div>
         <div className="settings-column">
       <LocalAssistantSettings key={`${status.account?.identity??'none'}:${status.localAssistant?.grant?.version??'none'}`}
@@ -51,7 +73,7 @@ export function Settings({
         <p>{status.settings.model} · {status.modelAuthorized?'模型许可有效':'模型未授权'}</p>
         <p className="hint">Key：{status.keyPresent?status.keyStored?'本机安全保存':'仅内存持有':'未配置'}。普通保存保留现有 Key 与授权。</p>
         <div className="row"><button onClick={()=>setModelOpen(true)}>模型详细配置</button></div>
-        <SettingsDialog title="模型详细配置" open={modelOpen} onClose={()=>setModelOpen(false)}>
+        <SettingsDialog title="模型详细配置" open={modelOpen} onClose={()=>setModelOpen(false)} busy={busy} error={error} notice={notice}>
         <p className="hint">关闭会保留当前输入；保存配置后才生效。Key 默认仅留后端内存。</p>
         <label>
           模型
@@ -94,13 +116,15 @@ export function Settings({
             void act("保存 AI 配置", async () => {
               const submitted = key;
               setKey("");
-              update(
-                await request<Status>({
-                  command: "configureAi",
-                  settings,
-                  key: submitted,
-                }),
-              );
+              const next = await request<Status>({
+                command: "configureAi",
+                settings,
+                key: submitted,
+              });
+              syncedSettings.current = next.settings;
+              setSettings(next.settings);
+              update(next);
+              setNotice?.("AI 配置已保存");
             })
           }
         >
@@ -111,10 +135,19 @@ export function Settings({
           {status.keyPresent ? status.keyStored?'当前用户 DPAPI 安全保存':'仅后端内存持有' : "未配置"}
         </p>
         <label className="check"><input type="checkbox" checked={!!status.keyStored} disabled={!status.keyPresent||!!busy}
-          onChange={e=>void act('更新安全保存',async()=>update(await request<Status>({command:'setKeyStorage',storage:e.target.checked?'DPAPI':'MEMORY'})))}/>
+          onChange={e=>{
+            const checked=e.target.checked;
+            void act('更新安全保存',async()=>{
+              update(await request<Status>({command:'setKeyStorage',storage:checked?'DPAPI':'MEMORY'}));
+              setNotice?.(checked?'已启用本机安全保存 Key':'已切换为仅内存持有 Key');
+            });
+          }}/>
           在本机安全保存 Key（Windows 当前用户 DPAPI，默认关闭）</label>
         {status.keyStorageError&&<p className="error">{reasons[status.keyStorageError]??status.keyStorageError}</p>}
-        <button disabled={!status.keyPresent&&!status.keyStored&&!status.keyStorageError} onClick={()=>void act('删除 Key',async()=>update(await request<Status>({command:'setKeyStorage',storage:'DELETE'})))}>删除已保存 Key 并清除内存</button>
+        <button disabled={!status.keyPresent&&!status.keyStored&&!status.keyStorageError} onClick={()=>void act('删除 Key',async()=>{
+          update(await request<Status>({command:'setKeyStorage',storage:'DELETE'}));
+          setNotice?.('已删除已保存 Key 并清除内存');
+        })}>删除已保存 Key 并清除内存</button>
         </SettingsDialog>
         <div className="budget">
           {status.budgets.map((b) => (
@@ -189,11 +222,12 @@ export function Settings({
           >
             打开有头浏览器
           </button>
-          {status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('恢复无头运行',async()=>update(
+          {(status.browser.loginRecovery||status.browser.mode==='headed')&&<button disabled={!!busy} onClick={()=>void act('恢复无头运行',async()=>update(
             await request<Status>({command:'browser',open:true,mode:'headless'})))}>返回无头运行</button>}
         </div>
-        <details className="fault-controls" open={status.automation?.emergencyStopped||undefined}><summary>故障处理</summary>
-          <BrowserDraftRecovery busy={busy} act={act}/>
+        <details className="fault-controls" open={faultOpen} onToggle={e=>setFaultOpen(e.currentTarget.open)}>
+          <summary onClick={e=>{e.preventDefault();setFaultOpen(open=>!open);}}>故障处理</summary>
+          {faultOpen&&<BrowserDraftRecovery busy={busy} act={act}/>}
           <p className="hint">仅在需要停止全部后台操作时使用。急停会停止收取、模型和发送；已提交消息不会撤回或重复发送。</p>
           <button className="danger" onClick={stop}>全局急停</button>
           {status.automation?.emergencyStopped&&<button disabled={!!busy}
@@ -215,7 +249,7 @@ export function Settings({
           退出工作台并保留数据
         </button>
         <p className="hint">
-          网络为本机直连。登录和验证码在正常可见浏览器中由本人处理，所有网页自启动即静音。
+          网络为本机直连。日常采用无头运行，平台安全验证优先在客户端内直接操作原无头页面完成；仅遇重新登录等情况时可临时打开有头浏览器处理，所有网页自启动即静音。
         </p>
         <details><summary>连接详情</summary><dl>
           {status.capabilities.map((c) => (
@@ -251,7 +285,10 @@ export function Settings({
         </div>
       </div>
       <KnowledgeSettings key={status.account?.id??'unbound'} accountId={status.account?.id??null} disabled={!!busy}/>
-      <details className="settings-diagnostics"><summary>运行诊断与用量详情</summary><DiagnosticsPanel/></details>
+      <details className="settings-diagnostics" open={diagnosticsOpen} onToggle={e=>setDiagnosticsOpen(e.currentTarget.open)}>
+        <summary onClick={e=>{e.preventDefault();setDiagnosticsOpen(open=>!open);}}>运行诊断与用量详情</summary>
+        {diagnosticsOpen&&<DiagnosticsPanel/>}
+      </details>
     </section>
   );
 }

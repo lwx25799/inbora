@@ -202,6 +202,93 @@ async fn client_request(
     }
 }
 
+const MAX_SIDECAR_LINE_BYTES: usize = 2_000_000;
+const OVERSIZED_PREFIX_BYTES: usize = 256;
+
+enum BoundedLine {
+    Line(String),
+    Oversized(Option<String>),
+    InvalidUtf8,
+    Eof,
+}
+
+fn extract_prefix_request_id(prefix: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(prefix).ok()?;
+    let marker = "\"requestId\":\"";
+    let start = text.find(marker)? + marker.len();
+    let rest = text.get(start..)?;
+    let end = rest.find('"')?;
+    let id = &rest[..end];
+    if id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        Some(id.to_string())
+    } else {
+        None
+    }
+}
+
+fn read_bounded_line(reader: &mut impl BufRead, max_bytes: usize) -> std::io::Result<BoundedLine> {
+    let mut buf = Vec::new();
+    let mut prefix = Vec::new();
+    let mut oversized = false;
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            if oversized {
+                return Ok(BoundedLine::Oversized(extract_prefix_request_id(&prefix)));
+            }
+            if buf.is_empty() {
+                return Ok(BoundedLine::Eof);
+            }
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            return Ok(match String::from_utf8(buf) {
+                Ok(line) => BoundedLine::Line(line),
+                Err(_) => BoundedLine::InvalidUtf8,
+            });
+        }
+        let newline = chunk.iter().position(|&b| b == b'\n');
+        let slice = match newline {
+            Some(pos) => &chunk[..pos],
+            None => chunk,
+        };
+        if prefix.len() < OVERSIZED_PREFIX_BYTES {
+            let take = (OVERSIZED_PREFIX_BYTES - prefix.len()).min(slice.len());
+            prefix.extend_from_slice(&slice[..take]);
+        }
+        if !oversized {
+            let effective_len = if newline.is_some() && slice.last() == Some(&b'\r') {
+                slice.len() - 1
+            } else {
+                slice.len()
+            };
+            if buf.len() + effective_len > max_bytes {
+                oversized = true;
+                buf.clear();
+            } else {
+                buf.extend_from_slice(slice);
+            }
+        }
+        let consumed = match newline {
+            Some(pos) => pos + 1,
+            None => chunk.len(),
+        };
+        reader.consume(consumed);
+        if newline.is_some() {
+            if oversized {
+                return Ok(BoundedLine::Oversized(extract_prefix_request_id(&prefix)));
+            }
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            return Ok(match String::from_utf8(buf) {
+                Ok(line) => BoundedLine::Line(line),
+                Err(_) => BoundedLine::InvalidUtf8,
+            });
+        }
+    }
+}
+
 fn start_backend(app: &tauri::App) -> Result<Desktop, Box<dyn std::error::Error>> {
     let packaged = app.path().resource_dir()?.join("sidecar");
     let resources = if cfg!(debug_assertions) && !packaged.join("node.exe").is_file() {
@@ -231,6 +318,10 @@ fn start_backend(app: &tauri::App) -> Result<Desktop, Box<dyn std::error::Error>
         .env_remove("NODE_PATH")
         .env_remove("INBORA_MODEL_KEY")
         .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("GOOGLE_GENERATIVE_AI_API_KEY")
+        .env_remove("GEMINI_API_KEY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -261,11 +352,27 @@ fn start_backend(app: &tauri::App) -> Result<Desktop, Box<dyn std::error::Error>
     let handle = app.handle().clone();
     let reader_backend = backend.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(output).lines() {
-            let Ok(line) = line else { break };
-            if line.len() > 2_000_000 {
-                break;
-            }
+        let mut reader = BufReader::new(output);
+        loop {
+            let line = match read_bounded_line(&mut reader, MAX_SIDECAR_LINE_BYTES) {
+                Ok(BoundedLine::Line(line)) => line,
+                Ok(BoundedLine::Oversized(request_id)) => {
+                    if let Some(id) = request_id {
+                        if let Ok(mut pending) = reader_backend.pending.lock() {
+                            if let Some(tx) = pending.remove(&id) {
+                                let _ = tx.send(Err("SIDECAR_RESPONSE_TOO_LARGE".into()));
+                            }
+                        }
+                    }
+                    let _ = handle.emit(
+                        "inbora_status_updated",
+                        json!({"event": "sidecar_response_too_large"}),
+                    );
+                    continue;
+                }
+                Ok(BoundedLine::InvalidUtf8) => continue,
+                Ok(BoundedLine::Eof) | Err(_) => break,
+            };
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };

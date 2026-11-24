@@ -54,8 +54,7 @@ export function App() {
     [suggestionId, setSuggestionId] = useState<string | null>(null);
   const [busy, setBusy] = useState(""),
     [error, setError] = useState(""),
-    [notice, setNotice] = useState(""),
-    [, setReview] = useState<null>(null);
+    [notice, setNotice] = useState("");
   const [send, setSend] = useState<{
     commandId: string;
     eventId: string;
@@ -92,7 +91,7 @@ export function App() {
     !!thread && (text !== replyEditorDraft(thread).text || suggestionId !== null || hasReplyHistory(thread)&&!canContinueReply(thread)&&localDraft);
   const devRecovery=useDevelopmentReconnect({
     selectedRef,selection,detailRequest,latestEditor,dialogOpen,
-    setStatus,setThread,setReview,setSend,setError,setNotice,
+    setStatus,setThread,setSend,setError,setNotice,
   });
   useWorkbenchRefresh({connected,status,selected,channel,filter,pageNumber,page,auditPage,notice,sendStatus:send?.status,
     readThread:alive=>refreshThread(undefined,alive),setStatus,setInbox,setAudit,setError});
@@ -134,7 +133,6 @@ export function App() {
     let ignore = false;
     setThread(null);
     editorLoaded.current = false;
-    setReview(null);
     setSend(null);
     setText("");
     const selectionId = crypto.randomUUID();
@@ -183,37 +181,6 @@ export function App() {
     if(!devRecovery.restoring&&dialogOpen&&dirty&&thread&&!thread.ownership.isMine&&canContinueReply(thread))
       void openDialog().catch(e=>setError(explain(e)));
   },[devRecovery.restoring,dialogOpen,dirty,thread?.ownership.isMine,thread?.ownership.generation,thread?.intent,thread?.followup?.eligible,thread?.followup?.queueReady]);
-  useEffect(() => {
-    if (!connected || !thread?.ownership.isMine || !selected) return;
-    const generation = thread.ownership.generation,
-      eventId = selected;
-    const id = setInterval(
-      () =>
-        void request<Thread["ownership"]>({
-          command: "renewHuman",
-          eventId,
-          generation,
-        })
-          .then((ownership) => {
-            if (selectedRef.current === eventId)
-              setThread((t) =>
-                t &&
-                t.event.id === eventId &&
-                t.ownership.generation === generation
-                  ? { ...t, ownership: { ...ownership, isMine: true } }
-                  : t,
-              );
-          })
-          .catch((e) => setError(explain(e))),
-      30_000,
-    );
-    return () => clearInterval(id);
-  }, [
-    connected,
-    selected,
-    thread?.ownership.isMine,
-    thread?.ownership.generation,
-  ]);
   useEffect(() => {
     if (!send || !["PREPARING", "QUEUED", "PREFLIGHT", "SENDING"].includes(send.status))
       return;
@@ -326,7 +293,6 @@ export function App() {
     select(id);
   }
   function select(id:string){
-    setReview(null);
     detailRequest.current++;
     selectedRef.current = id;
     setSelected(id);
@@ -372,10 +338,9 @@ export function App() {
       setSuggestionId(null);
     await refreshThread(eventId);
     setNotice("草稿已保存，旧审批已失效");
-    if (selectedRef.current === eventId) setReview(null);
   }
   async function reconnect(){
-    const next=await request<Status>({command:'connect',runtime,initialize:false,consent:true});setStatus(next);setReview(null);setSend(null);
+    const next=await request<Status>({command:'connect',runtime,initialize:false,consent:true});setStatus(next);setSend(null);
     const eventId=selectedRef.current,selectionId=crypto.randomUUID();selection.current=selectionId;
     await request({command:'selectTarget',eventId,selectionId});await refreshThread(eventId);setNotice('已读取内核权威状态，未重放发送；未保存人稿保留');
   }
@@ -413,6 +378,7 @@ export function App() {
     if (!status.operator.permissions.includes("SEND"))
       return "当前操作员没有发送权限";
     if (!text.trim()) return "请输入回复";
+    if (text.length > 2000) return "回复内容不能超过 2000 字";
     return "";
   }
   async function toggleAuto(enabled:boolean){
@@ -427,7 +393,7 @@ export function App() {
   }
   async function navigatePage(next:typeof page){
     if(page==='inbox'&&next!=='inbox'&&thread?.ownership.isMine&&canContinueReply(thread))await closeDialog();
-    setPage(next);setReview(null);
+    setPage(next);
   }
   async function openDialog(){
     if(!thread)return;
@@ -458,7 +424,7 @@ export function App() {
     setDialogOpen(false);await refreshThread();
   }
   async function emergencyStop(){
-    await request({command:'emergencyStop'});setStatus(s=>s?{...s,paused:true,automation:s.automation?{...s.automation,emergencyStopped:true}:s.automation}:s);setReview(null);
+    await request({command:'emergencyStop'});setStatus(s=>s?{...s,paused:true,automation:s.automation?{...s.automation,emergencyStopped:true}:s.automation}:s);
     setNotice('急停已生效；已存意图仍需回读或冻结');await refreshThread();
   }
   function applySubmission(result:ReplyCommandResult,commandId:string,submitted:SubmittedReply|undefined){
@@ -641,7 +607,7 @@ export function App() {
             <label className="check"><input type="checkbox" role="switch" aria-label="自动回复" checked={pendingAutoReply??(status.configuredMode==='LIMITED_AUTO'&&!!status.automation?.replyPolicy)}
               disabled={pendingAutoReply!==null||!!busy||!status.automation?.replyPolicy} onChange={e=>{const enabled=e.target.checked;void act('更新自动回复',()=>toggleAuto(enabled));}}/>
               {pendingAutoReply!==null?pendingAutoReply?'正在开启自动回复…':'正在关闭自动回复…':`自动回复：${status.configuredMode==='LIMITED_AUTO'&&status.automation?.replyPolicy?'开':'关'}`}</label>
-            {!status.automation?.replyPolicy&&<button onClick={()=>setPage('settings')}>设置自动回复</button>}
+            {!status.automation?.replyPolicy&&<button onClick={()=>{void navigatePage('settings').catch(e=>setError(explain(e)));}}>设置自动回复</button>}
             <button
               disabled={!!busy||status.sync.running}
               onClick={() =>
@@ -674,6 +640,9 @@ export function App() {
             status={status}
             runtime={runtime}
             busy={busy}
+            error={error}
+            notice={notice}
+            setNotice={setNotice}
             act={act}
             update={setStatus}
             toggleAuto={toggleAuto}
@@ -748,7 +717,6 @@ export function App() {
               text={text}
               setText={value=>{if(selected)remoteConflicts.current.delete(selected);if(error===reasons.MCP_DRAFT_VERSION_CHANGED)setError('');latestEditor.current.editVersion++;setText(value);}}
               setSuggestionId={value=>{if(selected)remoteConflicts.current.delete(selected);if(error===reasons.MCP_DRAFT_VERSION_CHANGED)setError('');latestEditor.current.editVersion++;setSuggestionId(value);}}
-              setReview={setReview}
               refreshThread={()=>refreshThread()}
               block={block}
               send={send}

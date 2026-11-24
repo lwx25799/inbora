@@ -1,4 +1,4 @@
-import {request,reasons,sourceNames} from './api';
+import {reasons,sourceNames} from './api';
 import {time,replyStatusLabel} from './presentation';
 import {ReplyComposer} from './ReplyComposer';
 import {DirectMessageChat} from './DirectMessageChat';
@@ -9,7 +9,7 @@ import {replyResultPresentation} from './reply-result-presentation';
 import type {ReplyViewProps} from './reply-view-types';
 
 export function ReplyDetail(props:ReplyViewProps) {
-  const {detailElement,dialogElement,thread,status,selected,busy,act,setNotice,openDialog,closeDialog}=props;
+  const {detailElement,dialogElement,thread,status,selected,act,openDialog,closeDialog}=props;
   if(thread?.event.payload.channel==='DIRECT_MESSAGE')return <DirectMessageChat {...props} thread={thread}/>;
   const unresolved=!!thread&&hasSubmittedReply(thread)&&!completedReply(thread);
   const replyAction=unresolved?'查看回复详情':'打开人工回复';
@@ -37,9 +37,6 @@ export function ReplyDetail(props:ReplyViewProps) {
           <dt>原事件</dt><dd>{thread.event.payload.platformEventId??'未取得'}</dd>
         </dl>
       </details>
-      {status.browser.mode==='headed'&&!status.browser.loginRecovery&&<button disabled={!!busy} onClick={()=>void act('打开准确原对象',async()=>{
-        await request({command:'openTarget',eventId:thread.event.id});setNotice('已在专属浏览器中定位，未填写或发送');
-      })}>在专属浏览器查看原对象</button>}
       {thread.commentContext?<CommentThreadContext thread={thread} choose={props.choose}/>:<section className="original">
         <h3>原父评论</h3><p><MessageText text={thread.event.payload.text}/></p>
         {thread.event.payload.observationIssue&&<p className="hint">{reasons[thread.event.payload.observationIssue]??thread.event.payload.observationIssue}</p>}
