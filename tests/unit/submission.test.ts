@@ -80,6 +80,23 @@ test.each([
   expect(proofTimeValid(proof,boundary)).toBe(expected);
 });
 
+test.each([
+  {label:'no-baseline-presend-plus-500ms-rejected',deltaFromBoundaryMs:500,hasBaseline:false,withSkew:false,target:'dm:conv-a',expected:false},
+  {label:'no-baseline-edge-plus-2000ms-rejected',deltaFromBoundaryMs:2000,hasBaseline:false,withSkew:false,target:'dm:conv-a',expected:false},
+  {label:'no-baseline-beyond-tolerance-2001ms-accepted',deltaFromBoundaryMs:2001,hasBaseline:false,withSkew:false,target:'dm:conv-a',expected:true},
+  {label:'no-baseline-comment-plus-500ms-rejected',deltaFromBoundaryMs:500,hasBaseline:false,withSkew:false,target:'comment:10:11',expected:false},
+  {label:'no-baseline-comment-beyond-tolerance-accepted',deltaFromBoundaryMs:2001,hasBaseline:false,withSkew:false,target:'comment:10:11',expected:true},
+  {label:'no-baseline-dm-plus-500ms-with-context-skew-accepted',deltaFromBoundaryMs:500,hasBaseline:false,withSkew:true,target:'dm:conv-a',expected:true},
+  {label:'no-baseline-comment-with-skew-rejected',deltaFromBoundaryMs:500,hasBaseline:false,withSkew:true,target:'comment:10:11',expected:false},
+  {label:'with-baseline-plus-500ms-accepted',deltaFromBoundaryMs:500,hasBaseline:true,withSkew:false,target:'dm:conv-a',expected:true},
+])('proofTimeValid guards baseline-less verification against +2000ms pre-send collisions: $label',({deltaFromBoundaryMs,hasBaseline,withSkew,target,expected})=>{
+  const now=Date.now(),boundary=new Date(now-2500).toISOString(),baseline='a'.repeat(64);
+  const proof:SendProof={id:'m1',ownId:'100',targetKey:target,text:'test',pending:false,
+    sentAt:new Date(Date.parse(boundary)+deltaFromBoundaryMs).toISOString(),
+    ...(withSkew?{clockSkew:{boundary,baselineContextDigest:baseline,remainingContextDigest:baseline,refreshedId:'m1'}}:{})};
+  expect(proofTimeValid(proof,boundary,hasBaseline)).toBe(expected);
+});
+
 test('comment publish confirmed status uses named default [7] and supports configured status sets',async()=>{
   expect(defaultConfirmedCommentPublishStatuses).toEqual([7]);
   for(const [configured,status,expected] of [[undefined,7,true],[undefined,1,false],[[7,1],1,true],[[7,1],7,true],[[7,1],0,false]] as const){

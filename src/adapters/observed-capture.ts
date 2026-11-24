@@ -287,7 +287,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       let time = NaN;
       if (seconds && typeof value === 'number' && Number.isFinite(value)) time = value * 1000;
       else if (!seconds) { try { time = Date.prototype.getTime.call(value); } catch { /* no date evidence */ } }
-      return Number.isFinite(time) && time >= Date.UTC(2000,0,1) && time <= Date.now() ? new Date(time).toISOString() : null;
+      return Number.isFinite(time) && time >= Date.UTC(2000,0,1) && time <= Date.now() + 2000 ? new Date(time).toISOString() : null;
     },
     dmFrame(chat:Element,clipRows:boolean,window:boolean):{rows:Element[];scroller:Element|undefined;viewport:ObservationBatch['dmViewport']} {
       const mounted=Array.from(chat.querySelectorAll(s.messages)),candidates=new Set<Element>();

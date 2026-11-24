@@ -83,7 +83,7 @@ test.each(['parsed-text','time','state','new-inbound','original-hidden','missing
 test.each(['fresh','old'] as const)('read-only verification after restart uses strict refreshed evidence without an armed request: %s',async kind=>{
   const f=await setup();try{
     const at=kind==='fresh'?new Date(Date.now()-1000):new Date('2020-01-01T00:00:00Z');
-    const boundary=new Date(Date.now()-2000).toISOString();
+    const boundary=new Date(Date.now()-4000).toISOString();
     await f.owner.dm.evaluate(({text,at})=>sessionStorage.setItem('native-receipt',JSON.stringify({id:'888',text,createdAt:at,clicks:0})),
       {text:f.draft.text,at:at.toISOString()});
     await f.owner.dm.reload({waitUntil:'domcontentloaded'});

@@ -110,18 +110,22 @@ test('bidirectional 2000ms clock skew accepts +1000ms server-ahead replies in DM
     await mountDmReply(owner,server.origin);
     const dmMap=dmReplyMapping(server.origin);
     const dmEvent=(await new ObservedReader(owner.dm,dmMap.observation).dm(0)).events[0]!;
+    dmAdapter=new ObservedDmReply(owner.dm,dmMap,400);
+    const dmSnapshot=await dmAdapter.inspect(dmEvent);
+    const dmBaseline=await dmAdapter.baseline(dmEvent);
     const boundary=new Date(Date.now()-500).toISOString(),replyText='slow-local-clock reply';
     await owner.dm.evaluate(({replyText,at})=>sessionStorage.setItem('native-receipt',JSON.stringify({id:'910',text:replyText,createdAt:at,clicks:0})),
       {replyText,at:new Date(Date.now()+1000).toISOString()});
     await owner.dm.reload({waitUntil:'domcontentloaded'});
-    dmAdapter=new ObservedDmReply(owner.dm,dmMap,400);
-    const dmProof=await dmAdapter.verifyExisting(dmEvent,replyText,boundary);
-    expect(dmProof).toMatchObject({id:'910',text:replyText});
+    const dmReadbackProof=await dmAdapter.readback(dmEvent,replyText,dmBaseline,boundary);
+    expect(dmReadbackProof).toMatchObject({id:'910',text:replyText});
+    const dmVerifiedWithContext=await dmAdapter.verifyExisting(dmEvent,replyText,boundary,dmSnapshot.contextDigest);
+    expect(dmVerifiedWithContext).toMatchObject({id:'910',text:replyText,clockSkew:{boundary,baselineContextDigest:dmSnapshot.contextDigest,refreshedId:'910'}});
     await owner.dm.evaluate(({replyText,at})=>sessionStorage.setItem('native-receipt',JSON.stringify({id:'911',text:replyText,createdAt:at,clicks:0})),
       {replyText,at:new Date(Date.now()+5000).toISOString()});
     await owner.dm.reload({waitUntil:'domcontentloaded'});
-    await expect(dmAdapter.verifyExisting(dmEvent,replyText,boundary)).rejects.toThrow('NATIVE_REPLY_WINDOW_UNVERIFIED');
-    expect(await dmAdapter.readback(dmEvent,replyText,[],boundary)).toBeNull();
+    await expect(dmAdapter.verifyExisting(dmEvent,replyText,boundary,dmSnapshot.contextDigest)).rejects.toThrow('NATIVE_REPLY_WINDOW_UNVERIFIED');
+    expect(await dmAdapter.readback(dmEvent,replyText,dmBaseline,boundary)).toBeNull();
 
     await mountCommentReply(owner,server.origin);
     const cmMap=commentReplyMapping(server.origin);
@@ -140,6 +144,128 @@ test('bidirectional 2000ms clock skew accepts +1000ms server-ahead replies in DM
     const cmProof=await commentAdapter.readback(cmEvent,replyText,[],boundary);
     expect(cmProof).toMatchObject({id:'920',text:replyText});
   }finally{dmAdapter?.dispose();commentAdapter?.dispose();await owner.close();await server.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('verifyExisting without baseline never misclassifies a pre-send +500ms message (server +1500ms ahead) in DM or comment',async()=>{
+  const root=privateTemp('p0-high2-presend-skew-'),server=await fixtureServer();
+  const owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
+  let dmAdapter:ObservedDmReply|undefined,commentAdapter:ObservedCommentReply|undefined;
+  try{
+    await mountDmReply(owner,server.origin);
+    const dmMap=dmReplyMapping(server.origin);
+    const dmEvent=(await new ObservedReader(owner.dm,dmMap.observation).dm(0)).events[0]!;
+    const sameText='repeated confirmation text';
+    const intentMs=Date.now();
+    const boundary=new Date(intentMs).toISOString();
+    // Pre-send M1 was sent at T-1000ms on a server +1500ms ahead => platform timestamp T+500ms.
+    const preSendPlatformAt=new Date(intentMs+500).toISOString();
+    await owner.dm.evaluate(({sameText,at})=>sessionStorage.setItem('native-receipt',JSON.stringify({id:'915',text:sameText,createdAt:at,clicks:0})),
+      {sameText,at:preSendPlatformAt});
+    await owner.dm.reload({waitUntil:'domcontentloaded'});
+    dmAdapter=new ObservedDmReply(owner.dm,dmMap,300);
+    // Pre-send snapshot includes M1.
+    const snapshotWithM1=await dmAdapter.inspect(dmEvent);
+    expect(await dmAdapter.verifyExisting(dmEvent,sameText,boundary)).toBeNull();
+    expect(await dmAdapter.verifyExisting(dmEvent,sameText,boundary,snapshotWithM1.contextDigest)).toBeNull();
+    // A message strictly past boundary + 2000ms (still <= now + 2000ms) is proven post-boundary even without baseline.
+    const olderBoundary=new Date(Date.parse(preSendPlatformAt)-2500).toISOString();
+    expect(await dmAdapter.verifyExisting(dmEvent,sameText,olderBoundary)).toMatchObject({id:'915',text:sameText});
+
+    // Comment verifyExisting must also reject pre-send M1 stamped at T+500ms (1s platform resolution).
+    await mountCommentReply(owner,server.origin);
+    await reloadableCommentReply(owner.notification,server.origin);
+    const cmMap=commentReplyMapping(server.origin);
+    const cmEvent=(await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,evidenceId:'fixture'})).events[0]!;
+    const replySec=Math.ceil((Date.now()+200)/1000);
+    const cmBoundary=new Date(replySec*1000-500).toISOString();
+    await owner.notification.addInitScript(({sameText,replySec})=>document.addEventListener('DOMContentLoaded',()=>{
+      const rootRow=document.querySelector('#root-comment')!,info=Object.getOwnPropertyDescriptor(rootRow,'__reactFiber$fixture')!.value.return.memoizedProps.commentInfo;
+      const reply={cid:'925',replyId:'11',text:sameText,createTime:replySec,status:1,user:{uid:'100',secUid:'self-sec'}};
+      info.replyComment=[reply];info.replyTotal=1;
+      const child=document.createElement('div');child.className='comment';
+      Object.defineProperty(child,'__reactFiber$fixture',{value:{return:{memoizedProps:{level:2,levelOneCid:'11',awemeInfo:{awemeId:'10'},commentInfo:reply}}}});
+      child.innerHTML='<a class="author" href="/user/self-sec">Self</a><div class="body"></div><div class="tooltip" id="tooltip_925">Actions</div>';
+      child.querySelector('.body')!.textContent=sameText;rootRow.append(child);
+    }),{sameText,replySec});
+    commentAdapter=new ObservedCommentReply(owner.notification,cmMap,300);
+    expect(await commentAdapter.verifyExisting(cmEvent,sameText,cmBoundary)).toBeNull();
+    // Positive pair: boundary more than 2000ms before replySec succeeds.
+    expect(await commentAdapter.verifyExisting(cmEvent,sameText,new Date(replySec*1000-2500).toISOString())).toMatchObject({id:'925',text:sameText});
+  }finally{dmAdapter?.dispose();commentAdapter?.dispose();await owner.close();await server.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('captureObserved accepts +1500ms server-ahead timestamps for DM and comment events while rejecting +5000ms',async()=>{
+  const root=privateTemp('p0-high3-capture-skew-'),server=await fixtureServer();
+  const owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
+  try{
+    await mountDmReply(owner,server.origin);
+    const dmMap=dmReplyMapping(server.origin);
+    const aheadIso=new Date(Date.now()+1500).toISOString();
+    await owner.dm.evaluate(aheadIso=>{
+      const row=document.querySelector('.message')!;
+      Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message.createdAt=new Date(aheadIso);
+    },aheadIso);
+    const dmAhead=await owner.dm.evaluate(captureObserved,{mapping:dmMap.observation,channel:'dm' as const,index:0,evidenceId:'skew-dm-ok',peer:dmMap.observation.peers[0]!,collectionPartial:true});
+    expect(dmAhead.events[0]!.occurredAt).toBe(aheadIso);
+    expect(dmAhead.dmCoverage).toBeDefined();
+    await owner.dm.evaluate(()=>{
+      const row=document.querySelector('.message')!;
+      Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message.createdAt=new Date(Date.now()+5000);
+    });
+    const dmFarFuture=await owner.dm.evaluate(captureObserved,{mapping:dmMap.observation,channel:'dm' as const,index:0,evidenceId:'skew-dm-far'});
+    expect(dmFarFuture.events[0]!.occurredAt).toBeNull();
+
+    await mountCommentReply(owner,server.origin);
+    const cmMap=commentReplyMapping(server.origin);
+    const aheadSec=Math.ceil((Date.now()+200)/1000);
+    await owner.notification.evaluate(aheadSec=>{
+      const rootRow=document.querySelector('#root-comment')!;
+      Object.getOwnPropertyDescriptor(rootRow,'__reactFiber$fixture')!.value.return.memoizedProps.commentInfo.createTime=aheadSec;
+    },aheadSec);
+    const cmAhead=await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,evidenceId:'skew-cm-ok'});
+    expect(cmAhead.events[0]!.occurredAt).toBe(new Date(aheadSec*1000).toISOString());
+    await owner.notification.evaluate(()=>{
+      const rootRow=document.querySelector('#root-comment')!;
+      Object.getOwnPropertyDescriptor(rootRow,'__reactFiber$fixture')!.value.return.memoizedProps.commentInfo.createTime=Math.floor((Date.now()+5000)/1000);
+    });
+    const cmFarFuture=await owner.notification.evaluate(captureObserved,{mapping:cmMap.observation,channel:'comments' as const,index:0,evidenceId:'skew-cm-far'});
+    expect(cmFarFuture.events[0]!.occurredAt).toBeNull();
+  }finally{await owner.close();await server.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('ObservedCommentReply.verifyExisting ignores unrelated bystander comments lacking canonical /user/<secUid> links',async()=>{
+  const root=privateTemp('p0-med4-bystander-'),server=await fixtureServer();
+  const owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
+  let adapter:ObservedCommentReply|undefined;
+  try{
+    await mountCommentReply(owner,server.origin);
+    await reloadableCommentReply(owner.notification,server.origin);
+    const mapping=commentReplyMapping(server.origin);
+    const event=(await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,evidenceId:'fixture'})).events[0]!;
+    const replyText='bystander safe verified reply';
+    const replySec=Math.floor((Date.now()-1000)/1000);
+    const boundary=new Date(replySec*1000-3000).toISOString();
+    await owner.notification.addInitScript(({replyText,replySec})=>document.addEventListener('DOMContentLoaded',()=>{
+      const list=document.querySelector('#comment-list')!;
+      const bystander=document.createElement('div');bystander.className='comment';
+      bystander.innerHTML='<a class="author" href="/anonymous">Anonymous bystander</a><div class="body">unrelated comment</div><div class="tooltip" id="tooltip_777">Actions</div>';
+      Object.defineProperty(bystander,'__reactFiber$fixture',{value:{return:{memoizedProps:{level:1,userInfo:{uid:'100'},awemeInfo:{awemeId:'10'},
+        commentInfo:{cid:'777',replyId:'0',replyTotal:0,replyComment:[],text:'unrelated comment',createTime:replySec-10,user:{uid:'999',secUid:''},status:1}}}}});
+      list.prepend(bystander);
+      const rootRow=document.querySelector('#root-comment')!,info=Object.getOwnPropertyDescriptor(rootRow,'__reactFiber$fixture')!.value.return.memoizedProps.commentInfo;
+      const reply={cid:'930',replyId:'11',text:replyText,createTime:replySec,status:1,user:{uid:'100',secUid:'self-sec'}};
+      info.replyComment=[reply];info.replyTotal=1;
+      const child=document.createElement('div');child.className='comment';
+      Object.defineProperty(child,'__reactFiber$fixture',{value:{return:{memoizedProps:{level:2,levelOneCid:'11',awemeInfo:{awemeId:'10'},commentInfo:reply}}}});
+      child.innerHTML='<a class="author" href="/user/self-sec">Self</a><div class="body"></div><div class="tooltip" id="tooltip_930">Actions</div>';
+      child.querySelector('.body')!.textContent=replyText;rootRow.append(child);
+    }),{replyText,replySec});
+    // Paired check: allCommentAuthors=true would fail on this exact bystander row.
+    await expect(new ObservedReader(owner.notification,mapping.observation).comments(0,true,0,{holdScroll:true,stay:false}))
+      .rejects.toThrow('OBSERVATION_COMMENT_AUTHOR_UNVERIFIED');
+    adapter=new ObservedCommentReply(owner.notification,mapping,400);
+    expect(await adapter.verifyExisting(event,replyText,boundary)).toMatchObject({id:'930',text:replyText});
+  }finally{adapter?.dispose();await owner.close();await server.close();await rm(root,{recursive:true,force:true});}
 });
 
 test('headless BrowserProfileOwner auto-closes unexpected popup orphan pages while allowing explicit context.newPage',async()=>{

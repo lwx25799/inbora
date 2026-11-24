@@ -2,7 +2,7 @@ import {reportSecurityFailure} from './security-signal.js';
 import {randomUUID} from 'node:crypto';
 import type {Page} from 'playwright';
 import type {CommentReplyMapping} from '../config/site-mapping.js';
-import {digest,dmClockToleranceMs,eventBinding,isStrong,requireSafe,targetKey,validText,
+import {digest,dmClockToleranceMs,eventBinding,isStrong,proofTimeValid,requireSafe,targetKey,validText,
   type InboundEvent,type ReplyAdapter,type SendProof,type TargetSnapshot} from '../core/contracts.js';
 import {ObservedReader} from './observed-reader.js';
 import {CommentResponses,type NativeCommentReply} from './comment-responses.js';
@@ -591,7 +591,7 @@ export class ObservedCommentReply implements ReplyAdapter{
     requireSafe(isStrong(event)&&Number.isFinite(Date.parse(notBefore)),'COMMENT_REPLY_SCOPE_REQUIRED');
     const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
     this.responses.watch(event);
-    await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).comments(index,true,0,{holdScroll:true,stay:false});
+    await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).comments(index,false,0,{holdScroll:true,stay:false});
     await this.locateRoot(event,index);
     await this.frame(event,'expand');
     return this.poll(event,text,[],notBefore,undefined,'VERIFY_EXISTING');
@@ -655,16 +655,17 @@ export class ObservedCommentReply implements ReplyAdapter{
   }
   private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string,stage:'POLL'|'VERIFY_EXISTING'='POLL'):Promise<SendProof|null>{
     const deadline=Date.now()+this.timeoutMs;let previous:string|null=null,dom:CommentProofCounts|undefined;
+    const hasBaseline=stage!=='VERIFY_EXISTING',start=Date.parse(notBefore),strictStart=hasBaseline?start:start+dmClockToleranceMs;
     const poll={snapshots:0,rawProofs:0,newProofs:0,sameText:0,afterBoundary:0,notFuture:0,ackMatches:0,eligibleProofs:0,stableSnapshots:0};
     try{
       do{const frame=await this.frame(event,'proofs');dom=frame.readbackCounts;poll.snapshots++;poll.rawProofs=frame.proofs.length;
         const fresh=frame.proofs.filter(p=>!before.includes(p.id)),same=fresh.filter(p=>p.text===text);
-        poll.newProofs=fresh.length;poll.sameText=same.length;poll.afterBoundary=same.filter(p=>Date.parse(p.sentAt)>Date.parse(notBefore)).length;
+        poll.newProofs=fresh.length;poll.sameText=same.length;poll.afterBoundary=same.filter(p=>Date.parse(p.sentAt)>strictStart).length;
         poll.notFuture=same.filter(p=>Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs).length;poll.ackMatches=ackId?same.filter(p=>p.id===ackId).length:0;
-        const matches=same.filter(p=>(ackId?p.id===ackId:Date.parse(p.sentAt)>Date.parse(notBefore))&&Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs);
+        const matches=same.filter(p=>(ackId?p.id===ackId:Date.parse(p.sentAt)>strictStart)&&Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs);
         poll.eligibleProofs=matches.length;requireSafe(matches.length<=1,'COMMENT_REPLY_PROOF_AMBIGUOUS');const proof=matches[0];
         poll.stableSnapshots=proof?(digest(proof)===previous?2:1):0;
-        if(proof&&poll.stableSnapshots===2){this.report({stage,reason:'VERIFIED',...(dom?{dom}:{}),poll});return proof;}
+        if(proof&&poll.stableSnapshots===2&&(ackId||proofTimeValid(proof,notBefore,hasBaseline))){this.report({stage,reason:'VERIFIED',...(dom?{dom}:{}),poll});return proof;}
         previous=proof?digest(proof):null;await new Promise(resolve=>setTimeout(resolve,75));
       }while(Date.now()<deadline);
       this.report({stage,reason:!poll.rawProofs?'EMPTY':!poll.eligibleProofs?'FILTERED':'UNSTABLE',...(dom?{dom}:{}),poll});return null;

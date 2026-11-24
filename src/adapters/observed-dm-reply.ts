@@ -2,7 +2,7 @@ import {reportSecurityFailure} from './security-signal.js';
 import { randomUUID } from 'node:crypto';
 import type { Page } from 'playwright';
 import type { DmReplyMapping } from '../config/site-mapping.js';
-import { digest, dmClockToleranceMs, eventBinding, isStrong, isManualMediaCandidate, requireSafe, targetKey, validText,
+import { digest, dmClockToleranceMs, eventBinding, isStrong, isManualMediaCandidate, proofTimeValid, requireSafe, targetKey, validText,
   type InboundEvent, type ReplyAdapter, type SendProof, type TargetSnapshot } from '../core/contracts.js';
 import { ObservedReader } from './observed-reader.js';
 import {SubmissionResponse,type SubmissionAck} from './submission-response.js';
@@ -604,7 +604,7 @@ export class ObservedDmReply implements ReplyAdapter {
       if(!ack){this.readDiagnostic('ACK_WAIT','ACK_MISSING');return null;}
     }
     this.readbackAck=!!ack;this.readDiagnostic('ACK_WAIT','OK');
-    return await this.refreshedProof(event,text,before,notBefore,ack??undefined,this.prepared?.contextDigest);
+    return await this.refreshedProof(event,text,before,notBefore,ack??undefined,this.prepared?.contextDigest,true);
     }catch(error){this.readFailure(error);throw error;}
   }
   async verifyExisting(event:InboundEvent,text:string,notBefore:string,baselineContextDigest?:string):Promise<SendProof|null>{
@@ -615,12 +615,12 @@ export class ObservedDmReply implements ReplyAdapter {
     await this.inspect(event);
     // A new read-only adapter cannot reconstruct the prior attempt's ephemeral acknowledgement.
     // Small clock differences require the persisted pre-send context, never an invented acknowledgement.
-    return await this.refreshedProof(event,text,[],notBefore,undefined,baselineContextDigest);
+    return await this.refreshedProof(event,text,[],notBefore,undefined,baselineContextDigest,false);
     }catch(error){this.readFailure(error);throw error;}
   }
-  private async refreshedProof(event:InboundEvent,text:string,before:string[],notBefore:string,ack?:SubmissionAck,baselineContextDigest?:string):Promise<SendProof|null>{
+  private async refreshedProof(event:InboundEvent,text:string,before:string[],notBefore:string,ack?:SubmissionAck,baselineContextDigest?:string,hasBaseline=true):Promise<SendProof|null>{
     this.readbackStage='FIRST_POLL';
-    const initial=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest);
+    const initial=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest,hasBaseline);
     if(!initial){this.readDiagnostic('FIRST_POLL','NO_COMPLETE_PROOF');return null;}
     // A serverId can coexist with a temporary local createdAt. Require a fresh page model.
     this.readbackStage='EMPTY_EDITOR';requireSafe((await this.frame(event,'proofs')).editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
@@ -630,10 +630,11 @@ export class ObservedDmReply implements ReplyAdapter {
     requireSafe(index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
     this.readbackStage='RESELECT';await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).dm(index,this.mapping.observation.peers[index],true);
     this.readbackStage='REFRESH_POLL';
-    const refreshed=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest);
+    const refreshed=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest,hasBaseline);
     if(ack&&this.submission!.current()!==ack)return null;
-    const result=refreshed?.id===initial.id?{...refreshed,...(ack?{submission:ack.submission}:{}),
+    const candidate=refreshed?.id===initial.id?{...refreshed,...(ack?{submission:ack.submission}:{}),
       ...(refreshed.clockSkew?{clockSkew:{...refreshed.clockSkew,refreshedId:refreshed.id}}:{})}:null;
+    const result=candidate&&proofTimeValid(candidate,notBefore,hasBaseline)?candidate:null;
     this.submission?.dispose();this.readDiagnostic('RESULT',result?'OK':'NO_COMPLETE_PROOF');return result;
   }
   private readDiagnostic(stage:DmReadbackDiagnostic['stage'],code:string,fields:Partial<DmReadbackDiagnostic>={}):void{
@@ -687,30 +688,30 @@ export class ObservedDmReply implements ReplyAdapter {
     }
     return null;
   }
-  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string,baselineContextDigest?:string):Promise<SendProof|null>{
+  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string,baselineContextDigest?:string,hasBaseline=true):Promise<SendProof|null>{
     const deadline=Date.now()+this.receiptTimeoutMs,stage=this.readbackStage;let previous:string|null=null,diagnosed=false,searched=false,restore:(()=>Promise<void>)|undefined,failed=false;
     try{
     do {
       requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
       let frame=await this.frame(event,'proofs');
-      const start=Date.parse(notBefore);
+      const start=Date.parse(notBefore),strictStart=hasBaseline?start:start+dmClockToleranceMs;
       const possible=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&Date.parse(p.sentAt)>=start-dmClockToleranceMs&&Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs);
       if(!ackId)requireSafe(possible.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
       const skew=possible[0];
-      if(!ackId&&!searched&&skew&&Date.parse(skew.sentAt)<=start&&frame.latestId===skew.id&&baselineContextDigest&&
+      if(!ackId&&!searched&&skew&&Date.parse(skew.sentAt)<=strictStart&&frame.latestId===skew.id&&baselineContextDigest&&
         !this.clockContext(frame,event,skew.id,baselineContextDigest).matches){
         searched=true;const found=await this.seekClockContext(event,frame,skew,baselineContextDigest);if(found){frame=found.frame;restore=found.restore;}
       }
       const matches=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&
-        (ackId?p.id===ackId:Date.parse(p.sentAt)>start||Boolean(baselineContextDigest&&
+        (ackId?p.id===ackId:Date.parse(p.sentAt)>strictStart||Boolean(baselineContextDigest&&
           Date.parse(p.sentAt)>=start-dmClockToleranceMs&&frame.latestId===p.id&&
           this.clockContext(frame,event,p.id,baselineContextDigest).matches))&&Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs);
       requireSafe(matches.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
-      const candidate=matches[0],proof=candidate&&!ackId&&Date.parse(candidate.sentAt)<=start?{...candidate,
+      const candidate=matches[0],proof=candidate&&!ackId&&Date.parse(candidate.sentAt)<=strictStart?{...candidate,
         clockSkew:{boundary:notBefore,baselineContextDigest:baselineContextDigest!,
           remainingContextDigest:this.clockContext(frame,event,candidate.id,baselineContextDigest).digest!,refreshedId:''}}:candidate;
       if(!diagnosed){const context=skew?this.clockContext(frame,event,skew.id,baselineContextDigest):{matches:false,trimmed:0};
-        this.readDiagnostic(stage,proof?'OK':'CONTEXT_INCOMPLETE',{candidateCount:possible.length,within2s:!!skew&&Date.parse(skew.sentAt)<=start,
+        this.readDiagnostic(stage,proof?'OK':'CONTEXT_INCOMPLETE',{candidateCount:possible.length,within2s:!!skew&&Date.parse(skew.sentAt)<=strictStart,
           candidateLatest:!!skew&&frame.latestId===skew.id,contextMatches:context.matches,rawRows:frame.context.length,trimmedRows:context.trimmed});diagnosed=true;}
       if(proof&&digest(proof)===previous)return frame.editorText===''?proof:null;
       previous=proof?digest(proof):null;

@@ -39,7 +39,7 @@ test('strict time filtering is reported separately from empty DOM and never beco
 });
 
 test('stable complete proofs are unchanged even when the diagnostic callback rejects',async()=>{
-  const boundary=new Date(Date.now()-2000).toISOString(),proof={id:'901',ownId:'100',targetKey:'comment:10:21',text:'PRIVATE_APPROVED_BODY',pending:false,sentAt:new Date(Date.now()-1000).toISOString()};
+  const boundary=new Date(Date.now()-4000).toISOString(),proof={id:'901',ownId:'100',targetKey:'comment:10:21',text:'PRIVATE_APPROVED_BODY',pending:false,sentAt:new Date(Date.now()-1000).toISOString()};
   const f=fixture([proof],false,200,true);try{
     expect(await f.adapter.verifyExisting(event,proof.text,boundary)).toEqual(proof);
     expect(f.reports.at(-1)).toMatchObject({reason:'VERIFIED',poll:{stableSnapshots:2,eligibleProofs:1}});

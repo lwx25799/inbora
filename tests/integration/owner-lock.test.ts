@@ -3,6 +3,8 @@ import { fork } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
+import { realpath } from 'node:fs/promises';
+import { digest } from '../../src/core/contracts.js';
 import { OwnerLock, ownerLockErrorCode, ownerLockPort, ownerLockPortBase, ownerLockPortSpan } from '../../src/browser/owner-lock.js';
 import { privateTemp } from '../helpers.js';
 import {existsSync} from 'node:fs';
@@ -28,16 +30,24 @@ test('second process is denied for same canonical owner directory; crash release
   } finally { if (child.exitCode === null) child.kill(); }
 });
 
-test('close is idempotent, port avoids Windows dynamic range, and EACCES is distinct from EADDRINUSE', async () => {
+test('close is idempotent, port hash preserves cross-version compatibility, and EACCES is distinct from EADDRINUSE', async () => {
   const directory = privateTemp('owner-lock-hardening-');
   const lock = await OwnerLock.acquire(directory);
+  let canonical = await realpath(directory);
+  if (process.platform === 'win32') canonical = canonical.toLowerCase();
+  expect(ownerLockPortBase).toBe(20_000);
+  expect(ownerLockPortSpan).toBe(40_000);
+  expect(lock.port).toBe(ownerLockPort(canonical));
+  expect(lock.port).toBe(20_000 + (Number.parseInt(digest(canonical).slice(0, 8), 16) % 40_000));
   expect(lock.port).toBeGreaterThanOrEqual(ownerLockPortBase);
   expect(lock.port).toBeLessThan(ownerLockPortBase + ownerLockPortSpan);
-  expect(lock.port).toBeLessThan(49_152);
   for (let i = 0; i < 200; i++) {
-    const port = ownerLockPort(`d:\\inbora\\synthetic-dir-${i}`);
+    const syntheticPath = `/synthetic/owner-dir-${i}`;
+    const port = ownerLockPort(syntheticPath);
+    const legacy = 20_000 + (Number.parseInt(digest(syntheticPath).slice(0, 8), 16) % 40_000);
+    expect(port).toBe(legacy);
     expect(port).toBeGreaterThanOrEqual(20_000);
-    expect(port).toBeLessThanOrEqual(48_999);
+    expect(port).toBeLessThanOrEqual(59_999);
   }
   expect(ownerLockErrorCode({ code: 'EADDRINUSE' })).toBe('OWNER_LOCKED_OR_PORT_UNAVAILABLE');
   expect(ownerLockErrorCode({ code: 'EACCES' })).toBe('OWNER_PORT_RESERVED');

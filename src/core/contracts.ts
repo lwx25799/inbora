@@ -106,11 +106,11 @@ export interface SendProof {
   clockSkew?:{boundary:string;baselineContextDigest:string;remainingContextDigest:string;refreshedId:string};
 }
 export const dmClockToleranceMs=2000;
-export function proofTimeValid(proof:SendProof,boundary:string):boolean{
+export function proofTimeValid(proof:SendProof,boundary:string,hasBaseline=true):boolean{
   const at=Date.parse(proof.sentAt),start=Date.parse(boundary),now=Date.now();
   if(!Number.isFinite(at)||at<Date.UTC(2000,0,1)||!Number.isFinite(start)||at>now+dmClockToleranceMs)return false;
   if(!proof.submission){
-    if(!proof.clockSkew)return at>start;
+    if(!proof.clockSkew)return at>(hasBaseline?start:start+dmClockToleranceMs);
     const skew=proof.clockSkew;
     return proof.targetKey.startsWith('dm:')&&at>=start-dmClockToleranceMs&&skew.boundary===boundary&&
       skew.refreshedId===proof.id&&/^[a-f0-9]{64}$/.test(skew.baselineContextDigest)&&

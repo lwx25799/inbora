@@ -3,7 +3,7 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { digest, Blocked } from '../core/contracts.js';
 
 export const ownerLockPortBase = 20_000;
-export const ownerLockPortSpan = 29_000;
+export const ownerLockPortSpan = 40_000;
 
 export function ownerLockPort(canonical: string): number {
   return ownerLockPortBase + (Number.parseInt(digest(canonical).slice(0, 8), 16) % ownerLockPortSpan);
