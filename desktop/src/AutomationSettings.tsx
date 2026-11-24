@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { request, reasons, type Status } from './api';
-import type { ReplyPolicy } from '../../src/app/automation-contracts.js';
+import type { ReplyPolicy } from '../../src/contracts/automation.js';
 import {
   collectionSnapshot,
   policySnapshot,

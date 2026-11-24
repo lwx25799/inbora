@@ -1,5 +1,5 @@
 import {useState} from 'react';
-import type {PersonaVersion} from '../../src/knowledge/contracts.js';
+import type {PersonaVersion} from '../../src/contracts/knowledge.js';
 import {formatDate,type KnowledgePanelProps} from './knowledge-client';
 
 const personaNames:Record<PersonaVersion['state'],string>={DRAFT:'草稿',PUBLISHED:'当前发布',ARCHIVED:'历史版本',INVALID:'来源已失效'};

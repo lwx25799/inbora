@@ -1,6 +1,6 @@
 import {useState} from 'react';
-import type {KnowledgeEntry,KnowledgeInput} from '../../src/knowledge/contracts.js';
-import type {Channel} from '../../src/core/contracts.js';
+import type {KnowledgeEntry,KnowledgeInput} from '../../src/contracts/knowledge.js';
+import type {Channel} from '../../src/contracts/events.js';
 import {channelName,formatDate,type KnowledgePanelProps} from './knowledge-client';
 import {KnowledgeImport} from './KnowledgeImport';
 

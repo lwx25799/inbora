@@ -1,14 +1,7 @@
 import {performance} from 'node:perf_hooks';
-import type {Channel} from '../core/contracts.js';
+import {runtimeStages,type RuntimeStage,type RuntimeOutcome,type RuntimeChannel,type RuntimePerformanceSummary} from '../contracts/diagnostics.js';
+export {runtimeStages,type RuntimeStage,type RuntimeOutcome,type RuntimeChannel,type RuntimePerformanceSummary} from '../contracts/diagnostics.js';
 
-export const runtimeStages=['QUEUE_WAIT','COLLECTION','TARGET_LOCATION','PAGE_WAIT','CONTENT_CHECK','RESPONSE_READ','RESPONSE_PARSE','PERSIST','MODEL','DELIVERY'] as const;
-export type RuntimeStage=typeof runtimeStages[number];
-export type RuntimeOutcome='SUCCEEDED'|'FAILED'|'CANCELLED'|'UNCERTAIN';
-export type RuntimeChannel=Channel|'SHARED';
-export interface RuntimePerformanceSummary {
-  stage:RuntimeStage;channel:RuntimeChannel;count:number;failures:number;cancelled:number;uncertain:number;
-  lastMs:number;p50Ms:number;p95Ms:number;maxMs:number;
-}
 interface Bucket {stage:RuntimeStage;channel:RuntimeChannel;count:number;failures:number;cancelled:number;uncertain:number;samples:number[]}
 const channels:readonly RuntimeChannel[]=['SHARED','COMMENT_NOTIFICATION','DIRECT_MESSAGE'];
 const outcomes:readonly RuntimeOutcome[]=['SUCCEEDED','FAILED','CANCELLED','UNCERTAIN'];

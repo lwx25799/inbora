@@ -1,6 +1,6 @@
 import {useEffect,useRef,useState} from 'react';
 import {request,type TimelineItem} from './api';
-import type {MessagePreviewData} from '../../src/storage/message-previews.js';
+import type {MessagePreviewData} from '../../src/contracts/inbox.js';
 
 const mediaPlaceholders={IMAGE:'[图片或表情消息，需人工查看]',VIDEO:'[视频消息，需人工查看]',AUDIO:'[音频消息，需人工查看]',MIXED:'[含媒体的消息，需人工查看]'};
 export const isMediaPlaceholder=(text:string,contentType?:TimelineItem['contentType'])=>contentType

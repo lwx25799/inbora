@@ -1,41 +1,37 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { AccountId } from "../../src/contracts/account.js";
+import type { BrowserStatus } from "../../src/contracts/browser-resources.js";
 import type {
   ClientCommand,
   SendParams,
   AiSettings,
   InboxSync,
   BrowserDraftChoice,
-} from "../../src/app/contracts.js";
+} from "../../src/contracts/client.js";
 import type {
   Draft,
   StoredEvent,
   InboundEvent,
-} from "../../src/core/contracts.js";
-import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../src/app/automation-contracts.js';
-import type { TimelineItem } from '../../src/app/inbox-queries.js';
-import type {LocalAssistantState} from '../../src/app/local-assistant-contracts.js';
-import type {SecurityRuntime} from '../../src/app/security-runtime.js';
-export type { TimelineItem };
+} from "../../src/contracts/events.js";
+import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../src/contracts/automation.js';
+import type { CommentThreadPage, ReplyStatus, TimelineItem } from '../../src/contracts/inbox.js';
+import type {LocalAssistantState} from '../../src/contracts/local-assistant.js';
+import type {SecurityRuntime} from '../../src/contracts/diagnostics.js';
+export type { ReplyStatus, TimelineItem };
 
 export type { SendParams, AiSettings, BrowserDraftChoice };
-export type ReplyStatus='WAITING'|'REPLIED'|'NOT_REQUIRED'|'MANUAL_ONLY';
 export interface Status {
   localAssistant?:LocalAssistantState;
   localAssistantConnection?:{ready:boolean;instanceId:string|null;transport:'stdio';tools:16};
   securityRuntime?:SecurityRuntime;
   securityHolds?:{channel:'DIRECT_MESSAGE'|'COMMENT_NOTIFICATION';reason:string;incidentId:string;revision:string;heldAt:number;mode:'headed'|'headless'}[];
   runtime: string;
-  account: { id: string; identity: string } | null;
+  account: { id: AccountId; identity: string } | null;
   operator: { id: string; permissions: string[]; expiresAt: number };
   mode: "OBSERVE" | "DRAFT_ONLY" | "MANUAL" | "AI_ASSISTED" | "LIMITED_AUTO";
   configuredMode: Status["mode"];
   paused: boolean;
-  browser: {
-    state: string;
-    mode: "headed" | "headless";
-    loginRecovery?:boolean;
-    version: string | null;
-  };
+  browser: BrowserStatus;
   lastSync: { channel: string; at: string }[];
   capabilities: {
     channel: string;
@@ -96,7 +92,7 @@ export interface Thread {
   timeline?:{items:TimelineItem[];pageSize:number;hasMore:boolean;before:string|null;projectionRevision?:string};
   replyStatus: ReplyStatus;
   conversationReplyStatus?: ReplyStatus;
-  commentContext?: ReturnType<typeof import('../../src/storage/comment-thread-context.js').commentThreadPage>;
+  commentContext?: CommentThreadPage;
   controlledTrial: boolean;
   workUrl: string | null;
   event: StoredEvent;

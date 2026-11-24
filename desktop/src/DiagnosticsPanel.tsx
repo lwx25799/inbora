@@ -1,15 +1,13 @@
 import {useEffect,useState} from 'react';
 import {listen} from '@tauri-apps/api/event';
-import type {DiagnosticsSnapshot} from '../../src/app/diagnostics';
-import type {EvidenceMaintenance} from '../../src/app/evidence-maintenance';
-import type {RuntimePerformanceSummary} from '../../src/observability/runtime-performance';
+import type {DiagnosticsSnapshot,EvidenceMaintenanceStatus,RuntimePerformanceSummary} from '../../src/contracts/diagnostics.js';
 import {request,reasons} from './api';
 import {time} from './presentation';
 import {ReadRefresh} from './read-refresh';
 import {BrowserResourcesPanel} from './BrowserResourcesPanel';
 
 type DiagnosticsView=DiagnosticsSnapshot&{
-  performance:RuntimePerformanceSummary[];evidence:ReturnType<EvidenceMaintenance['status']>;
+  performance:RuntimePerformanceSummary[];evidence:EvidenceMaintenanceStatus;
 };
 const statuses:Record<string,string>={SUCCEEDED:'成功',FAILED:'失败',STARTED:'未完成',UNKNOWN:'未识别'};
 const sources:Record<string,string>={COLLECTION:'收取',WORK:'作品读取',AUTOMATION:'自动回复',VERIFICATION:'送达检查',MANUAL_SEND:'人工回复'};

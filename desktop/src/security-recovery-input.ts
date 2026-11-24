@@ -1,4 +1,4 @@
-import type {ManualRecoveryFrame} from '../../src/app/manual-recovery-contracts.js';
+import type {ManualRecoveryFrame} from '../../src/contracts/manual-recovery.js';
 
 /** Screenshots and browser input use the same CSS pixel viewport. */
 export function recoveryPoint(frame:ManualRecoveryFrame,box:{left:number;top:number;width:number;height:number},clientX:number,clientY:number){

@@ -1,6 +1,6 @@
 import {useEffect,useRef,useState,type PointerEvent as ReactPointerEvent,type KeyboardEvent as ReactKeyboardEvent} from 'react';
 import {request,type Status} from './api';
-import type {ManualRecoveryFrame,ManualRecoverySession,ManualRecoveryCommand} from '../../src/app/manual-recovery-contracts.js';
+import type {ManualRecoveryFrame,ManualRecoverySession,ManualRecoveryCommand} from '../../src/contracts/manual-recovery.js';
 import {recoveryError,recoveryPoint} from './security-recovery-input';
 import './security-recovery.css';
 

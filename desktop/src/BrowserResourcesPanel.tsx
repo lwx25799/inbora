@@ -1,4 +1,4 @@
-import type {BrowserResourceReason,BrowserResourcesSnapshot} from '../../src/observability/browser-resource-contracts';
+import type {BrowserResourceReason,BrowserResourcesSnapshot} from '../../src/contracts/browser-resources';
 import {time} from './presentation';
 
 const states:Record<BrowserResourcesSnapshot['state'],string>={

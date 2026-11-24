@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
-import type {Channel} from '../../src/core/contracts.js';
+import type {Channel} from '../../src/contracts/events.js';
 import {knowledgeRequest,type ChatImportMapping,type ImportPreview,type PerformKnowledge} from './knowledge-client';
 
 interface MappingPreview {pairs:{prompt:string;response:string;group?:string}[];total:number;warnings?:string[]}

@@ -1,6 +1,6 @@
 import {useState} from 'react';
 import {request,type Status} from './api';
-import type {ManualRecoverySession,ManualRecoveryStart} from '../../src/app/manual-recovery-contracts.js';
+import type {ManualRecoverySession,ManualRecoveryStart} from '../../src/contracts/manual-recovery.js';
 import {SecurityRecoveryDialog} from './SecurityRecoveryDialog';
 import {recoveryError} from './security-recovery-input';
 import './emergency-stop.css';

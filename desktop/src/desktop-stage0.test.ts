@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import { createElement, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
@@ -188,7 +189,7 @@ function findControlByLabel(tree: ReactNode, labelPart: string, tag: 'input' | '
 function baseStatus(overrides: Partial<Status> = {}): Status {
   return {
     runtime: 'synthetic-stage0',
-    account: { id: 'account_001', identity: 'own-1' },
+    account: { id: DEFAULT_ACCOUNT_ID, identity: 'own-1' },
     operator: { id: 'op-1', permissions: ['READ', 'EDIT', 'SEND', 'CONTROL'], expiresAt: Date.now() + 60_000 },
     mode: 'MANUAL',
     configuredMode: 'MANUAL',
@@ -230,7 +231,7 @@ function baseThread(channel: 'DIRECT_MESSAGE' | 'COMMENT_NOTIFICATION', override
       binding: 'synthetic-binding',
       status: 'AWAITING_DRAFT',
       payload: {
-        accountId: 'account_001',
+        accountId: DEFAULT_ACCOUNT_ID,
         channel,
         platformEventId: 'evt-1',
         actorId: 'peer-1',

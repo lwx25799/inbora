@@ -1,11 +1,11 @@
-import {z} from 'zod';
+import type {z} from 'zod';
 import {requireSafe} from '../core/contracts.js';
 import type {ParsedDocument} from './import-parser.js';
 import type {SampleInput} from './contracts.js';
 
-export const importMappingSchema=z.object({speakerColumn:z.string().max(100),textColumn:z.string().max(100),
-  conversationColumn:z.string().max(100).optional(),timeColumn:z.string().max(100).optional(),selfName:z.string().trim().min(1).max(100),
-  channel:z.enum(['DIRECT_MESSAGE','COMMENT_NOTIFICATION'])}).strict();
+import type {importMappingSchema} from '../contracts/knowledge-import.js';
+export {importMappingSchema} from '../contracts/knowledge-import.js';
+
 export function mapChat(parsed:ParsedDocument,mapping:z.infer<typeof importMappingSchema>):SampleInput[]{
   return mapChatPreview(parsed,mapping).pairs;
 }

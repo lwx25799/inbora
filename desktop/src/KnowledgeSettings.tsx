@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
-import type {KnowledgeOverview} from '../../src/knowledge/contracts.js';
+import type {KnowledgeOverview} from '../../src/contracts/knowledge.js';
 import {KnowledgeDocuments} from './KnowledgeDocuments';
 import {KnowledgeSamples} from './KnowledgeSamples';
 import {KnowledgePersona} from './KnowledgePersona';

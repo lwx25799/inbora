@@ -1,5 +1,5 @@
-import type {KnowledgeInput,KnowledgeOverview} from '../../src/knowledge/contracts.js';
-import type {Channel} from '../../src/core/contracts.js';
+import type {KnowledgeInput,KnowledgeOverview} from '../../src/contracts/knowledge.js';
+import type {Channel} from '../../src/contracts/events.js';
 import {request,desktopInfo} from './api.js';
 import {explainSafe} from './error-messages.js';
 

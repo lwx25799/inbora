@@ -1,5 +1,5 @@
 import {useState} from 'react';
-import type {Channel} from '../../src/core/contracts.js';
+import type {Channel} from '../../src/contracts/events.js';
 import {formatDate,type KnowledgePanelProps} from './knowledge-client';
 
 interface TrialReply {text:string;model:string;personaId:string|null;fingerprint:string;
