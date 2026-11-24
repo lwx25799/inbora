@@ -47,6 +47,7 @@ export class HumanFollowups {
   }
   private editable(token:string,eventId:string,generation:number){
     requireSafe(this.present(),'FOLLOWUP_NOT_READY');
+    this.authority.requireGuiControl(token,'EDIT');
     const event=this.store.event(eventId),op=this.authority.requireOwner(token,event,generation);
     requireSafe(this.authority.mode()!=='OBSERVE','OBSERVE_READ_ONLY');
     requireSafe(this.hasOriginal(eventId,op.id),'FOLLOWUP_REQUIRES_CONFIRMED_REPLY');
@@ -54,6 +55,7 @@ export class HumanFollowups {
     return event;
   }
   save(token:string,eventId:string,generation:number,expectedVersion:number,text:string,suggestionId:string|null){
+    this.authority.requireGuiControl(token,'EDIT');
     requireSafe(suggestionId===null,'FOLLOWUP_HUMAN_TEXT_REQUIRED');text=text.replace(/\r\n?/gu,'\n');if(text)validText(text);
     this.store.db.transaction(()=>{
       this.editable(token,eventId,generation);const old=this.currentDraft(eventId);
@@ -65,7 +67,7 @@ export class HumanFollowups {
     }).immediate();return this.view(eventId)!.draft!;
   }
   queue(token:string,id:string,input:Input):boolean {
-    const op=this.authority.operator(token,'SEND'),prior=this.turn(id);
+    const op=this.authority.requireGuiControl(token,'SEND'),prior=this.turn(id);
     if(prior){requireSafe(prior.operator_id===op.id&&prior.input_digest===digest(input),'COMMAND_PARAMETERS_CONFLICT');return false;}
     requireSafe(!this.store.db.prepare('SELECT command_id FROM manual_send_commands WHERE command_id=?').get(id),'COMMAND_PARAMETERS_CONFLICT');
     return this.store.db.transaction(()=>{
@@ -89,7 +91,7 @@ export class HumanFollowups {
     const turn=this.turn(id);requireSafe(turn,'COMMAND_NOT_FOUND');const input=JSON.parse(turn.params) as Input,event=this.store.event(turn.event_id);
     assertSecurityChannelClear(this.store,event.payload.channel);
     requireSafe(['PREPARING',...(approved?['APPROVED']:[])].includes(turn.status),'COMMAND_NOT_QUEUED');
-    const op=this.authority.operator(token,'SEND');this.authority.operator(token,'APPROVE');
+    const op=this.authority.requireGuiControl(token,'SEND');this.authority.operator(token,'APPROVE');
     requireSafe(op.id===turn.operator_id,'OPERATOR_PERMISSION_DENIED');this.authority.requireOwner(token,event,input.generation);
     this.authority.requireSelection(token,event.id,input.selectionId);
     requireSafe(!this.authority.paused(),'ACCOUNT_PAUSED');
@@ -147,7 +149,7 @@ export class HumanFollowups {
           snapshot.eventBinding===event.binding&&snapshot.targetKey===row.target_key&&snapshot.composerKey===row.target_key,'TARGET_CHANGED');
         if(!isStrong(event.payload))requireSafe(validManualMediaProof(event.payload,snapshot),'HUMAN_MEDIA_APPROVAL_REQUIRED');
         requireSafe(capabilities===digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel)),'CAPABILITY_CHANGED_DURING_CHECK');
-        this.authority.attest(event.payload.channel,'SEND_AVAILABLE',identity,`readonly-contract:${digest(snapshot)}`);
+        this.authority.attest(event.payload.channel,'SEND_AVAILABLE',identity,`readonly-contract:${digest([snapshot,identity])}`);
         this.store.db.prepare("UPDATE human_reply_turns SET status='APPROVED',approval=? WHERE command_id=? AND status='PREPARING'")
           .run(JSON.stringify({version:row.version,textDigest:digest(row.text),snapshot}),id);
       });
@@ -156,9 +158,10 @@ export class HumanFollowups {
         requireSafe(humanReplyEligibility(this.store,event).eligible,'HUMAN_MEDIA_APPROVAL_REQUIRED');
       }});
     }catch(error){
-      const row=this.turn(id);if(row&&!row.intent_id)this.store.db.transaction(()=>{
-        this.store.db.prepare("UPDATE human_reply_turns SET status='FAILED_BEFORE_CLICK',reason=? WHERE command_id=?").run(this.errorCode(error),id);
-        this.store.db.prepare("UPDATE human_reply_drafts SET text=?,version=version+1,saved_at=? WHERE event_id=? AND text='' AND version=?")
+      const row=this.turn(id);
+      if(row&&!row.intent_id&&['PREPARING','APPROVED'].includes(row.status))this.store.db.transaction(()=>{
+        const updated=this.store.db.prepare("UPDATE human_reply_turns SET status='FAILED_BEFORE_CLICK',reason=?,approval=NULL WHERE command_id=? AND intent_id IS NULL AND status IN ('PREPARING','APPROVED')").run(this.errorCode(error),id);
+        if(updated.changes===1)this.store.db.prepare("UPDATE human_reply_drafts SET text=?,version=version+1,saved_at=? WHERE event_id=? AND text='' AND version=?")
           .run(row.text,this.authority.now(),row.event_id,row.version+1);
       }).immediate();
     }finally{dispose();this.emit();}
@@ -183,7 +186,7 @@ export class HumanFollowups {
         if(!isStrong(this.store.event(row.event_id).payload)){requireSafe(authority.manualMedia&&validManualMediaProof(this.store.event(row.event_id).payload,snapshot),'HUMAN_MEDIA_APPROVAL_REQUIRED');authority.manualMedia();}
         if(real)this.store.consumeBudget('SEND');const intent=randomUUID();
         this.store.db.prepare("UPDATE human_reply_turns SET status='INTENT_RECORDED',intent_id=?,attempt_started_at=? WHERE command_id=?")
-          .run(intent,new Date().toISOString(),id);this.store.audit('HUMAN_FOLLOWUP_CLICK_INTENT',id);authority.committed(intent);return intent;
+          .run(intent,new Date(this.authority.now()).toISOString(),id);this.store.audit('HUMAN_FOLLOWUP_CLICK_INTENT',id);authority.committed(intent);return intent;
       }).immediate(),
       intentBoundary:(_intentId:string)=>{const r=this.turn(id);requireSafe(r?.attempt_started_at,'INTENT_NOT_FOUND');return r.attempt_started_at;},
       receipt:(_intentId:string,result:'CONFIRMED'|'UNCERTAIN',ref:string,proof?:SendProof)=>this.receipt(id,result,ref,proof),
@@ -193,7 +196,7 @@ export class HumanFollowups {
     this.store.db.transaction(()=>{
       const row=this.turn(id);requireSafe(row?.intent_id&&['INTENT_RECORDED','UNCERTAIN'].includes(row.status),'INTENT_NOT_REVIEWABLE');
       this.store.db.prepare('UPDATE human_reply_turns SET status=?,proof_ref=?,verified_at=?,native_id_digest=?,reason=? WHERE command_id=?')
-        .run(result,ref,new Date().toISOString(),proof?.id?digest(proof.id):null,result==='UNCERTAIN'?ref:null,id);
+        .run(result,ref,new Date(this.authority.now()).toISOString(),proof?.id?digest(proof.id):null,result==='UNCERTAIN'?ref:null,id);
       if(proof?.submission||proof?.clockSkew)this.store.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?)')
         .run(randomUUID(),new Date().toISOString(),'HUMAN_FOLLOWUP_PROOF',id,JSON.stringify({
           submission:proof.submission,clockSkew:proof.clockSkew?{...proof.clockSkew,refreshedId:undefined}:undefined,

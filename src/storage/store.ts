@@ -258,7 +258,16 @@ export class EventStore {
           this.db.prepare('UPDATE thread_ownership SET operator_id=NULL,generation=generation+1,lease_expires_at=0 WHERE target_key=?').run(key);
           this.db.prepare(`UPDATE manual_send_commands SET status='FAILED_BEFORE_CLICK',reason='TARGET_PAUSED'
             WHERE event_id IN (SELECT id FROM inbound_events WHERE target_key=?) AND intent_id IS NULL
-            AND status IN ('PREVIEW','QUEUED','PREFLIGHT')`).run(key);
+            AND status IN ('PREPARING','PREVIEW','QUEUED','PREFLIGHT')`).run(key);
+          if(this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='human_reply_turns'").get()){
+            const pendingTurns=this.db.prepare("SELECT command_id,event_id,text,version FROM human_reply_turns WHERE target_key=? AND intent_id IS NULL AND status IN ('PREPARING','APPROVED') ORDER BY rowid")
+              .all(key) as {command_id:string;event_id:string;text:string;version:number}[];
+            const nowMs=Date.parse(this.now())||Date.now();
+            for(const turn of pendingTurns){
+              if(this.db.prepare("UPDATE human_reply_turns SET status='FAILED_BEFORE_CLICK',reason='TARGET_PAUSED',approval=NULL WHERE command_id=? AND intent_id IS NULL AND status IN ('PREPARING','APPROVED')").run(turn.command_id).changes===1)
+                this.db.prepare("UPDATE human_reply_drafts SET text=?,version=version+1,saved_at=? WHERE event_id=? AND text='' AND version=?").run(turn.text,nowMs,turn.event_id,turn.version+1);
+            }
+          }
         }
         const drafts = this.db.prepare(`SELECT d.id FROM reply_drafts d JOIN inbound_events e ON e.id=d.event_id
           WHERE e.target_key=? AND d.status='APPROVED' AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id)`).all(key) as {id:string}[];

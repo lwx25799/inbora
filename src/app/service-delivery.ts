@@ -1,0 +1,190 @@
+import { requireSafe } from "../core/contracts.js";
+import { SendCoordinator } from "../core/send-coordinator.js";
+import type { EventStore } from "../storage/store.js";
+import type { AutomationStore } from "../storage/automation-store.js";
+import { runtimePerformance } from "../observability/runtime-performance.js";
+import type { WorkbenchAuthority } from "./authority.js";
+import type { BrowserService } from "./browser-service.js";
+import type { VerificationScheduler } from "./verification-scheduler.js";
+import type { SendParams } from "./contracts.js";
+import { findUncertainFollowupForEvent, reconcileUncertainFollowup } from "./followup-verification.js";
+
+export interface DeliveryContext {
+  store: EventStore;
+  authority: WorkbenchAuthority;
+  browser: BrowserService;
+  getAutomation(): AutomationStore | null;
+  getVerification(): VerificationScheduler | null;
+  isClosing(): boolean;
+  suspendForVisible(stopUnsubmitted: boolean): void;
+  resetOnlineAbort(): AbortSignal;
+  resumeAfterLogin(): void;
+  bumpInboxRevision(): void;
+  emit(event: string): void;
+  errorCode(error: unknown): string;
+}
+
+export async function deliverCommand(
+  ctx: DeliveryContext,
+  token: string,
+  id: string,
+  p: SendParams,
+): Promise<void> {
+  let dispose = () => {};
+  const end = runtimePerformance.start("DELIVERY", ctx.store.event(p.eventId).payload.channel);
+  try {
+    const e = ctx.store.event(p.eventId);
+    const handle = await ctx.browser.adapter(e.payload, ctx.store, undefined, {
+      manualMedia: !!ctx.store.draft(p.draftId).approval?.snapshot.manualObservation,
+    });
+    dispose = handle.dispose;
+    await ctx.browser.refreshIdentity(e.payload.channel);
+    const outcome = await new SendCoordinator(ctx.store, ctx.browser.actor).send(
+      p.draftId,
+      handle.adapter,
+      true,
+      ctx.authority.dispatchGuard(token, id, () => ctx.browser.identity(e.payload.channel)),
+    );
+    const receipt = ctx.store.receiptForEvent(e.id) as { proof_ref: string } | undefined;
+    ctx.authority.finish(id, outcome, outcome === "UNCERTAIN" ? (receipt?.proof_ref ?? null) : null);
+    if (outcome === "UNCERTAIN") ctx.getVerification()?.enqueue(e.id);
+    if (outcome === "CONFIRMED") {
+      ctx.authority.completeTrial(p.eventId, ctx.authority.command(id).intent_id!, ctx.browser.identity(e.payload.channel));
+    }
+    end(outcome === "CONFIRMED" ? "SUCCEEDED" : "UNCERTAIN");
+  } catch (error) {
+    const intent = ctx.store.db
+      .prepare("SELECT id,status FROM send_intents WHERE event_id=?")
+      .get(p.eventId) as { id: string; status: string } | undefined;
+    end(intent ? (intent.status === "CONFIRMED" ? "SUCCEEDED" : "UNCERTAIN") : "FAILED");
+    if (intent && ctx.authority.command(id).intent_id === intent.id) {
+      ctx.authority.finish(id, intent.status === "CONFIRMED" ? "CONFIRMED" : "UNCERTAIN", ctx.errorCode(error));
+    } else {
+      ctx.authority.finish(id, "FAILED_BEFORE_CLICK", ctx.errorCode(error));
+      const d = ctx.store.draft(p.draftId);
+      if (d.status === "APPROVED") ctx.store.invalidateApproval(d.id);
+    }
+  } finally {
+    dispose();
+    ctx.emit("send_status_updated");
+  }
+}
+
+export async function openTargetCommand(
+  ctx: DeliveryContext,
+  token: string,
+  eventId: string,
+  visible?: true,
+): Promise<unknown> {
+  ctx.authority.operator(token, "CONTROL");
+  if (visible) {
+    let suspended = false;
+    const check = () => {
+      ctx.authority.operator(token, "CONTROL");
+      const auto = ctx.getAutomation();
+      requireSafe(
+        !ctx.isClosing() && auto?.state().collection?.inbox && !auto.state().emergencyStopped,
+        "COLLECTION_CANCELLED",
+      );
+    };
+    check();
+    try {
+      return await ctx.browser.openStoredMessage(
+        ctx.store,
+        eventId,
+        async () => {
+          ctx.suspendForVisible(false);
+          suspended = true;
+          const signal = ctx.resetOnlineAbort();
+          await ctx.getVerification()?.drain();
+          check();
+          return signal;
+        },
+        check,
+      );
+    } catch (error) {
+      if (suspended && !ctx.browser.loginRecovery && !ctx.getAutomation()?.state().emergencyStopped) {
+        ctx.resumeAfterLogin();
+      }
+      throw error;
+    } finally {
+      ctx.emit("status_updated");
+    }
+  }
+  const event = ctx.store.event(eventId);
+  const handle = await ctx.browser.adapter(event.payload, ctx.store);
+  try {
+    await ctx.browser.actor.run(() => handle.adapter.inspect(event.payload));
+    return { opened: true };
+  } finally {
+    handle.dispose();
+  }
+}
+
+export async function previewSendCommand(
+  ctx: DeliveryContext,
+  token: string,
+  params: SendParams,
+): Promise<unknown> {
+  ctx.authority.operator(token, "SEND");
+  const e = ctx.store.event(params.eventId);
+  const handle = await ctx.browser.adapter(e.payload, ctx.store);
+  try {
+    const snapshot = await ctx.browser.actor.run(async () => {
+      await ctx.browser.refreshIdentity(e.payload.channel);
+      ctx.authority.assertCanSend(token, params, ctx.browser.identity(e.payload.channel));
+      return handle.adapter.inspect(e.payload);
+    });
+    return {
+      ...ctx.authority.preview(token, params, snapshot, ctx.browser.identity(e.payload.channel)),
+      params,
+      target: e.payload,
+      account: snapshot.ownId,
+    };
+  } finally {
+    handle.dispose();
+  }
+}
+
+export function sendResultCommand(
+  store: EventStore,
+  authority: WorkbenchAuthority,
+  followups: { turn(id: string): unknown; result(token: string, id: string): unknown },
+  token: string,
+  id: string,
+) {
+  if (followups.turn(id)) return followups.result(token, id);
+  const row = authority.command(id);
+  authority.operator(token);
+  return {
+    commandId: id,
+    status: row.status,
+    intentId: row.intent_id,
+    reason: row.reason,
+    accepted:
+      row.status !== "FAILED_BEFORE_CLICK" &&
+      !!store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='manual_send_inputs'").get() &&
+      !!store.db.prepare("SELECT command_id FROM manual_send_inputs WHERE command_id=?").get(id),
+  };
+}
+
+export async function reconcileUncertainCommand(
+  ctx: DeliveryContext,
+  token: string,
+  eventId: string,
+): Promise<unknown> {
+  ctx.authority.operator(token, "CONTROL");
+  const uncertainOriginal = ctx.store.db
+    .prepare("SELECT id FROM send_intents WHERE event_id=? AND status='UNCERTAIN'")
+    .get(eventId);
+  if (!uncertainOriginal) {
+    const uncertainFollowup = findUncertainFollowupForEvent(ctx.store, eventId);
+    if (uncertainFollowup) {
+      return reconcileUncertainFollowup(ctx.store, ctx.browser, uncertainFollowup, ctx.authority.now, () => {
+        ctx.bumpInboxRevision();
+        ctx.emit("send_status_updated");
+      });
+    }
+  }
+  return ctx.browser.verifyExisting(ctx.store, eventId);
+}

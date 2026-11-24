@@ -112,7 +112,7 @@ export function commentThreadPage(context:CommentThreadContext,before?:string,pa
   if(before!==undefined){
     try{cursor=JSON.parse(Buffer.from(before,'base64url').toString('utf8'));}catch{requireSafe(false,'TIMELINE_CURSOR_INVALID');}
     requireSafe(cursor&&cursor.group===context.group&&Number.isFinite(cursor.at)&&typeof cursor.order==='string'&&
-      /^(in|out|retry):[a-f0-9-]{36}$/iu.test(cursor.order),'TIMELINE_CURSOR_INVALID');
+      /^(in|out|retry|followup):[a-f0-9-]{36}$/iu.test(cursor.order),'TIMELINE_CURSOR_INVALID');
   }
   const all=context.items.filter(item=>!item.isRoot&&(!cursor||at(item)<cursor.at||at(item)===cursor.at&&item.id.localeCompare(cursor.order)<0));
   const selected=all.slice(-pageSize),hasMore=all.length>pageSize,oldest=selected[0];

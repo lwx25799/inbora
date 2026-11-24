@@ -101,7 +101,7 @@ test.each([0,1])('login recovery never closes a webpage draft in page %s and ver
     await f.browser.open();f.owners[0]!.pages[pageIndex]!.dirty=true;
     await expect(f.browser.beginLoginRecovery()).rejects.toThrow('BROWSER_HAS_HUMAN_INPUT');
     expect(f.owners[0]!.closed).toBe(false);expect(f.launches).toEqual([true]);
-    await expect(f.browser.open('headed')).rejects.toThrow('LOGIN_RECOVERY_IN_PROGRESS');
+    expect(f.browser.loginRecovery).toBe(false);expect(f.browser.status().mode).toBe('headless');
     f.owners[0]!.pages[pageIndex]!.dirty=false;await f.browser.beginLoginRecovery();
     expect(f.launches).toEqual([true,false]);expect(f.browser.identity('DIRECT_MESSAGE')).toBeNull();
     expect(await f.browser.completeLoginIfVerified('wrong-own')).toBe(false);expect(guard).not.toHaveBeenCalled();

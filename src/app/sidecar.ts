@@ -10,6 +10,7 @@ import { runtimeRoot, initRuntime, loadRuntime } from "../config/runtime.js";
 import { requireSafe } from "../core/contracts.js";
 import { BrowserService } from "./browser-service.js";
 import { ClientService, clientError } from "./service.js";
+import { isReadOnlySidecarCommand } from "./service-guards.js";
 import { protocolVersion,commandSchema } from "./contracts.js";
 import {AssistantFacade} from '../mcp/assistant-facade.js';
 import {startAssistantControl} from '../mcp/control-server.js';
@@ -41,15 +42,17 @@ let service: ClientService | undefined,
 let assistant:AssistantFacade|undefined;
 let control:Awaited<ReturnType<typeof startAssistantControl>>|undefined;
 let connecting = false,
+  disconnecting = false,
   closing = false;
 let connectionSettled: Promise<void> | undefined;
+let disconnectSettled: Promise<void> | undefined;
 const active = new Set<Promise<void>>();
 const output = (value: unknown) =>
   process.stdout.write(JSON.stringify(value) + "\n");
 async function connect(raw: unknown): Promise<unknown> {
   const c = connectSchema.parse(raw);
   requireSafe(!closing, 'CLIENT_CLOSING');
-  requireSafe(!connecting, 'CONNECTION_IN_PROGRESS');
+  requireSafe(!connecting && !disconnecting, 'CONNECTION_IN_PROGRESS');
   if (service) {
     requireSafe(
       !c.initialize && runtimeRoot(c.runtime) === service.browser.root,
@@ -62,7 +65,7 @@ async function connect(raw: unknown): Promise<unknown> {
         clientError(error) === "OPERATOR_EXPIRED",
         "OPERATOR_PERMISSION_DENIED",
       );
-      service.authority.expireOperators();
+      service.authority.expireOperators("DESKTOP");
       token = service.authority.issueSession();
     }
     return {
@@ -141,6 +144,44 @@ async function closeServices():Promise<void>{
     }
   }
 }
+async function disconnect(currentTask: () => Promise<void>): Promise<{ connected: false }> {
+  requireSafe(!closing, "CLIENT_CLOSING");
+  requireSafe(!connecting && !disconnecting, "CONNECTION_IN_PROGRESS");
+  requireSafe(service, "CONNECT_RUNTIME_FIRST");
+  disconnecting = true;
+  let settle!: () => void;
+  disconnectSettled = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  const closingStore = store;
+  const closingLock = lock;
+  try {
+    await closeServices();
+  } finally {
+    const self = currentTask();
+    while (true) {
+      const others = [...active].filter((item) => item !== self);
+      if (!others.length) break;
+      await Promise.allSettled(others);
+    }
+    service = undefined;
+    store = undefined;
+    lock = undefined;
+    token = "";
+    try {
+      closingStore?.close();
+    } finally {
+      try {
+        await closingLock?.close();
+      } finally {
+        disconnecting = false;
+        settle();
+        disconnectSettled = undefined;
+      }
+    }
+  }
+  return { connected: false };
+}
 async function close(): Promise<void> {
   if (closing) return;
   closing = true;
@@ -148,6 +189,7 @@ async function close(): Promise<void> {
   // Other active requests remain cancellable by service.close(), so do not drain all requests here.
   try {
     await connectionSettled;
+    if (disconnectSettled) await disconnectSettled;
     await closeServices();
   } finally {
     await Promise.allSettled([...active]);
@@ -162,7 +204,8 @@ const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 input.on("line", (line) => {
   if (closing) return;
   let id: string | null = null;
-  const task = (async () => {
+  let task!: Promise<void>;
+  task = (async () => {
     try {
       requireSafe(Buffer.byteLength(line) <= 100_000, "IPC_REQUEST_TOO_LARGE");
       const envelope = pipeSchema.parse(JSON.parse(line));
@@ -179,25 +222,19 @@ input.on("line", (line) => {
       let result: unknown;
       if (raw.command === "connect") result = await connect(raw);
       else if (raw.command === "disconnect") {
-        requireSafe(service, "CONNECT_RUNTIME_FIRST");
-        await closeServices();
-        store!.close();
-        await lock!.close();
-        service = undefined;
-        store = undefined;
-        lock = undefined;
-        token = "";
-        result = { connected: false };
+        result = await disconnect(() => task);
       } else if(raw.command==='emergencyStop') {
-        requireSafe(service,'CONNECT_RUNTIME_FIRST');commandSchema.parse(raw);
+        requireSafe(!closing && !disconnecting, 'CLIENT_CLOSING');
+        requireSafe(service && !connecting,'CONNECT_RUNTIME_FIRST');commandSchema.parse(raw);
         // The independently authenticated desktop pipe can always obtain stop-only authority.
         // Expiry of the editing session must never put emergency stop behind reconnect/browser work.
         const stopToken=service.authority.issueSession(['READ','CONTROL']);
         try{await service.dispatch(stopToken,raw);result={paused:true,emergencyStopped:true};}
         finally{service.authority.revoke(stopToken);}
       } else {
-        requireSafe(service, "CONNECT_RUNTIME_FIRST");
-        service.authority.renewTrustedSession(token);
+        requireSafe(!closing && !disconnecting, "CLIENT_CLOSING");
+        requireSafe(service && !connecting, "CONNECT_RUNTIME_FIRST");
+        service.authority.renewTrustedSession(token, { readOnly: isReadOnlySidecarCommand(raw) });
         result = await service.dispatch(token, raw);
       }
       output({ protocol: 1, requestId: id, ok: true, result });

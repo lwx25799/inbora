@@ -89,5 +89,5 @@ test.each([true,false])('startup only bounds persisted cancellation delays; a re
 
 test('a persisted object deferral retains its normal interval and recorded object error',async()=>{
   const f=await setup(async()=>{throw new DeferredObjectRead('DM_CONTENT_READ_FAILED');});await f.scheduler.tick();
-  expect(f.progress()).toMatchObject({next_at:f.data.now()+15_000,last_success:null,last_error:'DM_CONTENT_READ_FAILED',failures:1});
+  expect(f.progress()).toMatchObject({next_at:f.data.now()+15_000,last_success:null,last_error:'DM_CONTENT_READ_FAILED',failures:0});
 });

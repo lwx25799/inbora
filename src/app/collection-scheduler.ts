@@ -21,6 +21,8 @@ export class CollectionScheduler {
   private fatal: string | null = null;
   private suspended=false;
   private cancelGeneration=0;
+  private transientFailures=0;
+  private retryAt=0;
   constructor(readonly persistence: AutomationStore,
     private readonly collect: (source: CollectionSource, signal: AbortSignal,trigger:CollectionTrigger) => Promise<void>,
     private readonly updated: () => void = () => {},
@@ -32,9 +34,20 @@ export class CollectionScheduler {
     void this.pulse();
   }
   private async pulse():Promise<void> {
-    try {await this.tick();}catch {
-      this.fatal='COLLECTION_STATE_UNAVAILABLE';
-      this.closed=true;clearInterval(this.timer);this.timer=undefined;
+    if (this.closed || this.persistence.now() < this.retryAt) return;
+    try {
+      await this.tick();
+      this.transientFailures = 0;
+      this.retryAt = 0;
+      if (this.fatal) {
+        this.fatal = null;
+        this.updated();
+      }
+    } catch {
+      if (this.closed) return;
+      this.transientFailures = Math.min(this.transientFailures + 1, 8);
+      this.retryAt = this.persistence.now() + Math.min(60_000, 2_000 * 2 ** (this.transientFailures - 1));
+      this.fatal = 'COLLECTION_STATE_UNAVAILABLE';
       this.updated();
     }
   }
@@ -122,8 +135,9 @@ export class CollectionScheduler {
         const old = this.persistence.store.db.prepare("SELECT failures FROM collection_progress WHERE source=?").get(source) as {failures: number};
         const heldCandidate=securityCandidateCodes.has(error)&&!!readSecurityHold(this.persistence.store,source==='works'?'COMMENT_NOTIFICATION':'DIRECT_MESSAGE');
         const delay = objectDeferred||error==='SECURITY_CHANNEL_HELD'||heldCandidate?interval:Math.min(Math.max(interval, 600_000), interval * 2 ** Math.min(old.failures + 1, 10));
-        this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_error=?,failures=failures+1,elapsed_ms=? WHERE source=?")
-          .run(now + delay, error, Math.max(0, now - started),source);
+        const nextFailures = objectDeferred ? old.failures : old.failures + 1;
+        this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_error=?,failures=?,elapsed_ms=? WHERE source=?")
+          .run(now + delay, error, nextFailures, Math.max(0, now - started),source);
         if (shouldStopGlobally(error)) this.persistence.stop(true,error,source==='works'?'COLLECTION_COMMENTS':'COLLECTION_DM');
       } else {
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_success=?,last_error=NULL,failures=0,elapsed_ms=? WHERE source=?")

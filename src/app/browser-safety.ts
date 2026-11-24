@@ -89,8 +89,13 @@ export class BrowserSafety {
         readSecurityHold(this.store,channel)?.revision===held.revision,'SECURITY_RECOVERY_CHANGED');};
       let recoveryTarget:string|undefined;
       try{
-        active();const incident=await this.incidents.read(held.incidentId),initial=incident?.initial??incident?.afterFailure;
+        active();const incident=await this.incidents.readRecovery(held.incidentId);
         const mapping=await loadObservationMapping(this.root);active();
+        let initial=incident?.initial??incident?.afterFailure;
+        if(!initial&&incident?.fromFallback&&explicit&&mapping&&incident.channel===channel&&incident.context.mappingDigest===digest(mapping)){
+          initial={version:1,state:'SUSPECT',href:mapping.entryUrl,origin:mapping.origin,title:'',
+            documentStartedAt:0,observedAt:incident.createdAt,kind:'COMPONENT',scope:'ACCOUNT_PAGE',matches:[],frames:[]};
+        }
         requireSafe(initial&&mapping&&incident?.channel===channel&&incident.context.mappingDigest===digest(mapping),'SECURITY_RECOVERY_TARGET_UNAVAILABLE');
         const own=this.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
         requireSafe(own?.own_id===mapping.self.uid,'ACCOUNT_CHANGED');
@@ -100,7 +105,7 @@ export class BrowserSafety {
         const expanded=structuredClone(mapping);
         const entryPath=new URL(mapping.entryUrl).pathname;
         const accountPage=[entryPath,'/'].includes(targetUrl.pathname)&&(
-          initial.scope==='ACCOUNT_PAGE'&&!initial.target?.workId&&!initial.target?.conversationId||
+          initial.scope==='ACCOUNT_PAGE'&&!initial.target?.workId&&!initial.target?.conversationId&&!incident.conversationDigest||
           channel==='COMMENT_NOTIFICATION'&&!initial.target?.workId);
         if(accountPage){
           requireSafe([new URL(mapping.entryUrl).pathname,'/'].includes(targetUrl.pathname),'SECURITY_RECOVERY_TARGET_UNAVAILABLE');
@@ -112,10 +117,19 @@ export class BrowserSafety {
           requireSafe(id&&(known||discovered?.url===targetUrl.href),'SECURITY_RECOVERY_TARGET_UNAVAILABLE');
           expanded.works=[{id,url:targetUrl.href}];
         }else{
-          const id=initial.target?.conversationId;
-          const known=mapping.peers.find(peer=>peer.conversationId===id);
-          const discovered=id&&this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='discovered_conversations'").get()?
-            this.store.db.prepare('SELECT uid,sec_uid,title FROM discovered_conversations WHERE id=? AND own_id=?').get(id,mapping.self.uid) as {uid:string;sec_uid:string;title:string}|undefined:undefined;
+          let id=initial.target?.conversationId;
+          let known=mapping.peers.find(peer=>peer.conversationId===id);
+          let discovered=id&&this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='discovered_conversations'").get()?
+            this.store.db.prepare('SELECT id,uid,sec_uid,title FROM discovered_conversations WHERE id=? AND own_id=?').get(id,mapping.self.uid) as {id:string;uid:string;sec_uid:string;title:string}|undefined:undefined;
+          if(!id&&incident.conversationDigest){
+            known=mapping.peers.find(peer=>digest(peer.conversationId)===incident.conversationDigest);
+            if(known)id=known.conversationId;
+            else if(this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='discovered_conversations'").get()){
+              const rows=this.store.db.prepare('SELECT id,uid,sec_uid,title FROM discovered_conversations WHERE own_id=?').all(mapping.self.uid) as {id:string;uid:string;sec_uid:string;title:string}[];
+              discovered=rows.find(row=>digest(row.id)===incident.conversationDigest);
+              if(discovered)id=discovered.id;
+            }
+          }
           requireSafe(initial.scope==='ACCOUNT_PAGE'||id&&(known||discovered),'SECURITY_RECOVERY_TARGET_UNAVAILABLE');
           if(id)expanded.peers=[known??{uid:discovered!.uid,secUid:discovered!.sec_uid,title:discovered!.title,conversationId:id}];
           requireSafe(targetUrl.pathname===entryPath,'SECURITY_RECOVERY_TARGET_UNAVAILABLE');
@@ -142,7 +156,7 @@ export class BrowserSafety {
           active();const mapping=await loadObservationMapping(this.root);
           if(mapping){
             const fresh=await page.evaluate(inspectSecuritySignal,{selectors:[mapping.securityBlockers]});active();
-            const incident=await this.incidents.read(held.incidentId),original=incident?.initial??incident?.afterFailure;
+            const incident=await this.incidents.readRecovery(held.incidentId),original=incident?.initial??incident?.afterFailure;
             if(fresh.state==='SUSPECT'&&fresh.origin===mapping.origin&&fresh.href.split('?')[0]===recoveryTarget&&
               (!incident?.sameDocument||!original||fresh.documentStartedAt!==original.documentStartedAt||fresh.href!==original.href||
                 incident?.context.epoch!==epoch||incident?.context.instanceId!==this.instanceId)){

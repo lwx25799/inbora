@@ -51,7 +51,7 @@ test.each(['OBSERVATION_COMMENT_SCROLL_UNAVAILABLE','OBSERVATION_CANCELLED','OBS
     else await expect(first).rejects.toThrow(secondary==='OBSERVATION_CANCELLED'?'COLLECTION_CANCELLED':secondary);
     expect(store.db.prepare("SELECT next_at,last_success,last_error,failures FROM collection_progress WHERE source='works'").get()).toEqual({
       next_at:now+(secondary==='OBSERVATION_ACCOUNT_CHANGED'?60_000:30_000),last_success:null,
-      last_error:secondary==='OBSERVATION_CANCELLED'?null:secondary,failures:secondary==='OBSERVATION_CANCELLED'?0:1});
+      last_error:secondary==='OBSERVATION_CANCELLED'?null:secondary,failures:secondary==='OBSERVATION_ACCOUNT_CHANGED'?1:0});
     expect(data.state().emergencyStopped).toBe(secondary==='OBSERVATION_ACCOUNT_CHANGED');
     await scheduler.close();scheduler=undefined;
     expect(thread).toHaveBeenCalledTimes(1);expect(advance).toHaveBeenCalledTimes(1);

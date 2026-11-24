@@ -57,7 +57,7 @@ test('manual object deferral reports incomplete work, keeps the success waterlin
   const before=f.data.now(),cursor='{"phase":"MAX","synthetic":true}';
   f.store.db.prepare("UPDATE collection_progress SET next_at=?,last_success=?,cursor_json=? WHERE source='dm'").run(before+600_000,before-1000,cursor);
   expect(await f.scheduler.runNow('dm')).toEqual({deferredCode:'OBSERVATION_DM_CONTENT_DOM_NOT_READY'});
-  expect(f.progress()).toEqual({next_at:before+15_000,last_success:before-1000,last_error:'OBSERVATION_DM_CONTENT_DOM_NOT_READY',failures:1,cursor_json:cursor});
+  expect(f.progress()).toEqual({next_at:before+15_000,last_success:before-1000,last_error:'OBSERVATION_DM_CONTENT_DOM_NOT_READY',failures:0,cursor_json:cursor});
   f.advance(15_000);expect(await f.scheduler.runNow('dm')).toEqual({deferredCode:null});
   expect(calls).toBe(2);expect(f.progress()).toEqual({next_at:f.data.now()+15_000,last_success:f.data.now(),last_error:null,failures:0,cursor_json:cursor});
 });

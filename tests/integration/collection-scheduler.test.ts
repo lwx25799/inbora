@@ -121,7 +121,7 @@ test.each([false,true])('only a persisted per-object deferral avoids whole-chann
   const f=await setup(async()=>{throw deferred?new DeferredObjectRead('OBSERVATION_DOM_NOT_READY'):new Blocked('OBSERVATION_DOM_NOT_READY');});
   const before=f.data.now();await f.scheduler.tick();
   expect(f.store.db.prepare("SELECT next_at,last_success,last_error,failures FROM collection_progress WHERE source='works'").get())
-    .toEqual({next_at:before+(deferred?30_000:60_000),last_success:null,last_error:'OBSERVATION_DOM_NOT_READY',failures:1});
+    .toEqual({next_at:before+(deferred?30_000:60_000),last_success:null,last_error:'OBSERVATION_DOM_NOT_READY',failures:deferred?0:1});
   expect(f.data.state().emergencyStopped).toBe(false);
 });
 test("identity/platform validation blocks subsequent collection and records a safe enumerated cause", async () => {

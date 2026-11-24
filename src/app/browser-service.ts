@@ -33,6 +33,7 @@ import {BrowserSafety} from './browser-safety.js';
 import {readSecurityHold} from '../storage/security-holds.js';
 import {BrowserManualRecovery} from './browser-manual-recovery.js';
 import type {ManualRecoveryCommand} from './manual-recovery-contracts.js';
+import {verifyFollowupInBrowser,type FollowupVerificationResult} from './followup-verification.js';
 
 export interface AdapterHandle {
   adapter: ReplyAdapter;
@@ -169,10 +170,20 @@ export class BrowserService {
   async beginLoginRecovery(autoFinish=true,signal?:AbortSignal,check?:()=>void):Promise<void>{
     requireSafe(!this.manualRecoveryActive,'MANUAL_RECOVERY_IN_PROGRESS');
     check?.();
-    this.loginGeneration++;
+    const previous={owner:this.owner,mode:this.mode,recovering:this.recoveringLogin,autoFinish:this.autoFinishLogin};
+    const generation=++this.loginGeneration;
     this.recoveringLogin=true;
     this.autoFinishLogin=autoFinish;
-    await this.changeMode('headed',signal,check);
+    try{
+      await this.changeMode('headed',signal,check);
+    }catch(error){
+      if(this.loginGeneration===generation&&(this.owner===previous.owner&&this.mode===previous.mode||!this.owner)){
+        this.recoveringLogin=previous.recovering;
+        this.autoFinishLogin=previous.autoFinish;
+        if(!this.owner)this.mode=previous.mode;
+      }
+      throw error;
+    }
   }
   async openStoredMessage(store:EventStore,eventId:string,beforeOpen:()=>Promise<AbortSignal>,permitted:()=>void):Promise<{opened:true;located:boolean}>{
     permitted();
@@ -208,10 +219,11 @@ export class BrowserService {
   }
   async completeLoginIfVerified(ownId:string):Promise<boolean>{
     if(!this.recoveringLogin||this.modeTransition)return false;
-    if(!this.autoFinishLogin&&this.owner)return false;
+    if(!this.autoFinishLogin&&this.owner&&this.mode==='headed')return false;
     const generation=this.loginGeneration;
     if(!this.owner)await this.changeMode('headless');
     if(generation!==this.loginGeneration||!this.owner)return false;
+    if(this.mode==='headless')this.autoFinishLogin=true;
     const owner=this.owner,observation=await loadObservationMapping(this.root);
     if(!observation||observation.self.uid!==ownId)return false;
     await owner.actor.run(async()=>{
@@ -681,5 +693,12 @@ export class BrowserService {
     } finally {
       handle.dispose();
     }
+  }
+  async verifyExistingFollowup(
+    store: EventStore,
+    commandId: string,
+    options: { signal?: AbortSignal; background?: boolean } = {},
+  ): Promise<FollowupVerificationResult> {
+    return verifyFollowupInBrowser(this, store, commandId, options);
   }
 }

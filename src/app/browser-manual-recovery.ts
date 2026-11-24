@@ -47,15 +47,20 @@ export class BrowserManualRecovery {
       const current=this.binding();let hold=readSecurityHold(this.store,command.channel);
       requireSafe(current.owner&&current.mode==='headless'&&!current.transitioning,'MANUAL_RECOVERY_HEADLESS_REQUIRED');
       requireSafe(hold,'MANUAL_RECOVERY_INCIDENT_REQUIRED');
-      let incident=await this.safety.incidents.read(hold.incidentId);
+      let incident=await this.safety.incidents.readRecovery(hold.incidentId);
       const mapping=await loadObservationMapping(this.root);
       permitted();
       let original=incident?.initial??incident?.afterFailure;
+      if(!original&&incident?.fromFallback&&mapping&&incident.channel===command.channel&&incident.context.mode==='headless'){
+        original={version:1,state:'SUSPECT',href:mapping.entryUrl,origin:mapping.origin,title:'',
+          documentStartedAt:0,observedAt:incident.createdAt,kind:'COMPONENT',scope:'ACCOUNT_PAGE',matches:[],frames:[]};
+      }
       requireSafe(original&&incident?.channel===command.channel&&incident.context.mode==='headless',
       'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
       requireSafe(mapping&&incident.context.mappingDigest===digest(mapping)&&original.origin===mapping.origin,
         'MANUAL_RECOVERY_MAPPING_CHANGED');
-      requireSafe(!hold.documentDigest||hold.documentDigest===digest([original.href,original.documentStartedAt]),
+      requireSafe(!hold.documentDigest||hold.documentDigest===digest([original.href,original.documentStartedAt])||
+        incident.fromFallback&&incident.documentDigest===hold.documentDigest,
         'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
       const previousHold=hold,stopRevision=securityRevision(this.store,command.channel).split(':')[1];
       const unchanged=()=>{
@@ -69,6 +74,7 @@ export class BrowserManualRecovery {
         return (command.channel==='DIRECT_MESSAGE'?current.owner!.dm:current.owner!.notification)
           .evaluate(()=>({href:location.href,started:performance.timeOrigin}));});
       unchanged();
+      let targetDoc:{href:string;started:number}={href:original.href,started:original.documentStartedAt};
       const recreated=!incident.sameDocument||incident.context.epoch!==current.epoch||incident.context.instanceId!==this.safety.instanceId||
         document.href!==original.href||document.started!==original.documentStartedAt;
       if(recreated){
@@ -83,9 +89,24 @@ export class BrowserManualRecovery {
           if(!isSecurityFailure(error)&&!(error instanceof Blocked&&securityCandidateCodes.has(error.code)))throw error;
           hold=readSecurityHold(this.store,command.channel);
           requireSafe(hold&&hold.revision!==previousHold.revision,'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
-          incident=await this.safety.incidents.read(hold.incidentId);original=incident?.initial??incident?.afterFailure;
-          requireSafe(original&&incident?.sameDocument&&incident.context.epoch===current.epoch&&
-            incident.context.instanceId===this.safety.instanceId,'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
+          incident=await this.safety.incidents.readRecovery(hold.incidentId);original=incident?.initial??incident?.afterFailure;
+          if(incident?.fromFallback){
+            requireSafe(original&&incident.context.epoch===current.epoch&&incident.context.instanceId===this.safety.instanceId,
+              'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
+            const live=await current.owner.actor.run(async()=>{unchanged();
+              requireSafe(readSecurityHold(this.store,command.channel)?.revision===hold!.revision,'MANUAL_RECOVERY_SECURITY_CHANGED');
+              return (command.channel==='DIRECT_MESSAGE'?current.owner!.dm:current.owner!.notification)
+                .evaluate(()=>({href:location.href,started:performance.timeOrigin}));});
+            unchanged();
+            const liveBase=live.href.split(/[?#]/u,1)[0];
+            requireSafe(liveBase===original.href&&live.started===original.documentStartedAt&&
+              (!hold.documentDigest||digest([live.href,live.started])===hold.documentDigest),'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
+            targetDoc=live;
+          }else{
+            requireSafe(original&&incident?.sameDocument&&incident.context.epoch===current.epoch&&
+              incident.context.instanceId===this.safety.instanceId,'MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
+            targetDoc={href:original.href,started:original.documentStartedAt};
+          }
         }
       }
       const revision=securityRevision(this.store,command.channel),ownId=mapping.self.uid;
@@ -100,7 +121,7 @@ export class BrowserManualRecovery {
       };
       this.permitted=permitted;check();this.requester=token;this.mappingDigest=digest(mapping);this.recreated=recreated;
       try{const session=await this.controller.start(current.owner,{channel:command.channel,epoch:current.epoch,
-        incidentId:hold.incidentId,revision:hold.revision,document:{href:original.href,started:original.documentStartedAt},
+        incidentId:hold.incidentId,revision:hold.revision,document:targetDoc,
         selectors:[mapping.securityBlockers],check});
         this.store.audit('SECURITY_MANUAL_RECOVERY_STARTED',hold.incidentId,{recreated});
         return {...session,...(recreated?{recreated:true}:{})};}

@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {lstat,mkdir,readdir,readFile,unlink,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import type {Page} from 'playwright';
+import {z} from 'zod';
 import {digest,requireSafe,type Channel} from '../core/contracts.js';
 import type {EventStore} from '../storage/store.js';
 import {holdSecurityChannel,readSecurityHold} from '../storage/security-holds.js';
@@ -10,7 +11,34 @@ import {securitySignalSchema,type SecuritySignal} from '../adapters/security-sig
 import {securityRuntime} from './security-runtime.js';
 
 const uuid=/^[a-f0-9-]{36}$/u;
+const hash64=/^[a-f0-9]{64}$/u;
+const recoveryMetaEvent='SECURITY_INCIDENT_RECOVERY_META';
 const maximumFiles=20,maximumBytes=50*1024*1024;
+const recoveryMetaSchema=z.object({
+  version:z.literal(1),
+  channel:z.enum(['COMMENT_NOTIFICATION','DIRECT_MESSAGE']),
+  createdAt:z.number().int().positive(),
+  mode:z.enum(['headed','headless']),
+  epoch:z.number().int().nonnegative(),
+  instanceId:z.string().max(128).nullable(),
+  mappingDigest:z.string().regex(hash64).nullable(),
+  documentDigest:z.string().regex(hash64).optional(),
+  href:z.string().max(2048).optional(),
+  origin:z.string().max(256).optional(),
+  documentStartedAt:z.number().finite().nonnegative().optional(),
+  scope:z.enum(['TARGET','ACCOUNT_PAGE']).optional(),
+  workId:z.string().max(64).optional(),
+  conversationDigest:z.string().regex(hash64).optional(),
+}).strict();
+type RecoveryMeta=z.infer<typeof recoveryMetaSchema>;
+function sanitizeLocation(raw:string):{href:string;origin:string}|null {
+  try{
+    const url=new URL(raw);
+    if(!['http:','https:'].includes(url.protocol))return null;
+    url.username='';url.password='';url.search='';url.hash='';
+    return {href:url.href.slice(0,2048),origin:url.origin.slice(0,256)};
+  }catch{return null;}
+}
 function signalDigest(signal:SecuritySignal):string {
   // Parsed envelopes and browser snapshots can insert the same fields in different orders.
   return digest([signal.state,
@@ -24,6 +52,11 @@ export interface SecurityIncident {
   frames:{url:string;parent:number|null}[];sameDocument:boolean;
   screenshot:{file:string;digest:string}|null;incomplete:string[];
 }
+export interface SecurityRecoveryIncident extends SecurityIncident {
+  fromFallback:boolean;
+  documentDigest?:string;
+  conversationDigest?:string;
+}
 
 /** Only called inside the original account task, before another task can navigate the page. */
 export class SecurityIncidents {
@@ -35,6 +68,47 @@ export class SecurityIncidents {
     const directory=join(evidence,'security-incidents');await mkdir(directory,{recursive:true});
     const stat=await lstat(directory);requireSafe(stat.isDirectory()&&!stat.isSymbolicLink(),'SECURITY_EVIDENCE_PATH_UNSAFE');return directory;
   }
+  private persistRecoveryMeta(id:string,channel:Channel,createdAt:number,context:IncidentContext,signal:SecuritySignal|null,fallbackUrl?:string):void {
+    const clean=signal?sanitizeLocation(signal.href):fallbackUrl?sanitizeLocation(fallbackUrl):null;
+    const meta:RecoveryMeta={
+      version:1,channel,createdAt,mode:context.mode,epoch:context.epoch,
+      instanceId:context.instanceId,mappingDigest:context.mappingDigest,
+      ...(signal?{documentDigest:digest([signal.href,signal.documentStartedAt])}:{}),
+      ...(clean?{href:clean.href,origin:clean.origin,documentStartedAt:signal?.documentStartedAt??0}:{}),
+      ...(signal?.scope?{scope:signal.scope}:clean?{scope:'ACCOUNT_PAGE'}:{}),
+      ...(signal?.target?.workId?{workId:signal.target.workId}:{}),
+      ...(signal?.target?.conversationId?{conversationDigest:digest(signal.target.conversationId)}:{}),
+    };
+    const parsed=recoveryMetaSchema.safeParse(meta);
+    if(!parsed.success)return;
+    this.store.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?)')
+      .run(randomUUID(),new Date(createdAt).toISOString(),recoveryMetaEvent,id,JSON.stringify(parsed.data));
+  }
+  private readInlineFallback(id:string):SecurityRecoveryIncident|null {
+    const row=this.store.db.prepare('SELECT detail_redacted FROM audit_events WHERE event_type=? AND entity_id=? ORDER BY rowid DESC LIMIT 1')
+      .get(recoveryMetaEvent,id) as {detail_redacted:string}|undefined;
+    if(!row)return null;
+    try{
+      const parsed=recoveryMetaSchema.safeParse(JSON.parse(row.detail_redacted));
+      if(!parsed.success)return null;
+      const meta=parsed.data;
+      const initial:SecuritySignal|null=meta.href&&meta.origin?{
+        version:1,state:'SUSPECT',href:meta.href,origin:meta.origin,title:'',
+        documentStartedAt:meta.documentStartedAt??0,observedAt:meta.createdAt,kind:'COMPONENT',
+        ...(meta.scope?{scope:meta.scope}:{}),
+        ...(meta.workId?{target:{workId:meta.workId}}:{}),
+        matches:[],frames:[],
+      }:null;
+      return {
+        version:1,id,channel:meta.channel,createdAt:meta.createdAt,
+        context:{mode:meta.mode,epoch:meta.epoch,instanceId:meta.instanceId,selectors:[],mappingDigest:meta.mappingDigest},
+        initial,afterFailure:null,afterScreenshot:null,frames:[],sameDocument:false,screenshot:null,
+        incomplete:['DISK_EVIDENCE_UNAVAILABLE'],fromFallback:true,
+        ...(meta.documentDigest?{documentDigest:meta.documentDigest}:{}),
+        ...(meta.conversationDigest?{conversationDigest:meta.conversationDigest}:{}),
+      };
+    }catch{return null;}
+  }
   async read(id:string):Promise<SecurityIncident|null>{
     if(!uuid.test(id))return null;
     try{
@@ -45,6 +119,21 @@ export class SecurityIncidents {
       if(value.initial&&!securitySignalSchema.safeParse(value.initial).success)return null;
       return value;
     }catch{return null;}
+  }
+  /** Reads disk evidence when present (preserving tamper checks); falls back to inline SQLite recovery meta only when disk evidence is absent/unwritable. */
+  async readRecovery(id:string):Promise<SecurityRecoveryIncident|null>{
+    if(!uuid.test(id))return null;
+    let diskFileExists=false;
+    try{
+      const directory=await this.directory();
+      await lstat(join(directory,id+'.json'));
+      diskFileExists=true;
+    }catch{diskFileExists=false;}
+    if(diskFileExists){
+      const saved=await this.read(id);
+      return saved?{...saved,fromFallback:false}:null;
+    }
+    return this.readInlineFallback(id);
   }
   private async capacity(directory:string):Promise<boolean>{
     const protectedIds=new Set(['COMMENT_NOTIFICATION','DIRECT_MESSAGE'].flatMap(channel=>{
@@ -76,9 +165,13 @@ export class SecurityIncidents {
     const previous=readSecurityHold(this.store,channel);
     if(previous&&previous.revision!==replaceRevision||replaceRevision&&!previous)return;
     const id=randomUUID(),createdAt=Date.now();
-    holdSecurityChannel(this.store,channel,{incidentId:id,reason:'OBSERVATION_SECURITY_SUSPECT',mode:context.mode,
-      source:'UNKNOWN',
-      ...(initial?{documentDigest:digest([initial.href,initial.documentStartedAt])}:{})},createdAt);
+    const fallbackUrl=!initial&&typeof (page as Partial<Page>).url==='function'?page.url():undefined;
+    this.store.db.transaction(()=>{
+      const held=holdSecurityChannel(this.store,channel,{incidentId:id,reason:'OBSERVATION_SECURITY_SUSPECT',mode:context.mode,
+        source:'UNKNOWN',
+        ...(initial?{documentDigest:digest([initial.href,initial.documentStartedAt])}:{})},createdAt);
+      if(held.incidentId===id)this.persistRecoveryMeta(id,channel,createdAt,context,initial,fallbackUrl);
+    }).immediate();
     const record:SecurityIncident={version:1,id,channel,createdAt,context,initial,afterFailure:null,afterScreenshot:null,frames:[],sameDocument:false,screenshot:null,
       incomplete:initial?[]:['INITIAL_SIGNAL_UNAVAILABLE']};
     try{
@@ -87,6 +180,7 @@ export class SecurityIncidents {
       }
       try{
         record.afterFailure=await page.evaluate(inspectSecuritySignal,{selectors:context.selectors});
+        if(!initial&&record.afterFailure)this.persistRecoveryMeta(id,channel,createdAt,context,record.afterFailure);
         const frames=page.frames();record.frames=frames.slice(0,16).map(frame=>({url:frame.url().slice(0,2048),parent:frame.parentFrame()?frames.indexOf(frame.parentFrame()!):null}));
         record.sameDocument=!!initial&&initial.href===record.afterFailure.href&&initial.documentStartedAt===record.afterFailure.documentStartedAt;
         if(!record.sameDocument)record.incomplete.push('DOCUMENT_CHANGED_OR_INITIAL_MISSING');
