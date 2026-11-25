@@ -1,5 +1,21 @@
 # 来源与许可
 
+## 2026-11-26：阶段 5 品牌与前端视觉基线（cosscom/ui 与离线字体套件）
+
+本条目登记固化在独立参考目录 `ui-preview/` 与 `assets/brand/` 中的阶段 5 前端设计原语及离线可变字体（完全隔离于当前 `0.3.5` 生产代码 `src/` 与 `desktop/`，未改动根 `package.json` 或生产打包配置）。
+
+| 来源 / npm 包 | 锁定版本 / Commit | 许可 | 采用范围与归档 |
+|---|---|---|---|
+| [cosscom/ui](https://github.com/cosscom/ui) | `11f4620946e5fb0e2c12a815388ccdf5b3120dd0` | MIT | 许可证存档于 `third_party/coss-ui-MIT.txt`；采用其 Base UI + Tailwind v4 原语组件落地至 `ui-preview/src/components/ui/` 与 `ui-preview/src/lib/utils.ts`，套用 inbora 暖白纸感 + 深松青令牌 |
+| `@base-ui/react` | `1.9.0` | MIT | `ui-preview` 无样式可访问性交互原语（由 `ui-preview/package-lock.json` 锁定） |
+| `misans` | `^5.0.0` | Apache-2.0 | 小米官方 MiSans VF 频度切片中文字体，全本地打包零外链 |
+| `@fontsource-variable/inter` | `^5.3.0` | OFL-1.1 | 拉丁正文与界面标签可变字体，全本地打包 |
+| `@fontsource-variable/plus-jakarta-sans` | `^5.3.0` | OFL-1.1 | 标题与 KPI 数字可变字体，全本地打包 |
+| `@fontsource-variable/jetbrains-mono` | `^5.3.0` | OFL-1.1 | 等宽编码、SKU 与模型标识可变字体，全本地打包 |
+| `lucide-react` / `tailwindcss` | `^0.555.0` / `^4.1.17` | ISC / MIT | `ui-preview` 图标集与 Tailwind CSS v4 样式编译 |
+
+`ui-preview/public/avatars/` 仅含 12 张合成演示头像，不含真实平台或用户数据；完整视觉规范与阶段 5 迁入清单见 `assets/brand/BRAND-AND-UI-SPEC.md`。
+
 ## 阶段 2 Wave 2.0 多模型 AI SDK
 
 六个直接依赖按下表精确锁定。上游为 [Vercel AI SDK](https://github.com/vercel/ai)，版本、源码目录及许可均核对自已安装包的 `package.json`，发布包完整性由 `pnpm-lock.yaml` 固定。
