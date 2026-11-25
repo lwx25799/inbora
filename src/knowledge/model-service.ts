@@ -3,15 +3,16 @@ import {z} from 'zod';
 import {digest,requireSafe,validText,type Channel} from '../core/contracts.js';
 import type {AiSettings} from '../app/contracts.js';
 import type {EventStore} from '../storage/store.js';
-import {requestDeepSeek} from '../ai/deepseek-request.js';
-import {buildReplySystemPrompt,classifyModelFailure,wrapModelTransport} from '../ai/reply-style.js';
+import {callBusinessModel,modelCallFailureReason,type BoundModelCall} from '../ai/business-model-call.js';
+import {buildReplySystemPrompt,classifyModelFailure} from '../ai/reply-style.js';
 import {ReplyKnowledgeStore} from './store.js';
-import {assertKnowledgePromptSafe,knowledgePromptData,privateModelText,unsafeModelOutput} from './generation-context.js';
+import {assertKnowledgePromptSafe,knowledgePromptData,replySettingsFingerprint,privateModelText,unsafeModelOutput} from './generation-context.js';
 import type {PersonaVersion,ReplySample} from './contracts.js';
 
 export type LearningPurpose='PERSONA_ANALYSIS'|'PERSONA_MERGE'|'SANDBOX_REPLY'|'SANDBOX_COMPARE';
 export interface LearningModelContext {
   store:EventStore;settings:AiSettings;key:string;accountId:string;allowedChannels:readonly Channel[];signal?:AbortSignal;
+  route?(purpose:LearningPurpose):BoundModelCall;
   check(requiredCalls?:number):void;reserve(callId:string,purpose:LearningPurpose):void;
 }
 export interface AnalyzeRequest {sampleIds:string[];taskId?:string|undefined}
@@ -44,32 +45,36 @@ function parseRules(text:string):string{
   requireSafe(!unsafeModelOutput(result.rules),'MODEL_SENSITIVE_OUTPUT');return result.rules;
 }
 
+export function recoverLearningTasks(store:EventStore):void{
+  store.db.transaction(()=>{
+    store.db.prepare("UPDATE k_learning_batches SET state='INTERRUPTED' WHERE state='RUNNING' AND call_id IS NOT NULL").run();
+    store.db.prepare(`UPDATE k_learning_tasks SET state=CASE
+      WHEN EXISTS(SELECT 1 FROM k_learning_batches b WHERE b.task_id=k_learning_tasks.id AND b.state='INTERRUPTED')
+      THEN 'INTERRUPTED' ELSE 'FAILED' END WHERE state='RUNNING'`).run();
+  }).immediate();
+}
+
 /** Explicit learning and sandbox calls have their own purpose, no forged inbound event and no send path. */
 export class LearningModelService {
   private readonly active=new Set<string>();
   constructor(private readonly transport:typeof fetch=fetch){}
-  private async call(context:LearningModelContext,input:{purpose:LearningPurpose;taskId?:string;system:string;data:unknown;maximumTokens:512|2048},
+  private async call(context:LearningModelContext,input:{purpose:LearningPurpose;taskId?:string;batchIndex?:number;system:string;data:unknown;maximumTokens:512|2048},
     validate:(text:string)=>string):Promise<{text:string;model:string;callId:string}>{
     requireAllowance(context,1);
-    requireSafe(context.key.length>0&&!/[\r\n]/u.test(context.key),'INVALID_MODEL_KEY');
-    const id=randomUUID(),started=Date.now();
-    context.store.db.transaction(()=>{
-      context.check();context.reserve(id,input.purpose);context.store.consumeBudget('MODEL');
-      context.store.db.prepare('INSERT INTO model_calls VALUES(?,?,?,NULL,NULL,NULL,NULL)').run(id,context.settings.model,'STARTED');
-      context.store.db.prepare('INSERT INTO k_model_purposes VALUES(?,?,?)').run(id,input.purpose,input.taskId??null);
-    }).immediate();
-    try{
-      const result=await requestDeepSeek(wrapModelTransport(this.transport,context.signal),{model:context.settings.model,key:context.key,system:input.system,
-        data:input.data,maximumTokens:input.maximumTokens,...(context.signal?{signal:context.signal}:{})});
-      context.store.db.prepare('UPDATE model_calls SET input_tokens=?,output_tokens=?,elapsed_ms=? WHERE id=?')
-        .run(result.inputTokens,result.outputTokens,Date.now()-started,id);
-      context.check(0);requireSafe(!context.signal?.aborted,'MODEL_CANCELLED');const text=validate(result.text);
-      context.store.db.prepare("UPDATE model_calls SET status='SUCCEEDED' WHERE id=?").run(id);
-      context.store.audit('LEARNING_MODEL_SUCCEEDED',digest(id));return{text,model:result.model,callId:id};
+    requireSafe(context.route||context.key.length>0&&!/[\r\n]/u.test(context.key),'INVALID_MODEL_KEY');
+    try {
+      return await callBusinessModel({
+        store:context.store,purpose:input.purpose,model:context.settings.model,key:context.key,
+        transport:this.transport,signal:context.signal,binding:context.route?.(input.purpose),taskId:input.taskId,
+        messages:[{role:'system',content:input.system},{role:'user',content:JSON.stringify(input.data)}],
+        check:()=>context.check(0),reserve:id=>context.reserve(id,input.purpose),linkReservedCall:id=>{
+          if(input.taskId&&input.batchIndex!==undefined)context.store.db.prepare('UPDATE k_learning_batches SET call_id=? WHERE task_id=? AND batch_index=?')
+            .run(id,input.taskId,input.batchIndex);
+        },validate:result=>validate(result.text),
+      });
     }catch(error){
-      context.store.db.prepare("UPDATE model_calls SET status='FAILED',elapsed_ms=? WHERE id=?").run(Date.now()-started,id);
-      const code=classifyModelFailure(error,context.signal?{signal:context.signal}:{});
-      requireSafe(false,code);
+      if(context.route)throw error;
+      requireSafe(false,classifyModelFailure(error,context.signal?{signal:context.signal}:{}));
     }
   }
   async analyze(context:LearningModelContext,request:AnalyzeRequest):Promise<{
@@ -79,13 +84,14 @@ export class LearningModelService {
     const selection=knowledge.learningSamples(context.accountId,request.sampleIds.length?request.sampleIds:undefined);
     requireSafe(selection.training.every(sample=>context.allowedChannels.includes(sample.channel)),'MODEL_CHANNEL_NOT_AUTHORIZED');
     const {batches,omitted}=planBatches(selection.training),used=batches.flat();requireSafe(used.length>0,'PERSONA_SAMPLES_REQUIRED');
-    const sampleDigest=digest(used.map(sample=>[sample.id,sampleData(sample)])),settingsDigest=digest(context.settings.model);
+    const sampleDigest=digest(used.map(sample=>[sample.id,sampleData(sample)])),settingsDigest=digest([context.route?.('PERSONA_ANALYSIS').snapshot??context.settings.model,replySettingsFingerprint(context.settings,undefined)]);
     const id=request.taskId??randomUUID();requireSafe(!this.active.has(id),'PERSONA_ANALYSIS_PENDING');
     const task=context.store.db.prepare('SELECT account_id,sample_digest,settings_digest,state,persona_id FROM k_learning_tasks WHERE id=?')
       .get(id) as {account_id:string;sample_digest:string;settings_digest:string;state:string;persona_id:string|null}|undefined;
     if(request.taskId)requireSafe(task&&task.account_id===context.accountId&&task.sample_digest===sampleDigest&&task.settings_digest===settingsDigest,
       'PERSONA_TASK_SELECTION_CHANGED');
     requireSafe(task?.state!=='INVALIDATED','PERSONA_TASK_SELECTION_CHANGED');
+    requireSafe(task?.state!=='INTERRUPTED','PERSONA_TASK_INTERRUPTED');
     const currentSamples=()=>{
       context.check(0);const state=context.store.db.prepare('SELECT state FROM k_learning_tasks WHERE id=?').get(id) as {state:string}|undefined;
       requireSafe(state?.state!=='INVALIDATED','PERSONA_TASK_SELECTION_CHANGED');
@@ -102,6 +108,7 @@ export class LearningModelService {
       return{taskId:id,persona,calls:0,usedCount:used.length,omittedCount:omitted};
     }
     const rows=task?context.store.db.prepare('SELECT * FROM k_learning_batches WHERE task_id=?').all(id) as BatchRow[]:[];
+    requireSafe(!rows.some(row=>row.state==='INTERRUPTED'||row.state==='RUNNING'&&row.call_id),'PERSONA_TASK_INTERRUPTED');
     const totalSteps=batches.length===1?1:batches.length+1;
     const remaining=Math.max(0,totalSteps-rows.filter(row=>row.state==='SUCCEEDED').length);
     requireAllowance(context,remaining);currentSamples();
@@ -123,11 +130,18 @@ export class LearningModelService {
       context.store.db.prepare(`INSERT INTO k_learning_batches VALUES(?,?,?,?,NULL,'RUNNING',NULL)
         ON CONFLICT(task_id,batch_index) DO UPDATE SET input_digest=excluded.input_digest,output_json=NULL,state='RUNNING',call_id=NULL`)
         .run(id,index,purpose,inputDigest);
+      let completedCall:string|undefined;
       try{
-        const result=await this.call(context,{purpose,taskId:id,system:analysisSystem,data,maximumTokens:2048},parseRules);calls++;
+        const result=await this.call({...context,check:(count)=>{context.check(count);currentSamples();}},
+          {purpose,taskId:id,batchIndex:index,system:analysisSystem,data,maximumTokens:2048},parseRules);calls++;
+        completedCall=result.callId;
         currentSamples();context.store.db.prepare("UPDATE k_learning_batches SET state='SUCCEEDED',output_json=?,call_id=? WHERE task_id=? AND batch_index=?")
           .run(JSON.stringify({rules:result.text}),result.callId,id,index);return result.text;
-      }catch(error){context.store.db.prepare("UPDATE k_learning_batches SET state='FAILED' WHERE task_id=? AND batch_index=?").run(id,index);throw error;}
+      }catch(error){
+        if(completedCall)context.route?.(purpose).controller.models.discardUnpublishedCall(completedCall,modelCallFailureReason(error));
+        context.store.db.prepare("UPDATE k_learning_batches SET state='FAILED' WHERE task_id=? AND batch_index=?").run(id,index);
+        throw error;
+      }
     };
     try{
       const summaries:string[]=[];

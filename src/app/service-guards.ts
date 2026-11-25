@@ -3,12 +3,13 @@ import type { EventStore } from "../storage/store.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type { WorkbenchAuthority } from "./authority.js";
 import type { PlatformConnector } from "../platform/platform-connector.js";
+import { saveAiSettings } from "./ai-configuration.js";
 import { CredentialStore } from "./credentials.js";
-import { grantConfiguredModel, saveAiSettings } from "./ai-configuration.js";
 import { configureAssistantConnection } from "./local-assistant-connection.js";
 import { recoverEmergency } from "./emergency-recovery.js";
 import { handleBrowserCommand } from "./browser-command.js";
 import type { AiSettings, ClientCommand } from "./contracts.js";
+import type { ModelProviderController } from "./model-provider-controller.js";
 import type { ReplyPolicy } from "./automation-contracts.js";
 
 /** Knowledge commands that persist state changes and justify a knowledge_updated broadcast. */
@@ -41,6 +42,7 @@ export function isReadOnlySidecarCommand(raw: unknown): boolean {
   if (readOnlyCommands.has(body.command)) return true;
   if (body.command === "getMessagePreview") return body.refresh !== true;
   if (body.command === "replyKnowledge") return body.action === "overview";
+  if (body.command === "modelProviders") return body.action === "list";
   return false;
 }
 
@@ -48,6 +50,7 @@ export interface AutoModeGateContext {
   authority: WorkbenchAuthority;
   automation: AutomationStore | null;
   settings: AiSettings;
+  models: ModelProviderController | null;
   resetAutomaticAbort(): void;
 }
 
@@ -55,7 +58,7 @@ export interface AutoModeGateContext {
 export function enableAutomaticReplyMode(token: string, ctx: AutoModeGateContext): void {
   requireSafe(ctx.automation, "AUTOMATION_NOT_READY");
   requireSafe(!ctx.automation.state().emergencyStopped, "EMERGENCY_STOPPED");
-  const grant = ctx.automation.active("AUTO_REPLY");
+  const grant = ctx.models?.guard.eligibleGrant("AUTO_REPLY");
   requireSafe(grant, "AUTO_POLICY_REQUIRED");
   requireSafe(grant.scope.model === ctx.settings.model, "MODEL_OUTSIDE_GRANT");
   requireSafe(ctx.automation.allowance(grant.version, "SEND"), "SEND_GRANT_EXHAUSTED");
@@ -73,14 +76,7 @@ export interface ConfigCommandContext {
   isClosing(): boolean;
   getSettings(): AiSettings;
   setSettings(settings: AiSettings): void;
-  getKey(): string;
-  setKey(key: string): void;
-  getKeyStored(): boolean;
-  setKeyStored(stored: boolean): void;
-  setKeyStorageError(error: string | null): void;
-  nextKeyGeneration(): number;
-  currentKeyGeneration(): number;
-  setModelAuthorized(authorized: boolean): void;
+  models: ModelProviderController | null;
   abortModel(): void;
   stopAutomaticReply(reason?: string): void;
   resetAutomaticAbort(force?: boolean): void;
@@ -123,8 +119,10 @@ export async function handleConfigWriteCommand(
     case "setModelGrant":
       ctx.authority.requireGuiControl(token);
       requireSafe(ctx.automation, "AUTOMATION_NOT_READY");
-      ctx.setModelAuthorized(false);
-      if (c.scope) ctx.automation.grant("MODEL", c.scope);
+      if (c.scope) {
+        requireSafe(ctx.models, "MODEL_PROVIDERS_NOT_INITIALIZED");
+        ctx.automation.grant("MODEL", c.scope);
+      }
       else {
         ctx.automation.revoke("MODEL");
         ctx.abortModel();
@@ -134,7 +132,10 @@ export async function handleConfigWriteCommand(
     case "setReplyPolicy":
       ctx.authority.requireGuiControl(token);
       requireSafe(ctx.automation, "AUTOMATION_NOT_READY");
-      if (c.policy) ctx.automation.grant("AUTO_REPLY", c.policy);
+      if (c.policy) {
+        requireSafe(ctx.models, "MODEL_PROVIDERS_NOT_INITIALIZED");
+        ctx.automation.grant("AUTO_REPLY", c.policy);
+      }
       else {
         ctx.automation.revoke("AUTO_REPLY");
         ctx.stopAutomaticReply();
@@ -144,6 +145,7 @@ export async function handleConfigWriteCommand(
     case "enableReplyPolicy":
       ctx.authority.requireGuiControl(token);
       requireSafe(ctx.automation, "AUTOMATION_NOT_READY");
+      requireSafe(ctx.models, "MODEL_PROVIDERS_NOT_INITIALIZED");
       ctx.store.db
         .transaction(() => {
           requireSafe(!ctx.automation!.state().emergencyStopped, "EMERGENCY_STOPPED");
@@ -170,6 +172,7 @@ export async function handleConfigWriteCommand(
           authority: ctx.authority,
           automation: ctx.automation,
           settings: ctx.getSettings(),
+          models: ctx.models,
           resetAutomaticAbort: () => ctx.resetAutomaticAbort(),
         });
       } else {
@@ -189,6 +192,7 @@ export async function handleConfigWriteCommand(
           authority: ctx.authority,
           automation: ctx.automation,
           settings: ctx.getSettings(),
+          models: ctx.models,
           resetAutomaticAbort: () => ctx.resetAutomaticAbort(),
         });
       } else {
@@ -197,69 +201,31 @@ export async function handleConfigWriteCommand(
       }
       ctx.emit("status_updated");
       return ctx.status(token);
-    case "clearModelKey": {
-      ctx.authority.requireGuiControl(token);
-      const generation = ctx.nextKeyGeneration();
-      ctx.setKey("");
-      ctx.abortModel();
-      await new CredentialStore(ctx.root).delete();
-      if (generation === ctx.currentKeyGeneration() && !ctx.isClosing()) {
-        ctx.setKeyStored(false);
-        ctx.setKeyStorageError(null);
-      }
-      ctx.store.audit("MODEL_KEY_CLEARED", ctx.store.accountId);
-      ctx.emit("status_updated");
-      return ctx.status(token);
-    }
+    case "clearModelKey":
     case "setKeyStorage": {
       ctx.authority.requireGuiControl(token);
-      const credentials = new CredentialStore(ctx.root);
-      const generation = ctx.nextKeyGeneration();
-      if (c.storage === "DPAPI") {
-        requireSafe(ctx.getKey(), "MODEL_KEY_REQUIRED");
-        await credentials.save(ctx.getKey());
-        if (generation === ctx.currentKeyGeneration() && !ctx.isClosing()) ctx.setKeyStored(true);
-      } else {
-        await credentials.delete();
-        if (generation === ctx.currentKeyGeneration() && !ctx.isClosing()) {
-          ctx.setKeyStored(false);
-          if (c.storage === "DELETE") {
-            ctx.setKey("");
-            ctx.abortModel();
-          }
-        }
+      requireSafe(c.command === "clearModelKey" || c.storage === "DELETE", "USE_MODEL_PROVIDER_SETTINGS");
+      requireSafe(ctx.models, "MODEL_PROVIDERS_NOT_INITIALIZED");
+      const selection = ctx.models.models.getSelection();
+      if (selection.connectionId) {
+        const row = ctx.models.models.requireConnection(selection.connectionId);
+        await ctx.models.clearKey(row.id, row.version);
       }
-      ctx.setKeyStorageError(null);
-      ctx.store.audit("MODEL_KEY_STORAGE_CHANGED", ctx.store.accountId, { stored: ctx.getKeyStored() });
-      ctx.emit("status_updated");
+      await new CredentialStore(ctx.root).delete();
       return ctx.status(token);
     }
     case "configureAi": {
       ctx.authority.requireGuiControl(token);
-      requireSafe(!/[\r\n]/u.test(c.key), "INVALID_MODEL_KEY");
-      const generation = c.key ? ctx.nextKeyGeneration() : ctx.currentKeyGeneration();
-      await saveAiSettings(ctx.root, c.settings);
-      const modelChanged = ctx.getSettings().model !== c.settings.model;
-      ctx.setSettings(c.settings);
-      if (c.key && generation === ctx.currentKeyGeneration() && !ctx.isClosing()) {
-        if (ctx.getKeyStored()) await new CredentialStore(ctx.root).save(c.key);
-        if (generation === ctx.currentKeyGeneration() && !ctx.isClosing()) ctx.setKey(c.key);
-      }
-      if (modelChanged) ctx.setModelAuthorized(false);
-      if (c.key && generation === ctx.currentKeyGeneration() && ctx.automation) {
-        grantConfiguredModel(ctx.store, ctx.automation, c.settings);
-      }
+      const { model, persona, business, rules } = c.settings;
+      requireSafe(!c.key && (model === undefined || model === ctx.getSettings().model), "USE_MODEL_PROVIDER_SETTINGS");
+      await saveAiSettings(ctx.root, { persona, business, rules }, !ctx.models);
+      ctx.setSettings({ model: ctx.getSettings().model, persona, business, rules });
       ctx.emit("status_updated");
       return ctx.status(token);
     }
     case "authorizeAi":
       ctx.authority.requireGuiControl(token);
-      requireSafe(!ctx.automation, "USE_PERSISTENT_MODEL_GRANT");
-      requireSafe(!c.authorized || ctx.getKey(), "MODEL_KEY_REQUIRED");
-      ctx.setModelAuthorized(c.authorized);
-      ctx.store.audit(c.authorized ? "DEEPSEEK_AUTHORIZED" : "DEEPSEEK_REVOKED", ctx.store.accountId);
-      ctx.emit("status_updated");
-      return ctx.status(token);
+      requireSafe(false, "USE_PERSISTENT_MODEL_GRANT");
   }
 }
 

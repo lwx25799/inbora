@@ -1,3 +1,4 @@
+import type { ModelRouteGuard } from './model-route-guard.js';
 import { ChannelAuthority, type CapabilityIdentity } from "./channel-authority.js";
 export type { CapabilityIdentity } from "./channel-authority.js";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -53,6 +54,7 @@ const sessionRenewalThresholdMs = 3600_000;
 export class WorkbenchAuthority {
   private readonly channels: ChannelAuthority;
   readonly assistant: LocalAssistantStore;
+  modelRoute: ModelRouteGuard | null = null;
   private selection = new Map<string, { eventId: string | null; selectionId: string }>();
   private readonly hooks: AuthorityInternalHooks;
   constructor(
@@ -381,7 +383,13 @@ export class WorkbenchAuthority {
         this.store.db
           .prepare("INSERT INTO draft_revisions VALUES(?,?,?,?,?,?)")
           .run(id, version, origin, text, op.id, this.now());
-        if (suggestionId) bindSuggestionLearningToDraft(this.store, suggestionId, id, version);
+        if (suggestionId) {
+          bindSuggestionLearningToDraft(this.store, suggestionId, id, version);
+          this.modelRoute?.models.copyGenerationBinding(
+            { ownerKind: "SUGGESTION", ownerId: suggestionId, ownerVersion: 1 },
+            { ownerKind: "DRAFT", ownerId: id, ownerVersion: version },
+          );
+        }
         this.store.audit(assistantVersion === null ? "HUMAN_DRAFT_SAVED" : "ASSISTANT_DRAFT_SAVED", id, { version });
         return this.draftFor(eventId)!;
       })
@@ -589,6 +597,7 @@ export class WorkbenchAuthority {
         ),
       check: () => {
         const row = this.command(id);
+        requireSafe(row.reason !== "MODEL_ROUTE_CHANGED" && row.reason !== "LEGACY_MODEL_ROUTE_UNPROVEN", row.reason!);
         requireSafe(["QUEUED", "PREFLIGHT"].includes(row.status), "COMMAND_NOT_QUEUED");
         requireSafe(this.approval(id).expires_at > this.now(), "CONFIRMATION_EXPIRED");
         this.assertCanSend(token, JSON.parse(row.params) as SendParams, identity(), true, id);
@@ -638,7 +647,8 @@ export class WorkbenchAuthority {
   }
   finish(id: string, status: string, reason: string | null = null): void {
     this.store.db
-      .prepare("UPDATE manual_send_commands SET status=?,reason=? WHERE command_id=?")
+      .prepare(`UPDATE manual_send_commands SET status=?,reason=? WHERE command_id=?
+        AND (intent_id IS NOT NULL OR reason IS NULL OR reason NOT IN ('MODEL_ROUTE_CHANGED','LEGACY_MODEL_ROUTE_UNPROVEN'))`)
       .run(status, reason, id);
   }
   recover(): void {

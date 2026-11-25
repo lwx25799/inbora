@@ -1,7 +1,7 @@
 import { request } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { Blocked, requireSafe } from '../core/contracts.js';
-import { assistantTools } from './tool-contracts.js';
+import { assistantTools, modelProviderDiagnosticsHeader } from './tool-contracts.js';
 import {
   readAssistantDiscoverySnapshot,
   statAssistantDiscovery,
@@ -83,7 +83,7 @@ export class AssistantBridgeClient {
         headers: {
           Authorization: `Bearer ${descriptor.secret}`, 'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(body), Connection: 'close',
-          ...(tool === 'inbora_get_diagnostics' ? { [browserResourcesHeader]: '1' } : {}),
+          ...(tool === 'inbora_get_diagnostics' ? { [browserResourcesHeader]: '1', [modelProviderDiagnosticsHeader]: '1' } : {}),
           ...(tool === 'inbora_get_status' ? { [securityStatusHeader]: '1' } : {}),
         },
       }, response => {

@@ -158,6 +158,8 @@ export function assertCanSendImpl(
           .get(commandId) as { grant_version: number; ownership_generation: number } | undefined)
       : null;
   if (policy) {
+    requireSafe(authority.modelRoute, "LEGACY_MODEL_ROUTE_UNPROVEN");
+    authority.modelRoute.assertAutomaticDraft({ ownerKind: "DRAFT", ownerId: p.draftId, ownerVersion: p.draftVersion }, policy.grant_version, e.id);
     const auto = new AutomationStore(store, authority.now),
       grant = auto.active("AUTO_REPLY") as Grant<ReplyPolicy> | null;
     requireSafe(grant?.version === policy.grant_version && auto.policyMatches(grant, e, "DRAFT"), "POLICY_NO_LONGER_AUTHORIZED");

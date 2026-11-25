@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { requireSafe } from "../core/contracts.js";
+import { Blocked, requireSafe } from "../core/contracts.js";
 import type { EventStore } from "../storage/store.js";
 import { AutomationStore } from "../storage/automation-store.js";
 import { migrateAutomation } from "../storage/automation-migration.js";
@@ -17,7 +17,12 @@ import { BrowserDraftRecovery } from "./browser-draft-recovery.js";
 import { classifyStoredShares } from "./message-disposition.js";
 import { CollectionScheduler } from "./collection-scheduler.js";
 import { VerificationScheduler } from "./verification-scheduler.js";
-import { settingsSchema, type AiSettings } from "./contracts.js";
+import { defaultSettings, settingsSchema, type AiSettings } from "./contracts.js";
+import { migrateModelProviders } from "../storage/model-provider-migration.js";
+import { ModelProviderStore } from "../storage/model-provider-store.js";
+import { ModelRouteGuard } from "./model-route-guard.js";
+import { ModelProviderController } from "./model-provider-controller.js";
+import { ModelCredentialStore } from "./credentials.js";
 
 export interface BootstrapInput {
   store: EventStore;
@@ -91,9 +96,26 @@ export async function bootstrapAutomationRuntime(input: BootstrapInput): Promise
 
 export async function loadClientSettings(root: string): Promise<AiSettings | null> {
   try {
-    return settingsSchema.parse(JSON.parse(await readFile(join(root, "client-settings.json"), "utf8")));
+    const raw = JSON.parse(await readFile(join(root, "client-settings.json"), "utf8"));
+    return settingsSchema.parse({ ...raw, model: defaultSettings.model });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
+  }
+}
+
+export async function bootstrapModelProviders(automation: AutomationStore, root: string, transport: typeof fetch,
+  updated: () => void): Promise<{ controller: ModelProviderController | null; reason: string | null }> {
+  try {
+    await migrateModelProviders(automation.store, root);
+    const models = new ModelProviderStore(automation.store.db, automation.now);
+    const controller = new ModelProviderController(new ModelRouteGuard(models, automation), new ModelCredentialStore(root),
+      transport, updated);
+    await controller.initialize();
+    return { controller, reason: null };
+  } catch (error) {
+    const reason = error instanceof Blocked ? error.code : "MODEL_PROVIDER_SCHEMA_INVALID";
+    automation.store.audit("MODEL_PROVIDERS_UNAVAILABLE", reason);
+    return { controller: null, reason };
   }
 }

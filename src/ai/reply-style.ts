@@ -55,6 +55,7 @@ export function buildReplySystemPrompt(options: ReplySystemPromptOptions): strin
 export const safeModelFailureCodes = new Set<string>([
   'MODEL_AUTH_FAILED',
   'MODEL_RATE_LIMITED',
+  'MODEL_SERVICE_ERROR',
   'MODEL_TIMEOUT',
   'MODEL_CANCELLED',
   'MODEL_HTTP_ERROR',
@@ -65,6 +66,7 @@ export const safeModelFailureCodes = new Set<string>([
   'MODEL_DUPLICATE_OUTPUT',
   'PERSONA_MODEL_FORMAT_INVALID',
   'KNOWLEDGE_CONTEXT_CHANGED',
+  'PERSONA_TASK_SELECTION_CHANGED',
   'INVALID_MODEL_KEY',
   'INVALID_TEXT',
   'MODEL_PAUSED',
@@ -87,27 +89,4 @@ export function classifyModelFailure(
     if (error.name === 'TimeoutError' || error.name === 'AbortError') return 'MODEL_TIMEOUT';
   }
   return 'MODEL_FAILED_NO_RETRY';
-}
-
-/** Wrap fetch to surface safe HTTP auth/rate-limit/timeout categories without modifying requestDeepSeek. */
-export function wrapModelTransport(transport: typeof fetch, signal?: AbortSignal): typeof fetch {
-  return async (input, init) => {
-    let response: Response;
-    try {
-      response = await transport(input, init);
-    } catch (error) {
-      if (signal?.aborted) throw new Blocked('MODEL_CANCELLED');
-      if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-        throw new Blocked('MODEL_TIMEOUT');
-      }
-      throw error;
-    }
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => {});
-      if (response.status === 401 || response.status === 403) throw new Blocked('MODEL_AUTH_FAILED');
-      if (response.status === 429) throw new Blocked('MODEL_RATE_LIMITED');
-      throw new Blocked('MODEL_HTTP_ERROR');
-    }
-    return response;
-  };
 }

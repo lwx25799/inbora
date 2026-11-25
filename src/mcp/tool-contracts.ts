@@ -1,3 +1,4 @@
+import { modelIdSchema, modelPresetIdSchema } from '../contracts/model-providers.js';
 import {z} from 'zod';
 import {channelSchema} from '../core/contracts.js';
 import {browserResourceReasons} from '../observability/browser-resource-contracts.js';
@@ -44,8 +45,10 @@ export const browserResourcesSchema=z.object({state:z.enum(['WAITING','AVAILABLE
   intervalMs:count,sampledAt:count.nullable(),segmentStartedAt:count.nullable(),
   latest:z.object({workingSetBytes:count,privateBytes:count,browserProcesses:count,pageCount:count,elapsedMs:z.number().nonnegative()}).strict().nullable(),
   hour:memoryWindow.nullable(),run:memoryWindow.nullable()}).strict();
+export const modelProviderDiagnosticsHeader='x-inbora-model-provider-diagnostics';
+export const legacyDiagnosticModelId=/^[A-Za-z0-9._:-]{1,100}$/u;
 export const diagnosticsSchema=z.object({version:z.literal(1),timeRangeSupported:z.literal(false),
-  model:z.object({total:usage,groups:z.array(usage.extend({model:z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/u),status:code})).max(100)}).strict(),
+  model:z.object({total:usage,groups:z.array(usage.extend({provider:modelPresetIdSchema.or(z.literal('UNKNOWN')).optional(),model:modelIdSchema,status:code})).max(100)}).strict(),
   blockers:z.array(z.object({source:code,code,count}).strict()).max(10),
   collection:z.object({channels:z.array(z.object({source:z.enum(['dm','works','UNKNOWN']),nextAt:count,lastSuccess:count.nullable(),
     lastError:code.nullable(),failures:count,elapsedMs:count.nullable()}).strict()).max(2),

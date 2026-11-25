@@ -1,4 +1,4 @@
-import { isStrong, targetKey, type Channel } from '../core/contracts.js';
+import { Blocked, isStrong, targetKey, type Channel } from '../core/contracts.js';
 import type { EventStore } from '../storage/store.js';
 import type { AutomationStore } from '../storage/automation-store.js';
 import type { WorkbenchAuthority } from './authority.js';
@@ -21,6 +21,8 @@ interface ViewState {
   keyStored: boolean;
   keyStorageError: string | null;
   modelAuthorized: boolean;
+  modelRoute?: SuggestionState['modelRoute'];
+  modelUnavailable?: string|null;
   modelBusy: boolean;
   automation: AutomationStore | null;
   collector: ReturnType<CollectionScheduler['status']> | undefined;
@@ -102,6 +104,11 @@ export class WorkbenchQueries {
 
   status(token: string, state: ViewState) {
     const { automation } = state;
+    const grant = (kind: 'MODEL'|'AUTO_REPLY') => {
+      try { return automation?.active(kind) ?? null; }
+      catch (error) { if (error instanceof Blocked && error.code === 'GRANT_CORRUPT') return null; throw error; }
+    };
+    const policy = grant('AUTO_REPLY');
     const op = this.authority.operator(token);
     const configuredMode=this.authority.mode();
     const needsSendCapability=['MANUAL','AI_ASSISTED'].includes(configuredMode);
@@ -154,14 +161,16 @@ export class WorkbenchQueries {
       keyStored:state.keyStored,keyStorageError:state.keyStorageError,
       modelAuthorized: hasSuggestionAuthorization(automation,state),
       automation:automation?{
-        ...automation.state(),modelGrant:automation.active('MODEL'),replyPolicy:automation.active('AUTO_REPLY'),
+        ...automation.state(),modelGrant:grant('MODEL'),replyPolicy:policy,
         collector:state.collector,inboxRevision:state.inboxRevision,
         pendingWorks:this.store.db.prepare("SELECT count(*) AS count FROM discovered_works WHERE state='REVIEW'").get(),
         unresolvedSends:this.store.db.prepare(`SELECT e.channel,count(*) AS count FROM send_intents i
           JOIN inbound_events e ON e.id=i.event_id WHERE i.status IN ('INTENT_RECORDED','UNCERTAIN')
           AND COALESCE((SELECT v.verified FROM verification_results v WHERE v.intent_id=i.id ORDER BY v.rowid DESC LIMIT 1),0)<>1 GROUP BY e.channel`).all(),
-        autoStopReason:configuredMode==='LIMITED_AUTO'&&automation.active('AUTO_REPLY')?(!state.keyPresent?'MODEL_KEY_REQUIRED':!automation.allowance(automation.active('AUTO_REPLY')!.version,'SEND')?'SEND_GRANT_EXHAUSTED':
-          !automation.allowance(automation.active('AUTO_REPLY')!.version,'MODEL')?'MODEL_GRANT_EXHAUSTED':this.authority.paused()?'ACCOUNT_PAUSED':null):null,
+        autoStopReason:configuredMode==='LIMITED_AUTO'?(state.modelUnavailable??(policy?
+          !state.keyPresent?'MODEL_KEY_REQUIRED':!automation.allowance(policy.version,'SEND')?'SEND_GRANT_EXHAUSTED':
+          !automation.allowance(policy.version,'MODEL')?'MODEL_GRANT_EXHAUSTED':this.authority.paused()?'ACCOUNT_PAUSED':null:
+          'AUTO_POLICY_REQUIRED')):null,
       }:null,
       modelBusy: state.modelBusy,
       sync:structuredClone(state.sync),

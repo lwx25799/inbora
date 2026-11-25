@@ -1,15 +1,34 @@
-# [已废弃：仅历史 schema2 CLI] 可选模型 HTTP 契约
+# 多模型提供商 V1.0 路由契约
 
-> [!WARNING]
-> **已废弃文档（仅历史 schema2 CLI 留档）**
-> 本文档描述的是早期 schema2 CLI 中的自定义 `HttpDraftProvider`（`src/ai/draft-service.ts`）与 `authorize-model` 契约，在现行 schema3 客户端下已被明确拒绝（`CLIENT_USE_VERSIONED_DRAFT_SERVICE`）。
->
-> - **现行 0.3.5 实现**：使用 DeepSeek Chat Completions 接口（`src/ai/deepseek.ts` + `src/ai/deepseek-request.ts`，官方 HTTPS 端点、非流式、30 秒超时、64,000 字节响应上限、禁止重定向、禁止自动重试），通过 GUI 持续策略授权与 Windows CurrentUser DPAPI / 后端内存管理凭据。
-> - **后续演进路线**：阶段 2 多模型提供商接入与切换统一按 [架构决策与演进路线](ARCHITECTURE-DECISIONS.md)（ADR-001 / ADR-002）在 Node/TS 唯一业务权威上实施。
+当前模型以 SQLite `m_selection` 为准。桌面 CONTROL 会话通过 `modelProviders` 管理连接修订和 Key。保存只更新待应用修订，应用才切换业务路由。MCP 继续使用 16 个业务工具。Key 保存在后端内存或 Windows CurrentUser DPAPI。
+
+人工建议、自动回复、知识分析和试答携带固定的连接、凭据、选择修订和授权版本，经 `ModelClient` 发起一次 HTTPS 请求。短回复和试答上限 512 tokens，知识分析和合并为 2048 tokens。生成请求限时 30 秒，响应上限 64,000 字节，拒绝重定向。
+
+业务生成在事务内预占一份持续授权和一次全局 MODEL 预算。切换继承有效授权的各自额度和已消费记录，并使旧路由的未提交自动任务失效。已有发送意图继续按原回读合同处理。连接测试只发固定测试消息，按命令 ID 去重并消费一次全局 MODEL 预算。
+
+详细规则见[多模型施工文档](../Inbora_多模型提供商接入与切换_施工文档_V1.0_2026-11-16.md)。
+
+## 分供应商验证矩阵
+
+| 供应商 | 配置与目录合成验证 | 四协议合成响应验证 | 真实 Windows DPAPI 往返与 Sidecar 断连重连 | 真实供应商 API Key 付费调用与原生 GUI 人工交互 |
+| --- | --- | --- | --- | --- |
+| DeepSeek | 已通过 | 已通过 | 离线合成宿主已通过 | 未实测 |
+| OpenAI | 已通过 | 已通过 | 离线合成宿主已通过 | 未实测 |
+| Claude | 已通过 | 已通过 | 离线合成宿主已通过 | 未实测 |
+| Gemini | 已通过 | 已通过 | 离线合成宿主已通过 | 未实测 |
+| 通义千问 | 已通过 | 已通过 | 离线合成宿主已通过 | 未实测 |
+| 豆包 | 已通过 | 已通过 | 离线合成宿主已通过 | 未实测 |
+| 硅基流动 | 已通过 | 已通过 | 离线合成宿主已通过 | 未实测 |
+| OpenRouter | 已通过 | 已通过 | 离线合成宿主已通过 | 未实测 |
+| 自定义云端 | 已通过 | 已通过 | 离线合成宿主已通过 | 未实测 |
+
+四协议列记录 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和 Gemini generateContent 的合成响应覆盖。DPAPI 与 Sidecar 列记录各供应商共用的 Windows 宿主验证。所有供应商的付费调用与原生 GUI 人工交互均待用户本人提供 Key，并在原开发窗口操作验收。
 
 ---
 
-## 历史 schema2 CLI 契约原文（仅作审计留档）
+## 已废弃的 schema2 CLI 契约（仅作审计留档）
+
+下面的 `HttpDraftProvider` 和 `authorize-model` 契约仅用于历史 schema2 CLI。schema3 客户端拒绝该入口并返回 `CLIENT_USE_VERSIONED_DRAFT_SERVICE`。
 
 当前默认 Mock；没有真实供应商调用，也没有费用。HTTP 适配器是待供应商接入验证的明确契约，不宣称兼容 OpenAI 或任何特定供应商 API。
 

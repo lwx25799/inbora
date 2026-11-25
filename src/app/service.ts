@@ -15,7 +15,8 @@ import { DeepSeekProvider } from "../ai/deepseek.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type { CollectionScheduler } from "./collection-scheduler.js";
 import type { VerificationScheduler } from "./verification-scheduler.js";
-import { CredentialStore } from "./credentials.js";
+import type { ModelProviderController } from "./model-provider-controller.js";
+import { handleModelProviderCommand } from "./model-provider-commands.js";
 import { runAutomaticReply } from "./automatic-reply.js";
 import { readDiagnostics } from "./diagnostics.js";
 import { markInboxRead } from "./inbox-read-state.js";
@@ -43,7 +44,7 @@ import {
   sendResultCommand,
   type DeliveryContext,
 } from "./service-delivery.js";
-import { bootstrapAutomationRuntime, loadClientSettings } from "./service-bootstrap.js";
+import { bootstrapAutomationRuntime, bootstrapModelProviders, loadClientSettings } from "./service-bootstrap.js";
 
 export function clientError(error: unknown): string {
   return error instanceof Blocked ? error.code : "OPERATION_FAILED_PRIVATE_DIAGNOSTICS";
@@ -62,8 +63,8 @@ export class ClientService {
   readonly authority: WorkbenchAuthority;
   private readonly humanReplies: HumanReplyWorkflow;
   private settings: AiSettings = { ...defaultSettings };
-  private key = "";
-  private modelAuthorized = false;
+  private models: ModelProviderController | null = null;
+  private modelUnavailable: string | null = "MODEL_PROVIDERS_NOT_INITIALIZED";
   private modelAbort = new AbortController();
   private automaticAbort = new AbortController();
   private modelPending = new Set<string>();
@@ -79,9 +80,6 @@ export class ClientService {
   private autoTimer: ReturnType<typeof setInterval> | undefined;
   private autoTask: Promise<void> | null = null;
   private humanQueue: Promise<void> = Promise.resolve();
-  private keyStored = false;
-  private keyStorageError: string | null = null;
-  private keyGeneration = 0;
   private readonly maintenance: EvidenceMaintenance;
   private readonly browserResources: BrowserResources;
   private assistantConnection = {
@@ -117,8 +115,9 @@ export class ClientService {
     this.authority = new WorkbenchAuthority(store, now, this.accountId);
     this.authority.recover();
     this.knowledge = new ReplyKnowledgeService(store, this.authority, browser.root, () => ({
-      settings: this.settings,
-      key: this.key,
+      settings: this.projectedSettings(),
+      models: this.models,
+      modelUnavailable: this.modelUnavailable,
       automation: this.automation,
       signal: this.modelAbort.signal,
       closing: this.closing,
@@ -162,8 +161,7 @@ export class ClientService {
         this.automation!.stop(true, code, "CONNECTION");
         this.collector?.cancel();
         this.stopAutomaticReply("EMERGENCY_STOPPED");
-        this.modelAbort.abort();
-        this.modelAbort = new AbortController();
+        this.abortModel();
       },
       onResumeAfterLogin: () => this.resumeAfterLogin(),
       onOwnerReady: () => this.browserResources.ownerReady(),
@@ -193,12 +191,21 @@ export class ClientService {
         },
       });
       this.automation = runtime.automation;
+      const models = await bootstrapModelProviders(runtime.automation, this.browser.root, this.provider.transport,
+        () => this.emit("status_updated"));
+      this.models = models.controller;
+      this.modelUnavailable = models.reason;
+      this.authority.modelRoute = this.models?.guard ?? null;
       this.collector = runtime.collector;
       this.verification = runtime.verification;
       this.onlineKeeper.setRecoveryDiagnosticPending(runtime.hasStartupRecoveryCandidate);
     }
-    const loaded = await loadClientSettings(this.browser.root);
-    if (loaded) this.settings = loaded;
+    try {
+      const loaded = await loadClientSettings(this.browser.root);
+      if (loaded) this.settings = loaded;
+    } catch {
+      this.disableModels("INVALID_LEGACY_MODEL_SETTINGS");
+    }
     this.collector?.start();
     this.verification?.start();
     if (!this.autoTimer) {
@@ -217,16 +224,24 @@ export class ClientService {
       }, 30_000);
       this.leaseTimer.unref();
     }
-    const keyGeneration = this.keyGeneration;
-    try {
-      const key = await new CredentialStore(this.browser.root).load();
-      if (key && !this.closing && keyGeneration === this.keyGeneration) {
-        this.key = key;
-        this.keyStored = true;
-      }
-    } catch {
-      this.keyStorageError = "DPAPI_RESTORE_FAILED";
-    }
+  }
+  private abortModel(): void {
+    this.modelAbort.abort(new Blocked("MODEL_CANCELLED"));
+    this.modelAbort = new AbortController();
+  }
+  private disableModels(reason: string): void {
+    this.models?.close();
+    this.models = null;
+    this.authority.modelRoute = null;
+    this.modelUnavailable = reason;
+  }
+  private projectedSettings(selection = this.models?.models.getSelection()): AiSettings {
+    return { ...this.settings, model: selection?.modelId ?? defaultSettings.model };
+  }
+  private selectedModelState() {
+    const modelProviders = this.models?.state();
+    const applied = modelProviders?.connections.find(c => c.id === modelProviders.selection.connectionId)?.applied;
+    return { modelProviders, applied };
   }
   startOnline(): void {
     this.browserResources.start();
@@ -292,7 +307,7 @@ export class ClientService {
     this.onlineKeeper.resetRetry();
   }
   private stopAutomaticReply(reason = "AUTO_REPLY_DISABLED"): void {
-    this.automaticAbort.abort();
+    this.automaticAbort.abort(new Blocked("MODEL_CANCELLED"));
     if (this.automation) {
       this.store.db
         .prepare(
@@ -331,22 +346,39 @@ export class ClientService {
     );
   }
   private suggestionState() {
+    const { modelProviders, applied } = this.selectedModelState();
     return {
-      settings: this.settings,
-      keyPresent: !!this.key,
-      modelAuthorized: this.modelAuthorized,
+      settings: this.projectedSettings(modelProviders?.selection),
+      keyPresent: !!applied?.keyPresent,
+      modelAuthorized: false,
+      modelRoute: this.models?.guard ?? null,
+      modelUnavailable: this.modelUnavailable,
       modelBusy: this.modelPending.size > 0,
       recovering: this.browser.loginRecovery,
     };
   }
   private status(token: string) {
+    const { modelProviders, applied } = this.selectedModelState();
+    const grantStatus = this.models?.guard.statusProjection();
     return {
+      modelProviders,
+      modelProvidersSupported: true as const,
+      modelProvidersAvailable: !!modelProviders,
+      modelProvidersError: this.modelUnavailable,
+      modelProvidersUnavailableReason: this.modelUnavailable,
+      modelGrantError: grantStatus?.corrupt.length ? "GRANT_CORRUPT" as const : null,
+      corruptModelGrantKinds: grantStatus?.corrupt ?? [],
       ...this.queries.status(token, {
-        settings: this.settings,
-        keyPresent: !!this.key,
-        keyStored: this.keyStored,
-        keyStorageError: this.keyStorageError,
-        modelAuthorized: this.modelAuthorized,
+        settings: this.projectedSettings(modelProviders?.selection),
+        keyPresent: !!applied?.keyPresent,
+        keyStored: !!applied?.keyStored,
+        keyStorageError: this.models?.cleanupError ?? (
+          applied?.unavailableReason === "DPAPI_RESTORE_FAILED" || applied?.unavailableReason === "LEGACY_MODEL_KEY_RECONFIGURE_REQUIRED"
+            ? applied.unavailableReason : null
+        ),
+        modelAuthorized: false,
+        modelRoute: grantStatus?.route ?? null,
+        modelUnavailable: this.modelUnavailable,
         modelBusy: this.modelPending.size > 0,
         automation: this.automation,
         collector: this.collector?.status(),
@@ -388,30 +420,12 @@ export class ClientService {
       automation: this.automation,
       root: this.browser.root,
       isClosing: () => this.closing,
-      getSettings: () => this.settings,
+      getSettings: () => this.projectedSettings(),
       setSettings: (settings: AiSettings) => {
         this.settings = settings;
       },
-      getKey: () => this.key,
-      setKey: (key: string) => {
-        this.key = key;
-      },
-      getKeyStored: () => this.keyStored,
-      setKeyStored: (stored: boolean) => {
-        this.keyStored = stored;
-      },
-      setKeyStorageError: (error: string | null) => {
-        this.keyStorageError = error;
-      },
-      nextKeyGeneration: () => ++this.keyGeneration,
-      currentKeyGeneration: () => this.keyGeneration,
-      setModelAuthorized: (authorized: boolean) => {
-        this.modelAuthorized = authorized;
-      },
-      abortModel: () => {
-        this.modelAbort.abort();
-        this.modelAbort = new AbortController();
-      },
+      models: this.models,
+      abortModel: () => this.abortModel(),
       stopAutomaticReply: (reason?: string) => this.stopAutomaticReply(reason),
       resetAutomaticAbort: (force = false) => {
         if (force || this.automaticAbort.signal.aborted) this.automaticAbort = new AbortController();
@@ -427,6 +441,11 @@ export class ClientService {
     requireSafe(!this.closing, "CLIENT_CLOSING");
     const c = commandSchema.parse(raw);
     this.authority.operator(token);
+    if (c.command === "modelProviders") {
+      const task = handleModelProviderCommand(this.authority, token, this.models, this.modelUnavailable, () => this.closing, c);
+      this.track(task);
+      return task;
+    }
     if (
       !["getStatus", "getInbox", "getThread", "getDiagnostics", "getAudit", "getSendResult", "getMessagePreview"].includes(
         c.command,
@@ -477,10 +496,7 @@ export class ClientService {
               this.automaticAbort = new AbortController();
             }
           },
-          abortModel: () => {
-            this.modelAbort.abort();
-            this.modelAbort = new AbortController();
-          },
+          abortModel: () => this.abortModel(),
           ownerReady: () => this.browserResources.ownerReady(),
           emit: (event) => this.emit(event),
           status: (t) => this.status(t),
@@ -657,7 +673,7 @@ export class ClientService {
                 ? this.knowledge.data.context(event.accountId, event.channel, event.text)
                 : null,
             state: () => this.suggestionState(),
-            key: () => this.key,
+            models: this.models,
             signal: () => this.modelAbort.signal,
             pending: this.modelPending,
             emit: (event) => this.emit(event),
@@ -697,7 +713,7 @@ export class ClientService {
     }
   }
   async runAutomaticReply(): Promise<void> {
-    if (this.closing || this.browser.loginRecovery || !this.automation || !this.key || this.modelPending.size) return;
+    if (this.closing || this.browser.loginRecovery || !this.automation || !this.models || !this.selectedModelState().applied?.keyPresent || this.modelPending.size) return;
     await runAutomaticReply({
       store: this.store,
       authority: this.authority,
@@ -707,9 +723,9 @@ export class ClientService {
         this.knowledge.data.available() ? this.knowledge.data.context(event.accountId, event.channel, event.text) : null,
       provider: this.provider,
       humanReplies: this.humanReplies,
-      settings: this.settings,
-      currentSettings: () => this.settings,
-      key: this.key,
+      settings: this.projectedSettings(),
+      currentSettings: () => this.projectedSettings(),
+      models: this.models,
       modelPending: this.modelPending,
       automaticSignal: this.automaticAbort.signal,
       modelSignal: this.modelAbort.signal,
@@ -725,8 +741,7 @@ export class ClientService {
         this.automation!.stop(true, code, "AUTOMATIC_REPLY");
         this.collector?.cancel();
         this.stopAutomaticReply("EMERGENCY_STOPPED");
-        this.modelAbort.abort();
-        this.modelAbort = new AbortController();
+        this.abortModel();
       },
     });
   }
@@ -743,11 +758,9 @@ export class ClientService {
     await this.knowledge.cancelActiveParse();
     await this.browser.closeManualRecovery();
     const resourcesClosed = this.browserResources.close();
-    this.keyGeneration++;
     this.syncRunner.stop();
     this.stopAutomaticReply("CLIENT_CLOSING");
-    this.key = "";
-    this.modelAuthorized = false;
+    this.models?.close();
     this.modelAbort.abort();
     clearInterval(this.leaseTimer);
     this.dialogs.clear();

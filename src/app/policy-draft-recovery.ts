@@ -1,19 +1,19 @@
 import {randomUUID} from 'node:crypto';
-import {digest,requireSafe} from '../core/contracts.js';
+import {Blocked,digest,requireSafe} from '../core/contracts.js';
 import type {EventStore} from '../storage/store.js';
 import type {AutomationStore} from '../storage/automation-store.js';
 import type {WorkbenchAuthority} from './authority.js';
 import type {HumanReplyWorkflow} from './human-reply-workflow.js';
 import type {Grant,ReplyPolicy} from './automation-contracts.js';
 import {sendParamsSchema,type SendParams} from './contracts.js';
-import {replyPolicySchema} from './automation-contracts.js';
+import {sameReplyPolicy,type ModelRouteGuard} from './model-route-guard.js';
 import {assertDraftLearningCurrent} from '../knowledge/generation-context.js';
 
 /** Requalify one generated policy draft that never acquired an intent. No model call or submit replay is available here. */
 export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAuthority,auto:AutomationStore,
-  workflow:HumanReplyWorkflow,grant:Grant<ReplyPolicy>,beforeWork:()=>void=()=>{}):Promise<boolean>{
+  workflow:HumanReplyWorkflow,grant:Grant<ReplyPolicy>,beforeWork:()=>void=()=>{},route?:ModelRouteGuard):Promise<boolean>{
   if(!auto.allowance(grant.version,'SEND'))return false;
-  const jobs=store.db.prepare(`SELECT j.event_id,j.context_version,j.draft_version,j.command_id,j.grant_version,j.reason,g.scope_json FROM automation_jobs j
+  const jobs=store.db.prepare(`SELECT j.event_id,j.context_version,j.draft_version,j.command_id,j.grant_version,j.reason,g.scope_json,g.scope_digest FROM automation_jobs j
     JOIN automation_grants g ON g.version=j.grant_version AND g.kind='AUTO_REPLY'
     JOIN reply_drafts d ON d.event_id=j.event_id JOIN draft_revisions r ON r.draft_id=d.id AND r.version=d.version
     WHERE r.origin='AUTO_POLICY' AND d.version=j.draft_version
@@ -27,17 +27,21 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
       OR (SELECT count(*) FROM audit_events a WHERE a.event_type='AUTO_DRAFT_RESUMED' AND a.entity_id=j.event_id)<2
       OR (j.state='FAILED_BEFORE_CLICK' AND j.reason='TARGET_CHANGED_REAPPROVE'
         AND NOT EXISTS(SELECT 1 FROM audit_events a WHERE a.event_type='AUTO_VIEWPORT_REQUALIFIED' AND a.entity_id=d.id)))
-    ORDER BY j.created_at`).all() as {event_id:string;context_version:string;draft_version:number;command_id:string;grant_version:number;reason:string;scope_json:string}[];
+    ORDER BY j.created_at`).all() as {event_id:string;context_version:string;draft_version:number;command_id:string;grant_version:number;reason:string;scope_json:string;scope_digest:string}[];
   for(const job of jobs){
-    const previous=replyPolicySchema.safeParse(JSON.parse(job.scope_json));if(!previous.success)continue;
-    const rules=({modelLimit:_model,sendLimit:_send,expiresAt:_expiry,replyToNestedComments,...scope}:ReplyPolicy)=>({
-      ...scope,...(store.event(job.event_id).payload.kind==='REPLY'?{replyToNestedComments:replyToNestedComments!==false}:{})});
-    if(digest(rules(previous.data))!==digest(rules(grant.scope)))continue;
+    let previous:ReplyPolicy;
+    try{previous=auto.readGrantScope('AUTO_REPLY',job) as ReplyPolicy;}catch{continue;}
     const event=store.event(job.event_id),draft=authority.draftFor(event.id);
+    if(!sameReplyPolicy(previous,grant.scope,event.payload.kind==='REPLY'))continue;
     if(!draft||!auto.policyMatches(grant,event,'DRAFT')||authority.contextVersion(event)!==job.context_version)continue;
-    try{assertDraftLearningCurrent(store,draft.id,draft.version);}catch{
-      store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason='KNOWLEDGE_CONTEXT_CHANGED',updated_at=? WHERE event_id=?")
-        .run(authority.now(),event.id);continue;
+    const check=()=>{
+      requireSafe(route,'LEGACY_MODEL_ROUTE_UNPROVEN');
+      route.assertAutomaticDraft({ownerKind:'DRAFT',ownerId:draft.id,ownerVersion:draft.version},grant.version,event.id);
+      assertDraftLearningCurrent(store,draft.id,draft.version);
+    };
+    try{check();}catch(error){
+      store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE event_id=?")
+        .run(error instanceof Blocked?error.code:'MODEL_ROUTE_CHANGED',authority.now(),event.id);continue;
     }
     const marker=store.db.prepare("SELECT id FROM audit_events WHERE event_type='AUTO_COMMENT_ROOT_REQUALIFIED' AND entity_id=?").get(draft.id);
     // Root and clock failures share the original one-time comment preparation contract, not separate retry budgets.
@@ -63,6 +67,7 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
     const commandId=randomUUID(),token=authority.issueSession();
     try{
       store.db.transaction(()=>{
+        check();
         requireSafe(auto.policyMatches(grant,store.event(event.id),'DRAFT'),'POLICY_NO_LONGER_AUTHORIZED');
         const claimed=store.db.prepare(`SELECT id FROM audit_events WHERE event_type='AUTO_COMMENT_ROOT_REQUALIFIED' AND entity_id=?
           AND json_extract(detail_redacted,'$.version')=? AND json_extract(detail_redacted,'$.contract')=1`).get(draft.id,draft.version);

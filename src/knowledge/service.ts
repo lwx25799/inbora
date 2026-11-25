@@ -4,15 +4,17 @@ import type {EventStore} from '../storage/store.js';
 import type {AutomationStore} from '../storage/automation-store.js';
 import type {WorkbenchAuthority} from '../app/authority.js';
 import type {AiSettings} from '../app/contracts.js';
-import {digest,requireSafe} from '../core/contracts.js';
-import {assertSecurityChannelClear} from '../storage/security-holds.js';
+import {requireSafe} from '../core/contracts.js';
+import {assertSecurityRevision,securityRevision} from '../storage/security-holds.js';
 import {ReplyKnowledgeStore} from './store.js';
 import {migrateReplyKnowledge} from './migration.js';
 import {KnowledgeImports} from './imports.js';
-import {LearningModelService,type LearningModelContext} from './model-service.js';
+import {LearningModelService,recoverLearningTasks,type LearningModelContext} from './model-service.js';
+import type {ModelProviderController} from '../app/model-provider-controller.js';
+import {replySettingsFingerprint} from './generation-context.js';
 import type {KnowledgeCommand} from './commands.js';
 
-interface State {settings:AiSettings;key:string;automation:AutomationStore|null;signal:AbortSignal;closing:boolean}
+interface State {settings:AiSettings;models:ModelProviderController|null;modelUnavailable:string|null;automation:AutomationStore|null;signal:AbortSignal;closing:boolean}
 export class ReplyKnowledgeService {
   readonly data:ReplyKnowledgeStore;
   private imports:KnowledgeImports;
@@ -22,7 +24,11 @@ export class ReplyKnowledgeService {
   constructor(private store:EventStore,private authority:WorkbenchAuthority,private root:string,private state:()=>State){
     this.data=new ReplyKnowledgeStore(store);this.imports=new KnowledgeImports(root);
   }
-  async initialize(){await migrateReplyKnowledge(this.store,join(this.root,'backups',`knowledge-${randomUUID()}.sqlite`));await this.imports.cleanup();}
+  async initialize(){
+    await migrateReplyKnowledge(this.store,join(this.root,'backups',`knowledge-${randomUUID()}.sqlite`));
+    recoverLearningTasks(this.store);
+    await this.imports.cleanup();
+  }
   collectIfDue(){
     if(Date.now()-this.lastCollected<60_000||!this.data.available()||this.state().automation?.state().emergencyStopped)return;
     this.lastCollected=Date.now();this.data.collectCandidates(this.authority.accountId);
@@ -49,22 +55,31 @@ export class ReplyKnowledgeService {
       case 'importCancel':await this.imports.cancel(command.id);return{cancelled:true};
       case 'analyze':case 'tryReply':{
         requireSafe(!this.modelBusy,'KNOWLEDGE_MODEL_BUSY');const before=this.state(),auto=before.automation;
-        const grant=auto?.active('MODEL')??auto?.active('AUTO_REPLY');
-        requireSafe(auto&&grant&&before.key,'REAL_MODEL_AUTHORIZATION_REQUIRED');
-        const settingsDigest=digest(command.action==='tryReply'?before.settings:before.settings.model);
+        const controller=before.models;
+        requireSafe(auto&&controller,before.modelUnavailable??'REAL_MODEL_AUTHORIZATION_REQUIRED');
+        const grant=controller.guard.eligibleGrant('MODEL')??controller.guard.eligibleGrant('AUTO_REPLY');
+        requireSafe(grant,'REAL_MODEL_AUTHORIZATION_REQUIRED');
+        const snapshot=controller.guard.snapshot(grant,command.action==='analyze'?'PERSONA_ANALYSIS':'SANDBOX_REPLY');
+        const settingsDigest=replySettingsFingerprint(before.settings,undefined);
+        const channels=command.action==='tryReply'?[command.channel]:grant.scope.channels;
+        const security=channels.map(channel=>({channel,revision:securityRevision(this.store,channel)}));
         const modelCheck=(requiredCalls=0)=>{
-          check();const fresh=this.state();requireSafe(!before.signal.aborted&&fresh.key===before.key&&
-            digest(command.action==='tryReply'?fresh.settings:fresh.settings.model)===settingsDigest,'MODEL_PAUSED');
+          check();controller.guard.assertCurrent(snapshot,grant.kind);
+          const current=controller.guard.eligibleGrant('MODEL')??controller.guard.eligibleGrant('AUTO_REPLY');
+          requireSafe(current?.version===grant.version,'GRANT_REVOKED');
+          const fresh=this.state();requireSafe(!before.signal.aborted&&
+            replySettingsFingerprint(fresh.settings,undefined)===settingsDigest,'MODEL_PAUSED');
           requireSafe(!auto.state().emergencyStopped,'EMERGENCY_STOPPED');
           auto.requireAccount(grant.scope.ownId);
-          requireSafe(auto.active(grant.kind)?.version===grant.version&&grant.scope.model===before.settings.model,'GRANT_REVOKED');
           const used=this.store.db.prepare("SELECT count(*) used FROM grant_reservations WHERE grant_version=? AND kind='MODEL'")
             .get(grant.version) as {used:number};
           requireSafe(grant.scope.modelLimit===null||grant.scope.modelLimit-used.used>=requiredCalls,'MODEL_GRANT_EXHAUSTED');
-          const channels=command.action==='tryReply'?[command.channel]:grant.scope.channels;
-          for(const channel of channels){requireSafe(grant.scope.channels.includes(channel),'MODEL_CHANNEL_NOT_AUTHORIZED');assertSecurityChannelClear(this.store,channel);}
+          for(const {channel,revision} of security){
+            requireSafe(grant.scope.channels.includes(channel),'MODEL_CHANNEL_NOT_AUTHORIZED');
+            assertSecurityRevision(this.store,channel,revision);
+          }
         };modelCheck();
-        const context:LearningModelContext={store:this.store,settings:before.settings,key:before.key,accountId,allowedChannels:grant.scope.channels,signal:before.signal,check:modelCheck,
+        const context:LearningModelContext={store:this.store,settings:before.settings,key:'',accountId,allowedChannels:grant.scope.channels,signal:before.signal,check:modelCheck,route:purpose=>({controller,kind:grant.kind,snapshot:Object.freeze({...snapshot,purpose})}),
           reserve:(callId)=>{modelCheck();auto.reserve(grant.version,'MODEL',callId);}};
         this.modelBusy=true;
         try{return command.action==='analyze'?await this.model.analyze(context,command):await this.model.tryReply(context,command);}

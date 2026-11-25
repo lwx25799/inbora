@@ -114,6 +114,7 @@ async fn client_request(
         .ok_or("INVALID_COMMAND")?;
     const ALLOWED: &[&str] = &[
         "replyKnowledge",
+        "modelProviders",
         "connect",
         "disconnect",
         "getStatus",

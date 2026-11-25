@@ -11,7 +11,7 @@ export const unsafeModelOutput=(text:string)=>{
   return privateModelText(text)||privateModelText(normalized)||/https?:\/\//iu.test(normalized)||sensitiveModelOutputTerms.test(normalized);
 };
 export const replySettingsFingerprint=(settings:AiSettings,persona:string|undefined,rules=settings.rules)=>
-  digest({...settings,persona:persona||settings.persona,rules});
+  digest({persona:persona||settings.persona,business:settings.business,rules});
 export function assertKnowledgePromptSafe(context:ReplyKnowledgeContext,event?:Pick<InboundEvent,'accountId'|'channel'|'text'>):void{
   if(event)requireSafe(context.accountId===event.accountId&&context.channel===event.channel&&context.query===event.text,'KNOWLEDGE_CONTEXT_MISMATCH');
   requireSafe(context.conflicts.length===0,'KNOWLEDGE_CONFLICT');
@@ -54,7 +54,8 @@ export function bindSuggestionLearningToDraft(store:EventStore,suggestionId:stri
   if(!hasBindings(store))return;
   const row=store.db.prepare("SELECT version FROM k_generation_contexts WHERE kind='SUGGESTION' AND entity_id=? ORDER BY version DESC LIMIT 1")
     .get(suggestionId) as {version:number}|undefined;
-  if(row)bindReplyKnowledge(store,'DRAFT',draftId,version,boundContext(store,'SUGGESTION',suggestionId,row.version));
+  if(row)store.db.prepare(`INSERT INTO k_generation_contexts SELECT 'DRAFT',?,?,snapshot_json
+    FROM k_generation_contexts WHERE kind='SUGGESTION' AND entity_id=? AND version=?`).run(draftId,version,suggestionId,row.version);
 }
 /** Invoked again by the transactional dispatch guard immediately before the intent is committed. */
 export function assertDraftLearningCurrent(store:EventStore,draftId:string,version:number):void{

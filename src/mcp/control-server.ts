@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { requireSafe } from '../core/contracts.js';
-import { assistantTools } from './tool-contracts.js';
+import { assistantTools, diagnosticsSchema, legacyDiagnosticModelId, modelProviderDiagnosticsHeader } from './tool-contracts.js';
 import { canonicalAssistantRoot, publishAssistantDiscovery } from './discovery.js';
 import {
   assistantError, assistantRoute, browserResourcesHeader, securityStatusHeader, bridgeRequestSchema, maxAssistantRequestBytes,
@@ -71,11 +71,10 @@ export async function startAssistantControl(options: AssistantControlOptions): P
       const expectedBytes = Buffer.from(expected);
       requireSafe(oneHeader(request, 'authorization') && suppliedBytes.length === expectedBytes.length &&
         timingSafeEqual(suppliedBytes, expectedBytes), 'ASSISTANT_AUTHENTICATION_FAILED');
-      const resourcesHeader = request.headers[browserResourcesHeader];
-      requireSafe(resourcesHeader === undefined || oneHeader(request, browserResourcesHeader) && resourcesHeader === '1',
-        'ASSISTANT_INVALID_REQUEST');
-      const securityHeader=request.headers[securityStatusHeader];
-      requireSafe(securityHeader===undefined||oneHeader(request,securityStatusHeader)&&securityHeader==='1','ASSISTANT_INVALID_REQUEST');
+      for (const name of [browserResourcesHeader, modelProviderDiagnosticsHeader, securityStatusHeader]) {
+        const value = request.headers[name];
+        requireSafe(value === undefined || oneHeader(request, name) && value === '1', 'ASSISTANT_INVALID_REQUEST');
+      }
       requireSafe(request.headers['content-type'] === 'application/json', 'ASSISTANT_INVALID_REQUEST');
       const envelope = bridgeRequestSchema.parse(await readBody(request));
       requireSafe(!closing, 'APP_NOT_RUNNING');
@@ -91,14 +90,22 @@ export async function startAssistantControl(options: AssistantControlOptions): P
       const checked = definition.outputSchema.safeParse(result);
       requireSafe(checked.success, 'ASSISTANT_RESPONSE_INVALID');
       let compatible = checked.data;
-      if (envelope.tool === 'inbora_get_diagnostics' && resourcesHeader === undefined &&
-        compatible !== null && typeof compatible === 'object' && !Array.isArray(compatible)) {
+      if (envelope.tool === 'inbora_get_diagnostics' &&
+        (request.headers[browserResourcesHeader] === undefined || request.headers[modelProviderDiagnosticsHeader] === undefined)) {
         // Existing stdio processes retain the previous strict output schema until their next start.
-        const legacy: Record<string, unknown> = { ...compatible };
-        delete legacy.browserResources;
-        compatible = legacy;
+        const diagnostics = diagnosticsSchema.safeParse(compatible);
+        requireSafe(diagnostics.success, 'ASSISTANT_RESPONSE_INVALID');
+        const { browserResources, model, ...rest } = diagnostics.data;
+        const groups = request.headers[modelProviderDiagnosticsHeader] === '1' ? model.groups
+          : model.groups.map(({ provider: _provider, ...group }) => ({
+            ...group, model: legacyDiagnosticModelId.test(group.model) ? group.model : 'UNKNOWN_MODEL',
+          }));
+        compatible = {
+          ...rest, model: { total: model.total, groups },
+          ...(request.headers[browserResourcesHeader] === '1' && browserResources ? { browserResources } : {}),
+        };
       }
-      if(envelope.tool==='inbora_get_status'&&securityHeader===undefined&&
+      if(envelope.tool==='inbora_get_status'&&request.headers[securityStatusHeader]===undefined&&
         compatible!==null&&typeof compatible==='object'&&!Array.isArray(compatible)){
         const legacy:Record<string,unknown>={...compatible};
         delete legacy.securityRuntime;delete legacy.securityHolds;compatible=legacy;
