@@ -28,6 +28,7 @@ import { configureAssistantConnection } from "./local-assistant-connection.js";
 import { readSecurityHold } from "../storage/security-holds.js";
 import { securityRuntime } from "./security-runtime.js";
 import {
+  clientError, dismissSuggestion,
   handleConfigWriteCommand,
   handleLifecycleControlCommand,
   knowledgeMutatingActions,
@@ -45,10 +46,11 @@ import {
   type DeliveryContext,
 } from "./service-delivery.js";
 import { bootstrapAutomationRuntime, bootstrapModelProviders, loadClientSettings } from "./service-bootstrap.js";
+import { AccountController, auditPage, isAccountWrite } from "./account-controller.js";
+import { CredentialStore } from "./credentials.js";
+import type { AccountsCommand } from "../contracts/account.js";
 
-export function clientError(error: unknown): string {
-  return error instanceof Blocked ? error.code : "OPERATION_FAILED_PRIVATE_DIAGNOSTICS";
-}
+export { clientError } from "./service-guards.js";
 
 /** Transport-neutral application service. Short controls never wait behind browser/model operations. */
 export class ClientService {
@@ -61,6 +63,7 @@ export class ClientService {
   private readonly onlineKeeper: OnlineKeeper;
   readonly events = new EventEmitter();
   readonly authority: WorkbenchAuthority;
+  readonly accounts: AccountController;
   private readonly humanReplies: HumanReplyWorkflow;
   private settings: AiSettings = { ...defaultSettings };
   private models: ModelProviderController | null = null;
@@ -113,6 +116,10 @@ export class ClientService {
       },
     });
     this.authority = new WorkbenchAuthority(store, now, this.accountId);
+    this.accounts = new AccountController(store, browser, now, this.authority, () => ({
+      models: this.models, provider: this.provider, knowledge: this.knowledge.data,
+      state: this.suggestionState(), signal: this.modelAbort.signal,
+    }));
     this.authority.recover();
     this.knowledge = new ReplyKnowledgeService(store, this.authority, browser.root, () => ({
       settings: this.projectedSettings(),
@@ -158,6 +165,7 @@ export class ClientService {
       getAutomation: () => this.automation,
       isClosing: () => this.closing,
       onStopForGlobalFailure: (code) => {
+        this.accounts.abortWorkerSends();
         this.automation!.stop(true, code, "CONNECTION");
         this.collector?.cancel();
         this.stopAutomaticReply("EMERGENCY_STOPPED");
@@ -193,6 +201,7 @@ export class ClientService {
       this.automation = runtime.automation;
       const models = await bootstrapModelProviders(runtime.automation, this.browser.root, this.provider.transport,
         () => this.emit("status_updated"));
+      this.accounts.initialize();
       this.models = models.controller;
       this.modelUnavailable = models.reason;
       this.authority.modelRoute = this.models?.guard ?? null;
@@ -329,6 +338,7 @@ export class ClientService {
     else this.automaticAbort.abort();
   }
   private emit(event: string): void {
+    this.accounts.recheckWorkerSend();
     this.events.emit("update", { event });
   }
   private track(task: Promise<unknown>): void {
@@ -373,6 +383,8 @@ export class ClientService {
         keyPresent: !!applied?.keyPresent,
         keyStored: !!applied?.keyStored,
         keyStorageError: this.models?.cleanupError ?? (
+          this.models?.credentials.cacheInvalidationUnconfirmed || CredentialStore.cacheInvalidationUnconfirmed(this.browser.root)
+            ? "MODEL_CREDENTIAL_CLEANUP_FAILED" :
           applied?.unavailableReason === "DPAPI_RESTORE_FAILED" || applied?.unavailableReason === "LEGACY_MODEL_KEY_RECONFIGURE_REQUIRED"
             ? applied.unavailableReason : null
         ),
@@ -385,6 +397,7 @@ export class ClientService {
         inboxRevision: this.inboxRevision,
         sync: this.syncRunner.snapshot(),
       }),
+      schema: this.accounts.schemaVersion,
       manualRecovery: this.browser.manualRecoveryStatus(),
       localAssistant: this.authority.assistant.state(),
       localAssistantConnection: { ...this.assistantConnection },
@@ -437,23 +450,36 @@ export class ClientService {
       status: (token: string) => this.status(token),
     };
   }
-  async dispatch(token: string, raw: unknown): Promise<unknown> {
+  private handleAccounts(token: string, command: AccountsCommand): Promise<unknown> {
+    this.authority.operator(token, isAccountWrite(command) ? "CONTROL" : "READ");
+    const task = this.accounts.dispatch(command);
+    this.track(task);
+    return task;
+  }
+  async dispatch(token: string, raw: unknown, accountRef = this.accountId): Promise<unknown> {
     requireSafe(!this.closing, "CLIENT_CLOSING");
     const c = commandSchema.parse(raw);
-    this.authority.operator(token);
+    if (c.command !== "accounts") this.authority.operator(token);
+    if (accountRef !== this.accountId) return this.accounts.dispatchMock(accountRef, token, c);
+    if (c.command === "emergencyStop") {
+      this.authority.operator(token, "CONTROL");
+      this.accounts.abortWorkerSends();
+    }
     if (c.command === "modelProviders") {
       const task = handleModelProviderCommand(this.authority, token, this.models, this.modelUnavailable, () => this.closing, c);
       this.track(task);
       return task;
     }
     if (
-      !["getStatus", "getInbox", "getThread", "getDiagnostics", "getAudit", "getSendResult", "getMessagePreview"].includes(
+      !["getStatus", "getInbox", "getThread", "getDiagnostics", "getAudit", "getSendResult", "getMessagePreview", "accounts"].includes(
         c.command,
       )
     ) {
       this.maintenance.cancel();
     }
     switch (c.command) {
+      case "accounts":
+        return this.handleAccounts(token, c);
       case "replyKnowledge": {
         const task = this.knowledge.dispatch(token, c);
         const tracked = knowledgeMutatingActions.has(c.action)
@@ -642,12 +668,7 @@ export class ClientService {
         this.syncRunner.start(token);
         return this.status(token);
       case "getAudit":
-        return {
-          items: this.store.db
-            .prepare("SELECT time,event_type,entity_id,detail_redacted FROM audit_events ORDER BY rowid DESC LIMIT 50 OFFSET ?")
-            .all(c.page * 50),
-          page: c.page,
-        };
+        return auditPage(this.store, c.page);
       case "previewSend":
         return previewSendCommand(this.deliveryContext(), token, c.params);
       case "submitManualSend": {
@@ -682,11 +703,11 @@ export class ClientService {
           token,
           c,
         );
-      case "dismissSuggestion":
-        this.authority.operator(token, "EDIT");
-        this.store.db.prepare("UPDATE ai_suggestions SET dismissed=1 WHERE id=?").run(c.suggestionId);
+      case "dismissSuggestion": {
+        const result = dismissSuggestion(this.store, this.authority, token, c.suggestionId);
         this.emit("suggestion_updated");
-        return { dismissed: true };
+        return result;
+      }
     }
   }
   private result(token: string, id: string) {
@@ -738,6 +759,7 @@ export class ClientService {
       beforeWork: () => this.maintenance.cancel(),
       statusUpdated: () => this.emit("status_updated"),
       stop: (code: string) => {
+        this.accounts.abortWorkerSends();
         this.automation!.stop(true, code, "AUTOMATIC_REPLY");
         this.collector?.cancel();
         this.stopAutomaticReply("EMERGENCY_STOPPED");
@@ -754,6 +776,7 @@ export class ClientService {
   }
   async close(): Promise<void> {
     this.closing = true;
+    this.accounts.abortWorkerSends();
     this.onlineKeeper.abort();
     await this.knowledge.cancelActiveParse();
     await this.browser.closeManualRecovery();
@@ -772,6 +795,6 @@ export class ClientService {
     await resourcesClosed;
     if (!this.automation) this.store.db.prepare("UPDATE client_state SET paused=1 WHERE id=1").run();
     await this.drain();
-    await this.knowledge.close().finally(() => this.browser.close());
+    await this.knowledge.close().finally(() => Promise.all([this.accounts.close(), this.browser.close()]));
   }
 }

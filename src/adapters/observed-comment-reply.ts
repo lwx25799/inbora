@@ -629,7 +629,7 @@ export class ObservedCommentReply implements ReplyAdapter{
     await this.frame(event,'expand');
     return this.poll(event,text,[],notBefore,undefined,'VERIFY_EXISTING');
   }
-  async clickOnce(notBefore?:string,check?:()=>void):Promise<void>{const token=this.token;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
+  async clickOnce(notBefore?:string,check?:()=>void,permitExpiresAt?:number):Promise<void>{const token=this.token;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
     try{
     if(this.submission){requireSafe(notBefore&&this.pendingEvent&&this.prepared,'COMMENT_REPLY_INTENT_REQUIRED');
       this.submission.arm(this.pendingEvent,this.prepared.text,notBefore);
@@ -641,11 +641,18 @@ export class ObservedCommentReply implements ReplyAdapter{
       await new Promise(resolve=>setTimeout(resolve,Math.max(1,deadline-Date.now()+1)));}
     }
     requireSafe(!this.options.signal?.aborted,'COMMENT_REPLY_CANCELLED');check?.();
-    const accepted=await this.page.evaluate(token=>{
+    const accepted=await this.page.evaluate(({token,permitExpiresAt})=>{
       const host=window as unknown as {__inboraCommentGate?:Gate},gate=host.__inboraCommentGate;
       if(!gate||gate.token!==token)throw Error('COMMENT_REPLY_NOT_PREPARED');
-      try{return gate.submit();}finally{gate.remove();if(host.__inboraCommentGate===gate)delete host.__inboraCommentGate;}
-    },token).catch(error=>reportSecurityFailure(this.page,error));
+      try{
+        if(permitExpiresAt!==undefined&&Date.now()>=permitExpiresAt)throw new Error('WORKER_SEND_PERMIT_EXPIRED');
+        return gate.submit();
+      }finally{gate.remove();if(host.__inboraCommentGate===gate)delete host.__inboraCommentGate;}
+    },{token,permitExpiresAt}).catch(error=>{
+      if(error instanceof Error&&/^(?:page\.evaluate: )?(?:Error: )?WORKER_SEND_PERMIT_EXPIRED(?:\r?\n|$)/u.test(error.message))
+        requireSafe(false,'WORKER_SEND_PERMIT_EXPIRED');
+      return reportSecurityFailure(this.page,error);
+    });
     requireSafe(accepted,'COMMENT_REPLY_CLICK_BLOCKED');
     }catch(error){await this.removeGate(token);throw error;}
     finally{if(this.token===token)this.token=null;}

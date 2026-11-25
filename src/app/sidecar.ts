@@ -1,39 +1,22 @@
-import { createInterface } from "node:readline";
-import { timingSafeEqual, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { z } from "zod";
 import { OwnerLock } from "../browser/owner-lock.js";
 import { EventStore } from "../storage/store.js";
 import { migrateClient } from "../storage/client-migration.js";
 import { migrateAutomation } from "../storage/automation-migration.js";
 import { runtimeRoot, initRuntime, loadRuntime } from "../config/runtime.js";
 import { requireSafe } from "../core/contracts.js";
-import { BrowserService } from "./browser-service.js";
 import { DEFAULT_ACCOUNT_ID } from "../contracts/account.js";
-import { DouyinPlatformConnector } from "../platform/douyin-platform-connector.js";
-import { PlatformConnectorRegistry } from "../platform/platform-connector-registry.js";
+import { MAX_NATIVE_BRIDGE_BYTES } from "../contracts/native-bridge.js";
+import { MAX_PROTOCOL_V2_FRAME_BYTES, type ProtocolScope, type ProtocolV2EventEnvelope } from "../contracts/protocol-v2.js";
+import { clearNativeWin32Bridge, getNativeWin32Bridge, registerNativeBridgeTransport } from "../native/win32-bridge.js";
 import { ClientService, clientError } from "./service.js";
-import { isReadOnlySidecarCommand } from "./service-guards.js";
-import { protocolVersion,commandSchema } from "./contracts.js";
+import { createRuntimeConnector } from "./account-controller.js";
+import { dispatchTrustedServiceCommand, MAX_V1_FRAME_BYTES, nativeResponsePrefix, oversizedSidecarFrame, parseSidecarFrame, routeSidecarEnvelope,
+  type SidecarCommand } from "./protocol-v2-router.js";
 import {AssistantFacade} from '../mcp/assistant-facade.js';
 import {startAssistantControl} from '../mcp/control-server.js';
 
-const pipeSchema = z
-  .object({
-    protocol: z.literal(protocolVersion),
-    requestId: z.uuid(),
-    secret: z.string().length(64),
-    body: z.unknown(),
-  })
-  .strict();
-const connectSchema = z
-  .object({
-    command: z.literal("connect"),
-    runtime: z.string().min(1).max(1000),
-    initialize: z.boolean(),
-    consent: z.literal(true),
-  })
-  .strict();
 const secret = process.env.INBORA_PIPE_NONCE;
 const firstRunAt = Math.floor(Date.now() - process.uptime() * 1000);
 requireSafe(secret?.length === 64, "TRUSTED_DESKTOP_PARENT_REQUIRED");
@@ -50,10 +33,22 @@ let connecting = false,
 let connectionSettled: Promise<void> | undefined;
 let disconnectSettled: Promise<void> | undefined;
 const active = new Set<Promise<void>>();
-const output = (value: unknown) =>
-  process.stdout.write(JSON.stringify(value) + "\n");
-async function connect(raw: unknown): Promise<unknown> {
-  const c = connectSchema.parse(raw);
+const lifecycleCommandIds = new Map<string, string>();
+let v2Events = false;
+function output<T extends { protocol?: number; requestId?: string | null; kind?: string }>(value: T): void {
+  let line = JSON.stringify(value);
+  const limit = value.kind === 'native_bridge_request' ? MAX_NATIVE_BRIDGE_BYTES :
+    value.protocol === 2 ? MAX_PROTOCOL_V2_FRAME_BYTES : 2_000_000;
+  if (Buffer.byteLength(line) > limit) {
+    if (value.requestId === undefined) return;
+    line = JSON.stringify({ protocol: value.protocol, requestId: value.requestId, ok: false, error: 'SIDECAR_RESPONSE_TOO_LARGE' });
+  }
+  process.stdout.write(line + "\n");
+}
+if (process.env.INBORA_NATIVE_BRIDGE === '1') {
+  registerNativeBridgeTransport({ secret, send: frame => { output(frame); } });
+}
+async function connect(c: Extract<SidecarCommand, { command: 'connect' }>): Promise<unknown> {
   requireSafe(!closing, 'CLIENT_CLOSING');
   requireSafe(!connecting && !disconnecting, 'CONNECTION_IN_PROGRESS');
   if (service) {
@@ -69,10 +64,12 @@ async function connect(raw: unknown): Promise<unknown> {
         "OPERATOR_PERMISSION_DENIED",
       );
       service.authority.expireOperators("DESKTOP");
+      service.accounts.recheckWorkerSend();
       token = service.authority.issueSession();
     }
     return {
       connected: true,
+      runtime: service.browser.root,
       ...((await service.dispatch(token, { command: "getStatus" })) as object),
     };
   }
@@ -97,10 +94,10 @@ async function connect(raw: unknown): Promise<unknown> {
     requireSafe(!closing, 'CLIENT_CLOSING');
     await migrateAutomation(store,join(root,'backups',`automation-before-${randomUUID()}.sqlite`));
     requireSafe(!closing, 'CLIENT_CLOSING');
-    const connector = new DouyinPlatformConnector(new BrowserService(root, undefined, store.accountId));
-    const registry = new PlatformConnectorRegistry();
-    registry.register(connector);
-    service = new ClientService(store, registry.resolve(connector.platformId, store.accountId), undefined, Date.now, firstRunAt);
+    // ADR-001 keeps the proven single-account connector. Multi-browser runtimes and the explicit
+    // INBORA_BROWSER_WORKER=1 override choose a separate Worker when opening the runtime.
+    const connector = createRuntimeConnector(root, store);
+    service = new ClientService(store, connector, undefined, Date.now, firstRunAt);
     await service.loadSettings();
     requireSafe(!closing, 'CLIENT_CLOSING');
     assistant=new AssistantFacade(service);
@@ -110,7 +107,19 @@ async function connect(raw: unknown): Promise<unknown> {
     service.setAssistantConnection(control.instanceId);
     requireSafe(!closing,'CLIENT_CLOSING');
     token = service.authority.issueSession();
-    service.events.on("update", (event) => output({ protocol: 1, event }));
+    const accountRef = service.accountId;
+    service.events.on("update", (event: { event: string }) => {
+      // The native relay keeps legacy listeners and scoped v2 subscribers on separate channels.
+      output({ protocol: 1, event });
+      if (v2Events) {
+        const scope = event.event === 'status_updated' ? { kind: 'GLOBAL' } as const : { kind: 'ACCOUNT', accountRef } as const;
+        const frame: ProtocolV2EventEnvelope = { protocol: 2, scope, event };
+        output(frame);
+      }
+    });
+    service.accounts.updates.on("update", (accountRef: string, event: { event: string }) => {
+      if (v2Events) output<ProtocolV2EventEnvelope>({ protocol: 2, scope: { kind: 'ACCOUNT', accountRef }, event });
+    });
     service.startOnline();
     return {
       connected: true,
@@ -174,6 +183,8 @@ async function disconnect(currentTask: () => Promise<void>): Promise<{ connected
     store = undefined;
     lock = undefined;
     token = "";
+    const bridge = getNativeWin32Bridge();
+    if (bridge.isAvailable()) await bridge.clearDpapiCache().catch(() => {});
     try {
       closingStore?.close();
     } finally {
@@ -202,77 +213,88 @@ async function close(): Promise<void> {
     try {
       store?.close();
     } finally {
-      await lock?.close();
+      try { await lock?.close(); }
+      finally { clearNativeWin32Bridge(); }
     }
   }
 }
-const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
-input.on("line", (line) => {
-  if (closing) return;
-  let id: string | null = null;
+async function dispatch(body: SidecarCommand, currentTask: () => Promise<void>, scope?: ProtocolScope): Promise<unknown> {
+  if (body.command === 'connect') return connect(body);
+  if (body.command === 'disconnect') return disconnect(currentTask);
+  requireSafe(!closing && !disconnecting, 'CLIENT_CLOSING');
+  requireSafe(service && !connecting, 'CONNECT_RUNTIME_FIRST');
+  return dispatchTrustedServiceCommand(service, token, body, scope);
+}
+
+function receive(frame: ReturnType<typeof parseSidecarFrame>): void {
+  if (frame.kind === 'native' || closing) return;
+  if (frame.kind === 'response') { output(frame.response); return; }
+  if (frame.envelope.protocol === 2) v2Events = true;
   let task!: Promise<void>;
   task = (async () => {
-    try {
-      requireSafe(Buffer.byteLength(line) <= 100_000, "IPC_REQUEST_TOO_LARGE");
-      const envelope = pipeSchema.parse(JSON.parse(line));
-      id = envelope.requestId;
-      requireSafe(
-        timingSafeEqual(Buffer.from(envelope.secret), Buffer.from(secret!)),
-        "IPC_AUTHENTICATION_FAILED",
-      );
-      const raw = envelope.body;
-      requireSafe(
-        raw && typeof raw === "object" && "command" in raw,
-        "INVALID_COMMAND",
-      );
-      let result: unknown;
-      if (raw.command === "connect") result = await connect(raw);
-      else if (raw.command === "disconnect") {
-        result = await disconnect(() => task);
-      } else if(raw.command==='emergencyStop') {
-        requireSafe(!closing && !disconnecting, 'CLIENT_CLOSING');
-        requireSafe(service && !connecting,'CONNECT_RUNTIME_FIRST');commandSchema.parse(raw);
-        // The independently authenticated desktop pipe can always obtain stop-only authority.
-        // Expiry of the editing session must never put emergency stop behind reconnect/browser work.
-        const stopToken=service.authority.issueSession(['READ','CONTROL']);
-        try{await service.dispatch(stopToken,raw);result={paused:true,emergencyStopped:true};}
-        finally{service.authority.revoke(stopToken);}
-      } else {
-        requireSafe(!closing && !disconnecting, "CLIENT_CLOSING");
-        requireSafe(service && !connecting, "CONNECT_RUNTIME_FIRST");
-        service.authority.renewTrustedSession(token, { readOnly: isReadOnlySidecarCommand(raw) });
-        result = await service.dispatch(token, raw);
-      }
-      output({ protocol: 1, requestId: id, ok: true, result });
-    } catch (error) {
-      output({
-        protocol: 1,
-        requestId: id,
-        ok: false,
-        error:
-          error instanceof z.ZodError ? "INVALID_COMMAND" : clientError(error),
-      });
-    }
+    output(await routeSidecarEnvelope(frame.envelope, {
+      accounts: connecting || disconnecting ? undefined : service?.accounts,
+      lifecycleCommandIds, dispatch: (body, scope) => dispatch(body, () => task, scope), errorCode: clientError,
+    }));
   })();
   active.add(task);
   void task.finally(() => active.delete(task));
-});
-input.on("close", () => {
+}
+
+// Consume bytes before decoding. A discarded line gets one short error and never
+// enters the JSON parser. A following line can still carry an emergency stop.
+const inputBuffer = Buffer.allocUnsafe(MAX_PROTOCOL_V2_FRAME_BYTES + 1);
+let inputBytes = 0;
+let discarding = false;
+let frameLimit = MAX_PROTOCOL_V2_FRAME_BYTES;
+function consume(chunk: Buffer): void {
+  for (let start = 0; start < chunk.length;) {
+    const newline = chunk.indexOf(0x0a, start);
+    const end = newline === -1 ? chunk.length : newline;
+    if (!discarding) {
+      if (inputBytes < 512) {
+        const prefixBytes = Math.min(end - start, 512 - inputBytes);
+        chunk.copy(inputBuffer, inputBytes, start, start + prefixBytes);
+        inputBytes += prefixBytes;
+        start += prefixBytes;
+        const prefix = inputBuffer.toString('utf8', 0, inputBytes);
+        if (/^\s*\{\s*"protocol"\s*:\s*1\s*[,}]/u.test(prefix)) frameLimit = MAX_V1_FRAME_BYTES;
+        else if (nativeResponsePrefix.test(prefix)) frameLimit = MAX_NATIVE_BRIDGE_BYTES;
+      }
+      const count = Math.min(end - start, frameLimit + 1 - inputBytes);
+      chunk.copy(inputBuffer, inputBytes, start, start + count);
+      inputBytes += count;
+      const trailingCR = inputBuffer[inputBytes - 1] === 0x0d;
+      if (start + count < end || inputBytes - Number(trailingCR) > frameLimit) {
+        receive(oversizedSidecarFrame(inputBuffer.toString('utf8', 0, Math.min(inputBytes, 512))));
+        discarding = true;
+      } else if (newline !== -1) {
+        receive(parseSidecarFrame(inputBuffer.toString('utf8', 0, inputBytes - Number(trailingCR)), secret!));
+      }
+    }
+    if (newline === -1) break;
+    start = newline + 1;
+    inputBytes = 0;
+    discarding = false;
+    frameLimit = MAX_PROTOCOL_V2_FRAME_BYTES;
+  }
+}
+function stopInput(): void {
+  process.stdin.off('data', consume);
+  process.stdin.pause();
   void close().catch(() => { process.exitCode = 1; });
-});
-process.on("SIGTERM", () => {
-  input.close();
-});
-process.on("SIGINT", () => {
-  input.close();
-});
+}
+process.stdin.on('data', consume);
+process.stdin.once('end', stopInput);
+process.on("SIGTERM", stopInput);
+process.on("SIGINT", stopInput);
 // A killed desktop must not leave a browser supervisor with an inherited pipe still open.
 const parent = process.ppid;
 const heartbeat = setInterval(() => {
   try {
     process.kill(parent, 0);
   } catch {
-    input.close();
+    stopInput();
     clearInterval(heartbeat);
   }
 }, 2000);

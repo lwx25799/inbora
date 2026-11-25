@@ -588,17 +588,24 @@ export class ObservedDmReply implements ReplyAdapter {
     await this.frame(event,'clearSaved',text);
     requireSafe((await this.frame(event)).editorText==='','NATIVE_REPLY_SAVED_DRAFT_NOT_CLEARED');
   }
-  async clickOnce(notBefore?:string,check?:()=>void):Promise<void>{
+  async clickOnce(notBefore?:string,check?:()=>void,permitExpiresAt?:number):Promise<void>{
     check?.();
     this.submissionStarted=true;
     const token=this.gateToken;this.gateToken=null;requireSafe(token,'NATIVE_REPLY_NOT_PREPARED');
     if(this.submission){requireSafe(notBefore&&this.pendingEvent&&this.prepared,'NATIVE_REPLY_INTENT_REQUIRED');
       this.submission.arm(this.pendingEvent,this.prepared.text,notBefore);}
-    const accepted=await this.page.evaluate(token=>{
+    const accepted=await this.page.evaluate(({token,permitExpiresAt})=>{
       const gate=(window as unknown as {__inboraDmReplyGate?:{token:string;submit:()=>boolean;remove:()=>void}}).__inboraDmReplyGate;
       if(!gate||gate.token!==token)throw new Error('NATIVE_REPLY_NOT_PREPARED');
-      try{return gate.submit();}finally{gate.remove();}
-    },token).catch(error=>reportSecurityFailure(this.page,error));
+      try{
+        if(permitExpiresAt!==undefined&&Date.now()>=permitExpiresAt)throw new Error('WORKER_SEND_PERMIT_EXPIRED');
+        return gate.submit();
+      }finally{gate.remove();}
+    },{token,permitExpiresAt}).catch(error=>{
+      if(error instanceof Error&&/^(?:page\.evaluate: )?(?:Error: )?WORKER_SEND_PERMIT_EXPIRED(?:\r?\n|$)/u.test(error.message))
+        requireSafe(false,'WORKER_SEND_PERMIT_EXPIRED');
+      return reportSecurityFailure(this.page,error);
+    });
     requireSafe(accepted,'NATIVE_REPLY_CLICK_BLOCKED');
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{

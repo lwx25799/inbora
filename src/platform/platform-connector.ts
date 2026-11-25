@@ -32,6 +32,7 @@ export interface AccountSerialExecutor {
 }
 
 export interface PlatformReplyAdapter extends ReplyAdapter {
+  clickOnce(notBefore?: string, check?: () => void, permitExpiresAt?: number): Promise<void>;
   verifyExisting?(event: InboundEvent, text: string, notBefore: string, contextDigest?: string): Promise<SendProof | null>;
   readSavedDraft?(event: InboundEvent): Promise<{ text: string; snapshot: TargetSnapshot }>;
   clearSavedDraft?(event: InboundEvent, text: string): Promise<void>;

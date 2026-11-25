@@ -1,4 +1,4 @@
-import { requireSafe } from "../core/contracts.js";
+import { Blocked, requireSafe } from "../core/contracts.js";
 import type { EventStore } from "../storage/store.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type { WorkbenchAuthority } from "./authority.js";
@@ -11,6 +11,10 @@ import { handleBrowserCommand } from "./browser-command.js";
 import type { AiSettings, ClientCommand } from "./contracts.js";
 import type { ModelProviderController } from "./model-provider-controller.js";
 import type { ReplyPolicy } from "./automation-contracts.js";
+
+export function clientError(error: unknown): string {
+  return error instanceof Blocked ? error.code : "OPERATION_FAILED_PRIVATE_DIAGNOSTICS";
+}
 
 /** Knowledge commands that persist state changes and justify a knowledge_updated broadcast. */
 export const knowledgeMutatingActions = new Set<string>([
@@ -43,6 +47,7 @@ export function isReadOnlySidecarCommand(raw: unknown): boolean {
   if (body.command === "getMessagePreview") return body.refresh !== true;
   if (body.command === "replyKnowledge") return body.action === "overview";
   if (body.command === "modelProviders") return body.action === "list";
+  if (body.command === "accounts") return body.action === "listAccounts" || body.action === "getAccountStatus";
   return false;
 }
 
@@ -102,6 +107,27 @@ export type ConfigWriteCommand = Extract<
   }
 >;
 
+export function updateModelGrant(token: string, c: Extract<ClientCommand, { command: "setModelGrant" }>,
+  ctx: Pick<ConfigCommandContext, "authority" | "automation" | "models" | "abortModel">): void {
+  ctx.authority.requireGuiControl(token);
+  requireSafe(ctx.automation, "AUTOMATION_NOT_READY");
+  if (c.scope) {
+    requireSafe(ctx.models, "MODEL_PROVIDERS_NOT_INITIALIZED");
+    ctx.automation.grant("MODEL", c.scope);
+  } else {
+    ctx.automation.revoke("MODEL");
+    ctx.abortModel();
+  }
+}
+
+export function dismissSuggestion(store: EventStore, authority: WorkbenchAuthority, token: string, suggestionId: string) {
+  authority.operator(token, "EDIT");
+  requireSafe(store.db.prepare(`UPDATE ai_suggestions SET dismissed=1 WHERE id IN (
+    SELECT s.id FROM ai_suggestions s JOIN inbound_events e ON e.id=s.event_id WHERE s.id=? AND e.account_id=?)`)
+    .run(suggestionId, store.accountId).changes === 1, "SUGGESTION_NOT_FOUND");
+  return { dismissed: true };
+}
+
 /** Centralized GUI-only config/policy/key mutations and unified LIMITED_AUTO gating. */
 export async function handleConfigWriteCommand(
   token: string,
@@ -117,16 +143,7 @@ export async function handleConfigWriteCommand(
       ctx.emit("status_updated");
       return ctx.status(token);
     case "setModelGrant":
-      ctx.authority.requireGuiControl(token);
-      requireSafe(ctx.automation, "AUTOMATION_NOT_READY");
-      if (c.scope) {
-        requireSafe(ctx.models, "MODEL_PROVIDERS_NOT_INITIALIZED");
-        ctx.automation.grant("MODEL", c.scope);
-      }
-      else {
-        ctx.automation.revoke("MODEL");
-        ctx.abortModel();
-      }
+      updateModelGrant(token, c, ctx);
       ctx.emit("status_updated");
       return ctx.status(token);
     case "setReplyPolicy":
@@ -271,7 +288,7 @@ export async function handleLifecycleControlCommand(
         requireSafe(!ctx.isClosing(), "CLIENT_CLOSING");
       };
       check();
-      if (c.action === "start") ctx.suspendForVisible();
+      if (c.action === "start" && ctx.browser.capabilities.loginRecovery) ctx.suspendForVisible();
       try {
         const result = await ctx.browser.securityRecovery(c, token, check);
         return c.action === "close" || c.action === "finish" ? ctx.status(token) : result;
