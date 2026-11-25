@@ -15,7 +15,8 @@ CREATE INDEX human_reply_turns_target ON human_reply_turns(target_key,status);
 CREATE INDEX human_reply_turns_event ON human_reply_turns(event_id);`;
 /** Independent human turns retain the original inbound, draft, intent and receipt unchanged. */
 export async function migrateFollowups(store:EventStore,backupFile:string):Promise<boolean>{
-  requireSafe(store.db.pragma('user_version',{simple:true})===3,'CLIENT_MIGRATION_REQUIRED');
+  const version=store.db.pragma('user_version',{simple:true});
+  requireSafe(version===3||version===4,'CLIENT_MIGRATION_REQUIRED');
   const present=(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('human_reply_drafts','human_reply_turns')").all() as {name:string}[]).length;
   requireSafe(present===0||present===2,'FOLLOWUP_SCHEMA_INCOMPLETE');if(present===2)return false;
   const names=(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {name:string}[]).map(row=>row.name);

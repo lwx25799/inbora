@@ -69,7 +69,8 @@ function inventory(db:Database.Database,names:string[]):string{
 
 /** Exercise a consistent backup, trial upgrade and restored copy before changing the owner database. */
 export async function migrateReplyKnowledge(store:EventStore,backupFile:string):Promise<boolean>{
-  requireSafe(store.db.pragma('user_version',{simple:true})===3,'CLIENT_MIGRATION_REQUIRED');
+  const dbVersion=store.db.pragma('user_version',{simple:true});
+  requireSafe(dbVersion===3||dbVersion===4,'CLIENT_MIGRATION_REQUIRED');
   const has=(name:string)=>!!store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name);
   const present=required.filter(has),hasSchema=has('k_schema');
   const versions=hasSchema?store.db.prepare('SELECT version FROM k_schema').all() as {version:number}[]:[];

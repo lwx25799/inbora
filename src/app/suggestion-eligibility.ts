@@ -34,8 +34,7 @@ export function requireSuggestionEligibility(store:EventStore,authority:Workbenc
   requireSafe(!automation?.state().emergencyStopped,'EMERGENCY_STOPPED');
   store.assertModelObservation(event.payload);
   requireSafe(!store.db.prepare('SELECT id FROM source_collisions WHERE event_id=? LIMIT 1').get(event.id),'TARGET_NEEDS_REVIEW');
-  const paused=store.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(targetKey(event.payload)) as {paused:number}|undefined;
-  requireSafe(!paused?.paused,'TARGET_PAUSED');
+  store.assertTargetUnpaused(targetKey(event.payload));
   const intent=store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(event.id);
   const submitted=store.db.prepare("SELECT command_id FROM manual_send_commands WHERE event_id=? AND status<>'FAILED_BEFORE_CLICK' LIMIT 1").get(event.id);
   const hasTurns=store.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get()&&

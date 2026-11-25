@@ -15,7 +15,8 @@ CREATE TABLE assistant_operations(operation_id TEXT PRIMARY KEY,tool TEXT NOT NU
   state TEXT NOT NULL,result_json TEXT,error TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);`;
 /** A separate additive extension; old grants, drafts, commands and spend remain byte-for-byte intact. */
 export async function migrateLocalAssistant(store:EventStore,backupFile:string):Promise<boolean>{
-  requireSafe(store.db.pragma('user_version',{simple:true})===3,'CLIENT_MIGRATION_REQUIRED');
+  const version=store.db.pragma('user_version',{simple:true});
+  requireSafe(version===3||version===4,'CLIENT_MIGRATION_REQUIRED');
   requireSafe(!!store.db.prepare("SELECT name FROM sqlite_master WHERE name='automation_grants'").get(),'AUTOMATION_MIGRATION_REQUIRED');
   const present=tables.filter(name=>store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name));
   requireSafe(present.length===0||present.length===tables.length,'ASSISTANT_SCHEMA_INCOMPLETE');
@@ -39,7 +40,7 @@ export async function migrateLocalAssistant(store:EventStore,backupFile:string):
     const restored=new Database(trialFile,{readonly:true});
     try{
       requireSafe(restored.pragma('quick_check',{simple:true})==='ok'&&
-        restored.pragma('user_version',{simple:true})===3&&migrationInventory(restored,names)===before&&
+        restored.pragma('user_version',{simple:true})===version&&migrationInventory(restored,names)===before&&
         !tables.some(name=>restored.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name)),
         'MIGRATION_BACKUP_RESTORE_FAILED');
     }finally{restored.close();}

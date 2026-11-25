@@ -59,7 +59,8 @@ INSERT INTO automation_schema VALUES(3);DROP TABLE automation_schema_previous;`;
 
 /** Additive extension of schema3; backup and restore are checked before the owner database changes. */
 export async function migrateAutomation(store: EventStore, backupFile: string): Promise<boolean> {
-  requireSafe(store.db.pragma("user_version", { simple: true }) === 3, "CLIENT_MIGRATION_REQUIRED");
+  const version = store.db.pragma("user_version", { simple: true });
+  requireSafe(version === 3 || version === 4, "CLIENT_MIGRATION_REQUIRED");
   const hasSchema=!!store.db.prepare("SELECT name FROM sqlite_master WHERE name='automation_schema'").get();
   const versions=hasSchema?
     store.db.prepare('SELECT version FROM automation_schema').all() as {version:number}[]:[];

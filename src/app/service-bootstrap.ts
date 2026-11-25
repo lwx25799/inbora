@@ -20,9 +20,22 @@ import { VerificationScheduler } from "./verification-scheduler.js";
 import { defaultSettings, settingsSchema, type AiSettings } from "./contracts.js";
 import { migrateModelProviders } from "../storage/model-provider-migration.js";
 import { ModelProviderStore } from "../storage/model-provider-store.js";
+import { migrateToSchema4 } from "../storage/schema4-migration.js";
+import { AccountStore } from "../storage/account-store.js";
 import { ModelRouteGuard } from "./model-route-guard.js";
 import { ModelProviderController } from "./model-provider-controller.js";
 import { ModelCredentialStore } from "./credentials.js";
+
+class AccountModelRouteGuard extends ModelRouteGuard {
+  override switchGrants(...args: Parameters<ModelRouteGuard["switchGrants"]>): void {
+    const { store, accountId } = this.automation;
+    // Model selection replaces grants in place within the caller's transaction. Bind just those new versions.
+    const lastVersion = store.db.prepare("SELECT COALESCE(MAX(version),0) FROM automation_grants").pluck().get();
+    super.switchGrants(...args);
+    store.db.prepare(`INSERT INTO account_grant_bindings (grant_version,account_id)
+      SELECT version,? FROM automation_grants WHERE version>? AND kind IN ('MODEL','AUTO_REPLY')`).run(accountId, lastVersion);
+  }
+}
 
 export interface BootstrapInput {
   store: EventStore;
@@ -60,15 +73,16 @@ export async function bootstrapAutomationRuntime(input: BootstrapInput): Promise
   const hasStartupRecoveryCandidate = new BrowserDraftRecovery(store, authority, browser).hasStartupCandidate();
   if (authority.mode() === "LIMITED_AUTO") authority.resumeIdleAutomation();
   if (!automation.state().emergencyStopped && authority.paused()) {
-    store.db.prepare("UPDATE client_state SET paused=0 WHERE id=1").run();
+    store.updateClientState({ paused: 0 });
     store.audit("SINGLE_ACCOUNT_ONLINE_RESTORED", authority.accountId);
   }
   store.db
     .prepare(
       `UPDATE automation_jobs SET state=COALESCE((SELECT status FROM send_intents WHERE event_id=automation_jobs.event_id),'REVIEW'),
-       reason='RESTART_NO_REPLAY',updated_at=? WHERE state IN ('QUALIFYING','GENERATING','PREPARING','QUEUED','PREFLIGHT','SENDING')`,
+       reason='RESTART_NO_REPLAY',updated_at=? WHERE state IN ('QUALIFYING','GENERATING','PREPARING','QUEUED','PREFLIGHT','SENDING')
+       AND event_id IN (SELECT id FROM inbound_events WHERE account_id=?)`,
     )
-    .run(authority.now());
+    .run(authority.now(), store.accountId);
   const collector = new CollectionScheduler(
     automation,
     async (source, signal, trigger) => {
@@ -106,16 +120,23 @@ export async function loadClientSettings(root: string): Promise<AiSettings | nul
 
 export async function bootstrapModelProviders(automation: AutomationStore, root: string, transport: typeof fetch,
   updated: () => void): Promise<{ controller: ModelProviderController | null; reason: string | null }> {
+  const unavailable = (error: unknown) => {
+    const reason = error instanceof Blocked ? error.code : "MODEL_PROVIDER_SCHEMA_INVALID";
+    automation.store.audit("MODEL_PROVIDERS_UNAVAILABLE", reason);
+    return { controller: null, reason };
+  };
+  const modelMigrationFailure = await migrateModelProviders(automation.store, root)
+    .then(() => null, error => ({ error }));
+  await migrateToSchema4(automation.store, join(root, "backups", `schema4-${randomUUID()}.sqlite`));
+  new AccountStore(automation.store.db, automation.now).ensureLegacyPrimaryAccount(root);
+  if (modelMigrationFailure) return unavailable(modelMigrationFailure.error);
   try {
-    await migrateModelProviders(automation.store, root);
     const models = new ModelProviderStore(automation.store.db, automation.now);
-    const controller = new ModelProviderController(new ModelRouteGuard(models, automation), new ModelCredentialStore(root),
+    const controller = new ModelProviderController(new AccountModelRouteGuard(models, automation), new ModelCredentialStore(root),
       transport, updated);
     await controller.initialize();
     return { controller, reason: null };
   } catch (error) {
-    const reason = error instanceof Blocked ? error.code : "MODEL_PROVIDER_SCHEMA_INVALID";
-    automation.store.audit("MODEL_PROVIDERS_UNAVAILABLE", reason);
-    return { controller: null, reason };
+    return unavailable(error);
   }
 }

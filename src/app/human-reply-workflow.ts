@@ -55,8 +55,9 @@ export class HumanReplyWorkflow {
         requireSafe(!this.isClosing(),'CLIENT_CLOSING');
         requireSafe(this.authority.command(id).status==='PREPARING','COMMAND_NOT_QUEUED');
         this.authority.assertCanSend(token,params,this.browser.identity(event.payload.channel),false,id,true);
-        const priorIdentity=digest(this.browser.identity(event.payload.channel));
-        const before=digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel));
+        const channel=event.payload.channel,initialIdentity=this.browser.identity(channel);
+        const priorIdentity=digest(initialIdentity);
+        const before=digest(this.authority.capabilitySnapshot(channel,initialIdentity));
         const snapshot=await handle.adapter.inspect(event.payload);
         requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
         requireSafe(!this.isClosing(),'CLIENT_CLOSING');
@@ -68,7 +69,7 @@ export class HumanReplyWorkflow {
         requireSafe(identity&&ownId&&snapshot.ownId===ownId&&identity.identityDigest===digest(ownId)&&snapshot.accountId===event.payload.accountId&&
           snapshot.eventBinding===event.binding&&snapshot.targetKey===targetKey(event.payload)&&snapshot.composerKey===snapshot.targetKey,'TARGET_CHANGED');
         if(manualMedia)requireSafe(validManualMediaProof(event.payload,snapshot),'HUMAN_MEDIA_APPROVAL_REQUIRED');
-        requireSafe(before===digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel)),'CAPABILITY_CHANGED_DURING_CHECK');
+        requireSafe(before===digest(this.authority.capabilitySnapshot(channel,identity)),'CAPABILITY_CHANGED_DURING_CHECK');
         this.authority.attest(event.payload.channel,'SEND_AVAILABLE',identity,`readonly-contract:${digest(snapshot.manualObservation?[snapshot,identity]:snapshot)}`);
         this.store.audit('READ_ONLY_SEND_CONTRACT_VERIFIED',id);
         this.authority.approvePreparedCommand(token,id,snapshot,identity);

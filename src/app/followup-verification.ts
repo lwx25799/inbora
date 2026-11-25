@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   Blocked,
@@ -70,8 +69,9 @@ export function cancelUnsubmittedFollowups(
   reason: string,
 ): number {
   if (!hasFollowupTables(store)) return 0;
-  const clauses = ["intent_id IS NULL", "status IN ('PREPARING','APPROVED')"];
-  const args: unknown[] = [];
+  const clauses = ["intent_id IS NULL", "status IN ('PREPARING','APPROVED')",
+    "event_id IN (SELECT id FROM inbound_events WHERE account_id=?)"];
+  const args: unknown[] = [store.accountId];
   if (filter.operatorId !== undefined) {
     clauses.push("operator_id=?");
     args.push(filter.operatorId);
@@ -187,6 +187,12 @@ function effectiveFollowupDeadline(store: EventStore, intentId: string, channel:
   return securityHoldDeadline(store, channel, baseAt, withPersisted);
 }
 
+function uncertainTurns(store: EventStore) {
+  return store.db.prepare(`SELECT t.*, e.channel FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
+    WHERE e.account_id=? AND t.status='UNCERTAIN' AND t.intent_id IS NOT NULL AND t.attempt_started_at IS NOT NULL
+    ORDER BY t.rowid`).all(store.accountId) as (FollowupTurnRow & { channel: Channel })[];
+}
+
 /** Extend bounded verification windows for unfinished UNCERTAIN followups on startup or while a channel hold is active. */
 export function extendFollowupVerificationDeadlines(
   store: EventStore,
@@ -194,38 +200,25 @@ export function extendFollowupVerificationDeadlines(
   channels?: readonly Channel[],
 ): void {
   if (!hasFollowupTables(store)) return;
-  const turns = store.db
-    .prepare(
-      `SELECT t.*, e.channel FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
-       WHERE t.status='UNCERTAIN' AND t.intent_id IS NOT NULL AND t.attempt_started_at IS NOT NULL
-       ORDER BY t.rowid`,
-    )
-    .all() as (FollowupTurnRow & { channel: Channel })[];
-  if (!turns.length) return;
-  const insert = store.db.prepare("INSERT INTO audit_events VALUES(?,?,?,?,?)");
   const nextDeadline = now + deadlineWindowMs;
-  for (const turn of turns) {
-    if (channels && !channels.includes(turn.channel)) continue;
-    const approval = parseApproval(turn.approval);
-    const boundaryMs = Date.parse(turn.attempt_started_at ?? "");
-    if (!approval || !Number.isFinite(boundaryMs) || !turn.intent_id) continue;
-    if (attemptStats(store, turn.intent_id).attempts >= maxAttempts) continue;
-    const baseAt = Math.max(boundaryMs, turn.created_at);
-    const current = effectiveFollowupDeadline(store, turn.intent_id, turn.channel, baseAt);
-    const shouldExtend = channels ? current <= now + deadlineWindowMs - holdExtensionMarginMs : current <= now;
-    if (!shouldExtend || nextDeadline <= current) continue;
-    insert.run(
-      randomUUID(),
-      new Date(now).toISOString(),
-      deadlineAuditType,
-      turn.intent_id,
-      JSON.stringify({
+  store.db.transaction(() => {
+    for (const turn of uncertainTurns(store)) {
+      if (channels && !channels.includes(turn.channel)) continue;
+      const approval = parseApproval(turn.approval);
+      const boundaryMs = Date.parse(turn.attempt_started_at ?? "");
+      if (!approval || !Number.isFinite(boundaryMs) || !turn.intent_id) continue;
+      if (attemptStats(store, turn.intent_id).attempts >= maxAttempts) continue;
+      const baseAt = Math.max(boundaryMs, turn.created_at);
+      const current = effectiveFollowupDeadline(store, turn.intent_id, turn.channel, baseAt);
+      const shouldExtend = channels ? current <= nextDeadline - holdExtensionMarginMs : current <= now;
+      if (!shouldExtend || nextDeadline <= current) continue;
+      store.audit(deadlineAuditType, turn.intent_id, {
         commandId: turn.command_id,
         deadline: nextDeadline,
         reason: channels ? "SECURITY_HOLD" : "STARTUP",
-      }),
-    );
-  }
+      }, new Date(now).toISOString());
+    }
+  }).immediate();
 }
 
 /** Pick at most one UNCERTAIN human followup turn due for bounded read-only verification. */
@@ -235,15 +228,8 @@ export function claimFollowupVerification(
   heldChannels: readonly Channel[],
 ): FollowupVerificationJob | undefined {
   if (!hasFollowupTables(store)) return undefined;
-  const turns = store.db
-    .prepare(
-      `SELECT t.*, e.channel FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
-       WHERE t.status='UNCERTAIN' AND t.intent_id IS NOT NULL AND t.attempt_started_at IS NOT NULL
-       ORDER BY t.rowid`,
-    )
-    .all() as (FollowupTurnRow & { channel: Channel })[];
   let best: { job: FollowupVerificationJob; nextAt: number } | undefined;
-  for (const turn of turns) {
+  for (const turn of uncertainTurns(store)) {
     if (heldChannels.includes(turn.channel)) continue;
     const approval = parseApproval(turn.approval);
     const boundaryMs = Date.parse(turn.attempt_started_at ?? "");
@@ -276,8 +262,9 @@ export function claimFollowupVerification(
 function readTurn(store: EventStore, commandId: string): FollowupTurnRow | undefined {
   if (!hasFollowupTables(store)) return undefined;
   return store.db
-    .prepare("SELECT * FROM human_reply_turns WHERE command_id=?")
-    .get(commandId) as FollowupTurnRow | undefined;
+    .prepare(`SELECT t.* FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
+      WHERE t.command_id=? AND e.account_id=?`)
+    .get(commandId, store.accountId) as FollowupTurnRow | undefined;
 }
 
 export function assertFollowupVerificationBound(store: EventStore, job: FollowupVerificationJob): FollowupTurnRow {
@@ -285,7 +272,7 @@ export function assertFollowupVerificationBound(store: EventStore, job: Followup
   const event = store.event(job.eventId);
   const approval = parseApproval(row?.approval ?? null);
   requireSafe(
-    row &&
+    event.payload.channel === job.channel && row &&
       row.status === "UNCERTAIN" &&
       row.intent_id === job.intentId &&
       row.event_id === job.eventId &&
@@ -325,28 +312,17 @@ export function commitFollowupVerificationResult(
           verified = false;
         }
       }
-      store.db
-        .prepare("INSERT INTO audit_events VALUES(?,?,?,?,?)")
-        .run(
-          randomUUID(),
-          new Date(now).toISOString(),
-          recordAttempt ? attemptAuditType : explicitAuditType,
-          job.intentId,
-          JSON.stringify({
-            commandId: job.commandId,
-            verified,
-            evidenceId: result.evidenceId,
-            checkedAt: now,
-            previousProofRef: row.proof_ref,
-          }),
-        );
+      store.audit(recordAttempt ? attemptAuditType : explicitAuditType, job.intentId, {
+        commandId: job.commandId, verified, evidenceId: result.evidenceId, checkedAt: now, previousProofRef: row.proof_ref,
+      }, new Date(now).toISOString());
       if (verified) {
         const verifiedAt = new Date(Math.max(now, Date.parse(job.boundary))).toISOString();
         store.db
           .prepare(
-            "UPDATE human_reply_turns SET status='CONFIRMED',proof_ref=?,verified_at=?,native_id_digest=?,reason=NULL WHERE command_id=? AND status='UNCERTAIN'",
+            `UPDATE human_reply_turns SET status='CONFIRMED',proof_ref=?,verified_at=?,native_id_digest=?,reason=NULL
+             WHERE command_id=? AND status='UNCERTAIN' AND event_id IN (SELECT id FROM inbound_events WHERE account_id=?)`,
           )
-          .run(result.proofDigest, verifiedAt, result.nativeIdDigest, job.commandId);
+          .run(result.proofDigest, verifiedAt, result.nativeIdDigest, job.commandId, store.accountId);
         store.audit("HUMAN_FOLLOWUP_DELIVERY_VERIFIED", job.intentId, { verified: true });
       } else {
         store.audit("HUMAN_FOLLOWUP_PROOF_INCOMPLETE", job.intentId, { verified: false });
@@ -365,15 +341,9 @@ export function commitFollowupVerificationFailure(
   const error = cause instanceof Blocked ? cause.code : "VERIFICATION_FAILED_PRIVATE_DIAGNOSTICS";
   store.db
     .transaction(() => {
-      store.db
-        .prepare("INSERT INTO audit_events VALUES(?,?,?,?,?)")
-        .run(
-          randomUUID(),
-          new Date(now).toISOString(),
-          attemptAuditType,
-          job.intentId,
-          JSON.stringify({ commandId: job.commandId, verified: false, error, checkedAt: now }),
-        );
+      assertFollowupVerificationBound(store, job);
+      store.audit(attemptAuditType, job.intentId,
+        { commandId: job.commandId, verified: false, error, checkedAt: now }, new Date(now).toISOString());
       store.audit("HUMAN_FOLLOWUP_PROOF_INCOMPLETE", job.intentId, { verified: false });
     })
     .immediate();
@@ -438,9 +408,10 @@ export function findUncertainFollowupForEvent(store: EventStore, eventId: string
   if (!hasFollowupTables(store)) return undefined;
   return store.db
     .prepare(
-      "SELECT * FROM human_reply_turns WHERE event_id=? AND status='UNCERTAIN' AND intent_id IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+      `SELECT t.* FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
+       WHERE t.event_id=? AND e.account_id=? AND t.status='UNCERTAIN' AND t.intent_id IS NOT NULL ORDER BY t.rowid DESC LIMIT 1`,
     )
-    .get(eventId) as FollowupTurnRow | undefined;
+    .get(eventId, store.accountId) as FollowupTurnRow | undefined;
 }
 
 /** Explicit read-only reconciliation for an UNCERTAIN human followup turn. */

@@ -203,14 +203,7 @@ export function assertCanSendImpl(
       (manualMedia && e.status === "MANUAL_REVIEW"),
     "TARGET_NEEDS_REVIEW",
   );
-  requireSafe(
-    !(
-      store.db.prepare("SELECT paused FROM pauses WHERE target_key=?").get(targetKey(e.payload)) as
-        | { paused: number }
-        | undefined
-    )?.paused,
-    "TARGET_PAUSED",
-  );
+  store.assertTargetUnpaused(targetKey(e.payload));
   requireSafe(!store.sendFrozen(e.id), "TARGET_FROZEN");
   requireSafe(!store.db.prepare("SELECT id FROM send_intents WHERE event_id=?").get(e.id), "INTENT_EXISTS");
   const d = authority.draftFor(e.id);

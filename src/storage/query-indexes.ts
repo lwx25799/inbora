@@ -30,9 +30,10 @@ function healthy(db:Database.Database):boolean {
   return db.pragma('quick_check',{simple:true})==='ok'&&(db.pragma('foreign_key_check') as unknown[]).length===0;
 }
 
-/** Purely additive indexes keep both version markers at 3 so old clients can still open new records. */
+/** Purely additive indexes leave the database and automation version markers unchanged. */
 export async function ensureQueryIndexes(store:EventStore,backupFile:string):Promise<boolean> {
-  requireSafe(store.db.pragma('user_version',{simple:true})===3&&
+  const version=store.db.pragma('user_version',{simple:true});
+  requireSafe((version===3||version===4)&&
     (store.db.prepare('SELECT version FROM automation_schema').get() as {version:number}).version===3,'QUERY_INDEX_SCHEMA_REQUIRED');
   const needed=missing(store.db);if(!needed.length)return false;
   requireSafe(healthy(store.db),'QUERY_INDEX_DATABASE_INVALID');

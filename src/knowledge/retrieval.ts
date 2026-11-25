@@ -39,25 +39,26 @@ export function retrieveKnowledge(db:Database.Database,accountId:string,channel:
   const expression=terms.map(term=>'"'+term.replaceAll('"','""')+'"').join(' OR ');
   const candidates=db.prepare(`SELECT k.id,k.source_id,k.title,k.topic,k.version,c.text,c.id AS chunk_id,k.aliases_json FROM k_terms
     JOIN k_chunks c ON c.id=k_terms.chunk_id JOIN k_knowledge k ON k.id=c.entry_id JOIN k_sources s ON s.id=k.source_id
-    WHERE k_terms MATCH ? AND ${where} ORDER BY bm25(k_terms),k.id,c.ordinal LIMIT ?`)
-    .all(expression,...args,knowledgeLimits.candidates) as SearchRow[];
+    WHERE k_terms MATCH ? AND ${where}`).all(expression,...args) as SearchRow[];
   const ftsTerms=Array.from(needle).length>=3?Array.from(needle).map((_,i,a)=>a.slice(i,i+3).join(''))
     .filter(term=>Array.from(term).length===3&&/[\p{L}\p{N}]/u.test(term)).slice(0,12):[];
   if(ftsTerms.length){
     const expression=ftsTerms.map(term=>'"'+term.replaceAll('"','""')+'"').join(' OR ');
     const fts=db.prepare(`SELECT k.id,k.source_id,k.title,k.topic,k.version,c.text,c.id AS chunk_id,k.aliases_json FROM k_search
       JOIN k_chunks c ON c.id=k_search.chunk_id JOIN k_knowledge k ON k.id=c.entry_id JOIN k_sources s ON s.id=k.source_id
-      WHERE k_search MATCH ? AND ${where} ORDER BY bm25(k_search),k.id,c.ordinal LIMIT ?`)
-      .all(expression,...args,knowledgeLimits.candidates) as SearchRow[];
+      WHERE k_search MATCH ? AND ${where}`).all(expression,...args) as SearchRow[];
     const seen=new Set(candidates.map(row=>row.chunk_id));for(const row of fts)if(!seen.has(row.chunk_id)){candidates.push(row);seen.add(row.chunk_id);}
   }
   const rank=(row:SearchRow)=>{
-    const aliases=JSON.parse(row.aliases_json) as string[],title=normalized(row.title),body=normalized(row.text);
-    const exact=needle.length>1&&(title.includes(needle)||aliases.some(alias=>needle.includes(normalized(alias))||normalized(alias).includes(needle)));
+    const aliases=(JSON.parse(row.aliases_json) as string[]).map(normalized),title=normalized(row.title),body=normalized(row.text);
+    const exact=needle.length>1&&(title.includes(needle)||aliases.some(alias=>needle.includes(alias)||alias.includes(needle)));
     return (exact?20:0)+terms.reduce((sum,term)=>sum+(title.includes(term)?4:0)+(body.includes(term)?1:0)+
-      (aliases.some(alias=>normalized(alias).includes(term))?3:0),0);
+      (aliases.some(alias=>alias.includes(term))?3:0),0);
   };
-  const ranked=candidates.sort((a,b)=>rank(b)-rank(a)||a.id.localeCompare(b.id)||a.chunk_id.localeCompare(b.chunk_id)).slice(0,knowledgeLimits.candidates);
+  // FTS selects matches. Only the visible chunks and query terms influence the score and cutoff.
+  const ranked=candidates.map(row=>({row,score:rank(row)}))
+    .sort((a,b)=>b.score-a.score||a.row.id.localeCompare(b.row.id)||a.row.chunk_id.localeCompare(b.row.chunk_id))
+    .slice(0,knowledgeLimits.candidates).map(({row})=>row);
   const entryIds=[...new Set(ranked.map(row=>row.id))],topics=[...new Set(ranked.map(row=>row.topic))],conflicts:string[]=[],relevant:string[]=[];
   // Scope conflict checks to active entries actually matched by this query so complementary entries under one broad topic do not block each other.
   const variants=entryIds.length?db.prepare(`SELECT k.id,k.text,k.version,k.topic FROM k_knowledge k JOIN k_sources s ON s.id=k.source_id

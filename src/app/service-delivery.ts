@@ -177,7 +177,8 @@ export function sendResultCommand(
     accepted:
       row.status !== "FAILED_BEFORE_CLICK" &&
       !!store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='manual_send_inputs'").get() &&
-      !!store.db.prepare("SELECT command_id FROM manual_send_inputs WHERE command_id=?").get(id),
+      !!store.db.prepare(`SELECT 1 FROM manual_send_inputs i JOIN manual_send_commands c ON c.command_id=i.command_id
+        JOIN inbound_events e ON e.id=c.event_id WHERE i.command_id=? AND e.account_id=?`).get(id, store.accountId),
   };
 }
 

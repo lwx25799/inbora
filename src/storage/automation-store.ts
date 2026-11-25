@@ -1,4 +1,4 @@
-import { Blocked, digest, isStrong, requireSafe, targetKey, type StoredEvent } from "../core/contracts.js";
+import { Blocked, DEFAULT_ACCOUNT_ID, digest, isStrong, requireSafe, targetKey, type StoredEvent } from "../core/contracts.js";
 import { collectionSchema, type CollectionSettings, type Grant, type ModelGrant, type ReplyPolicy } from "../app/automation-contracts.js";
 import { currentModelGrantScope, parseStoredModelGrant } from "./model-grant-binding.js";
 import type { EventStore } from "./store.js";
@@ -25,7 +25,10 @@ export class AutomationStore {
     const row = this.store.db.prepare("SELECT * FROM automation_state WHERE id=1").get() as {
       started_at: number; emergency_stopped: number; collection_json: string;
     };
-    const raw: unknown = JSON.parse(row.collection_json);
+    const collectionJson = this.store.schemaVersion() >= 4
+      ? this.store.db.prepare('SELECT collection_json FROM account_collection_config WHERE account_id=?').pluck().get(this.accountId) as string | undefined
+      : row.collection_json;
+    const raw: unknown = JSON.parse(collectionJson ?? 'null');
     return { startedAt: row.started_at, emergencyStopped: !!row.emergency_stopped,
       emergencyStop:row.emergency_stopped?readEmergencyStop(this.store):null,
       collection: raw === null ? null : collectionSchema.parse(raw) };
@@ -37,14 +40,28 @@ export class AutomationStore {
   configureCollection(settings: CollectionSettings): void {
     const parsed = collectionSchema.parse(settings);
     this.requireAccount(parsed.ownId);
-    this.store.db.prepare("UPDATE automation_state SET collection_json=? WHERE id=1").run(JSON.stringify(parsed));
-    this.store.audit("COLLECTION_CONFIGURED", digest(parsed.ownId), {comments: parsed.comments, inbox: parsed.inbox});
+    const json = JSON.stringify(parsed);
+    this.store.db.transaction(() => {
+      const schema4 = this.store.schemaVersion() >= 4;
+      if (schema4) this.store.db.prepare(`INSERT INTO account_collection_config (account_id, collection_json, updated_at)
+        VALUES (?,?,?) ON CONFLICT(account_id) DO UPDATE SET collection_json=excluded.collection_json, updated_at=excluded.updated_at`)
+        .run(this.accountId, json, this.now());
+      if (!schema4 || this.accountId === DEFAULT_ACCOUNT_ID)
+        this.store.db.prepare("UPDATE automation_state SET collection_json=? WHERE id=1").run(json);
+      this.store.audit("COLLECTION_CONFIGURED", digest(parsed.ownId), {comments: parsed.comments, inbox: parsed.inbox});
+    }).immediate();
   }
   stop(stopped:boolean,reason='MANUAL_EMERGENCY_STOP',source:EmergencySource='MANUAL'):void {
     recordEmergencyStop(this.store,stopped,this.now(),reason,source);
   }
   emergencyRevision():string {return emergencyRevision(this.store);}
   resumeEmergency(expectedRevision:string):boolean {return resumeEmergency(this.store,expectedRevision,this.now());}
+  private grantFilter() {
+    return this.store.schemaVersion() >= 4
+      ? { sql: ' AND COALESCE((SELECT b.account_id FROM account_grant_bindings b WHERE b.grant_version=automation_grants.version), ?)=?',
+        args: [DEFAULT_ACCOUNT_ID, this.accountId] }
+      : { sql: '', args: [] };
+  }
   grant(kind: "MODEL", scope: ModelGrant): Grant<ModelGrant>;
   grant(kind: "AUTO_REPLY", scope: ReplyPolicy): Grant<ReplyPolicy>;
   grant(kind: "MODEL" | "AUTO_REPLY", scope: ModelGrant | ReplyPolicy): Grant {
@@ -60,15 +77,24 @@ export class AutomationStore {
       const previous=this.active(kind);
       const used=(budgetKind:'MODEL'|'SEND')=>previous?(this.store.db.prepare('SELECT count(*) n FROM grant_reservations WHERE grant_version=? AND kind=?')
         .get(previous.version,budgetKind) as {n:number}).n:0;
-      this.saveBudgetLimit('MODEL',parsed.modelLimit,used('MODEL'));
-      if(kind==='AUTO_REPLY')this.saveBudgetLimit('SEND',(parsed as ReplyPolicy).sendLimit,used('SEND'));
+      if (this.accountId === DEFAULT_ACCOUNT_ID) {
+        this.saveBudgetLimit('MODEL',parsed.modelLimit,used('MODEL'));
+        if(kind==='AUTO_REPLY')this.saveBudgetLimit('SEND',(parsed as ReplyPolicy).sendLimit,used('SEND'));
+      } else {
+        requireSafe(parsed.modelLimit === null || parsed.modelLimit >= used('MODEL'), 'MODEL_BUDGET_EXCEEDED');
+        const sendLimit = (parsed as ReplyPolicy).sendLimit;
+        if (kind === 'AUTO_REPLY') requireSafe(sendLimit === null || sendLimit >= used('SEND'), 'SEND_BUDGET_EXCEEDED');
+      }
       this.revoke(kind);
+      const createdAt = this.now();
       const row = this.store.db.prepare("INSERT INTO automation_grants(kind,scope_json,scope_digest,created_at) VALUES(?,?,?,?)")
-        .run(kind, JSON.stringify(parsed), digest(parsed), this.now());
+        .run(kind, JSON.stringify(parsed), digest(parsed), createdAt);
+      if (this.store.schemaVersion() >= 4) this.store.db.prepare('INSERT INTO account_grant_bindings VALUES(?,?)')
+        .run(row.lastInsertRowid, this.accountId);
       this.store.audit("PERSISTENT_GRANT_ENABLED", String(row.lastInsertRowid));
       if(previous)this.store.db.prepare('INSERT INTO grant_reservations SELECT ?,kind,job_key,reserved_at FROM grant_reservations WHERE grant_version=?')
         .run(row.lastInsertRowid,previous.version);
-      return {version: Number(row.lastInsertRowid), kind, scope: parsed, createdAt: this.now()};
+      return {version: Number(row.lastInsertRowid), kind, scope: parsed, createdAt};
     }).immediate();
   }
   private saveBudgetLimit(kind:'MODEL'|'SEND',limit:number|null,inherited:number):void{
@@ -82,10 +108,15 @@ export class AutomationStore {
     if(maximum!==global.maximum)this.store.audit('BUDGET_POLICY_CHANGED',kind,{unlimited:maximum===null,...(maximum===null?{}:{maximum})});
   }
   revoke(kind: "MODEL" | "AUTO_REPLY"): void {
-    this.store.db.prepare("UPDATE automation_grants SET revoked_at=? WHERE kind=? AND revoked_at IS NULL").run(this.now(), kind);
+    const {sql, args} = this.grantFilter();
+    this.store.db.prepare(`UPDATE automation_grants SET revoked_at=? WHERE kind=? AND revoked_at IS NULL${sql}`).run(this.now(), kind, ...args);
     this.store.audit("PERSISTENT_GRANT_REVOKED", kind);
   }
-  readGrantScope(kind: Grant["kind"], row: { scope_json: string; scope_digest: string }): Grant["scope"] {
+  readGrantScope(kind: Grant["kind"], row: { scope_json: string; scope_digest: string; grant_version?: number }): Grant["scope"] {
+    if (row.grant_version !== undefined && this.store.schemaVersion() >= 4) {
+      requireSafe(this.store.db.prepare('SELECT 1 WHERE COALESCE((SELECT account_id FROM account_grant_bindings WHERE grant_version=?), ?) = ?')
+        .get(row.grant_version, DEFAULT_ACCOUNT_ID, this.accountId), 'GRANT_REVOKED');
+    }
     let scope: Grant["scope"];
     try { scope = parseStoredModelGrant(kind, JSON.parse(row.scope_json)); }
     catch { throw new Blocked("GRANT_CORRUPT"); }
@@ -93,7 +124,9 @@ export class AutomationStore {
     return scope;
   }
   active(kind: "MODEL" | "AUTO_REPLY"): Grant | null {
-    const row = this.store.db.prepare("SELECT * FROM automation_grants WHERE kind=? AND revoked_at IS NULL ORDER BY version DESC LIMIT 1").get(kind) as {
+    const {sql, args} = this.grantFilter();
+    const row = this.store.db.prepare(`SELECT * FROM automation_grants WHERE kind=? AND revoked_at IS NULL${sql}
+      ORDER BY version DESC LIMIT 1`).get(kind, ...args) as {
       version: number; scope_json: string; scope_digest: string; created_at: number;
     } | undefined;
     if (!row) return null;
@@ -103,22 +136,28 @@ export class AutomationStore {
   }
   /** Called inside the same transaction as the global model reservation or send intent. No refunds/replays. */
   allowance(version:number,kind:'MODEL'|'SEND'):boolean {
-    const row=this.store.db.prepare('SELECT kind FROM automation_grants WHERE version=? AND revoked_at IS NULL').get(version) as {kind:'MODEL'|'AUTO_REPLY'}|undefined;
-    if(!row)return false;
-    const grant=this.active(row.kind);if(grant?.version!==version)return false;
+    const grant = this.currentGrant(version);
+    if (!grant || kind === 'SEND' && grant.kind !== 'AUTO_REPLY') return false;
     const used=this.store.db.prepare('SELECT count(*) AS used FROM grant_reservations WHERE grant_version=? AND kind=?').get(version,kind) as {used:number};
     const global=this.store.budget(kind),limit=kind==='MODEL'?grant.scope.modelLimit:(grant.scope as ReplyPolicy).sendLimit;
     return (limit===null||used.used<limit)&&(global.maximum===null||global.used<global.maximum);
   }
+  private currentGrant(version: number): Grant | null {
+    const {sql, args} = this.grantFilter();
+    const row = this.store.db.prepare(`SELECT kind FROM automation_grants WHERE version=? AND revoked_at IS NULL${sql}`)
+      .get(version, ...args) as {kind: Grant['kind']} | undefined;
+    const grant = row && this.active(row.kind);
+    return grant?.version === version ? grant : null;
+  }
   reserve(version: number, kind: "MODEL" | "SEND", jobKey: string,channel?:StoredEvent['payload']['channel']): void {
     this.store.db.transaction(() => {
-      const row = this.store.db.prepare("SELECT kind FROM automation_grants WHERE version=? AND revoked_at IS NULL").get(version) as {kind: "MODEL" | "AUTO_REPLY"} | undefined;
-      requireSafe(row, "GRANT_REVOKED");
-      const grant = this.active(row.kind);
-      requireSafe(grant?.version === version, "GRANT_REVOKED");
+      const grant = this.currentGrant(version);
+      requireSafe(grant && (kind !== 'SEND' || grant.kind === 'AUTO_REPLY'), "GRANT_REVOKED");
       this.requireAccount(grant.scope.ownId);
       requireSafe(!this.state().emergencyStopped, "EMERGENCY_STOPPED");
-      const event=this.store.db.prepare('SELECT channel FROM inbound_events WHERE id=?').get(jobKey) as {channel:StoredEvent['payload']['channel']}|undefined;
+      const event=this.store.db.prepare('SELECT account_id,channel FROM inbound_events WHERE id=?').get(jobKey) as
+        {account_id: AccountId; channel: StoredEvent['payload']['channel']} | undefined;
+      requireSafe(!event || event.account_id === this.accountId, 'GRANT_REVOKED');
       if(channel??event?.channel)assertSecurityChannelClear(this.store,(channel??event!.channel));
       const used = this.store.db.prepare("SELECT count(*) AS used FROM grant_reservations WHERE grant_version=? AND kind=?").get(version, kind) as {used: number};
       const limit = kind === "MODEL" ? grant.scope.modelLimit : (grant.scope as ReplyPolicy).sendLimit;
@@ -135,15 +174,14 @@ export class AutomationStore {
     const p = active.scope as ReplyPolicy;
     if(e.payload.channel==='COMMENT_NOTIFICATION'&&e.payload.kind==='REPLY'&&p.replyToNestedComments===false)return false;
     this.requireAccount(p.ownId);
-    const client = this.store.db.prepare("SELECT paused,mode FROM client_state WHERE id=1").get() as {paused: number; mode: string};
+    const client = this.store.clientState();
     if (client.paused || client.mode !== "LIMITED_AUTO") return false;
     if (!p.channels.includes(e.payload.channel) || e.payload.direction !== "INCOMING" || e.payload.actorId === p.ownId) return false;
     if (this.store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(e.id)||this.store.sendFrozen(e.id)) return false;
-    const paused = this.store.db.prepare("SELECT paused FROM pauses WHERE target_key=?").get(targetKey(e.payload)) as {paused: number} | undefined;
     // Only an active editing lease pauses a conversation; merely viewing it must not leave a persistent handoff.
     const owner = this.store.db.prepare("SELECT operator_id,lease_expires_at FROM thread_ownership WHERE account_id=? AND channel=? AND target_key=?")
       .get(this.accountId,e.payload.channel,targetKey(e.payload)) as {operator_id: string | null;lease_expires_at:number} | undefined;
-    if (paused?.paused || owner?.operator_id&&owner.lease_expires_at>this.now()) return false;
+    if (this.store.targetPaused(targetKey(e.payload)) || owner?.operator_id&&owner.lease_expires_at>this.now()) return false;
     return this.policyScopeMatches(grant,e);
   }
   /** Authorization scope only; explicit human suggestions do not inherit automatic scheduling gates. */

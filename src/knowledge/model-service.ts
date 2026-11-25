@@ -47,10 +47,11 @@ function parseRules(text:string):string{
 
 export function recoverLearningTasks(store:EventStore):void{
   store.db.transaction(()=>{
-    store.db.prepare("UPDATE k_learning_batches SET state='INTERRUPTED' WHERE state='RUNNING' AND call_id IS NOT NULL").run();
+    store.db.prepare(`UPDATE k_learning_batches SET state='INTERRUPTED' WHERE state='RUNNING' AND call_id IS NOT NULL
+      AND task_id IN (SELECT id FROM k_learning_tasks WHERE account_id=?)`).run(store.accountId);
     store.db.prepare(`UPDATE k_learning_tasks SET state=CASE
       WHEN EXISTS(SELECT 1 FROM k_learning_batches b WHERE b.task_id=k_learning_tasks.id AND b.state='INTERRUPTED')
-      THEN 'INTERRUPTED' ELSE 'FAILED' END WHERE state='RUNNING'`).run();
+      THEN 'INTERRUPTED' ELSE 'FAILED' END WHERE state='RUNNING' AND account_id=?`).run(store.accountId);
   }).immediate();
 }
 

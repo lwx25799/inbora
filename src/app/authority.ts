@@ -65,7 +65,8 @@ export class WorkbenchAuthority {
     store.assertAccount(accountId);
     this.channels = new ChannelAuthority(store, now);
     this.assistant = new LocalAssistantStore(store, now);
-    requireSafe(store.db.pragma("user_version", { simple: true }) === 3, "CLIENT_MIGRATION_REQUIRED");
+    const version = store.db.pragma("user_version", { simple: true });
+    requireSafe(version === 3 || version === 4, "CLIENT_MIGRATION_REQUIRED");
     this.hooks = {
       writeOwner: (e, operator, generation, expiry) => this.writeOwner(e, operator, generation, expiry),
       invalidate: (e) => this.invalidate(e),
@@ -75,14 +76,19 @@ export class WorkbenchAuthority {
   issueSession(permissions: Permission[] = ["READ", "EDIT", "APPROVE", "SEND", "CONTROL"]): string {
     const token = randomBytes(32).toString("hex"),
       id = randomUUID();
-    this.store.db
-      .prepare("INSERT INTO operator_sessions VALUES(?,?,?,?)")
-      .run(id, digest(token), JSON.stringify(permissions), this.now() + 8 * 3600_000);
+    const { db } = this.store;
+    db.transaction(() => {
+      db.prepare("INSERT INTO operator_sessions VALUES(?,?,?,?)")
+        .run(id, digest(token), JSON.stringify(permissions), this.now() + 8 * 3600_000);
+      if (this.store.schemaVersion() >= 4)
+        db.prepare("INSERT INTO account_operator_sessions VALUES(?,?)").run(id, this.accountId);
+    }).immediate();
     return token;
   }
   issueAssistantSession(grantVersion: number): string {
     return this.store.db
       .transaction(() => {
+        requireSafe(this.assistant.active()?.version === grantVersion, "ASSISTANT_PERMISSION_REQUIRED");
         const token = this.issueSession();
         this.assistant.bindSession(this.operator(token).id, grantVersion);
         return token;
@@ -119,10 +125,18 @@ export class WorkbenchAuthority {
     this.assistant.requireEvent("read", event, version);
     this.assistant.requireEvent("editControl", event, version);
   }
+  private sessionScope() {
+    return this.store.schemaVersion() >= 4
+      ? { sql: " AND id IN (SELECT operator_id FROM account_operator_sessions WHERE account_id=?)", args: [this.accountId] }
+      : { sql: "", args: [] };
+  }
+  private sessionRow(tokenDigest: string) {
+    const { sql, args } = this.sessionScope();
+    return this.store.db.prepare(`SELECT id,permissions,expires_at FROM operator_sessions WHERE token_digest=?${sql}`)
+      .get(tokenDigest, ...args) as { id: string; permissions: string; expires_at: number } | undefined;
+  }
   operator(token: string, permission: Permission = "READ"): Operator {
-    const row = this.store.db
-      .prepare("SELECT id,permissions,expires_at FROM operator_sessions WHERE token_digest=?")
-      .get(digest(token)) as { id: string; permissions: string; expires_at: number } | undefined;
+    const row = this.sessionRow(digest(token));
     requireSafe(row && row.expires_at > this.now(), "OPERATOR_EXPIRED");
     const result = { ...row, permissions: JSON.parse(row.permissions) as Permission[] };
     if (!result.permissions.includes(permission)) {
@@ -132,8 +146,10 @@ export class WorkbenchAuthority {
     return result;
   }
   revoke(token: string): void {
-    this.store.db.prepare("UPDATE operator_sessions SET expires_at=0 WHERE token_digest=?").run(digest(token));
-    this.selection.delete(digest(token));
+    const { sql, args } = this.sessionScope();
+    const tokenDigest = digest(token);
+    this.store.db.prepare(`UPDATE operator_sessions SET expires_at=0 WHERE token_digest=?${sql}`).run(tokenDigest, ...args);
+    this.selection.delete(tokenDigest);
   }
   /** Only the authenticated desktop parent calls this; stop-only sessions cannot be promoted. */
   renewTrustedSession(
@@ -141,9 +157,7 @@ export class WorkbenchAuthority {
     options: { readOnly?: boolean; minRemainingMs?: number } = {},
   ): void {
     const tokenDigest = digest(token);
-    const row = this.store.db
-      .prepare("SELECT permissions,expires_at FROM operator_sessions WHERE token_digest=?")
-      .get(tokenDigest) as { permissions: string; expires_at: number } | undefined;
+    const row = this.sessionRow(tokenDigest);
     requireSafe(row, "OPERATOR_EXPIRED");
     const permissions = JSON.parse(row.permissions) as Permission[];
     requireSafe(
@@ -152,16 +166,15 @@ export class WorkbenchAuthority {
     );
     const threshold = options.minRemainingMs ?? sessionRenewalThresholdMs;
     if (options.readOnly && row.expires_at - this.now() >= threshold) return;
-    this.store.db
-      .prepare("UPDATE operator_sessions SET expires_at=? WHERE token_digest=?")
-      .run(this.now() + 8 * 3600_000, tokenDigest);
+    const { sql, args } = this.sessionScope();
+    this.store.db.prepare(`UPDATE operator_sessions SET expires_at=? WHERE token_digest=?${sql}`)
+      .run(this.now() + 8 * 3600_000, tokenDigest, ...args);
   }
   private pruneExpiredSelections(): void {
     if (!this.selection.size) return;
     const now = this.now();
-    const check = this.store.db.prepare("SELECT expires_at FROM operator_sessions WHERE token_digest=?");
     for (const tokenDigest of [...this.selection.keys()]) {
-      const row = check.get(tokenDigest) as { expires_at: number } | undefined;
+      const row = this.sessionRow(tokenDigest);
       if (!row || row.expires_at <= now) this.selection.delete(tokenDigest);
     }
   }
@@ -218,9 +231,10 @@ export class WorkbenchAuthority {
     const drafts = this.store.db
       .prepare(
         `SELECT d.id FROM reply_drafts d JOIN inbound_events e ON e.id=d.event_id
-         WHERE e.target_key=? AND d.status='APPROVED' AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id)`,
+         WHERE e.account_id=? AND e.channel=? AND e.target_key=? AND d.status='APPROVED'
+         AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id)`,
       )
-      .all(targetKey(e.payload)) as { id: string }[];
+      .all(this.accountId, e.payload.channel, targetKey(e.payload)) as { id: string }[];
     for (const d of drafts) this.store.invalidateApproval(d.id);
   }
   claim(token: string, eventId: string, expected: number): Ownership {
@@ -396,10 +410,10 @@ export class WorkbenchAuthority {
       .immediate();
   }
   mode(): Mode {
-    return (this.store.db.prepare("SELECT mode FROM client_state WHERE id=1").get() as { mode: Mode }).mode;
+    return this.store.clientState().mode;
   }
   paused(): boolean {
-    return !!(this.store.db.prepare("SELECT paused FROM client_state WHERE id=1").get() as { paused: number }).paused;
+    return !!this.store.clientState().paused;
   }
   pause(token: string, eventId: string | null, paused: boolean): void {
     this.operator(token, "CONTROL");
@@ -407,15 +421,15 @@ export class WorkbenchAuthority {
       .transaction(() => {
         const events = eventId ? [this.store.event(eventId)] : this.store.events();
         if (!eventId) {
-          this.store.db.prepare("UPDATE client_state SET paused=? WHERE id=1").run(Number(paused));
+          this.store.updateClientState({ paused: Number(paused) });
           if (paused) cancelUnsubmittedFollowups(this.store, this.now(), {}, "ACCOUNT_PAUSED");
         }
         const seen = new Set<string>();
         for (const e of events) {
-          const key = targetKey(e.payload);
+          const key = JSON.stringify([e.payload.channel, targetKey(e.payload)]);
           if (seen.has(key)) continue;
           seen.add(key);
-          if (eventId) this.store.pause(key, paused);
+          if (eventId) this.store.pause(targetKey(e.payload), paused);
           if (paused && !eventId) {
             const o = this.ownership(e);
             this.writeOwner(e, null, o.generation + 1, 0);
@@ -446,20 +460,21 @@ export class WorkbenchAuthority {
       (mode === "MANUAL" || mode === "AI_ASSISTED")
     ) {
       requireSafe(
-        this.store.db
-          .prepare("SELECT channel FROM channel_capabilities WHERE state='SEND_AVAILABLE' AND expires_at>? LIMIT 1")
-          .get(this.now()) ||
+        this.channels.hasSendCapability() ||
           this.store.db
-            .prepare("SELECT event_id FROM controlled_trials WHERE used=0 AND expires_at>? LIMIT 1")
-            .get(this.now()),
+            .prepare(`SELECT t.event_id FROM controlled_trials t JOIN inbound_events e ON e.id=t.event_id
+              WHERE e.account_id=? AND t.used=0 AND t.expires_at>? LIMIT 1`)
+            .get(this.accountId, this.now()),
         "CAPABILITY_UNVERIFIED",
       );
     }
-    this.store.db.prepare("UPDATE client_state SET mode=? WHERE id=1").run(mode);
-    if (mode === "OBSERVE" || mode === "DRAFT_ONLY") {
-      for (const e of this.store.events()) this.invalidate(e);
-    }
-    this.store.audit("MODE_CHANGED", digest(mode));
+    this.store.db.transaction(() => {
+      this.store.updateClientState({ mode });
+      if (mode === "OBSERVE" || mode === "DRAFT_ONLY") {
+        for (const e of this.store.events()) this.invalidate(e);
+      }
+      this.store.audit("MODE_CHANGED", digest(mode));
+    }).immediate();
   }
   attest(...args: Parameters<ChannelAuthority["attest"]>): void {
     this.channels.attest(...args);
@@ -475,6 +490,9 @@ export class WorkbenchAuthority {
   }
   capability(...args: Parameters<ChannelAuthority["capability"]>) {
     return this.channels.capability(...args);
+  }
+  capabilitySnapshot(...args: Parameters<ChannelAuthority["capabilitySnapshot"]>) {
+    return this.channels.capabilitySnapshot(...args);
   }
   assertCanSend(
     token: string,
@@ -520,8 +538,9 @@ export class WorkbenchAuthority {
   }
   command(id: string): CommandRow {
     const row = this.store.db
-      .prepare("SELECT * FROM manual_send_commands WHERE command_id=?")
-      .get(id) as CommandRow | undefined;
+      .prepare(`SELECT c.* FROM manual_send_commands c JOIN inbound_events e ON e.id=c.event_id
+        WHERE c.command_id=? AND e.account_id=?`)
+      .get(id, this.store.accountId) as CommandRow | undefined;
     requireSafe(row, "COMMAND_NOT_FOUND");
     return row;
   }
@@ -580,9 +599,11 @@ export class WorkbenchAuthority {
   }
   approval(id: string): { snapshot: string; expires_at: number } {
     const a = this.store.db
-      .prepare("SELECT snapshot,expires_at FROM client_approvals WHERE command_id=?")
-      .get(id) as { snapshot: string; expires_at: number } | undefined;
-    requireSafe(a, "APPROVAL_REQUIRED");
+      .prepare(`SELECT a.snapshot,a.expires_at FROM manual_send_commands c JOIN inbound_events e ON e.id=c.event_id
+        LEFT JOIN client_approvals a ON a.command_id=c.command_id WHERE c.command_id=? AND e.account_id=?`)
+      .get(id, this.store.accountId) as { snapshot: string; expires_at: number } | { snapshot: null; expires_at: null } | undefined;
+    requireSafe(a, "COMMAND_NOT_FOUND");
+    requireSafe(a.snapshot !== null, "APPROVAL_REQUIRED");
     return a;
   }
   dispatchGuard(token: string, id: string, identity: () => CapabilityIdentity | null) {
@@ -656,12 +677,45 @@ export class WorkbenchAuthority {
     this.store.db
       .prepare(
         `UPDATE manual_send_commands SET status=COALESCE((SELECT status FROM send_intents WHERE id=intent_id),'FAILED_BEFORE_CLICK'),
-         reason='RESTART_NO_REPLAY' WHERE status IN ('PREPARING','QUEUED','PREFLIGHT','SENDING','PREVIEW')`,
+         reason='RESTART_NO_REPLAY' WHERE status IN ('PREPARING','QUEUED','PREFLIGHT','SENDING','PREVIEW')
+         AND event_id IN (SELECT id FROM inbound_events WHERE account_id=?)`,
       )
-      .run();
+      .run(this.accountId);
     this.expireOperators("ALL");
   }
   expireOperators(scope: "ALL" | "DESKTOP" = "ALL"): void {
-    expireOperatorsImpl(this, this.hooks, scope);
+    if (this.store.schemaVersion() < 4) {
+      expireOperatorsImpl(this, this.hooks, scope);
+      return;
+    }
+    const { db } = this.store;
+    const desktopOnly = scope === "DESKTOP" && this.assistant.available();
+    const excludeAssistant = desktopOnly ? "AND operator_id NOT IN (SELECT operator_id FROM assistant_sessions)" : "";
+    db.transaction(() => {
+      const now = this.now();
+      const excludeAssistantDrafts = desktopOnly ? `AND NOT EXISTS (
+        SELECT 1 FROM thread_ownership o JOIN assistant_sessions a ON a.operator_id=o.operator_id
+        JOIN operator_sessions s ON s.id=o.operator_id
+        WHERE o.account_id=e.account_id AND o.channel=e.channel AND o.target_key=e.target_key
+          AND o.lease_expires_at>? AND s.expires_at>?
+      ) AND NOT EXISTS (
+        SELECT 1 FROM manual_send_commands c JOIN assistant_commands ac ON ac.command_id=c.command_id
+        WHERE c.event_id=e.id AND c.status IN ('PREPARING','QUEUED','PREFLIGHT','SENDING')
+      )` : "";
+      const drafts = db.prepare(`SELECT d.id FROM reply_drafts d JOIN inbound_events e ON e.id=d.event_id
+        WHERE e.account_id=? AND d.status='APPROVED' AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id)
+        ${excludeAssistantDrafts} ORDER BY d.rowid`).all(this.accountId, ...(desktopOnly ? [now, now] : [])) as { id: string }[];
+      for (const draft of drafts) this.store.invalidateApproval(draft.id);
+      if (desktopOnly) db.prepare(`UPDATE manual_send_commands SET status='FAILED_BEFORE_CLICK',reason='OPERATOR_EXPIRED'
+        WHERE event_id IN (SELECT id FROM inbound_events WHERE account_id=?) AND intent_id IS NULL
+        AND status IN ('PREPARING','PREVIEW','QUEUED','PREFLIGHT') ${excludeAssistant}`).run(this.accountId);
+      cancelUnsubmittedFollowups(this.store, now, { excludeAssistant: desktopOnly }, "OPERATOR_EXPIRED");
+      db.prepare(`UPDATE thread_ownership SET operator_id=NULL,generation=generation+1,lease_expires_at=0
+        WHERE account_id=? AND operator_id IS NOT NULL ${excludeAssistant}`).run(this.accountId);
+      db.prepare(`UPDATE operator_sessions SET expires_at=0 WHERE id IN (
+        SELECT operator_id FROM account_operator_sessions WHERE account_id=? ${excludeAssistant}
+      )`).run(this.accountId);
+    }).immediate();
+    this.pruneExpiredSelections();
   }
 }

@@ -60,8 +60,23 @@ function writeCounters(db: Database.Database) {
   ].join("/");
 }
 
+// The unchanged provider inspector is schema3-gated, but its extension DDL and checks are identical on schema4.
+// Adapt only its version read, leaving the owner database header and transaction semantics intact.
+function providerExtensionView(db: Database.Database): Database.Database {
+  if (db.pragma("user_version", { simple: true }) !== 4) return db;
+  return new Proxy(db, {
+    get(target, key) {
+      if (key === "pragma") return (source: string, options?: Database.PragmaOptions) =>
+        source === "user_version" && options?.simple ? 3 : target.pragma(source, options);
+      const value: unknown = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 function verifyDatabase(db: Database.Database, tables: string[], before: string, code: string) {
-  requireSafe(db.pragma("user_version", { simple: true }) === 3 && db.pragma("quick_check", { simple: true }) === "ok"
+  const version = db.pragma("user_version", { simple: true });
+  requireSafe((version === 3 || version === 4) && db.pragma("quick_check", { simple: true }) === "ok"
     && (db.pragma("foreign_key_check") as unknown[]).length === 0 && migrationInventory(db, tables) === before, code);
 }
 
@@ -74,8 +89,9 @@ async function restoreProbe(backup: string, directory: string, seed: LegacyModel
     const trial = new Database(trialFile, { fileMustExist: true });
     try {
       trial.pragma("foreign_keys = ON");
-      initializeModelProviderSchema(trial, seed);
-      requireSafe(inspectModelProviderSchema(trial) === "READY", "MODEL_PROVIDER_MIGRATION_TRIAL_FAILED");
+      const extension = providerExtensionView(trial);
+      initializeModelProviderSchema(extension, seed);
+      requireSafe(inspectModelProviderSchema(extension) === "READY", "MODEL_PROVIDER_MIGRATION_TRIAL_FAILED");
       verifyDatabase(trial, tables, before, "MODEL_PROVIDER_MIGRATION_TRIAL_FAILED");
     } finally { trial.close(); }
 
@@ -84,7 +100,7 @@ async function restoreProbe(backup: string, directory: string, seed: LegacyModel
     const restored = new Database(trialFile, { readonly: true, fileMustExist: true });
     try {
       verifyDatabase(restored, tables, before, "MODEL_PROVIDER_MIGRATION_RESTORE_FAILED");
-      requireSafe(inspectModelProviderSchema(restored) === "ABSENT"
+      requireSafe(inspectModelProviderSchema(providerExtensionView(restored)) === "ABSENT"
         && schemaDigest(restored) === originalSchema, "MODEL_PROVIDER_MIGRATION_RESTORE_FAILED");
     } finally { restored.close(); }
   } finally {
@@ -96,7 +112,7 @@ async function restoreProbe(backup: string, directory: string, seed: LegacyModel
 export async function migrateModelProviders(store: { db: Database.Database }, root: string,
   options: MigrationOptions = {}): Promise<boolean | typeof LEGACY_KEY_WARNING> {
   const { db } = store;
-  if (inspectModelProviderSchema(db) === "READY") return false;
+  if (inspectModelProviderSchema(providerExtensionView(db)) === "READY") return false;
   requireSafe(!db.inTransaction && db.pragma("foreign_keys", { simple: true }) === 1, "MODEL_PROVIDER_SCHEMA_INVALID");
   const stats = lstatSync(root);
   requireSafe(stats.isDirectory() && !stats.isSymbolicLink(), "MODEL_PROVIDER_BACKUP_PATH_INVALID");
@@ -137,7 +153,7 @@ export async function migrateModelProviders(store: { db: Database.Database }, ro
       && migrationInventory(db, source.tables) === source.rows, "DATABASE_CHANGED_DURING_MIGRATION");
     requireSafe(digest(legacyDigests(captureLegacyFiles(canonicalRoot))) === digest(sourceFilesDigest),
       "MODEL_PROVIDER_LEGACY_FILES_CHANGED");
-    initializeModelProviderSchema(db, migration);
+    initializeModelProviderSchema(providerExtensionView(db), migration);
     verifyDatabase(db, source.tables, source.rows, "MODEL_PROVIDER_MIGRATION_PUBLISH_FAILED");
     if (warning) db.prepare("INSERT INTO audit_events VALUES(?,?,?,?,?)")
       .run(randomUUID(), new Date().toISOString(), warning, migration.connectionId, "{}");

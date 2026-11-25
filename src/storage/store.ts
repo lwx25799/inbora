@@ -5,7 +5,9 @@ import { dirname } from 'node:path';
 import { z } from 'zod';
 import {readCommentThreadContext} from './comment-thread-context.js';
 import {assertSecurityChannelClear} from './security-holds.js';
-import { DEFAULT_ACCOUNT_ID, type AccountId } from '../contracts/account.js';
+import { assertSchema4Complete } from './schema4-migration.js';
+import { accountIdSchema, DEFAULT_ACCOUNT_ID, DOUYIN_PLATFORM_ID, type AccountId } from '../contracts/account.js';
+import type { Mode } from '../contracts/client.js';
 import {
   digest, dmClockToleranceMs, eventBinding, eventSchema, isEligible, isManualMediaCandidate, isStrong, requireSafe, targetKey, validText,
   validManualMediaProof,
@@ -27,24 +29,29 @@ export interface Intent { id: string; event_id: string; target_key: string; stat
 const retryGrantSchema=z.object({eventId:z.uuid(),draftId:z.uuid(),previousIntentId:z.uuid(),version:z.number().int().positive(),
   textDigest:z.string().regex(/^[a-f0-9]{64}$/),snapshotDigest:z.string().regex(/^[a-f0-9]{64}$/),authorizationDigest:z.string().regex(/^[a-f0-9]{64}$/)});
 export type RetryGrant=z.infer<typeof retryGrantSchema>;
+type ClientState = { paused: number; mode: Mode };
 
 export class EventStore {
   readonly db: Database.Database;
   constructor(file: string, initialize = false, private readonly now: () => string = () => new Date().toISOString(),
     readonly accountId: AccountId = DEFAULT_ACCOUNT_ID) {
-    // Both legacy schema versions have the same single-account storage constraint.
-    requireSafe(accountId === DEFAULT_ACCOUNT_ID, 'ACCOUNT_UNSUPPORTED_SCHEMA3');
+    if (accountId !== DEFAULT_ACCOUNT_ID) requireSafe(existsSync(file), 'ACCOUNT_UNSUPPORTED_SCHEMA3');
     requireSafe(initialize || existsSync(file), 'DATABASE_MISSING_USE_INIT');
     if (initialize) mkdirSync(dirname(file), { recursive: true });
     this.db = new Database(file, { fileMustExist: !initialize });
     try {
       requireSafe(this.db.pragma('quick_check', { simple: true }) === 'ok', 'DATABASE_CORRUPT');
+      const version = this.schemaVersion();
+      requireSafe(version === 2 || version === 3 || version === 4 || (version === 0 && initialize), 'DATABASE_SCHEMA_UNSUPPORTED');
+      if (version === 4) {
+        requireSafe(accountIdSchema.safeParse(accountId).success, 'INVALID_ACCOUNT_ID');
+        this.db.transaction(() => assertSchema4Complete(this.db))();
+      }
+      else requireSafe(accountId === DEFAULT_ACCOUNT_ID, 'ACCOUNT_UNSUPPORTED_SCHEMA3');
       this.db.pragma('journal_mode = WAL');
       this.db.pragma('synchronous = FULL');
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('busy_timeout = 3000');
-      const version = this.db.pragma('user_version', { simple: true });
-      requireSafe(version === 2 || version === 3 || (version === 0 && initialize), 'DATABASE_SCHEMA_UNSUPPORTED');
       if (version === 0) this.schema();
     } catch (error) { this.db.close(); throw error; }
   }
@@ -85,6 +92,23 @@ export class EventStore {
     }).immediate();
   }
   close(): void { this.db.close(); }
+  schemaVersion(): number { return this.db.pragma('user_version', { simple: true }) as number; }
+  clientState(): ClientState {
+    const row = this.schemaVersion() >= 4
+      ? this.db.prepare('SELECT paused,mode FROM account_client_state WHERE account_id=?').get(this.accountId)
+      : this.db.prepare('SELECT paused,mode FROM client_state WHERE id=1').get();
+    return (row as ClientState | undefined) ?? { paused: 0, mode: 'DRAFT_ONLY' };
+  }
+  updateClientState(change: Partial<ClientState>): void {
+    this.db.transaction(() => {
+      const { paused, mode } = { ...this.clientState(), ...change };
+      const schema4 = this.schemaVersion() >= 4;
+      if (schema4) this.db.prepare(`INSERT INTO account_client_state (account_id,paused,mode) VALUES (?,?,?)
+        ON CONFLICT(account_id) DO UPDATE SET paused=excluded.paused,mode=excluded.mode`).run(this.accountId, paused, mode);
+      if (!schema4 || this.accountId === DEFAULT_ACCOUNT_ID)
+        this.db.prepare('UPDATE client_state SET paused=?,mode=? WHERE id=1').run(paused, mode);
+    }).immediate();
+  }
   assertAccount(accountId: AccountId): void {
     requireSafe(accountId === this.accountId, 'ACCOUNT_CHANGED');
   }
@@ -101,14 +125,35 @@ export class EventStore {
     this.assertAccount(accountId);
     requireSafe(typeof ownId === 'string' && ownId.trim().length > 0, 'ACCOUNT_REQUIRED');
     this.db.transaction(() => {
-      const bound = this.accountOwnId(accountId);
-      requireSafe(bound === undefined || bound === ownId, 'ACCOUNT_CHANGED');
-      this.db.prepare('INSERT OR IGNORE INTO accounts VALUES (?,?)').run(accountId, ownId);
+      if (this.schemaVersion() >= 4) {
+        const account = this.db.prepare('SELECT own_id, platform, status FROM accounts WHERE id=?').get(accountId) as
+          { own_id: string; platform: string; status: string } | undefined;
+        requireSafe(account || accountId === DEFAULT_ACCOUNT_ID, 'ACCOUNT_NOT_FOUND');
+        requireSafe(!account || account.status === 'ACTIVE', 'ACCOUNT_NOT_ACTIVE');
+        requireSafe(!account?.own_id || account.own_id === ownId, 'ACCOUNT_CHANGED');
+        requireSafe(!this.db.prepare('SELECT 1 FROM accounts WHERE platform=? AND own_id=? AND id<>?')
+          .get(account?.platform ?? DOUYIN_PLATFORM_ID, ownId, accountId), 'ACCOUNT_IDENTITY_CONFLICT');
+        if (account?.own_id === '') {
+          this.db.prepare("UPDATE accounts SET own_id=?, updated_at=? WHERE id=? AND own_id=''")
+            .run(ownId, this.now(), accountId);
+          return;
+        }
+      } else {
+        const account = this.db.prepare('SELECT own_id FROM accounts WHERE id=?').pluck().get(accountId);
+        requireSafe(account === undefined || account === ownId, 'ACCOUNT_CHANGED');
+      }
+      this.db.prepare('INSERT OR IGNORE INTO accounts (id, own_id) VALUES (?, ?)').run(accountId, ownId);
     }).immediate();
   }
-  audit(code: string, id: string, detail: Record<string, number | boolean> = {}): void {
-    this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)')
-      .run(randomUUID(), new Date().toISOString(), code, id, JSON.stringify(detail));
+  audit(code: string, id: string, detail: Record<string, unknown> = {}, time = new Date().toISOString()): void {
+    this.writeAudit(randomUUID(), time, code, id, detail);
+  }
+  private writeAudit(auditId: string, time: string, code: string, id: string, detail: Record<string, unknown>): void {
+    this.db.transaction(() => {
+      this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)').run(auditId, time, code, id, JSON.stringify(detail));
+      if (this.schemaVersion() >= 4) this.db.prepare('INSERT OR IGNORE INTO account_audit_links (audit_id, account_id) VALUES (?, ?)')
+        .run(auditId, this.accountId);
+    }).immediate();
   }
   observe(channel: Channel, scope: string, candidates: InboundEvent[], ownId: string, evidenceRef: string, observedAt = this.now(), firstBoundary?: number): string[] {
     return this.db.transaction(() => {
@@ -116,7 +161,11 @@ export class EventStore {
       const events = candidates.map(e => eventSchema.parse(e));
       for (const event of events) this.assertAccount(event.accountId);
       requireSafe(events.every(e => e.channel === channel), 'CHANNEL_MISMATCH');
-      const cursor = this.db.prepare('SELECT cursor_data FROM cursors WHERE channel=? AND scope=?').get(channel, scope) as {cursor_data:string}|undefined;
+      const schema4 = this.schemaVersion() >= 4;
+      const legacy = !schema4 || this.accountId === DEFAULT_ACCOUNT_ID;
+      const cursor = (schema4 ? this.db.prepare('SELECT cursor_data FROM account_cursors WHERE account_id=? AND channel=? AND scope=?')
+        .get(this.accountId, channel, scope) : this.db.prepare('SELECT cursor_data FROM cursors WHERE channel=? AND scope=?')
+        .get(channel, scope)) as {cursor_data:string}|undefined;
       const priorWatermark = cursor ? z.object({baselineTime:z.number().finite(),highWater:z.number().finite(),bindings:z.array(z.string())}).parse(JSON.parse(cursor.cursor_data)) : null;
       const absoluteTime = (value: string | null): number | null => {
         const parsed = z.iso.datetime({offset:true}).safeParse(value);
@@ -129,8 +178,10 @@ export class EventStore {
       const initialBoundary = priorWatermark?.baselineTime ?? firstBoundary ?? highWater;
       const newIds: string[] = [];
       const weakOccurrences = new Map<string, { eventId: string; count: number }>();
-      this.db.prepare('INSERT INTO observations VALUES (?,?,?,?,?,?)')
-        .run(randomUUID(), channel, scope, observedAt, events.length, evidenceRef);
+      const observation = [randomUUID(), channel, scope, observedAt, events.length, evidenceRef] as const;
+      if (schema4) this.db.prepare(`INSERT INTO account_observations (account_id, id, channel, scope, observed_at, count, evidence_ref)
+        VALUES (?,?,?,?,?,?,?)`).run(this.accountId, ...observation);
+      if (legacy) this.db.prepare('INSERT INTO observations VALUES (?,?,?,?,?,?)').run(...observation);
       for (const e of events) {
         if (!isEligible(e, ownId)) continue;
         const key = e.platformEventId ?? digest([e.actorId, e.occurredAt, targetKey(e), e.text]);
@@ -178,8 +229,12 @@ export class EventStore {
       for (const occurrence of weakOccurrences.values()) if (occurrence.count > 1)
         this.audit('WEAK_SOURCE_MULTIPLICITY', occurrence.eventId, { occurrences: occurrence.count });
       // Watermarks are per channel and conversation, not based only on message body.
-      this.db.prepare('INSERT INTO cursors VALUES (?,?,?,?) ON CONFLICT(channel,scope) DO UPDATE SET cursor_data=excluded.cursor_data,updated_at=excluded.updated_at')
-        .run(channel, scope, JSON.stringify({baselineTime:initialBoundary,highWater,bindings:events.map(eventBinding)}), observedAt);
+      const cursorData = JSON.stringify({baselineTime:initialBoundary,highWater,bindings:events.map(eventBinding)});
+      if (schema4) this.db.prepare(`INSERT INTO account_cursors (account_id, channel, scope, cursor_data, updated_at)
+        VALUES (?,?,?,?,?) ON CONFLICT(account_id,channel,scope) DO UPDATE SET cursor_data=excluded.cursor_data,updated_at=excluded.updated_at`)
+        .run(this.accountId, channel, scope, cursorData, observedAt);
+      if (legacy) this.db.prepare('INSERT INTO cursors VALUES (?,?,?,?) ON CONFLICT(channel,scope) DO UPDATE SET cursor_data=excluded.cursor_data,updated_at=excluded.updated_at')
+        .run(channel, scope, cursorData, observedAt);
       return newIds;
     }).immediate();
   }
@@ -211,20 +266,23 @@ export class EventStore {
       AND NOT EXISTS(SELECT 1 FROM automation_jobs j WHERE j.event_id=e.id)
       AND NOT EXISTS(SELECT 1 FROM reply_drafts d WHERE d.event_id=e.id)
       AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id) ORDER BY e.rowid`);
-    // A for-of return closes the SQLite iterator before its caller writes a job or starts I/O.
-    for(const row of statement.iterate(this.accountId,...channels) as IterableIterator<EventRow>){
+    // Finish the query before invoking matches, which can query the same connection.
+    const rows = statement.all(this.accountId, ...channels) as EventRow[];
+    for (const row of rows) {
       const event=decodeEventRow(row, this.accountId);if(matches(event))return event;
     }
     return undefined;
   }
   draft(id: string): Draft {
-    const row = this.db.prepare('SELECT * FROM reply_drafts WHERE id=?').get(id) as DraftRow | undefined;
+    const row = this.db.prepare(`SELECT d.* FROM reply_drafts d JOIN inbound_events e ON e.id=d.event_id
+      WHERE e.account_id=? AND d.id=?`).get(this.accountId, id) as DraftRow | undefined;
     requireSafe(row, 'DRAFT_NOT_FOUND');
     return { id: row.id, eventId: row.event_id, text: row.text, model: row.model, version: row.version,
       status: row.status, approval: row.approval ? JSON.parse(row.approval) as Draft['approval'] : null };
   }
   saveDraft(eventId: string, text: string, model: string): Draft {
-    requireSafe(this.db.pragma('user_version',{simple:true})!==3,'CLIENT_USE_VERSIONED_DRAFT_SERVICE');
+    const v = this.schemaVersion();
+    requireSafe(v !== 3 && v !== 4, 'CLIENT_USE_VERSIONED_DRAFT_SERVICE');
     text=validText(text);
     return this.db.transaction(() => {
       const e = this.event(eventId);
@@ -278,16 +336,23 @@ export class EventStore {
   }
   pause(key: string, paused: boolean): void {
     this.db.transaction(() => {
-      this.db.prepare('INSERT INTO pauses VALUES (?,?) ON CONFLICT(target_key) DO UPDATE SET paused=excluded.paused').run(key, Number(paused));
+      const v = this.schemaVersion();
+      if (v >= 4) this.db.prepare(`INSERT INTO account_pauses (account_id, target_key, paused) VALUES (?,?,?)
+        ON CONFLICT(account_id,target_key) DO UPDATE SET paused=excluded.paused`).run(this.accountId, key, Number(paused));
+      if (v < 4 || this.accountId === DEFAULT_ACCOUNT_ID)
+        this.db.prepare('INSERT INTO pauses VALUES (?,?) ON CONFLICT(target_key) DO UPDATE SET paused=excluded.paused').run(key, Number(paused));
       if (paused) {
-        if(this.db.pragma('user_version',{simple:true})===3){
-          this.db.prepare('UPDATE thread_ownership SET operator_id=NULL,generation=generation+1,lease_expires_at=0 WHERE target_key=?').run(key);
+        if(v>=3){
+          this.db.prepare('UPDATE thread_ownership SET operator_id=NULL,generation=generation+1,lease_expires_at=0 WHERE account_id=? AND target_key=?')
+            .run(this.accountId, key);
           this.db.prepare(`UPDATE manual_send_commands SET status='FAILED_BEFORE_CLICK',reason='TARGET_PAUSED'
-            WHERE event_id IN (SELECT id FROM inbound_events WHERE target_key=?) AND intent_id IS NULL
-            AND status IN ('PREPARING','PREVIEW','QUEUED','PREFLIGHT')`).run(key);
+            WHERE event_id IN (SELECT id FROM inbound_events WHERE account_id=? AND target_key=?) AND intent_id IS NULL
+            AND status IN ('PREPARING','PREVIEW','QUEUED','PREFLIGHT')`).run(this.accountId, key);
           if(this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='human_reply_turns'").get()){
-            const pendingTurns=this.db.prepare("SELECT command_id,event_id,text,version FROM human_reply_turns WHERE target_key=? AND intent_id IS NULL AND status IN ('PREPARING','APPROVED') ORDER BY rowid")
-              .all(key) as {command_id:string;event_id:string;text:string;version:number}[];
+            const pendingTurns=this.db.prepare(`SELECT t.command_id,t.event_id,t.text,t.version FROM human_reply_turns t
+              JOIN inbound_events e ON e.id=t.event_id WHERE e.account_id=? AND t.target_key=? AND t.intent_id IS NULL
+              AND t.status IN ('PREPARING','APPROVED') ORDER BY t.rowid`)
+              .all(this.accountId, key) as {command_id:string;event_id:string;text:string;version:number}[];
             const nowMs=Date.parse(this.now())||Date.now();
             for(const turn of pendingTurns){
               if(this.db.prepare("UPDATE human_reply_turns SET status='FAILED_BEFORE_CLICK',reason='TARGET_PAUSED',approval=NULL WHERE command_id=? AND intent_id IS NULL AND status IN ('PREPARING','APPROVED')").run(turn.command_id).changes===1)
@@ -296,11 +361,12 @@ export class EventStore {
           }
         }
         const drafts = this.db.prepare(`SELECT d.id FROM reply_drafts d JOIN inbound_events e ON e.id=d.event_id
-          WHERE e.target_key=? AND d.status='APPROVED' AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id)`).all(key) as {id:string}[];
+          WHERE e.account_id=? AND e.target_key=? AND d.status='APPROVED' AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id)`)
+          .all(this.accountId, key) as {id:string}[];
         for (const d of drafts) this.invalidateApproval(d.id);
         const grants=this.db.prepare(`SELECT g.id FROM audit_events g JOIN send_intents i ON i.id=g.entity_id
-          WHERE g.event_type='MANUAL_RETRY_AUTHORIZED' AND i.target_key=? AND NOT EXISTS
-          (SELECT 1 FROM audit_events r WHERE r.event_type='MANUAL_RETRY_REVOKED' AND r.entity_id=g.id)`).all(key) as {id:string}[];
+          JOIN inbound_events e ON e.id=i.event_id WHERE g.event_type='MANUAL_RETRY_AUTHORIZED' AND e.account_id=? AND i.target_key=? AND NOT EXISTS
+          (SELECT 1 FROM audit_events r WHERE r.event_type='MANUAL_RETRY_REVOKED' AND r.entity_id=g.id)`).all(this.accountId, key) as {id:string}[];
         for(const g of grants)this.audit('MANUAL_RETRY_REVOKED',g.id);
       }
       this.audit(paused ? 'PAUSED' : 'RESUMED', digest(key));
@@ -308,11 +374,13 @@ export class EventStore {
   }
   sendFrozen(eventId:string):boolean {
     const event=this.event(eventId),next=event.payload;
-    const unresolved=this.db.prepare("SELECT event_id,status,attempt_started_at FROM send_intents WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')")
-      .all(targetKey(next)) as {event_id:string;status:string;attempt_started_at:string|null}[];
+    const unresolved=this.db.prepare(`SELECT i.event_id,i.status,i.attempt_started_at FROM send_intents i JOIN inbound_events e ON e.id=i.event_id
+      WHERE e.account_id=? AND i.target_key=? AND i.status IN ('INTENT_RECORDED','UNCERTAIN')`)
+      .all(this.accountId, targetKey(next)) as {event_id:string;status:string;attempt_started_at:string|null}[];
     if(this.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get())
-      unresolved.push(...this.db.prepare("SELECT event_id,status,attempt_started_at FROM human_reply_turns WHERE target_key=? AND status IN ('INTENT_RECORDED','UNCERTAIN')")
-        .all(targetKey(next)) as typeof unresolved);
+      unresolved.push(...this.db.prepare(`SELECT t.event_id,t.status,t.attempt_started_at FROM human_reply_turns t
+        JOIN inbound_events e ON e.id=t.event_id WHERE e.account_id=? AND t.target_key=? AND t.status IN ('INTENT_RECORDED','UNCERTAIN')`)
+        .all(this.accountId, targetKey(next)) as typeof unresolved);
     if(!unresolved.length)return false;
     // A legacy DM outcome belongs to its original inbound. It must not stop distinct later messages forever.
     if(next.channel!=='DIRECT_MESSAGE'||!(isStrong(next)||isManualMediaCandidate(next))||next.direction!=='INCOMING'||next.kind!=='DM')return true;
@@ -334,8 +402,16 @@ export class EventStore {
     requireSafe(!this.sendFrozen(eventId), 'TARGET_FROZEN');
     requireSafe(!this.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(eventId), 'INTENT_EXISTS');
   }
-  assertTargetUnpaused(key:string):void {
-    requireSafe(!(this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as {paused:number}|undefined)?.paused,'TARGET_PAUSED');
+  targetPaused(key: string): boolean {
+    const v = this.schemaVersion();
+    const accountPaused = v >= 4 && this.db.prepare('SELECT paused FROM account_pauses WHERE account_id=? AND target_key=?')
+      .pluck().get(this.accountId, key);
+    const legacyPaused = (v < 4 || this.accountId === DEFAULT_ACCOUNT_ID) &&
+      this.db.prepare('SELECT paused FROM pauses WHERE target_key=?').pluck().get(key);
+    return Boolean(accountPaused || legacyPaused);
+  }
+  assertTargetUnpaused(key: string): void {
+    requireSafe(!this.targetPaused(key), 'TARGET_PAUSED');
   }
   hasIntentForDraft(draftId:string):boolean {
     return !!this.db.prepare('SELECT id FROM send_intents WHERE draft_id=?').get(draftId);
@@ -360,7 +436,7 @@ export class EventStore {
   recordIntent(draftId: string, snapshot: TargetSnapshot, real: boolean,
     authority?: { check(): void; committed(intentId: string): void;manualMedia?():void }): string {
     return this.db.transaction(() => {
-      requireSafe(this.db.pragma('user_version', {simple:true}) !== 3 || authority, 'CLIENT_AUTHORITY_REQUIRED');
+      requireSafe(this.schemaVersion() < 3 || authority, 'CLIENT_AUTHORITY_REQUIRED');
       authority?.check();
       const d = this.draft(draftId); this.assertSendable(d.eventId);
       assertSecurityChannelClear(this,this.event(d.eventId).payload.channel);
@@ -381,16 +457,16 @@ export class EventStore {
     }).immediate();
   }
   private submissionProof(id:string,proof:SendProof|undefined):void{
-    if(proof?.clockSkew)this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)').run(randomUUID(),new Date().toISOString(),'CLOCK_SKEW_PROOF',id,
-      JSON.stringify({...proof.clockSkew,refreshedId:undefined,allowedSkewMs:dmClockToleranceMs,
-        observedSkewMs:Date.parse(proof.clockSkew.boundary)-Date.parse(proof.sentAt),nativeIdDigest:digest(proof.id),proofDigest:digest(proof)}));
+    if(proof?.clockSkew)this.audit('CLOCK_SKEW_PROOF',id,
+      {...proof.clockSkew,refreshedId:undefined,allowedSkewMs:dmClockToleranceMs,
+        observedSkewMs:Date.parse(proof.clockSkew.boundary)-Date.parse(proof.sentAt),nativeIdDigest:digest(proof.id),proofDigest:digest(proof)});
     if(!proof?.submission)return;
-    this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)').run(randomUUID(),new Date().toISOString(),'SUBMISSION_PROOF',id,
-      JSON.stringify({...proof.submission,nativeIdDigest:digest(proof.id),proofDigest:digest(proof)}));
+    this.audit('SUBMISSION_PROOF',id,{...proof.submission,nativeIdDigest:digest(proof.id),proofDigest:digest(proof)});
   }
   receipt(intentId: string, result: 'CONFIRMED' | 'UNCERTAIN', proofRef: string,proof?:SendProof): void {
     this.db.transaction(() => {
-      const intent = this.db.prepare('SELECT * FROM send_intents WHERE id=?').get(intentId) as Intent | undefined;
+      const intent = this.db.prepare(`SELECT i.* FROM send_intents i JOIN inbound_events e ON e.id=i.event_id
+        WHERE e.account_id=? AND i.id=?`).get(this.accountId, intentId) as Intent | undefined;
       requireSafe(intent && ['INTENT_RECORDED', 'UNCERTAIN'].includes(intent.status), 'INTENT_NOT_REVIEWABLE');
       if(result==='CONFIRMED'){
         this.submissionProof(intentId,proof);
@@ -406,20 +482,25 @@ export class EventStore {
   }
   recover(): number {
     return this.db.transaction(() => {
-      const pending = this.db.prepare("SELECT id FROM send_intents WHERE status='INTENT_RECORDED'").all() as { id: string }[];
+      const pending = this.db.prepare(`SELECT i.id FROM send_intents i JOIN inbound_events e ON e.id=i.event_id
+        WHERE e.account_id=? AND i.status='INTENT_RECORDED'`).all(this.accountId) as { id: string }[];
       for (const i of pending) this.receipt(i.id, 'UNCERTAIN', 'RESTART_WITH_UNFINISHED_INTENT');
-      const retries=this.db.prepare(`SELECT i.id FROM audit_events i WHERE i.event_type='MANUAL_RETRY_INTENT' AND NOT EXISTS
-        (SELECT 1 FROM audit_events r WHERE r.event_type='MANUAL_RETRY_RECEIPT' AND r.entity_id=i.id)`).all() as {id:string}[];
+      const retries=this.db.prepare(`SELECT i.id FROM audit_events i
+        JOIN inbound_events e ON e.id=json_extract(i.detail_redacted,'$.eventId')
+        WHERE e.account_id=? AND i.event_type='MANUAL_RETRY_INTENT' AND NOT EXISTS
+        (SELECT 1 FROM audit_events r WHERE r.event_type='MANUAL_RETRY_RECEIPT' AND r.entity_id=i.id)`).all(this.accountId) as {id:string}[];
       for(const r of retries)this.commentRetryReceipt(r.id,'UNCERTAIN','RESTART_WITH_UNFINISHED_RETRY');
       return pending.length+retries.length;
     }).immediate();
   }
   uncertain(): Intent[] {
-    return this.db.prepare("SELECT id,event_id,target_key,status FROM send_intents WHERE status='UNCERTAIN'").all() as Intent[];
+    return this.db.prepare(`SELECT i.id,i.event_id,i.target_key,i.status FROM send_intents i
+      JOIN inbound_events e ON e.id=i.event_id WHERE e.account_id=? AND i.status='UNCERTAIN'`).all(this.accountId) as Intent[];
   }
   receiptForEvent(eventId: string): unknown {
     return this.db.prepare(`SELECT r.id,r.result,r.proof_ref,r.verified_at FROM delivery_receipts r
-      JOIN send_intents i ON i.id=r.send_intent_id WHERE i.event_id=? ORDER BY r.rowid DESC LIMIT 1`).get(eventId);
+      JOIN send_intents i ON i.id=r.send_intent_id JOIN inbound_events e ON e.id=i.event_id
+      WHERE e.account_id=? AND e.id=? ORDER BY r.rowid DESC LIMIT 1`).get(this.accountId, eventId);
   }
   intentBoundary(intentId: string): string {
     const row=this.db.prepare('SELECT attempt_started_at FROM send_intents WHERE id=?').get(intentId) as {attempt_started_at:string}|undefined;
@@ -436,7 +517,7 @@ export class EventStore {
         .get(intentId,event.id,draft.id,snapshot.targetKey,digest(snapshot),digest(draft.text)), 'INTENT_BINDING_CHANGED');
   }
   private retryAudit(id:string,type:string,entityId:string,detail:Record<string,unknown>):void{
-    this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?)').run(id,new Date().toISOString(),type,entityId,JSON.stringify(detail));
+    this.writeAudit(id,new Date().toISOString(),type,entityId,detail);
   }
   retryGrant(id:string):RetryGrant{
     const row=this.db.prepare("SELECT detail_redacted FROM audit_events WHERE id=? AND event_type='MANUAL_RETRY_AUTHORIZED'").get(id) as {detail_redacted:string}|undefined;
@@ -450,7 +531,7 @@ export class EventStore {
     }).immediate();
   }
   authorizeCommentRetry(draftId:string,snapshot:TargetSnapshot,authorizationRef:string):string{
-    requireSafe(this.db.pragma('user_version',{simple:true})!==3,'CLIENT_UNKNOWN_READ_ONLY');
+    requireSafe(this.schemaVersion() < 3,'CLIENT_UNKNOWN_READ_ONLY');
     requireSafe(authorizationRef.length>0&&authorizationRef.length<=500,'MANUAL_RETRY_AUTHORIZATION_REQUIRED');
     return this.db.transaction(()=>{
       const draft=this.draft(draftId),event=this.event(draft.eventId),key=targetKey(event.payload);
@@ -478,7 +559,7 @@ export class EventStore {
     }).immediate();
   }
   assertCommentRetryAvailable(grantId:string,recordedIntentId?:string):RetryGrant{
-    requireSafe(this.db.pragma('user_version',{simple:true})!==3,'CLIENT_UNKNOWN_READ_ONLY');
+    requireSafe(this.schemaVersion() < 3,'CLIENT_UNKNOWN_READ_ONLY');
     const grant=this.retryGrant(grantId),draft=this.draft(grant.draftId),event=this.event(grant.eventId),key=targetKey(event.payload);
     assertSecurityChannelClear(this,event.payload.channel);
     const prior=this.db.prepare('SELECT status,event_id FROM send_intents WHERE id=?').get(grant.previousIntentId) as {status:string;event_id:string}|undefined;
@@ -542,17 +623,19 @@ export class EventStore {
   }
   stats(): Record<string, unknown> {
     return {
-      events: this.db.prepare('SELECT status,count(*) AS count FROM inbound_events GROUP BY status').all(),
+      events: this.db.prepare('SELECT status,count(*) AS count FROM inbound_events WHERE account_id=? GROUP BY status').all(this.accountId),
       budgets: this.budgets(),
       uncertain: this.uncertain().length,
       manualRetries:this.db.prepare(`SELECT i.id AS retryId,i.entity_id AS grantId,
         json_extract(i.detail_redacted,'$.eventId') AS eventId,
         COALESCE((SELECT json_extract(r.detail_redacted,'$.result') FROM audit_events r WHERE r.event_type='MANUAL_RETRY_RECEIPT' AND r.entity_id=i.id),'INTENT_RECORDED') AS result
-        FROM audit_events i WHERE i.event_type='MANUAL_RETRY_INTENT' ORDER BY i.rowid`).all(),
+        FROM audit_events i JOIN inbound_events e ON e.id=json_extract(i.detail_redacted,'$.eventId')
+        WHERE e.account_id=? AND i.event_type='MANUAL_RETRY_INTENT' ORDER BY i.rowid`).all(this.accountId),
       tasks: this.db.prepare(`SELECT e.id AS eventId,e.channel,e.status,d.id AS draftId,d.version,d.status AS draftStatus,
         COALESCE((SELECT MAX(CAST(json_extract(a.detail_redacted,'$.occurrences') AS INTEGER)) FROM audit_events a
           WHERE a.event_type='WEAK_SOURCE_MULTIPLICITY' AND a.entity_id=e.id),1) AS maxObservedOccurrences
-        FROM inbound_events e LEFT JOIN reply_drafts d ON d.event_id=e.id WHERE e.status<>'BASELINE' ORDER BY e.rowid`).all(),
+        FROM inbound_events e LEFT JOIN reply_drafts d ON d.event_id=e.id
+        WHERE e.account_id=? AND e.status<>'BASELINE' ORDER BY e.rowid`).all(this.accountId),
     };
   }
 }

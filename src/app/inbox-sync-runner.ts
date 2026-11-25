@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { requireSafe } from "../core/contracts.js";
+import { DEFAULT_ACCOUNT_ID, requireSafe } from "../core/contracts.js";
 import { shouldStopGlobally } from "../core/emergency-stop.js";
 import type { EventStore } from "../storage/store.js";
 import type { AutomationStore } from "../storage/automation-store.js";
@@ -58,13 +58,22 @@ export class InboxSyncRunner {
     const code = this.host.errorCode(error),
       mode = this.host.browser.status().mode;
     if (code !== "BROWSER_CLOSED") {
-      if (shouldStopGlobally(code)) {
-        this.host.store.db.prepare("UPDATE channel_capabilities SET state='BLOCKED'").run();
-      } else {
-        this.host.store.db
-          .prepare("UPDATE channel_capabilities SET state='BLOCKED' WHERE channel=? AND browser_mode=?")
-          .run(source === "dm" ? "DIRECT_MESSAGE" : "COMMENT_NOTIFICATION", mode);
-      }
+      const { store } = this.host;
+      const { db, accountId } = store;
+      const schema4 = store.schemaVersion() === 4;
+      const global = shouldStopGlobally(code);
+      const channel = source === "dm" ? "DIRECT_MESSAGE" : "COMMENT_NOTIFICATION";
+      db.transaction(() => {
+        if (schema4) {
+          if (global) db.prepare("UPDATE account_channel_capabilities SET state='BLOCKED' WHERE account_id=?").run(accountId);
+          else db.prepare("UPDATE account_channel_capabilities SET state='BLOCKED' WHERE account_id=? AND channel=? AND browser_mode=?")
+            .run(accountId, channel, mode);
+        }
+        if (!schema4 || accountId === DEFAULT_ACCOUNT_ID) {
+          if (global) db.prepare("UPDATE channel_capabilities SET state='BLOCKED'").run();
+          else db.prepare("UPDATE channel_capabilities SET state='BLOCKED' WHERE channel=? AND browser_mode=?").run(channel, mode);
+        }
+      }).immediate();
     }
     this.host.emit("status_updated");
     throw error;

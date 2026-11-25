@@ -94,6 +94,9 @@ export class ReplyKnowledgeStore {
         channels_json=excluded.channels_json,effective_at=excluded.effective_at,expires_at=excluded.expires_at,state='DISABLED',version=excluded.version,updated_at=excluded.updated_at`)
         .run(id,accountId,sourceId,parsed.title,normalized(parsed.topic),parsed.text,JSON.stringify(parsed.aliases),JSON.stringify(parsed.channels),
           parsed.effectiveAt??null,parsed.expiresAt??null,version,now);
+      if (this.store.schemaVersion() >= 4) this.store.db.prepare(`INSERT INTO account_knowledge_scopes
+        (entry_id,owner_account_id,visibility,updated_at) VALUES (?,?,'PRIVATE',?)
+        ON CONFLICT(entry_id) DO UPDATE SET updated_at=excluded.updated_at`).run(id,accountId,now);
       this.store.db.prepare('DELETE FROM k_search WHERE chunk_id IN (SELECT id FROM k_chunks WHERE entry_id=?)').run(id);
       this.store.db.prepare('DELETE FROM k_terms WHERE chunk_id IN (SELECT id FROM k_chunks WHERE entry_id=?)').run(id);
       this.store.db.prepare('DELETE FROM k_chunks WHERE entry_id=?').run(id);
@@ -209,6 +212,8 @@ export class ReplyKnowledgeStore {
         WHERE g.kind='learning' AND g.entity_id=t.id AND s.value=?)`).all(accountId,sourceId) as {id:string}[];
       this.store.db.prepare('DELETE FROM k_search WHERE chunk_id IN (SELECT c.id FROM k_chunks c JOIN k_knowledge k ON k.id=c.entry_id WHERE k.source_id=?)').run(sourceId);
       this.store.db.prepare('DELETE FROM k_terms WHERE chunk_id IN (SELECT c.id FROM k_chunks c JOIN k_knowledge k ON k.id=c.entry_id WHERE k.source_id=?)').run(sourceId);
+      if (this.store.schemaVersion() >= 4) this.store.db.prepare(`DELETE FROM account_knowledge_scopes
+        WHERE entry_id IN (SELECT id FROM k_knowledge WHERE source_id=?)`).run(sourceId);
       this.store.db.prepare('DELETE FROM k_knowledge WHERE source_id=?').run(sourceId);
       this.store.db.prepare('DELETE FROM k_sample_sources WHERE source_id=?').run(sourceId);
       const samples=this.store.db.prepare('SELECT id FROM k_samples WHERE source_id=?').all(sourceId) as {id:string}[];

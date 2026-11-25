@@ -20,6 +20,9 @@ import {
   type FollowupVerificationJob,
 } from "./followup-verification.js";
 
+const ownedJob = `EXISTS (SELECT 1 FROM send_intents i JOIN inbound_events e ON e.id=i.event_id
+  WHERE i.id=verification_jobs.intent_id AND e.id=verification_jobs.event_id AND e.account_id=?)`;
+
 /** Append-only follow-up evidence for an existing intent. This worker has no sending capability. */
 export class VerificationScheduler {
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -44,33 +47,23 @@ export class VerificationScheduler {
     private readonly verifyFollowup?: (commandId: string, signal: AbortSignal) => Promise<FollowupVerificationResult>,
   ) {}
   enqueue(eventId: string): void {
-    const intent = this.data.store.db
-      .prepare("SELECT id,attempt_started_at,target_digest FROM send_intents WHERE event_id=? AND status='UNCERTAIN'")
-      .get(eventId) as { id: string; attempt_started_at: string; target_digest: string } | undefined;
-    if (!intent) return;
-    this.data.store.db
-      .prepare("INSERT OR IGNORE INTO verification_jobs VALUES(?,?,?,?,0,?,?,'PENDING',NULL)")
-      .run(
-        intent.id,
-        eventId,
-        intent.attempt_started_at,
-        intent.target_digest,
-        this.data.now() + 2000,
-        this.data.now() + 120_000,
-      );
+    const { db, accountId } = this.data.store, now = this.data.now();
+    db.prepare(`INSERT OR IGNORE INTO verification_jobs
+      SELECT i.id,i.event_id,i.attempt_started_at,i.target_digest,0,?,?,'PENDING',NULL
+      FROM send_intents i JOIN inbound_events e ON e.id=i.event_id
+      WHERE i.event_id=? AND e.account_id=? AND i.status='UNCERTAIN'`).run(now + 2000, now + 120_000, eventId, accountId);
   }
   start(): void {
     if (this.timer || this.closed) return;
-    const legacy = this.data.store.db
-      .prepare("SELECT event_id FROM send_intents WHERE status='UNCERTAIN' AND id NOT IN (SELECT intent_id FROM verification_jobs)")
-      .all() as { event_id: string }[];
+    const { db, accountId } = this.data.store;
+    const legacy = db.prepare(`SELECT i.event_id FROM send_intents i JOIN inbound_events e ON e.id=i.event_id
+      WHERE e.account_id=? AND i.status='UNCERTAIN' AND i.id NOT IN (SELECT intent_id FROM verification_jobs)`)
+      .all(accountId) as { event_id: string }[];
     for (const intent of legacy) this.enqueue(intent.event_id);
-    this.data.store.db
-      .prepare("UPDATE verification_jobs SET state=CASE WHEN attempts<2 THEN 'PENDING' ELSE 'REVIEW' END WHERE state='RUNNING'")
-      .run();
-    this.data.store.db
-      .prepare("UPDATE verification_jobs SET deadline=? WHERE state='PENDING' AND attempts<2 AND deadline<=?")
-      .run(this.data.now() + 120_000, this.data.now());
+    db.prepare(`UPDATE verification_jobs SET state=CASE WHEN attempts<2 THEN 'PENDING' ELSE 'REVIEW' END
+      WHERE state='RUNNING' AND ${ownedJob}`).run(accountId);
+    db.prepare(`UPDATE verification_jobs SET deadline=? WHERE state='PENDING' AND attempts<2 AND deadline<=? AND ${ownedJob}`)
+      .run(this.data.now() + 120_000, this.data.now(), accountId);
     extendFollowupVerificationDeadlines(this.data.store, this.data.now());
     this.timer = setInterval(() => void this.pulse(), 1000);
     this.timer.unref();
@@ -135,6 +128,7 @@ export class VerificationScheduler {
       return false;
     }
     if (this.closed || this.suspended || this.data.state().emergencyStopped) return false;
+    const { db, accountId } = this.data.store;
     const held = (["COMMENT_NOTIFICATION", "DIRECT_MESSAGE"] as const).filter((channel) =>
       readSecurityHold(this.data.store, channel),
     );
@@ -142,23 +136,22 @@ export class VerificationScheduler {
       this.data.store.db
         .prepare(
           `UPDATE verification_jobs SET deadline=MAX(deadline,?) WHERE state='PENDING' AND attempts<2
-           AND event_id IN (SELECT id FROM inbound_events WHERE channel=?)`,
+           AND event_id IN (SELECT e.id FROM inbound_events e WHERE e.channel=?) AND ${ownedJob}`,
         )
-        .run(this.data.now() + 120_000, channel);
+        .run(this.data.now() + 120_000, channel, accountId);
     }
     if (held.length) extendFollowupVerificationDeadlines(this.data.store, this.data.now(), held);
-    this.data.store.db
-      .prepare("UPDATE verification_jobs SET state='NOT_NEEDED' WHERE state='PENDING' AND intent_id IN (SELECT id FROM send_intents WHERE status='CONFIRMED')")
-      .run();
-    this.data.store.db
-      .prepare("UPDATE verification_jobs SET state='REVIEW',last_error='VERIFICATION_DEADLINE' WHERE state='PENDING' AND (deadline<=? OR attempts>=2)")
-      .run(this.data.now());
+    db.prepare(`UPDATE verification_jobs SET state='NOT_NEEDED' WHERE state='PENDING' AND ${ownedJob}
+      AND intent_id IN (SELECT id FROM send_intents WHERE status='CONFIRMED')`).run(accountId);
+    db.prepare(`UPDATE verification_jobs SET state='REVIEW',last_error='VERIFICATION_DEADLINE'
+      WHERE state='PENDING' AND (deadline<=? OR attempts>=2) AND ${ownedJob}`).run(this.data.now(), accountId);
     let job = this.data.store.db
       .prepare(
-        `SELECT j.* FROM verification_jobs j JOIN send_intents i ON i.id=j.intent_id JOIN inbound_events e ON e.id=j.event_id
-         WHERE j.state='PENDING' AND j.next_at<=? AND i.status='UNCERTAIN' AND e.channel NOT IN (?,?) ORDER BY j.next_at LIMIT 1`,
+        `SELECT j.* FROM verification_jobs j JOIN send_intents i ON i.id=j.intent_id AND i.event_id=j.event_id
+         JOIN inbound_events e ON e.id=i.event_id WHERE e.account_id=? AND j.state='PENDING' AND j.next_at<=?
+         AND i.status='UNCERTAIN' AND e.channel NOT IN (?,?) ORDER BY j.next_at LIMIT 1`,
       )
-      .get(this.data.now(), held[0] ?? "", held[1] ?? "") as VerificationJob | ReceiptRecheckJob | undefined;
+      .get(accountId, this.data.now(), held[0] ?? "", held[1] ?? "") as VerificationJob | ReceiptRecheckJob | undefined;
     if (!job && this.verifyFollowup) {
       const followup = claimFollowupVerification(this.data.store, this.data.now(), held);
       if (followup) {
@@ -184,9 +177,10 @@ export class VerificationScheduler {
         if (readSecurityHold(this.data.store, channel)) return;
         this.activeEvent = job.event_id;
         this.updated();
-        const intent = this.data.store.db
-          .prepare("SELECT event_id,attempt_started_at,target_digest FROM send_intents WHERE id=?")
-          .get(job.intent_id) as { event_id: string; attempt_started_at: string; target_digest: string } | undefined;
+        const readIntent = db.prepare(`SELECT i.event_id,i.attempt_started_at,i.target_digest,i.target_key FROM send_intents i
+          JOIN inbound_events e ON e.id=i.event_id WHERE i.id=? AND e.account_id=?`);
+        const intent = readIntent.get(job.intent_id, accountId) as
+          { event_id: string; attempt_started_at: string; target_digest: string; target_key: string } | undefined;
         try {
           requireSafe(
             intent &&
@@ -197,20 +191,16 @@ export class VerificationScheduler {
           );
           if (repair) requireSafe(receiptRecheckStillBound(this.data.store, repair, this.data.now()), "VERIFICATION_BINDING_CHANGED");
           if (!supplemental) {
-            this.data.store.db
-              .prepare("UPDATE verification_jobs SET state='RUNNING',attempts=attempts+1 WHERE intent_id=? AND state='PENDING'")
-              .run(job.intent_id);
+            const claimed = db.prepare(`UPDATE verification_jobs SET state='RUNNING',attempts=attempts+1
+              WHERE intent_id=? AND state='PENDING' AND ${ownedJob}`).run(job.intent_id, accountId);
+            if (claimed.changes !== 1) return;
           }
           const result = await this.verify(job.event_id, abort.signal);
           requireSafe(!abort.signal.aborted, "VERIFICATION_CANCELLED");
           this.data.store.db
             .transaction(() => {
               assertSecurityRevision(this.data.store, channel, security);
-              const current = this.data.store.db
-                .prepare("SELECT event_id,attempt_started_at,target_digest,target_key FROM send_intents WHERE id=?")
-                .get(job.intent_id) as
-                | { event_id: string; attempt_started_at: string; target_digest: string; target_key: string }
-                | undefined;
+              const current = readIntent.get(job.intent_id, accountId) as typeof intent;
               const event = this.data.store.event(job.event_id);
               requireSafe(
                 current &&
@@ -244,32 +234,36 @@ export class VerificationScheduler {
                 .run(randomUUID(), job.intent_id, Number(verified), result.evidenceId, this.data.now());
               if (!supplemental) {
                 this.data.store.db
-                  .prepare("UPDATE verification_jobs SET state=?,next_at=?,last_error=? WHERE intent_id=?")
+                  .prepare(`UPDATE verification_jobs SET state=?,next_at=?,last_error=? WHERE intent_id=? AND ${ownedJob}`)
                   .run(
                     verified ? "VERIFIED" : conflict || job.attempts + 1 >= 2 ? "REVIEW" : "PENDING",
                     this.data.now() + 10_000,
                     verified ? null : conflict ? "VERIFICATION_NATIVE_ID_CONFLICT" : "NO_COMPLETE_PROOF",
                     job.intent_id,
+                    accountId,
                   );
               }
               this.data.store.audit(verified ? "FOLLOWUP_DELIVERY_VERIFIED" : "FOLLOWUP_PROOF_INCOMPLETE", job.intent_id);
             })
             .immediate();
         } catch (cause) {
+          if (!readIntent.get(job.intent_id, accountId)) return;
           const error = cause instanceof Blocked ? cause.code : "VERIFICATION_FAILED_PRIVATE_DIAGNOSTICS";
           if (!supplemental) {
             this.data.store.db
-              .prepare("UPDATE verification_jobs SET state=?,next_at=?,last_error=? WHERE intent_id=?")
+              .prepare(`UPDATE verification_jobs SET state=?,next_at=?,last_error=? WHERE intent_id=? AND ${ownedJob}`)
               .run(
                 job.attempts + 1 >= 2 || error === "VERIFICATION_BINDING_CHANGED" ? "REVIEW" : "PENDING",
                 this.data.now() + 10_000,
                 error,
                 job.intent_id,
+                accountId,
               );
           }
           if (supplemental) {
             this.data.store.db
               .transaction(() => {
+                if (!readIntent.get(job.intent_id, accountId)) return;
                 this.data.store.db
                   .prepare("INSERT INTO verification_results VALUES(?,?,?,?,?)")
                   .run(

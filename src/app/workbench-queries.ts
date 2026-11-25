@@ -1,4 +1,4 @@
-import { Blocked, isStrong, targetKey, type Channel } from '../core/contracts.js';
+import { Blocked, DEFAULT_ACCOUNT_ID, isStrong, targetKey, type Channel } from '../core/contracts.js';
 import type { EventStore } from '../storage/store.js';
 import type { AutomationStore } from '../storage/automation-store.js';
 import type { WorkbenchAuthority } from './authority.js';
@@ -57,13 +57,7 @@ export class WorkbenchQueries {
       this.store.db
         .prepare("SELECT id,status FROM send_intents WHERE event_id=?")
         .get(eventId) ?? null;
-    const paused = Boolean(
-      (
-        this.store.db
-          .prepare("SELECT paused FROM pauses WHERE target_key=?")
-          .get(targetKey(e.payload)) as { paused: number } | undefined
-      )?.paused,
-    );
+    const paused = this.store.targetPaused(targetKey(e.payload));
     const frozen = this.store.sendFrozen(e.id);
     return {
       event: e,
@@ -116,7 +110,8 @@ export class WorkbenchQueries {
       this.authority.capability(channel,this.browser.identity(channel)).state==='SEND_AVAILABLE')||
       (this.store.db.prepare(`SELECT t.event_id,d.id,d.version,d.text,e.channel FROM controlled_trials t
         JOIN reply_drafts d ON d.event_id=t.event_id JOIN inbound_events e ON e.id=t.event_id
-        WHERE t.used=0 AND t.expires_at>? AND t.draft_id=d.id AND t.draft_version=d.version`).all(this.authority.now()) as
+        WHERE e.account_id=? AND t.used=0 AND t.expires_at>? AND t.draft_id=d.id AND t.draft_version=d.version`)
+        .all(this.store.accountId,this.authority.now()) as
         {event_id:string;id:string;version:number;text:string;channel:Channel}[]).some(row=>
           this.authority.trialAvailable(row.event_id,row.id,row.version,row.text,this.browser.identity(row.channel)));
     const effectiveMode=['MANUAL','AI_ASSISTED'].includes(configuredMode)&&!anySendAvailable?'DRAFT_ONLY':configuredMode;
@@ -137,11 +132,10 @@ export class WorkbenchQueries {
       configuredMode,
       paused: this.authority.paused(),
       browser: this.browser.status(),
-      lastSync: this.store.db
-        .prepare(
-          "SELECT channel,MAX(observed_at) AS at FROM observations GROUP BY channel",
-        )
-        .all(),
+      lastSync: this.store.schemaVersion() >= 4
+        ? this.store.db.prepare("SELECT channel,MAX(observed_at) AS at FROM account_observations WHERE account_id=? GROUP BY channel")
+          .all(this.store.accountId)
+        : this.store.db.prepare("SELECT channel,MAX(observed_at) AS at FROM observations GROUP BY channel").all(),
       capabilities: (
         ["COMMENT_NOTIFICATION", "DIRECT_MESSAGE"] as Channel[]
       ).map((channel) => ({
@@ -163,10 +157,13 @@ export class WorkbenchQueries {
       automation:automation?{
         ...automation.state(),modelGrant:grant('MODEL'),replyPolicy:policy,
         collector:state.collector,inboxRevision:state.inboxRevision,
-        pendingWorks:this.store.db.prepare("SELECT count(*) AS count FROM discovered_works WHERE state='REVIEW'").get(),
+        pendingWorks:this.store.accountId===DEFAULT_ACCOUNT_ID
+          ? this.store.db.prepare("SELECT count(*) AS count FROM discovered_works WHERE state='REVIEW'").get()
+          : { count: 0 },
         unresolvedSends:this.store.db.prepare(`SELECT e.channel,count(*) AS count FROM send_intents i
-          JOIN inbound_events e ON e.id=i.event_id WHERE i.status IN ('INTENT_RECORDED','UNCERTAIN')
-          AND COALESCE((SELECT v.verified FROM verification_results v WHERE v.intent_id=i.id ORDER BY v.rowid DESC LIMIT 1),0)<>1 GROUP BY e.channel`).all(),
+          JOIN inbound_events e ON e.id=i.event_id WHERE e.account_id=? AND i.status IN ('INTENT_RECORDED','UNCERTAIN')
+          AND COALESCE((SELECT v.verified FROM verification_results v WHERE v.intent_id=i.id ORDER BY v.rowid DESC LIMIT 1),0)<>1
+          GROUP BY e.channel`).all(this.store.accountId),
         autoStopReason:configuredMode==='LIMITED_AUTO'?(state.modelUnavailable??(policy?
           !state.keyPresent?'MODEL_KEY_REQUIRED':!automation.allowance(policy.version,'SEND')?'SEND_GRANT_EXHAUSTED':
           !automation.allowance(policy.version,'MODEL')?'MODEL_GRANT_EXHAUSTED':this.authority.paused()?'ACCOUNT_PAUSED':null:
@@ -175,7 +172,7 @@ export class WorkbenchQueries {
       modelBusy: state.modelBusy,
       sync:structuredClone(state.sync),
       go: "UNVERIFIED",
-      schema: 3,
+      schema: this.store.db.pragma('user_version', { simple: true }) as number,
     };
   }
 

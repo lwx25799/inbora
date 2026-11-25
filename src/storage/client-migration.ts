@@ -42,9 +42,10 @@ export async function migrateClient(
   store: EventStore,
   backupFile: string,
 ): Promise<boolean> {
-  if (store.db.pragma("user_version", { simple: true }) === 3) return false;
+  const version = store.db.pragma("user_version", { simple: true });
+  if (version === 3 || version === 4) return false;
   requireSafe(
-    store.db.pragma("user_version", { simple: true }) === 2,
+    version === 2,
     "DATABASE_SCHEMA_UNSUPPORTED",
   );
   const before = migrationInventory(store.db);

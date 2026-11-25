@@ -120,7 +120,8 @@ const selectSelection = `SELECT connection_id AS connectionId,route_revision AS 
   model_id AS modelId,revision AS selectionRevision FROM m_selection`;
 
 export function inspectModelProviderSchema(db: Database.Database): "ABSENT" | "READY" {
-  requireSafe(db.pragma("user_version", { simple: true }) === 3, "CLIENT_MIGRATION_REQUIRED");
+  const version = db.pragma("user_version", { simple: true });
+  requireSafe(version === 3 || version === 4, "CLIENT_MIGRATION_REQUIRED");
   const objects = db.prepare("SELECT name,type,sql FROM main.sqlite_schema WHERE substr(name,1,2)='m_'").all() as
     { name: string; type: string; sql: string | null }[];
   if (objects.length === 0) return "ABSENT";

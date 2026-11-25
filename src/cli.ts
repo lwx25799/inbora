@@ -64,10 +64,15 @@ async function ask(message: string): Promise<string> {
 function print(value: unknown): void { stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
 function safeCode(error: unknown): string { return error instanceof Blocked ? error.code : 'OPERATION_FAILED_PRIVATE_DIAGNOSTICS'; }
 
+function isVersionedSchema(store: EventStore): boolean {
+  const version = store.db.pragma('user_version', { simple: true });
+  return version === 3 || version === 4;
+}
+
 async function replyCommand(command:string,id:string,store:EventStore,port:PlatformConnector):Promise<void>{
   const d=store.draft(id),e=store.event(d.eventId),root=port.root;
   if(command==='calibrate-client'){
-    requireSafe(store.db.pragma('user_version',{simple:true})===3,'CLIENT_MIGRATION_REQUIRED');
+    requireSafe(isVersionedSchema(store),'CLIENT_MIGRATION_REQUIRED');
     const handle=await port.adapter(e.payload,store,undefined,{nativeReplyOnly:true});
     try{
       const snapshot=await port.actor.run(()=>handle.adapter.inspect(e.payload));
@@ -78,10 +83,10 @@ async function replyCommand(command:string,id:string,store:EventStore,port:Platf
       print({calibrated:true,eventId:e.id,draftVersion:d.version,evidenceId:evidence,sendApproved:false,expiresInSeconds:3600});
     }finally{await handle.dispose();}return;
   }
-  if(store.db.pragma('user_version',{simple:true})===3&&command==='approve'){
+  if(isVersionedSchema(store)&&command==='approve'){
     requireSafe(false,'CLIENT_SCHEMA_CONFIRM_IN_GUI_OR_SEND_ONCE');
   }
-  if(store.db.pragma('user_version',{simple:true})===3&&command==='send-once'){
+  if(isVersionedSchema(store)&&command==='send-once'){
     const service=new ClientService(store,port);
     const token=service.authority.issueSession();
     try {
@@ -226,7 +231,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       } else if (command === 'edit') {
         requireSafe(values.file, 'FILE_REQUIRED'); const d = store.draft(id);
         const text=await readFile(values.file,'utf8');
-        if(store.db.pragma('user_version',{simple:true})===3){
+        if(isVersionedSchema(store)){
           const authority=new WorkbenchAuthority(store),token=authority.issueSession();
           try{const generation=authority.claim(token,d.eventId,authority.ownership(store.event(d.eventId)).generation).generation;
             print({draftId:authority.save(token,d.eventId,generation,d.version,text).id});authority.release(token,d.eventId,generation);

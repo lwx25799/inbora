@@ -9,9 +9,12 @@ export interface VerificationJob {intent_id:string;event_id:string;boundary:stri
 export function claimDmContextVerification(store:EventStore,now:number):VerificationJob|undefined {
   if(readSecurityHold(store,'DIRECT_MESSAGE'))return undefined;
   return store.db.transaction(()=>{
-    if(store.db.prepare("SELECT id FROM audit_events WHERE event_type='DM_CONTEXT_WINDOW_CHECKED' LIMIT 1").get())return undefined;
+    const checked=store.db.prepare(`SELECT a.id FROM audit_events a
+      JOIN send_intents i ON i.id=a.entity_id JOIN inbound_events e ON e.id=i.event_id
+      WHERE a.event_type='DM_CONTEXT_WINDOW_CHECKED' AND e.account_id=? LIMIT 1`).get(store.accountId);
+    if(checked)return undefined;
     const candidates=store.db.prepare(`SELECT j.* FROM verification_jobs j JOIN send_intents i ON i.id=j.intent_id
-      JOIN inbound_events e ON e.id=i.event_id WHERE j.state='REVIEW' AND j.attempts=2 AND i.status='UNCERTAIN'
+      JOIN inbound_events e ON e.id=i.event_id WHERE e.account_id=? AND j.state='REVIEW' AND j.attempts=2 AND i.status='UNCERTAIN'
       AND e.channel='DIRECT_MESSAGE' AND j.last_error='NO_COMPLETE_PROOF'
       AND EXISTS(SELECT 1 FROM delivery_receipts r WHERE r.send_intent_id=i.id AND r.result='UNCERTAIN'
         AND r.proof_ref='POST_INTENT_FAILURE:READBACK:UNCLASSIFIED')
@@ -19,7 +22,7 @@ export function claimDmContextVerification(store:EventStore,now:number):Verifica
       AND NOT EXISTS(SELECT 1 FROM verification_results r WHERE r.intent_id=i.id AND r.verified=1)
       AND EXISTS(SELECT 1 FROM policy_commands p JOIN manual_send_commands c ON c.command_id=p.command_id
         WHERE c.intent_id=i.id AND c.event_id=i.event_id)
-      ORDER BY i.attempt_started_at DESC,i.rowid DESC LIMIT 1`).all() as VerificationJob[];
+      ORDER BY i.attempt_started_at DESC,i.rowid DESC LIMIT 1`).all(store.accountId) as VerificationJob[];
     const chat=new ChatMessageStore(store);
     for(const job of candidates){
       const intent=store.db.prepare('SELECT * FROM send_intents WHERE id=?').get(job.intent_id) as {
