@@ -11,6 +11,7 @@ interface HookDispatcher {
 let activeHooks: HookDispatcher | null = null;
 const requestMock = vi.fn();
 const listenMock = vi.fn();
+const invokeMock = vi.fn();
 
 vi.mock('react', async () => {
   const actual = await vi.importActual<typeof import('react')>('react');
@@ -33,9 +34,10 @@ vi.mock('./api', async () => {
 vi.mock('@tauri-apps/api/event', () => ({
   listen: (...args: unknown[]) => listenMock(...args),
 }));
+vi.mock('@tauri-apps/api/core', () => ({invoke: (...args: unknown[]) => invokeMock(...args)}));
 
 import type { Status, Thread } from './api';
-import { explain, reasons } from './api';
+import { explain, reasons, runtimeSession, type BusinessPrompts } from './api';
 import { AutomationSettings } from './AutomationSettings';
 import { DiagnosticsPanel } from './DiagnosticsPanel';
 import { DirectMessageChat } from './DirectMessageChat';
@@ -58,6 +60,7 @@ import {
 beforeEach(() => {
   requestMock.mockReset();
   listenMock.mockReset();
+  invokeMock.mockReset();
 });
 
 afterEach(() => {
@@ -341,6 +344,8 @@ test('Settings keeps collapsed fault recovery and diagnostics unmounted and upda
       notice: '',
       act: async (_label, run) => run(),
       update: () => {},
+      updatePrompts: () => {},
+      updateProviders: () => {},
       stop: () => {},
       toggleAuto: async () => {},
       pendingAutoReply: null,
@@ -355,7 +360,7 @@ test('Settings keeps collapsed fault recovery and diagnostics unmounted and upda
 test('SettingsDialog renders local error, busy and notice feedback inside the dialog', () => {
   const errHtml = renderToStaticMarkup(
     createElement(SettingsDialog, {
-      title: '模型详细配置',
+      title: '业务提示词',
       open: true,
       onClose: () => {},
       error: '保存失败提示',
@@ -366,15 +371,15 @@ test('SettingsDialog renders local error, busy and notice feedback inside the di
   expect(errHtml).toContain('保存失败提示');
   const noticeHtml = renderToStaticMarkup(
     createElement(SettingsDialog, {
-      title: '模型详细配置',
+      title: '业务提示词',
       open: true,
       onClose: () => {},
-      notice: 'AI 配置已保存',
+      notice: '业务提示词已保存',
       children: createElement('div'),
     }),
   );
   expect(noticeHtml).toContain('role="status"');
-  expect(noticeHtml).toContain('AI 配置已保存');
+  expect(noticeHtml).toContain('业务提示词已保存');
 });
 
 test('settings-form-sync compares clean vs dirty states and tracks backend policy/grant revisions', () => {
@@ -624,48 +629,61 @@ test('AutomationSettings syncs baseline on model grant and policy revoke without
   }
 });
 
-test('Settings preserves in-flight AI edits during configureAi save and syncs cleanly when idle', async () => {
-  const s1 = baseStatus();
-  const makeProps = (status: Status) => ({
-    status,
+test('Settings saves only business prompts, follows idle updates and preserves in-flight typing', async () => {
+  const selection = {connectionId: '64ce7003-91f9-41e1-bc3e-60611c81b002', routeRevision: 1, modelId: 'deepseek-flash', selectionRevision: 1};
+  let status = baseStatus({modelProvidersSupported:true, modelProviders: {connections: [], selection}});
+  const update = vi.fn();
+  const makeProps = (snapshot: Status) => ({
+    status: snapshot,
     runtime: 'synthetic-runtime',
     busy: '',
     error: '',
     notice: '',
     act: async (_label: string, fn: () => Promise<void>) => fn(),
-    update: (next: Status) => view.rerender(makeProps(next)),
+    update,
+    updatePrompts, updateProviders: update,
     stop: () => {},
     toggleAuto: async () => {},
     pendingAutoReply: null,
   });
-  const view = mountComponent(Settings, makeProps(s1));
+  const updatePrompts = vi.fn<(session: string, prompts: BusinessPrompts) => void>();
+  const view = mountComponent(Settings, makeProps(status));
+  const rules = () => findControlByLabel(view.getTree(), '回复规则', 'textarea');
+  const edit = (value: string) => (rules().props.onChange as (event: {target: {value: string}}) => void)({target: {value}});
+  const save = () => (findButton(view.getTree(), '保存业务提示词').props.onClick as () => Promise<void>)();
   try {
-    // Clean save without in-flight edit updates baseline and follows subsequent backend changes.
-    (findControlByLabel(view.getTree(), '回复规则', 'textarea').props.onChange as (e: { target: { value: string } }) => void)({
-      target: { value: '规则A' },
-    });
-    const s2 = baseStatus({ settings: { ...s1.settings, rules: '规则A' } });
-    requestMock.mockResolvedValueOnce(s2);
-    await (findButton(view.getTree(), '保存配置并清空 Key 输入').props.onClick as () => Promise<void>)();
-    expect(findControlByLabel(view.getTree(), '回复规则', 'textarea').props.value).toBe('规则A');
+    (findButton(view.getTree(), '编辑业务提示词').props.onClick as () => void)();
+    expect(findAllElements(view.getTree(), el => el.type === SettingsDialog)[0]?.props.open).toBe(true);
+    edit('规则A');
+    const obsolete = {...status, settings: {...status.settings, rules: '规则A'}};
+    status = {...status, settings: {...status.settings, model: 'new-model'}, keyPresent: false,
+      modelProviders: {connections: [], selection: {...selection, modelId: 'new-model', selectionRevision: 2}}};
+    view.rerender(makeProps(status));
+    invokeMock.mockResolvedValueOnce(obsolete);
+    await save();
+    const prompts = {persona: '人设', business: '业务', rules: '规则A'};
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'client_request', {body: {command: 'configureAi', settings: prompts}});
+    expect(updatePrompts).toHaveBeenNthCalledWith(1, runtimeSession(status), prompts);
+    expect(update).not.toHaveBeenCalled();
+    expect(rules().props.value).toBe('规则A');
 
-    const s3 = baseStatus({ settings: { ...s1.settings, rules: '后端同步规则' } });
-    view.rerender(makeProps(s3));
-    expect(findControlByLabel(view.getTree(), '回复规则', 'textarea').props.value).toBe('后端同步规则');
+    status = {...status, settings: {...status.settings, rules: '后端同步规则'}};
+    view.rerender(makeProps(status));
+    expect(rules().props.value).toBe('后端同步规则');
 
-    // In-flight edit while configureAi is pending must NOT be overwritten on resolve.
-    (findControlByLabel(view.getTree(), '回复规则', 'textarea').props.onChange as (e: { target: { value: string } }) => void)({
-      target: { value: '规则B' },
-    });
+    edit('规则B');
     let resolveSave!: (value: Status) => void;
-    requestMock.mockReturnValueOnce(new Promise<Status>(resolve => { resolveSave = resolve; }));
-    const saving = (findButton(view.getTree(), '保存配置并清空 Key 输入').props.onClick as () => Promise<void>)();
-    (findControlByLabel(view.getTree(), '回复规则', 'textarea').props.onChange as (e: { target: { value: string } }) => void)({
-      target: { value: '规则B+继续编辑' },
-    });
-    resolveSave(baseStatus({ settings: { ...s1.settings, rules: '规则B' } }));
+    invokeMock.mockReturnValueOnce(new Promise<Status>(resolve => { resolveSave = resolve; }));
+    const saving = save();
+    expect(findButton(view.getTree(), '保存业务提示词').props.disabled).toBe(true);
+    expect(findButton(view.getTree(), '编辑业务提示词').props.disabled).toBeUndefined();
+    edit('规则B+继续编辑');
+    resolveSave({...obsolete, settings: {...obsolete.settings, rules: '规则B'}});
     await saving;
-    expect(findControlByLabel(view.getTree(), '回复规则', 'textarea').props.value).toBe('规则B+继续编辑');
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'client_request', {body: {command: 'configureAi', settings: {...prompts, rules: '规则B'}}});
+    expect(updatePrompts).toHaveBeenNthCalledWith(2, runtimeSession(status), {...prompts, rules: '规则B'});
+    expect(rules().props.value).toBe('规则B+继续编辑');
+    expect(findButton(view.getTree(), '保存业务提示词').props.disabled).toBe(false);
   } finally {
     view.unmount();
   }

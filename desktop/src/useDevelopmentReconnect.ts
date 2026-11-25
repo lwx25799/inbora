@@ -59,5 +59,6 @@ export function useDevelopmentReconnect(view:ReconnectView){
     })).then(stop=>{if(disposed)stop();else unlisten=stop;}).catch(()=>{});
     return()=>{disposed=true;epoch.current++;unlisten?.();};
   },[]);
-  return {restoring,blockAutosave:restoring||draftGuard.current!==null};
+  const generation=epoch.current;
+  return {restoring,generation,isCurrent:()=>epoch.current===generation,blockAutosave:restoring||draftGuard.current!==null};
 }

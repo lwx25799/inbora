@@ -1,12 +1,15 @@
 import {useEffect,useState} from 'react';
 import {listen} from '@tauri-apps/api/event';
-import type {DiagnosticsSnapshot,EvidenceMaintenanceStatus,RuntimePerformanceSummary} from '../../src/contracts/diagnostics.js';
-import {request,reasons} from './api';
+import type {DiagnosticsSnapshot,EvidenceMaintenanceStatus,ModelUsageGroup,RuntimePerformanceSummary} from '../../src/contracts/diagnostics.js';
+import {modelPresetIdSchema} from '../../src/contracts/model-providers.js';
+import {modelPresetNames,request,reasons} from './api';
 import {time} from './presentation';
 import {ReadRefresh} from './read-refresh';
 import {BrowserResourcesPanel} from './BrowserResourcesPanel';
 
-type DiagnosticsView=DiagnosticsSnapshot&{
+type DiagnosticModelGroup = ModelUsageGroup & {provider?: string | null; presetId?: string | null};
+type DiagnosticsView=Omit<DiagnosticsSnapshot, 'model'>&{
+  model: Omit<DiagnosticsSnapshot['model'], 'groups'> & {groups: DiagnosticModelGroup[]};
   performance:RuntimePerformanceSummary[];evidence:EvidenceMaintenanceStatus;
 };
 const statuses:Record<string,string>={SUCCEEDED:'成功',FAILED:'失败',STARTED:'未完成',UNKNOWN:'未识别'};
@@ -17,6 +20,11 @@ const channel=(value:string)=>value==='DIRECT_MESSAGE'||value==='dm'?'私信':va
 const duration=(value:number|null)=>value===null?'未记录':`${Math.round(value*100)/100} ms`;
 const bytes=(value:number)=>value>=1024*1024?`${(value/1024/1024).toFixed(2)} MB`:value>=1024?`${(value/1024).toFixed(2)} KB`:`${value} B`;
 const reason=(code:string)=>reasons[code]??`后台保留处理中（${code}）`;
+
+function providerLabel(group: DiagnosticModelGroup) {
+  const preset = modelPresetIdSchema.safeParse(group.presetId ?? group.provider);
+  return preset.success ? modelPresetNames[preset.data] : '未知（历史记录）';
+}
 
 const ignoredDiagnosticsEvents=new Set(['sidecar_response_too_large','knowledge_updated']);
 
@@ -53,10 +61,12 @@ export function DiagnosticsPanel(){
       <p>已知输入 {usage.inputTokens} / 输出 {usage.outputTokens} Token</p>
       <p className="hint">费用：未知；不依据缺失用量或未经核对的单价推算。</p>
       <p>平均耗时 {duration(usage.averageElapsedMs)} · P95 {duration(usage.p95ElapsedMs)} · 已记录耗时 {usage.elapsedSamples} 次</p>
+      {snapshot.modelBreakdownTruncated && <p className="hint">模型明细仅展示 {snapshot.model.groups.length} 组
+        {snapshot.modelBreakdownTotal !== undefined && `（共 ${snapshot.modelBreakdownTotal} 组）`}，上方累计包含全部记录。</p>}
       {snapshot.model.groups.length>0&&<div style={{overflowX:'auto'}}><table aria-label="模型与状态累计">
-        <thead><tr><th>模型</th><th>状态</th><th>次数</th><th>用量未知</th><th>已知输入 / 输出 Token</th><th>平均 / P95</th></tr></thead>
-        <tbody>{snapshot.model.groups.map(group=><tr key={group.model+':'+group.status}>
-          <td>{group.model}</td><td>{statuses[group.status]??'未识别'}</td><td>{group.requests}</td><td>{group.unknownUsageRequests}</td>
+        <thead><tr><th>提供商</th><th>模型</th><th>状态</th><th>次数</th><th>用量未知</th><th>已知输入 / 输出 Token</th><th>平均 / P95</th></tr></thead>
+        <tbody>{snapshot.model.groups.map(group=><tr key={JSON.stringify([group.presetId ?? group.provider ?? null, group.model, group.status])}>
+          <td>{providerLabel(group)}</td><td>{group.model}</td><td>{statuses[group.status]??'未识别'}</td><td>{group.requests}</td><td>{group.unknownUsageRequests}</td>
           <td>{group.inputTokens} / {group.outputTokens}</td><td>{duration(group.averageElapsedMs)} / {duration(group.p95ElapsedMs)}</td>
         </tr>)}</tbody>
       </table></div>}

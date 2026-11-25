@@ -1,4 +1,12 @@
-import type { AiSettings, Status } from './api.js';
+import type { AiSettings, BusinessPrompts, Status } from './api.js';
+
+export function businessPrompts({persona, business, rules}: BusinessPrompts): BusinessPrompts {
+  return {persona, business, rules};
+}
+
+export function samePrompts(a: BusinessPrompts, b: BusinessPrompts) {
+  return a.persona === b.persona && a.business === b.business && a.rules === b.rules;
+}
 
 export interface CollectionForm {
   comments: boolean;

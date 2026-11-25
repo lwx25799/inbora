@@ -7,6 +7,7 @@ import type {
   AiSettings,
   InboxSync,
   BrowserDraftChoice,
+  ModelProviderStatusFields,
 } from "../../src/contracts/client.js";
 import type {
   Draft,
@@ -17,10 +18,15 @@ import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../s
 import type { CommentThreadPage, ReplyStatus, TimelineItem } from '../../src/contracts/inbox.js';
 import type {LocalAssistantState} from '../../src/contracts/local-assistant.js';
 import type {SecurityRuntime} from '../../src/contracts/diagnostics.js';
+import {extractErrorCode} from './error-messages.js';
+import {
+  MODEL_PAGE_LIMIT, modelCatalogPageSchema, publicModelStateSchema,
+  type ModelPresetId, type ModelProtocol, type PublicModelConnection, type PublicModelState,
+} from '../../src/contracts/model-providers.js';
 export type { ReplyStatus, TimelineItem };
 
 export type { SendParams, AiSettings, BrowserDraftChoice };
-export interface Status {
+export interface Status extends ModelProviderStatusFields {
   localAssistant?:LocalAssistantState;
   localAssistantConnection?:{ready:boolean;instanceId:string|null;transport:'stdio';tools:16};
   securityRuntime?:SecurityRuntime;
@@ -135,6 +141,78 @@ export interface Review {
   target: InboundEvent;
   account: string;
 }
+export type BusinessPrompts = Pick<AiSettings, 'persona' | 'business' | 'rules'>;
+
+export async function saveBusinessPrompts(status: Status, settings: BusinessPrompts): Promise<Status> {
+  if (status.modelProvidersSupported !== true) throw new Error('BUSINESS_PROMPTS_BACKEND_UPGRADE_REQUIRED');
+  return request<Status>({command:'configureAi', settings});
+}
+
+export function runtimeSession(status: Status) {
+  return JSON.stringify([status.runtime, status.operator.id, status.securityRuntime?.instanceId]);
+}
+
+export async function readModelCatalog(connection: PublicModelConnection) {
+  if (!connection.modelsTruncated) return connection.models;
+  const models: PublicModelConnection['models'] = [];
+  const ids = new Set<string>();
+  let offset: number | null = 0;
+  while (offset !== null) {
+    const page = modelCatalogPageSchema.parse(await request<unknown>({command:'modelProviders', action:'list',
+      connectionId:connection.id, offset, limit:MODEL_PAGE_LIMIT}));
+    if (page.connectionId !== connection.id || page.version !== connection.version || page.offset !== offset
+      || page.totalModelCount !== connection.totalModelCount) throw new Error('MODEL_CONNECTION_CONFLICT');
+    for (const model of page.models) {
+      if (ids.has(model.modelId)) throw new Error('MODEL_PROVIDER_STATUS_UNCONFIRMED');
+      ids.add(model.modelId);
+      models.push(model);
+    }
+    const next = models.length < page.totalModelCount ? models.length : null;
+    if (models.length > page.totalModelCount || page.nextOffset !== next || (next !== null && next <= offset)) {
+      throw new Error('MODEL_PROVIDER_STATUS_UNCONFIRMED');
+    }
+    offset = next;
+  }
+  return models;
+}
+
+async function readConnectionPages(state: PublicModelState): Promise<PublicModelState> {
+  const connections = [...state.connections];
+  const ids = new Set(connections.map(connection => connection.id));
+  let offset = state.nextConnectionOffset;
+  while (offset != null) {
+    const page = publicModelStateSchema.parse(await request<unknown>({command:'modelProviders', action:'list', offset,
+      ...(state.listRevision === undefined ? {} : {expectedListRevision:state.listRevision})}));
+    if (page.listRevision !== state.listRevision || page.selection.selectionRevision !== state.selection.selectionRevision
+      || page.totalConnectionCount !== state.totalConnectionCount
+      || offset !== connections.length || page.connections.some(connection => ids.has(connection.id))) {
+      throw new Error('MODEL_CONNECTION_CONFLICT');
+    }
+    for (const connection of page.connections) ids.add(connection.id);
+    connections.push(...page.connections);
+    if (!page.connections.length || (page.nextConnectionOffset == null && connections.length !== state.totalConnectionCount)) {
+      throw new Error('MODEL_PROVIDER_STATUS_UNCONFIRMED');
+    }
+    offset = page.nextConnectionOffset;
+  }
+  return {...state, connections, nextConnectionOffset:null};
+}
+
+export async function readModelConnections(first: Status) {
+  let status = first;
+  for (let attempt = 0; ; attempt++) {
+    if (!status.modelProviders || status.modelProvidersAvailable !== true || runtimeSession(status) !== runtimeSession(first)) {
+      throw new Error('MODEL_PROVIDER_STATUS_UNCONFIRMED');
+    }
+    try {
+      return {status, state:await readConnectionPages(status.modelProviders)};
+    } catch (error) {
+      if (attempt >= 2 || extractErrorCode(error) !== 'MODEL_CONNECTION_CONFLICT') throw error;
+      status = await request<Status>({command:'getStatus'});
+    }
+  }
+}
+
 export function request<T>(
   body:
     | ClientCommand
@@ -178,6 +256,14 @@ export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
 export { errorMessages as reasons, explain } from './error-messages.js';
+export const modelPresetNames: Record<ModelPresetId, string> = {
+  deepseek:'DeepSeek', openai:'OpenAI', anthropic:'Claude', gemini:'Gemini', qwen:'通义千问',
+  doubao:'豆包', siliconflow:'硅基流动', openrouter:'OpenRouter', custom:'自定义',
+};
+export const modelProtocolNames: Record<ModelProtocol, string> = {
+  OPENAI_CHAT:'OpenAI Chat Completions', OPENAI_RESPONSES:'OpenAI Responses',
+  ANTHROPIC_MESSAGES:'Anthropic Messages', GEMINI_GENERATE_CONTENT:'Gemini GenerateContent',
+};
 export const capabilityNames: Record<string, string> = {
   READ_OK: "已验证读取",
   SEND_REVIEW_ONLY: "发送待验证",

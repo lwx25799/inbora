@@ -8,9 +8,11 @@ import {matchesSentDraft,replyEditorDraft,hasLocalReplyDraft,replyDraft,hasReply
 import { modes, time, browserState } from './presentation';
 import { useDevelopmentReconnect } from './useDevelopmentReconnect';
 import {useWorkbenchRefresh,type AuditRow} from './useWorkbenchRefresh';
+import {businessPrompts, samePrompts} from './settings-form-sync';
 import {
   request,
   restoreDesktop,
+  runtimeSession,
   explain,
   reasons,
   type Status,
@@ -637,14 +639,28 @@ export function App() {
         )}
         {page === "settings" ? (
           <Settings
+            key={JSON.stringify([runtimeSession(status),devRecovery.generation])}
             status={status}
             runtime={runtime}
             busy={busy}
             error={error}
             notice={notice}
-            setNotice={setNotice}
             act={act}
             update={setStatus}
+            updateProviders={(next,previous)=>setStatus(current=>{
+              if (!current || !devRecovery.isCurrent() || runtimeSession(current)!==runtimeSession(previous)
+                || runtimeSession(next)!==runtimeSession(previous)) return current;
+              const latest = current.modelProviders, incoming = next.modelProviders;
+              if (latest && (!incoming || incoming.selection.selectionRevision < latest.selection.selectionRevision
+                || (incoming.listRevision ?? -1) < (latest.listRevision ?? -1)
+                || incoming.connections.some(item => latest.connections.some(known => known.id === item.id && known.version > item.version)))) {
+                return current;
+              }
+              return samePrompts(current.settings,previous.settings) ? next
+                : {...next,settings:{...next.settings,...businessPrompts(current.settings)}};
+            })}
+            updatePrompts={(session,prompts)=>setStatus(current=>current&&devRecovery.isCurrent()&&runtimeSession(current)===session
+              ? {...current,settings:{...current.settings,...prompts}} : current)}
             toggleAuto={toggleAuto}
             pendingAutoReply={pendingAutoReply}
             stop={()=>void emergencyStop().catch(e=>setError(explain(e)))}

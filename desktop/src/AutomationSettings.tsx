@@ -116,7 +116,7 @@ export function AutomationSettings({
       <div><label>本次持续授权的发送次数<input type="number" min="1" disabled={unlimitedSend} value={sendLimit} onChange={e=>setPolicyField('sendLimit',Number(e.target.value))}/></label>
       <label className="check"><input type="checkbox" checked={unlimitedSend} onChange={e=>setPolicyField('unlimitedSend',e.target.checked)}/>发送次数无上限</label></div></div>
     <p className="hint">累计额度：{status.budgets.map(b=>`${b.kind} ${b.used}/${b.maximum===null?'无上限':b.maximum}`).join(' · ')}。保存后生效，已用次数不重置；改回有限额度时扣除已用次数，重启保留。</p>
-    <p className="hint">首次保存 API Key 会自动开启模型调用授权，撤销后再次保存不再自动恢复。自动回复由统一开关和已保存范围控制，累计额度不会重置。</p>
+    <p className="hint">保存 API Key 后，请在当前模型区应用连接修订。没有有效授权时，请启用模型授权或保存自动回复策略。累计额度继续沿用。</p>
     <details><summary>仅生成 AI 建议（可选）</summary>
       <p className="hint">用于人工编辑时生成建议。下方规则自动回复已包含模型调用许可，无需先启用此项。</p>
       <div className="row"><button disabled={!ownId||!channels.length||!!busy} onClick={()=>void act('启用持续模型授权',async()=>{

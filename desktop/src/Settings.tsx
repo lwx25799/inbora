@@ -4,10 +4,12 @@ import {LocalAssistantSettings} from './LocalAssistantSettings';
 import { BrowserDraftRecovery } from './BrowserDraftRecovery';
 import {DiagnosticsPanel} from './DiagnosticsPanel';
 import {KnowledgeSettings} from './KnowledgeSettings';
-import { request, closeDesktop, reasons, capabilityNames, type Status } from './api';
+import {ModelProviderSettings} from './ModelProviderSettings';
+import { request, closeDesktop, reasons, capabilityNames, runtimeSession, saveBusinessPrompts, type BusinessPrompts, type Status } from './api';
+import {explainSafe} from './error-messages';
 import { modes } from './presentation';
-import { sameAiSettings } from './settings-form-sync';
 import {SettingsDialog} from './SettingsDialog';
+import {businessPrompts, samePrompts} from './settings-form-sync';
 import './settings.css';
 
 export function Settings({
@@ -16,9 +18,10 @@ export function Settings({
   busy,
   error = '',
   notice = '',
-  setNotice,
   act,
   update,
+  updateProviders,
+  updatePrompts,
   stop,
   toggleAuto,
   pendingAutoReply,
@@ -28,27 +31,65 @@ export function Settings({
   busy: string;
   error?: string;
   notice?: string;
-  setNotice?: (message: string) => void;
   act: (s: string, f: () => Promise<void>) => Promise<void>;
   update: (s: Status) => void;
+  updateProviders: (next: Status, previous: Status) => void;
+  updatePrompts: (session: string, prompts: BusinessPrompts) => void;
   stop:()=>void;
   toggleAuto:(enabled:boolean)=>Promise<void>;
   pendingAutoReply:boolean|null;
 }) {
-  const [settings, setSettings] = useState(status.settings);
-  const syncedSettings = useRef(status.settings);
+  const [settings, setSettings] = useState(() => businessPrompts(status.settings));
+  const syncedSettings = useRef(settings);
   const latestSettings = useRef(settings);
   latestSettings.current = settings;
-  const settingsKey = JSON.stringify(status.settings);
+  const settingsKey = JSON.stringify(businessPrompts(status.settings));
   useEffect(() => {
-    if (sameAiSettings(latestSettings.current, syncedSettings.current)) {
-      syncedSettings.current = status.settings;
-      latestSettings.current = status.settings;
-      setSettings(status.settings);
+    if (samePrompts(latestSettings.current, syncedSettings.current)) {
+      const next = businessPrompts(status.settings);
+      syncedSettings.current = next;
+      latestSettings.current = next;
+      setSettings(next);
     }
   }, [settingsKey]);
-  const [key, setKey] = useState("");
-  const [modelOpen,setModelOpen]=useState(false);
+  const [promptsOpen,setPromptsOpen]=useState(false);
+  const [promptBusy, setPromptBusy] = useState(false);
+  const [promptError, setPromptError] = useState('');
+  const [promptNotice, setPromptNotice] = useState('');
+  const savingPrompts = useRef(false);
+  const active = useRef(false);
+  const session = runtimeSession(status);
+  const canSavePrompts = status.modelProvidersSupported === true;
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
+
+  async function savePrompts() {
+    if (savingPrompts.current || !canSavePrompts) return;
+    savingPrompts.current = true;
+    setPromptBusy(true);
+    setPromptError('');
+    setPromptNotice('');
+    const submitted = latestSettings.current;
+    try {
+      const next = await saveBusinessPrompts(status, submitted);
+      if (!active.current || runtimeSession(next) !== session) return;
+      const saved = businessPrompts(next.settings);
+      syncedSettings.current = saved;
+      if (samePrompts(latestSettings.current, submitted)) {
+        latestSettings.current = saved;
+        setSettings(saved);
+      }
+      updatePrompts(session, saved);
+      setPromptNotice('业务提示词已保存');
+    } catch (error) {
+      if (active.current) setPromptError(explainSafe(error, '业务提示词保存失败。'));
+    } finally {
+      savingPrompts.current = false;
+      if (active.current) setPromptBusy(false);
+    }
+  }
   const [faultOpen, setFaultOpen] = useState(Boolean(status.automation?.emergencyStopped));
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   useEffect(() => {
@@ -67,93 +108,32 @@ export function Settings({
       {status.automation&&<AutomationSettings status={status} busy={busy} error={error} notice={notice} act={act} update={update}/>}
         </div>
         <div className="settings-column">
+      <ModelProviderSettings status={status} update={updateProviders}/>
       <LocalAssistantSettings key={`${status.account?.identity??'none'}:${status.localAssistant?.grant?.version??'none'}`}
         status={status} busy={busy} act={act} update={update}/>
       <div className="settings-section">
-        <h2>DeepSeek 辅助回复</h2>
-        <p>{status.settings.model} · {status.modelAuthorized?'模型许可有效':'模型未授权'}</p>
-        <p className="hint">Key：{status.keyPresent?status.keyStored?'本机安全保存':'仅内存持有':'未配置'}。普通保存保留现有 Key 与授权。</p>
-        <div className="row"><button onClick={()=>setModelOpen(true)}>模型详细配置</button></div>
-        <SettingsDialog title="模型详细配置" open={modelOpen} onClose={()=>setModelOpen(false)} busy={busy} error={error} notice={notice}>
-        <p className="hint">关闭会保留当前输入；保存配置后才生效。Key 默认仅留后端内存。</p>
-        <label>
-          模型
-          <input
-            value={settings.model}
-            onChange={(e) =>
-              setSettings((current) => ({ ...current, model: e.target.value }))
-            }
-          />
-        </label>
-        <small>官方接口：https://api.deepseek.com/chat/completions</small>
+        <h2>业务提示词</h2>
+        <div className="row"><button onClick={()=>setPromptsOpen(true)}>编辑业务提示词</button></div>
+        <SettingsDialog title="业务提示词" open={promptsOpen} onClose={()=>setPromptsOpen(false)}
+          busy={promptBusy ? '正在保存业务提示词…' : ''} error={promptError} notice={promptNotice}>
         {(["persona", "business", "rules"] as const).map((field, i) => (
           <label key={field}>
             {["账号人设", "业务说明", "回复规则"][i]}
             <textarea
               value={settings[field]}
+              maxLength={field === 'persona' ? 2000 : 4000}
               onChange={(e) =>
                 setSettings((current) => ({ ...current, [field]: e.target.value }))
               }
             />
           </label>
         ))}
-        <label>
-          本次 API Key
-          <input
-            type="password"
-            value={key}
-            autoComplete="off"
-            onChange={(e) => setKey(e.target.value)}
-            placeholder={
-              status.keyPresent
-                ? "已持有 Key，留空保存可保留"
-                : "不填写也可人工回复"
-            }
-          />
-        </label>
-        <button
-          disabled={!!busy}
-          onClick={() =>
-            void act("保存 AI 配置", async () => {
-              const submittedSettings = latestSettings.current;
-              const submitted = key;
-              setKey("");
-              const next = await request<Status>({
-                command: "configureAi",
-                settings: submittedSettings,
-                key: submitted,
-              });
-              syncedSettings.current = next.settings;
-              if (sameAiSettings(latestSettings.current, submittedSettings)) {
-                latestSettings.current = next.settings;
-                setSettings(next.settings);
-              }
-              update(next);
-              setNotice?.("AI 配置已保存");
-            })
-          }
-        >
-          保存配置并清空 Key 输入
-        </button>
-        <p>
-          模型：{status.modelAuthorized ? "持续授权有效" : "未授权"} · Key：
-          {status.keyPresent ? status.keyStored?'当前用户 DPAPI 安全保存':'仅后端内存持有' : "未配置"}
-        </p>
-        <label className="check"><input type="checkbox" checked={!!status.keyStored} disabled={!status.keyPresent||!!busy}
-          onChange={e=>{
-            const checked=e.target.checked;
-            void act('更新安全保存',async()=>{
-              update(await request<Status>({command:'setKeyStorage',storage:checked?'DPAPI':'MEMORY'}));
-              setNotice?.(checked?'已启用本机安全保存 Key':'已切换为仅内存持有 Key');
-            });
-          }}/>
-          在本机安全保存 Key（Windows 当前用户 DPAPI，默认关闭）</label>
-        {status.keyStorageError&&<p className="error">{reasons[status.keyStorageError]??status.keyStorageError}</p>}
-        <button disabled={!status.keyPresent&&!status.keyStored&&!status.keyStorageError} onClick={()=>void act('删除 Key',async()=>{
-          update(await request<Status>({command:'setKeyStorage',storage:'DELETE'}));
-          setNotice?.('已删除已保存 Key 并清除内存');
-        })}>删除已保存 Key 并清除内存</button>
+        {!canSavePrompts && <p className="hint" role="status">{reasons.BUSINESS_PROMPTS_BACKEND_UPGRADE_REQUIRED}</p>}
+        <button disabled={promptBusy || !canSavePrompts} onClick={savePrompts}>保存业务提示词</button>
         </SettingsDialog>
+      </div>
+      <div className="settings-section">
+        <h2>累计用量</h2>
         <div className="budget">
           {status.budgets.map((b) => (
             <p key={b.kind}>
