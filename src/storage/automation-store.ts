@@ -1,5 +1,6 @@
-import { digest, isStrong, requireSafe, targetKey, type StoredEvent } from "../core/contracts.js";
-import { collectionSchema, modelGrantSchema, replyPolicySchema, type CollectionSettings, type Grant, type ModelGrant, type ReplyPolicy } from "../app/automation-contracts.js";
+import { Blocked, digest, isStrong, requireSafe, targetKey, type StoredEvent } from "../core/contracts.js";
+import { collectionSchema, type CollectionSettings, type Grant, type ModelGrant, type ReplyPolicy } from "../app/automation-contracts.js";
+import { currentModelGrantScope, parseStoredModelGrant } from "./model-grant-binding.js";
 import type { EventStore } from "./store.js";
 import type {EmergencySource} from '../core/emergency-stop.js';
 import {readEmergencyStop,recordEmergencyStop,emergencyRevision,isEmergencyStopped,resumeEmergency} from './emergency-stop.js';
@@ -47,15 +48,15 @@ export class AutomationStore {
   grant(kind: "MODEL", scope: ModelGrant): Grant<ModelGrant>;
   grant(kind: "AUTO_REPLY", scope: ReplyPolicy): Grant<ReplyPolicy>;
   grant(kind: "MODEL" | "AUTO_REPLY", scope: ModelGrant | ReplyPolicy): Grant {
-    const parsed = kind === "MODEL" ? modelGrantSchema.parse(scope) : replyPolicySchema.parse({...scope,containsAny:[]});
-    if(kind==='AUTO_REPLY'){
-      const policy=parsed as ReplyPolicy;
-      requireSafe(policy.channels.every(channel=>channel==='DIRECT_MESSAGE'?policy.entireInbox||policy.conversationIds.length>0:
-        policy.futureOwnWorks||policy.workIds.length>0),'POLICY_TARGETS_REQUIRED');
-    }
-    this.requireAccount(parsed.ownId);
-    requireSafe(parsed.expiresAt === null || parsed.expiresAt > this.now(), "GRANT_EXPIRED");
     return this.store.db.transaction(() => {
+      const parsed = currentModelGrantScope(this.store, kind, kind === "MODEL" ? scope : {...scope,containsAny:[]});
+      if(kind==='AUTO_REPLY'){
+        const policy=parsed as ReplyPolicy;
+        requireSafe(policy.channels.every(channel=>channel==='DIRECT_MESSAGE'?policy.entireInbox||policy.conversationIds.length>0:
+          policy.futureOwnWorks||policy.workIds.length>0),'POLICY_TARGETS_REQUIRED');
+      }
+      this.requireAccount(parsed.ownId);
+      requireSafe(parsed.expiresAt === null || parsed.expiresAt > this.now(), "GRANT_EXPIRED");
       const previous=this.active(kind);
       const used=(budgetKind:'MODEL'|'SEND')=>previous?(this.store.db.prepare('SELECT count(*) n FROM grant_reservations WHERE grant_version=? AND kind=?')
         .get(previous.version,budgetKind) as {n:number}).n:0;
@@ -84,13 +85,19 @@ export class AutomationStore {
     this.store.db.prepare("UPDATE automation_grants SET revoked_at=? WHERE kind=? AND revoked_at IS NULL").run(this.now(), kind);
     this.store.audit("PERSISTENT_GRANT_REVOKED", kind);
   }
+  readGrantScope(kind: Grant["kind"], row: { scope_json: string; scope_digest: string }): Grant["scope"] {
+    let scope: Grant["scope"];
+    try { scope = parseStoredModelGrant(kind, JSON.parse(row.scope_json)); }
+    catch { throw new Blocked("GRANT_CORRUPT"); }
+    requireSafe(digest(scope) === row.scope_digest, "GRANT_CORRUPT");
+    return scope;
+  }
   active(kind: "MODEL" | "AUTO_REPLY"): Grant | null {
     const row = this.store.db.prepare("SELECT * FROM automation_grants WHERE kind=? AND revoked_at IS NULL ORDER BY version DESC LIMIT 1").get(kind) as {
       version: number; scope_json: string; scope_digest: string; created_at: number;
     } | undefined;
     if (!row) return null;
-    const scope = kind === "MODEL" ? modelGrantSchema.parse(JSON.parse(row.scope_json)) : replyPolicySchema.parse(JSON.parse(row.scope_json));
-    requireSafe(digest(scope) === row.scope_digest, "GRANT_CORRUPT");
+    const scope = this.readGrantScope(kind, row);
     if (scope.expiresAt !== null && scope.expiresAt <= this.now()) return null;
     return {version: row.version, kind, scope, createdAt: row.created_at};
   }

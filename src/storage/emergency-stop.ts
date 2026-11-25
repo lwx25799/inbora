@@ -2,6 +2,15 @@ import {randomUUID} from 'node:crypto';
 import {platformStopCodes,emergencySources,safeEmergencyReason,type EmergencySource,type EmergencyStopInfo} from '../core/emergency-stop.js';
 import type {EventStore} from './store.js';
 
+const stopListeners = new WeakMap<EventStore, Set<() => void>>();
+
+export function onEmergencyStop(store: EventStore, callback: () => void): () => void {
+  const listeners = stopListeners.get(store) ?? new Set<() => void>();
+  listeners.add(callback);
+  stopListeners.set(store, listeners);
+  return () => { listeners.delete(callback); };
+}
+
 function latest(store:Pick<EventStore,'accountId'|'db'>){
   return store.db.prepare("SELECT id,event_type,detail_redacted FROM audit_events WHERE event_type IN ('EMERGENCY_STOPPED','EMERGENCY_RESUMED') ORDER BY rowid DESC LIMIT 1")
     .get() as {id:string;event_type:string;detail_redacted:string}|undefined;
@@ -47,6 +56,7 @@ export function recordEmergencyStop(store:EventStore,stopped:boolean,now:number,
     store.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?)').run(randomUUID(),new Date(now).toISOString(),
       stopped?'EMERGENCY_STOPPED':'EMERGENCY_RESUMED',store.accountId,JSON.stringify(detail));
   }).immediate();
+  if (stopped) for (const listener of stopListeners.get(store) ?? []) listener();
 }
 export function resumeEmergency(store:EventStore,expectedRevision:string,now:number):boolean {
   return store.db.transaction(()=>{
