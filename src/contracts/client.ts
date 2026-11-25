@@ -1,10 +1,14 @@
 import { z } from "zod";
+import { accountsCommandSchema } from "./account.js";
 import {knowledgeCommandSchema} from './knowledge-commands.js';
 import { collectionSchema, modelGrantInputSchema, replyPolicyInputSchema } from "./automation.js";
 import {manualRecoveryCommandSchema} from './manual-recovery.js';
 import { modelIdSchema, modelProvidersCommandSchema, type PublicModelState } from "./model-providers.js";
 
 export const protocolVersion = 1;
+export const protocolVersionV2 = 2;
+export { accountsCommandSchema };
+export type { AccountId, AccountRef, AccountsCommand, AccountStatus, AccountSummary, LegacyTargetAlias, PlatformId, TargetRef } from "./account.js";
 export const modeSchema = z.enum([
   "OBSERVE",
   "DRAFT_ONLY",
@@ -170,7 +174,7 @@ const ordinaryCommandSchema = z.discriminatedUnion("command", [
 ]);
 export const commandSchema = z.union([
   ordinaryCommandSchema, browserCommandSchema, manualRecoveryCommandSchema,
-  knowledgeCommandSchema, modelProvidersCommandSchema,
+  knowledgeCommandSchema, modelProvidersCommandSchema, accountsCommandSchema,
 ]);
 export type ClientCommand = z.infer<typeof commandSchema>;
 export interface ModelProviderStatusFields {
