@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AutomationSettings } from './AutomationSettings';
+import { AccountPlatformPanel } from './AccountPlatformPanel';
 import {LocalAssistantSettings} from './LocalAssistantSettings';
 import { BrowserDraftRecovery } from './BrowserDraftRecovery';
 import {DiagnosticsPanel} from './DiagnosticsPanel';
@@ -267,6 +268,7 @@ export function Settings({
         </button>
         </details>
       </div>
+      <AccountPlatformPanel status={status} busy={busy} />
         </div>
       </div>
       <KnowledgeSettings key={status.account?.id??'unbound'} accountId={status.account?.id??null} disabled={!!busy}/>

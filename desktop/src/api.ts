@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AccountId } from "../../src/contracts/account.js";
+import {
+  accountSummarySchema, DEFAULT_ACCOUNT_ID, DOUYIN_PLATFORM_ID, MOCK_PLATFORM_ID,
+  type AccountId, type AccountSummary, type AccountsCommand,
+} from "../../src/contracts/account.js";
+import { isMutatingClientCommand, requiredScopeForCommand, type ProtocolScope } from "../../src/contracts/protocol-v2.js";
 import type { BrowserStatus } from "../../src/contracts/browser-resources.js";
 import type {
   ClientCommand,
@@ -24,6 +28,8 @@ import {
   type ModelPresetId, type ModelProtocol, type PublicModelConnection, type PublicModelState,
 } from '../../src/contracts/model-providers.js';
 export type { ReplyStatus, TimelineItem };
+export type { AccountSummary, AccountsCommand, ProtocolScope };
+export { DOUYIN_PLATFORM_ID, MOCK_PLATFORM_ID };
 
 export type { SendParams, AiSettings, BrowserDraftChoice };
 export interface Status extends ModelProviderStatusFields {
@@ -213,19 +219,149 @@ export async function readModelConnections(first: Status) {
   }
 }
 
-export function request<T>(
-  body:
-    | ClientCommand
-    | {
-        command: "connect";
-        runtime: string;
-        initialize: boolean;
-        consent: true;
-      }
-    | { command: "disconnect" },
-): Promise<T> {
-  return invoke<T>("client_request", { body });
+type DesktopCommand = ClientCommand
+  | { command: "connect"; runtime: string; initialize: boolean; consent: true }
+  | { command: "disconnect" };
+
+interface AccountRouting {
+  session: string;
+  accountRef: AccountId;
+  active: Set<AccountId> | null;
+  loading: Promise<AccountSummary[]> | null;
 }
+let accountRouting: AccountRouting | null = null;
+
+function observeRoutingStatus(status: Status): void {
+  if (!(status?.schema >= 4)) {
+    accountRouting = null;
+    return;
+  }
+  const session = runtimeSession(status);
+  const accountRef = status.account?.id ?? DEFAULT_ACCOUNT_ID;
+  if (accountRouting?.session === session) accountRouting.accountRef = accountRef;
+  else accountRouting = { session, accountRef, active: null, loading: null };
+}
+
+function writeV2<T>(routing: AccountRouting, body: ClientCommand, kind: ProtocolScope['kind']): Promise<T> {
+  const scope: ProtocolScope = kind === 'GLOBAL' ? { kind } : {
+    kind, accountRef: 'accountRef' in body ? body.accountRef : routing.accountRef,
+  };
+  const commandId = ('commandId' in body ? body.commandId : undefined) ?? crypto.randomUUID();
+  return requestV2<T>(scope, body, commandId);
+}
+
+export async function request<T>(body: DesktopCommand): Promise<T> {
+  if (body.command === 'emergencyStop') return invoke<T>("client_request", { body });
+  const routing = accountRouting;
+  if (body.command === 'connect' || body.command === 'disconnect' || body.command === 'getStatus') {
+    try {
+      const result = await invoke<T>("client_request", { body });
+      if (body.command === 'disconnect') accountRouting = null;
+      else if (body.command === 'connect' || accountRouting === routing) observeRoutingStatus(result as Status);
+      return result;
+    } catch (error) {
+      if (accountRouting === routing && extractErrorCode(error) === 'CONNECT_RUNTIME_FIRST') accountRouting = null;
+      throw error;
+    }
+  }
+
+  const kind = routing && isMutatingClientCommand(body) ? requiredScopeForCommand(body) : null;
+  if (!routing || !kind) return invoke<T>("client_request", { body });
+  if (!routing.active) {
+    // A schema4 connection can already have multiple accounts before Settings is opened.
+    await listAccountsV2().catch(() => {});
+    if (routing !== accountRouting) throw new Error('CONNECT_RUNTIME_FIRST');
+  }
+  if (routing.active && routing.active.size > 1) return writeV2<T>(routing, body, kind);
+  try {
+    return await invoke<T>("client_request", { body });
+  } catch (error) {
+    // This rejection happens before dispatch, so a scoped request cannot replay a write.
+    if (routing !== accountRouting || extractErrorCode(error) !== 'PROTOCOL_V2_ACCOUNT_SCOPE_REQUIRED') throw error;
+    routing.active = null;
+    return writeV2<T>(routing, body, kind);
+  }
+}
+
+export function requestV2<T>(
+  scope: ProtocolScope,
+  body: DesktopCommand,
+  commandId?: string,
+): Promise<T> {
+  return invoke<T>("client_request_v2", { scope, body, ...(commandId ? { commandId } : {}) });
+}
+
+export const platformNames: Record<string, string> = {
+  [DOUYIN_PLATFORM_ID]: '抖音',
+  [MOCK_PLATFORM_ID]: '合成验证平台 (Mock)',
+};
+
+export async function listAccountsV2(status?: Status): Promise<AccountSummary[]> {
+  if (status) observeRoutingStatus(status);
+  const routing = accountRouting;
+  if (routing?.loading) return routing.loading;
+  const loading = requestV2<{ accounts: unknown }>({ kind: 'GLOBAL' }, { command: 'accounts', action: 'listAccounts' })
+    .then(result => accountSummarySchema.array().parse(result.accounts));
+  if (routing) routing.loading = loading;
+  try {
+    const accounts = await loading;
+    if (routing?.loading === loading) {
+      routing.active = new Set(accounts.filter(account => account.status === 'ACTIVE').map(account => account.accountRef));
+    }
+    return accounts;
+  } finally {
+    if (routing?.loading === loading) routing.loading = null;
+  }
+}
+
+export interface MockRegistration {
+  commandId: string;
+  displayLabel: string;
+}
+
+export function mockRegistrationAccountRef(commandId: string): AccountId {
+  return `account_${commandId}`;
+}
+
+export function accountRegistrationUnconfirmed(error: unknown): boolean {
+  return ['', 'COMMAND_IN_PROGRESS', 'IPC_RESPONSE_UNKNOWN_READ_STATUS', 'SIDECAR_CLOSED',
+    'SIDECAR_RESPONSE_TOO_LARGE', 'DEV_BACKEND_RESTARTING_READ_STATUS',
+    'DEV_BACKEND_UNAVAILABLE_RESTART_REQUIRED', 'OPERATION_FAILED_PRIVATE_DIAGNOSTICS',
+  ].includes(extractErrorCode(error));
+}
+
+async function changeAccount(scope: ProtocolScope, body: Extract<AccountsCommand, { commandId: string }>): Promise<AccountSummary> {
+  const routing = accountRouting;
+  try {
+    const account = await requestV2<AccountSummary>(scope, body, body.commandId);
+    if (routing) {
+      routing.loading = null; // A list started before the write can describe the old account set.
+      if (body.action === 'disconnectAccount') routing.active?.delete(account.accountRef);
+      else if (account.status === 'ACTIVE') routing.active?.add(account.accountRef);
+    }
+    return account;
+  } catch (error) {
+    if (routing && accountRegistrationUnconfirmed(error)) {
+      routing.active = null;
+      routing.loading = null;
+    }
+    throw error;
+  }
+}
+
+export function registerMockAccountV2({ commandId, displayLabel }: MockRegistration): Promise<AccountSummary> {
+  return changeAccount({ kind: 'GLOBAL' }, {
+    command: 'accounts', action: 'registerAccount', commandId, accountId: mockRegistrationAccountRef(commandId),
+    platform: MOCK_PLATFORM_ID, connector: MOCK_PLATFORM_ID, displayLabel,
+  });
+}
+
+export function disconnectAccountV2(accountRef: AccountSummary['accountRef']): Promise<AccountSummary> {
+  return changeAccount({ kind: 'ACCOUNT', accountRef }, {
+    command: 'accounts', action: 'disconnectAccount', commandId: crypto.randomUUID(), accountRef, confirmed: true,
+  });
+}
+
 export function desktopInfo(): Promise<{ runtime: string; version: string; rememberedRuntime?: string|null; features?:{replyKnowledge?:boolean} }> {
   return invoke("desktop_info");
 }

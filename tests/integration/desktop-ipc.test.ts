@@ -9,6 +9,7 @@ import {existsSync} from 'node:fs';
 import {readFile,rm,writeFile} from 'node:fs/promises';
 import {z} from 'zod';
 import {commandSchema} from '../../src/app/contracts.js';
+import {MAX_PROTOCOL_V2_FRAME_BYTES} from '../../src/contracts/protocol-v2.js';
 import {installFixtureKey,modelFixture,providerState} from '../model-provider-helpers.js';
 import {ModelProviderStore} from '../../src/storage/model-provider-store.js';
 import type {ModelCatalogEntry,ModelCatalogPage,PublicModelState} from '../../src/contracts/model-providers.js';
@@ -50,9 +51,12 @@ test('desktop status projects the persistent selection without key or credential
 });
 
 async function rustFrameLimit(): Promise<number> {
-  const native = await readFile("desktop/src-tauri/src/main.rs", "utf8");
+  const native = await readFile("desktop/src-tauri/src/protocol.rs", "utf8");
   const rustLimit = Number(native.match(/MAX_SIDECAR_LINE_BYTES: usize = ([\d_]+)/u)?.[1]?.replaceAll("_", ""));
+  const v2Limit = Number(native.match(/MAX_PROTOCOL_V2_FRAME_BYTES: usize = ([\d_]+)/u)?.[1]?.replaceAll("_", ""));
   expect(rustLimit).toBe(2_000_000);
+  expect(v2Limit).toBe(1_048_576);
+  expect(v2Limit).toBe(MAX_PROTOCOL_V2_FRAME_BYTES);
   return rustLimit;
 }
 
@@ -203,7 +207,7 @@ test("source sidecar authenticates IPC, rejects unbounded/extra fields, reconnec
       }),
     ).toMatchObject({
       ok: true,
-      result: { connected: true, schema: 3, mode: "DRAFT_ONLY",
+      result: { connected: true, schema: 4, mode: "DRAFT_ONLY",
         localAssistantConnection:{ready:true,instanceId:expect.any(String),transport:'stdio',tools:16} },
     });
     const recoverySession=randomUUID();

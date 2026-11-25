@@ -26,6 +26,19 @@ export const errorMessages: Record<string, string> = {
   DISCONNECT_FIRST: '当前已连接其他运行目录，请先断开后再切换。',
   CLIENT_CLOSING: '运行目录正在断开，请连接完成后重新读取。',
 
+  // Multi-account protocol & worker recovery
+  PROTOCOL_V2_ACCOUNT_SCOPE_REQUIRED: '多账号运行中，写操作需通过协议 v2 显式指定目标账号。',
+  PROTOCOL_SCOPE_MISMATCH: '请求作用域与命令类型不匹配，请重试。',
+  INVALID_SCOPE: '账号作用域参数无效。',
+  INVALID_COMMAND_ID: '请求命令标识无效。',
+  COMMAND_ID_CONFLICT: '命令标识冲突，请勿用同一标识提交不同参数。',
+  ACCOUNT_IDENTITY_CONFLICT: '该平台已绑定相同原生账号身份，无法重复注册。',
+  ACCOUNT_ID_CONFLICT: '账号标识已存在。',
+  ACCOUNT_NOT_FOUND: '未找到指定账号。',
+  ACCOUNT_NOT_ACTIVE: '该账号当前未处于活跃状态。',
+  SCHEMA4_REQUIRED: '当前数据库尚未升级至多账号结构（schema4）。',
+  WORKER_CRASH_NO_REPLAY: '浏览器子进程异常退出，为防止重复发送已禁止重放旧意图，请只读核验状态。',
+
   // Emergency stop, security holds & manual recovery
   EMERGENCY_STOPPED: '全局急停已生效。请在 AI 与设置的故障处理区域或顶部提示中明确恢复后继续。',
   EMERGENCY_RECOVERY_HEADLESS_REQUIRED: '请先返回无头运行，再检查并恢复调度。',
