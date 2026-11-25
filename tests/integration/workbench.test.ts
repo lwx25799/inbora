@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import { afterEach, describe, expect, test } from "vitest";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -697,12 +698,15 @@ describe("workbench authority and application contracts, synthetic only", () => 
   });
   test("G02 AI is explicit, Key never persisted, late output stays candidate and never overwrites new human version", async () => {
     let resolve!: (r: Response) => void;
+    let entered!:()=>void;
+    const ready=new Promise<void>(done=>{entered=done;});
     let calls = 0;
     const provider = new DeepSeekProvider(async () => {
       calls++;
-      return new Promise<Response>((r) => (resolve = r));
+      return new Promise<Response>((r) => {resolve=r;entered();});
     });
     const c = await setup(provider);
+    await c.service.loadSettings();
     const p = saveAndSelect(c);
     await expect(
       c.service.dispatch(c.token, {
@@ -721,21 +725,17 @@ describe("workbench authority and application contracts, synthetic only", () => 
     await c.service.dispatch(c.token, {
       command: "configureAi",
       settings,
-      key,
     });
     expect(
       await readFile(join(c.browser.root, "client-settings.json"), "utf8"),
     ).not.toContain(key);
-    await c.service.dispatch(c.token, {
-      command: "authorizeAi",
-      authorized: true,
-    });
+    await installFixtureKey(c.service,c.token,{key,grant:true});
     const suggestion = c.service.dispatch(c.token, {
       command: "generateSuggestion",
       eventId: c.eventId,
       draftVersion: p.draftVersion,
     });
-    await Promise.resolve();
+    await ready;
     c.service.authority.save(
       c.token,
       c.eventId,
@@ -764,5 +764,6 @@ describe("workbench authority and application contracts, synthetic only", () => 
     );
     expect(calls).toBe(1);
     expect(c.browser.clicks).toBe(0);
+    await c.service.close();
   });
 });

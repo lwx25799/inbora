@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import {expect,test,vi} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
@@ -6,7 +7,6 @@ import {AccountActor} from '../../src/browser/account-actor.js';
 import {ClientService} from '../../src/app/service.js';
 import {HumanReplyWorkflow} from '../../src/app/human-reply-workflow.js';
 import {DeepSeekProvider} from '../../src/ai/deepseek.js';
-import {defaultSettings} from '../../src/app/contracts.js';
 import type {ReplyPolicy} from '../../src/app/automation-contracts.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
 import {Blocked,digest,targetKey,type InboundEvent} from '../../src/core/contracts.js';
@@ -32,7 +32,7 @@ async function setup(){
   const provider=new DeepSeekProvider(async()=>{models++;return new Response(JSON.stringify({model:policy.model,choices:[{index:0,finish_reason:'stop',message:{role:'assistant',content:'A saved exact comment answer'}}],
     usage:{prompt_tokens:2,completion_tokens:3,total_tokens:5}}));});
   const service=new ClientService(store,browser,provider);await service.loadSettings();const token=service.authority.issueSession();
-  await service.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-only-key'});
+  await installFixtureKey(service,token,{key:'synthetic-only-key'});
   await service.dispatch(token,{command:'setReplyPolicy',policy,confirmed:true});await service.dispatch(token,{command:'setMode',mode:'LIMITED_AUTO'});
   await service.runAutomaticReply();expect(models).toBe(1);expect(browser.clicks).toBe(0);
   expect(store.db.prepare('SELECT state,reason FROM automation_jobs WHERE event_id=?').get(id)).toEqual({state:'FAILED_BEFORE_CLICK',reason:'COMMENT_REPLY_ROOT_NOT_UNIQUE'});
@@ -109,7 +109,7 @@ test('a crash after the durable root qualification is consumed cannot replay pre
     await f.service.close();const browser=new CommentRecoveryBrowser(f.browser.root);browser.failure=null;
     let calls=0;restarted=new ClientService(f.store,browser,new DeepSeekProvider(async()=>{calls++;throw new Error('must not call');}));
     await restarted.loadSettings();const token=restarted.authority.issueSession();
-    await restarted.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-only-key'});
+    await installFixtureKey(restarted,token,{key:'synthetic-only-key'});
     await restarted.runAutomaticReply();expect(f.count()).toEqual({n:1});expect(browser.preparations).toBe(0);expect(browser.clicks).toBe(0);expect(calls).toBe(0);
     expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});expect(f.store.budget('MODEL').used).toBe(1);
   }finally{prepare.mockRestore();await restarted?.close();await f.close();}

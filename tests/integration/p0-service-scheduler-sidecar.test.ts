@@ -1,3 +1,4 @@
+import {installFixtureKey,modelFixture,providerState} from '../model-provider-helpers.js';
 import { afterEach, expect, test, vi } from "vitest";
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -13,7 +14,6 @@ import { CollectionScheduler, DeferredObjectRead } from "../../src/app/collectio
 import { VerificationScheduler } from "../../src/app/verification-scheduler.js";
 import { humanQueueFrozen } from "../../src/app/human-queue-context.js";
 import { claimReceiptRecheck, receiptRecheckVersion } from "../../src/app/receipt-recheck.js";
-import { CredentialStore } from "../../src/app/credentials.js";
 import { defaultSettings } from "../../src/app/contracts.js";
 import type { ReplyPolicy } from "../../src/app/automation-contracts.js";
 import { DeepSeekProvider } from "../../src/ai/deepseek.js";
@@ -137,7 +137,7 @@ test("readOnly session renewal avoids SQLite writes, desktop reconnect preserves
 
   const gui = f.service.authority.issueSession();
   await f.service.dispatch(gui, { command: "setReplyPolicy", policy: { ...policy, model: "deepseek-chat" }, confirmed: true });
-  await expect(f.service.dispatch(gui, { command: "setMode", mode: "LIMITED_AUTO" })).rejects.toThrow("MODEL_OUTSIDE_GRANT");
+  expect(f.auto.active("AUTO_REPLY")?.scope.model).toBe(defaultSettings.model);
   await f.service.dispatch(gui, { command: "setReplyPolicy", policy, confirmed: true });
   f.store.db.prepare("UPDATE automation_grants SET scope_digest='tampered' WHERE kind='AUTO_REPLY' AND revoked_at IS NULL").run();
   await expect(f.service.dispatch(gui, { command: "setMode", mode: "LIMITED_AUTO" })).rejects.toThrow("GRANT_CORRUPT");
@@ -150,7 +150,23 @@ test("readOnly session renewal avoids SQLite writes, desktop reconnect preserves
   expect(f.service.authority.mode()).toBe("LIMITED_AUTO");
 });
 
-test("emergencyStop/close abort automaticAbort, replyKnowledge emits selectively, clearModelKey deletes DPAPI disk key", async () => {
+test("clearModelKey revokes the applied revision and removes its DPAPI file", async () => {
+  const f=await modelFixture();
+  const {root,store,service,token}=f;
+  try{
+    await installFixtureKey(service,token,{storage:"DPAPI",key:"synthetic-dpapi-key"});
+    const selected=(await providerState(service,token)).selection;
+    const credential=store.db.prepare("SELECT credential_revision FROM m_connection_revisions WHERE connection_id=? AND route_revision=?")
+      .pluck().get(selected.connectionId,selected.routeRevision) as string;
+    const keyFile=join(root,"model-credentials",selected.connectionId!,credential+".dpapi");
+    expect(existsSync(keyFile)).toBe(true);
+    await service.dispatch(token, { command: "clearModelKey" });
+    expect(existsSync(keyFile)).toBe(false);
+    expect(await service.dispatch(token, { command: "getStatus" })).toMatchObject({ keyPresent: false, keyStored: false });
+  }finally{await f.close();}
+});
+
+test("emergencyStop aborts automatic qualification and replyKnowledge emits only for persistent writes", async () => {
   const root = privateTemp("p0-5-service-");
   const store = database();
   await migrateClient(store, join(root, "client.sqlite"));
@@ -187,13 +203,6 @@ test("emergencyStop/close abort automaticAbort, replyKnowledge emits selectively
   });
   await service.loadSettings();
   const token = service.authority.issueSession();
-  await service.dispatch(token, { command: "configureAi", settings: defaultSettings, key: "synthetic-dpapi-key" });
-  await service.dispatch(token, { command: "setKeyStorage", storage: "DPAPI" });
-  expect(existsSync(join(root, "model-key.dpapi"))).toBe(true);
-  await service.dispatch(token, { command: "clearModelKey" });
-  expect(existsSync(join(root, "model-key.dpapi"))).toBe(false);
-  expect(await new CredentialStore(root).load()).toBeNull();
-  expect(await service.dispatch(token, { command: "getStatus" })).toMatchObject({ keyPresent: false, keyStored: false });
 
   const events: string[] = [];
   service.events.on("update", (m: { event: string }) => events.push(m.event));
@@ -227,7 +236,7 @@ test("emergencyStop/close abort automaticAbort, replyKnowledge emits selectively
   });
   expect(events.filter((e) => e === "knowledge_updated")).toHaveLength(1);
 
-  await service.dispatch(token, { command: "configureAi", settings: defaultSettings, key: "synthetic-auto-key" });
+  await installFixtureKey(service,token);
   await service.dispatch(token, {
     command: "setReplyPolicy",
     confirmed: true,

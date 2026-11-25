@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import {afterEach,expect,test} from 'vitest';
 import Database from 'better-sqlite3';
 import {copyFile} from 'node:fs/promises';
@@ -65,11 +66,11 @@ test('model-only nullable scope and key saves preserve the explicit global choic
   const second=auto.grant('MODEL',model);expect(()=>auto.reserve(second.version,'MODEL','already-used')).toThrow('GRANT_JOB_ALREADY_RESERVED');
   const service=new ClientService(store,new BrowserService(root));await service.loadSettings();const token=service.authority.issueSession();
   try{
-    await service.dispatch(token,{command:'configureAi',settings:{model:'deepseek-flash',persona:'',business:'',rules:''},key:'synthetic-only-key'});
+    await installFixtureKey(service,token);
     expect(new AutomationStore(store).active('MODEL')!.scope.modelLimit).toBeNull();
     expect(await service.dispatch(token,{command:'getStatus'})).toMatchObject({budgets:expect.arrayContaining([{kind:'MODEL',used:1,maximum:null}])});
     await service.dispatch(token,{command:'setModelGrant',scope:null,confirmed:true});
-    await service.dispatch(token,{command:'configureAi',settings:{model:'deepseek-flash',persona:'',business:'',rules:''},key:'synthetic-only-key'});
+    await installFixtureKey(service,token);
     expect(new AutomationStore(store).active('MODEL')).toBeNull();
     expect(store.budget('MODEL')).toEqual({kind:'MODEL',used:1,maximum:null});
     await service.dispatch(token,{command:'setModelGrant',scope:model,confirmed:true});

@@ -1,11 +1,12 @@
 import {expect,test,vi} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {AssistantFacade} from '../../src/mcp/assistant-facade.js';
-import {operationSchema,replySchema,statusSchema,threadSchema,diagnosticsSchema} from '../../src/mcp/tool-contracts.js';
+import {assistantTools,operationSchema,replySchema,statusSchema,threadSchema,diagnosticsSchema} from '../../src/mcp/tool-contracts.js';
 import {ChatMessageStore} from '../../src/storage/chat-messages.js';
 import {setupAssistant} from '../mcp-helpers.js';
 import {candidate,pending} from '../helpers.js';
 import {targetKey} from '../../src/core/contracts.js';
+import {providerState} from '../model-provider-helpers.js';
 
 async function fixture(){
   const f=await setupAssistant();f.service.authority.release(f.token,f.eventId,f.input.generation);
@@ -21,6 +22,34 @@ async function fixture(){
   };
   return {...f,facade,session,call,run,open,async close(){await facade.close();await f.close();}};
 }
+
+test('assistant CONTROL cannot use the seven model management actions or compatibility commands',async()=>{
+  const f=await fixture();
+  try{
+    const before=await providerState(f.service,f.gui);
+    const connection=before.connections[0]!;
+    const ref={connectionId:connection.id,routeRevision:connection.draftRevision};
+    const target={...ref,modelId:'example/model:revision',confirmed:true,commandId:randomUUID()};
+    for(const fields of [
+      {action:'list'},
+      {action:'save',connectionId:null,expectedVersion:0,name:'Synthetic',presetId:'custom',protocol:'OPENAI_CHAT',
+        baseUrl:'https://models.example.com/v1',region:null,manualModels:[]},
+      {action:'setKey',connectionId:connection.id,expectedVersion:connection.version,storage:'MEMORY',key:'synthetic-only'},
+      {action:'discover',...ref},
+      {action:'test',...target},
+      {action:'apply',...target,expectedSelectionRevision:before.selection.selectionRevision},
+      {action:'delete',connectionId:connection.id,expectedVersion:connection.version},
+    ]) await expect(f.service.dispatch(f.token,{command:'modelProviders',...fields})).rejects.toThrow('ASSISTANT_PERMISSION_REQUIRED');
+    for(const command of [
+      {command:'configureAi',settings:{persona:'',business:'',rules:''}},
+      {command:'clearModelKey'},
+      {command:'setKeyStorage',storage:'DPAPI'},
+    ])await expect(f.service.dispatch(f.token,command)).rejects.toThrow('ASSISTANT_PERMISSION_REQUIRED');
+    expect(await providerState(f.service,f.gui)).toEqual(before);
+    expect(Object.keys(assistantTools)).toHaveLength(16);
+    expect(threadSchema.parse(await f.call('inbora_get_thread',{eventId:f.eventId})).event.id).toBe(f.eventId);
+  }finally{await f.close();}
+});
 
 test('first authenticated assistant connection enables the existing account range and inherits global allowance',async()=>{
   const f=await fixture();try{

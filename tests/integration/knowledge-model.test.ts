@@ -7,6 +7,89 @@ import {ReplyKnowledgeStore} from '../../src/knowledge/store.js';
 import {LearningModelService,type LearningModelContext} from '../../src/knowledge/model-service.js';
 import {defaultSettings} from '../../src/app/contracts.js';
 import {privateTemp} from '../helpers.js';
+import {applyModel,chatAnswer,deferred,installFixtureKey,modelFixture,stageFixtureModel} from '../model-provider-helpers.js';
+
+function routedSamples(store:EventStore,count:number){
+  const knowledge=new ReplyKnowledgeStore(store);
+  knowledge.addSamples('account_001',Array.from({length:count},(_,i)=>({
+    channel:'DIRECT_MESSAGE' as const,prompt:'Sample question '+i,response:'Sample response '+i,group:'fixture',
+    source:'IMPORTED' as const,
+  })));
+  const ids=store.db.prepare('SELECT id FROM k_samples').pluck().all() as string[];
+  knowledge.selectSamples('account_001',ids,true);
+}
+
+test('analysis, merge and both sandbox trials use the applied route with their own token limits',async()=>{
+  const requests:{url:string;model:string;max_tokens:number}[]=[];
+  const f=await modelFixture(async(url,init)=>{
+    const body=JSON.parse(String(init?.body));
+    requests.push({url:String(url),model:body.model,max_tokens:body.max_tokens});
+    return chatAnswer(body.max_tokens===2048?'{"rules":"Short and friendly."}':'A safe sandbox reply.');
+  });
+  try{
+    await installFixtureKey(f.service,f.token,{grant:true});
+    const target=await stageFixtureModel(f.service,f.token);
+    await applyModel(f.service,f.token,target.connectionId,target.routeRevision,target.modelId);
+    routedSamples(f.store,45);
+    expect(await f.service.dispatch(f.token,{command:'replyKnowledge',action:'analyze',sampleIds:[],confirmed:true}))
+      .toMatchObject({calls:3});
+    await f.service.dispatch(f.token,{command:'replyKnowledge',action:'tryReply',channel:'DIRECT_MESSAGE',
+      message:'Hello',sourceIds:[],personaVersionId:null,comparePersonaVersionId:null,confirmed:true});
+    expect(requests.map(r=>r.max_tokens)).toEqual([2048,2048,2048,512,512]);
+    expect(requests.every(r=>r.model===target.modelId&&r.url==='https://models.example.com/v1/chat/completions')).toBe(true);
+    expect(f.store.db.prepare('SELECT purpose FROM m_call_routes ORDER BY rowid').pluck().all())
+      .toEqual(['PERSONA_ANALYSIS','PERSONA_ANALYSIS','PERSONA_MERGE','SANDBOX_REPLY','SANDBOX_COMPARE']);
+  }finally{await f.close();}
+});
+
+test('switch preserves completed batches, stops subsequent calls and rejects the old task id',async()=>{
+  const entered=deferred(),release=deferred();let calls=0;
+  const f=await modelFixture(async()=>{
+    if(++calls===2){entered.resolve();await release.promise;}
+    return chatAnswer('{"rules":"Short and friendly."}');
+  });
+  try{
+    await installFixtureKey(f.service,f.token,{grant:true});
+    const target=await stageFixtureModel(f.service,f.token);
+    routedSamples(f.store,85);
+    const command={command:'replyKnowledge',action:'analyze',sampleIds:[],confirmed:true};
+    const run=expect(f.service.dispatch(f.token,command)).rejects.toThrow('MODEL_ROUTE_CHANGED');
+    await entered.promise;
+    await applyModel(f.service,f.token,target.connectionId,target.routeRevision,target.modelId);
+    release.resolve();await run;
+    expect(f.store.db.prepare('SELECT state FROM k_learning_batches ORDER BY batch_index').pluck().all())
+      .toEqual(['SUCCEEDED','FAILED']);
+    const taskId=f.store.db.prepare('SELECT id FROM k_learning_tasks').pluck().get();
+    await expect(f.service.dispatch(f.token,{...command,taskId})).rejects.toThrow('PERSONA_TASK_SELECTION_CHANGED');
+    expect(calls).toBe(2);
+    expect(f.store.budget('MODEL').used).toBe(2);
+  }finally{release.resolve();await f.close();}
+});
+
+test('an ambiguous paid batch cannot be reposted by same-route task continuation',async()=>{
+  let calls=0;
+  const f=await modelFixture(async()=>{calls++;return chatAnswer('{"rules":"Short and friendly."}');});
+  let restarted:typeof f.service|undefined;
+  try{
+    await installFixtureKey(f.service,f.token,{grant:true});routedSamples(f.store,1);
+    const command={command:'replyKnowledge',action:'analyze',sampleIds:[],confirmed:true};
+    const {taskId}=await f.service.dispatch(f.token,command) as {taskId:string};
+    const callId=f.store.db.prepare("SELECT call_id FROM k_learning_batches WHERE task_id=?").pluck().get(taskId);
+    expect(callId).toEqual(expect.any(String));
+    f.store.db.prepare("UPDATE k_learning_tasks SET state='RUNNING',persona_id=NULL WHERE id=?").run(taskId);
+    f.store.db.prepare("UPDATE k_learning_batches SET state='RUNNING',output_json=NULL WHERE task_id=?").run(taskId);
+    await expect(f.service.dispatch(f.token,{...command,taskId})).rejects.toThrow('PERSONA_TASK_INTERRUPTED');
+    expect(calls).toBe(1);
+    expect(f.store.budget('MODEL').used).toBe(1);
+    await f.service.close();
+    const next=await f.start();restarted=next.service;
+    expect(await restarted.dispatch(next.token,{command:'replyKnowledge',action:'overview'})).toMatchObject({
+      learningTasks:[{id:taskId,state:'INTERRUPTED',completed:0}],
+    });
+    expect(f.store.db.prepare("SELECT state,call_id FROM k_learning_batches WHERE task_id=?").get(taskId))
+      .toEqual({state:'INTERRUPTED',call_id:callId});
+  }finally{await restarted?.close();await f.close();}
+});
 
 const roots:string[]=[];const stores:EventStore[]=[];
 afterEach(()=>{for(const store of stores.splice(0))store.close();for(const root of roots.splice(0))rmSync(root,{recursive:true,force:true});});

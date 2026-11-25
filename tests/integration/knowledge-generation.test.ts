@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import {afterEach,expect,test} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {rmSync} from 'node:fs';
@@ -37,7 +38,7 @@ async function fixture(){
     model:'deepseek-flash',choices:[{index:0,finish_reason:'stop',message:{role:'assistant',content:'可以用冷水轻柔清洗。'}}],
     usage:{prompt_tokens:9,completion_tokens:4,total_tokens:13}}));});
   const service=new ClientService(store,browser,provider);fixtures.push({service,store,root});await service.loadSettings();
-  const token=service.authority.issueSession();await service.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-only'});
+  const token=service.authority.issueSession();await installFixtureKey(service,token,{key:'synthetic-only',grant:true});
   service.authority.attest('DIRECT_MESSAGE','SEND_AVAILABLE',browser.identity(),'synthetic-only');service.authority.setMode(token,'MANUAL');
   const knowledge=new ReplyKnowledgeStore(store),entry=knowledge.saveKnowledge('account_001',{title:'清洗方法',topic:'清洗',text:'清洗时使用冷水。'});
   knowledge.setKnowledgeState('account_001',entry.id,'ACTIVE');

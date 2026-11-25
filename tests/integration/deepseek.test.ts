@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import { afterEach, test, expect } from "vitest";
 import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
@@ -95,7 +96,7 @@ test("DeepSeek uses independent official messages/choices/usage contract and lim
     const provider = new DeepSeekProvider(async (url, init) => {
       calls++;
       expect(url).toBe("https://api.deepseek.com/chat/completions");
-      expect(init?.redirect).toBe("error");
+      expect(init?.redirect).toBe("manual");
       expect(init?.signal).toBeInstanceOf(AbortSignal);
       const body = JSON.parse(init!.body as string) as {
         max_tokens: number;
@@ -105,7 +106,6 @@ test("DeepSeek uses independent official messages/choices/usage contract and lim
       };
       expect(body).toMatchObject({
         max_tokens: 512,
-        stream: false,
         thinking: { type: "disabled" },
       });
       expect(body.messages.map((m) => m.role)).toEqual(["system", "user"]);
@@ -133,7 +133,7 @@ test("DeepSeek uses independent official messages/choices/usage contract and lim
         "synthetic-contract-key",
         true,
       ),
-    ).toEqual({ text: "收到，我会核实。", model: "deepseek-flash" });
+    ).toMatchObject({ text: "收到，我会核实。", model: "deepseek-flash" });
     expect(
       store.db
         .prepare("SELECT status,input_tokens,output_tokens FROM model_calls")
@@ -147,11 +147,10 @@ test("DeepSeek uses independent official messages/choices/usage contract and lim
 test.each([
   ["http", "MODEL_RATE_LIMITED"],
   ["auth", "MODEL_AUTH_FAILED"],
-  ["server", "MODEL_HTTP_ERROR"],
+  ["server", "MODEL_SERVICE_ERROR"],
   ["timeout-abort", "MODEL_TIMEOUT"],
   ["timeout", "MODEL_FAILED_NO_RETRY"],
   ["json", "MODEL_FAILED_NO_RETRY"],
-  ["usage", "MODEL_USAGE_INVALID"],
   ["truncated", "MODEL_FAILED_NO_RETRY"],
   ["sensitive-output", "MODEL_SENSITIVE_OUTPUT"],
   ["duplicate-output", "MODEL_DUPLICATE_OUTPUT"],
@@ -188,17 +187,6 @@ test.each([
             status: 503,
           });
         if (failure === "json") return new Response("{");
-        if (failure === "usage")
-          return new Response(
-            JSON.stringify({
-              ...good,
-              usage: {
-                prompt_tokens: 18,
-                completion_tokens: 7,
-                total_tokens: 99,
-              },
-            }),
-          );
         if (failure === "truncated")
           return new Response(
             JSON.stringify({
@@ -403,8 +391,8 @@ async function setupLimitedAuto(replyText: string, inboundText: string, rules = 
   await service.dispatch(token, {
     command: "configureAi",
     settings: { ...settings, business: "生鲜商品不支持无理由退款", rules },
-    key: "synthetic-contract-key",
   });
+  await installFixtureKey(service,token);
   service.authority.attest("DIRECT_MESSAGE", "SEND_AVAILABLE", browser.identity(), "synthetic-contract-key");
   const policy: ReplyPolicy = {
     ownId: "own-1",

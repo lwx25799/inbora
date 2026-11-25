@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import {expect,test} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {setupAssistant} from '../mcp-helpers.js';
@@ -6,7 +7,7 @@ import {targetKey} from '../../src/core/contracts.js';
 
 async function enableModel(f:Awaited<ReturnType<typeof setupAssistant>>){
   f.auto.grant('MODEL',{ownId:'own-1',channels:['DIRECT_MESSAGE','COMMENT_NOTIFICATION'],model:'deepseek-flash',modelLimit:5,expiresAt:null});
-  await f.service.dispatch(f.gui,{command:'configureAi',settings:{model:'deepseek-flash',persona:'',business:'',rules:''},key:'synthetic-only'});
+  await installFixtureKey(f.service,f.gui,{key:'synthetic-only',grant:true});
 }
 
 test('pre-origin incoming text in the actual finite DM context is rejected before any paid reservation',async()=>{

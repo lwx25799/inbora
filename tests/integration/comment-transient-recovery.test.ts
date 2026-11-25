@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
@@ -5,7 +6,6 @@ import {AccountActor} from '../../src/browser/account-actor.js';
 import {BrowserService} from '../../src/app/browser-service.js';
 import {ClientService} from '../../src/app/service.js';
 import {DeepSeekProvider} from '../../src/ai/deepseek.js';
-import {defaultSettings} from '../../src/app/contracts.js';
 import type {ReplyPolicy} from '../../src/app/automation-contracts.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
 import {Blocked,digest,targetKey,type InboundEvent} from '../../src/core/contracts.js';
@@ -38,7 +38,7 @@ async function setup(failure:'ROOT'|'CLOCK'){
   const provider=new DeepSeekProvider(async()=>{models++;return new Response(JSON.stringify({model:policy.model,
     choices:[{index:0,finish_reason:'stop',message:{role:'assistant',content:'The one saved exact nested answer'}}],usage:{prompt_tokens:2,completion_tokens:3,total_tokens:5}}));});
   const service=new ClientService(store,browser,provider);await service.loadSettings();const token=service.authority.issueSession();
-  await service.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-only-key'});
+  await installFixtureKey(service,token,{key:'synthetic-only-key'});
   await service.dispatch(token,{command:'setReplyPolicy',policy,confirmed:true});await service.dispatch(token,{command:'setMode',mode:'LIMITED_AUTO'});
   await service.runAutomaticReply();
   expect(store.db.prepare('SELECT state,reason,draft_version FROM automation_jobs WHERE event_id=?').get(id)).toEqual(failure==='ROOT'?

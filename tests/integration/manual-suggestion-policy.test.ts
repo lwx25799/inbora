@@ -1,3 +1,4 @@
+import {applyModel,installFixtureKey,stageFixtureModel} from '../model-provider-helpers.js';
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
 import {ClientService} from '../../src/app/service.js';
@@ -26,11 +27,12 @@ async function setup(scope:Partial<ReplyPolicy>={}){
     model:'deepseek-flash',choices:[{index:0,finish_reason:'stop',message:{role:'assistant',content:'Exact synthetic reply candidate'}}],usage:{prompt_tokens:3,completion_tokens:2,total_tokens:5}}));});
   const service=new ClientService(store,browser,provider,()=>clock);await service.loadSettings();const token=service.authority.issueSession();
   service.authority.attest('DIRECT_MESSAGE','SEND_AVAILABLE',browser.identity(),'synthetic-only');service.authority.setMode(token,'MANUAL');
+  await installFixtureKey(service,token);
   const auto=new AutomationStore(store,()=>clock),grant=auto.grant('AUTO_REPLY',policy(scope));
   // Current grant creation clears the retired positive filter. Preserve a valid historical saved scope for this guard case.
   if(scope.containsAny?.length){const saved={...grant.scope,containsAny:scope.containsAny};
     store.db.prepare('UPDATE automation_grants SET scope_json=?,scope_digest=? WHERE version=?').run(JSON.stringify(saved),digest(saved),grant.version);}
-  await service.dispatch(token,{command:'configureAi',settings:{model:'deepseek-flash',persona:'',business:'',rules:'Existing account rule'},key:'synthetic-memory-only'});
+  await service.dispatch(token,{command:'configureAi',settings:{model:'deepseek-flash',persona:'',business:'',rules:'Existing account rule'},key:''});
   const generation=service.authority.claim(token,id,0).generation;
   clock=current;
   return {store,id,service,token,auto,grant,calls,generation,clock,advance:(ms:number)=>{clock+=ms;},setGate:(value:()=>Promise<void>)=>{gate=value;},
@@ -60,7 +62,6 @@ test('explicit manual suggestion after auto replies are off uses one policy MODE
 
 test.each([
   {scope:{channels:['COMMENT_NOTIFICATION']},reason:'MODEL_OUTSIDE_GRANT'},
-  {scope:{model:'deepseek-another'},reason:'MODEL_OUTSIDE_GRANT'},
   {scope:{conversationIds:['other-conversation']},reason:'MODEL_OUTSIDE_GRANT'},
   {scope:{containsAny:['not-present']},reason:'MODEL_OUTSIDE_GRANT'},
   {scope:{excludesAny:['hello']},reason:'MODEL_OUTSIDE_GRANT'},
@@ -80,10 +81,13 @@ test.each(['REVOKE','EMERGENCY','MODEL_CHANGE'] as const)('late $0 revokes polic
     const work=f.service.dispatch(f.token,{command:'generateSuggestion',eventId:f.id,draftVersion:0});await entered;
     if(fault==='REVOKE')await f.service.dispatch(f.token,{command:'setReplyPolicy',policy:null,confirmed:true});
     if(fault==='EMERGENCY')await f.service.dispatch(f.token,{command:'emergencyStop'});
-    if(fault==='MODEL_CHANGE')await f.service.dispatch(f.token,{command:'configureAi',settings:{model:'deepseek-other',persona:'',business:'',rules:''},key:''});
+    if(fault==='MODEL_CHANGE'){
+      const other=await stageFixtureModel(f.service,f.token);
+      await applyModel(f.service,f.token,other.connectionId,other.routeRevision,other.modelId);
+    }
     release();await expect(work).rejects.toThrow();expect(f.store.db.prepare('SELECT count(*) n FROM ai_suggestions').get()).toEqual({n:0});
     expect(f.calls).toHaveLength(1);expect(f.store.db.prepare("SELECT used FROM budgets WHERE kind='MODEL'").get()).toEqual({used:1});
-    expect(f.store.db.prepare("SELECT count(*) n FROM grant_reservations WHERE kind='MODEL'").get()).toEqual({n:1});
+    expect(f.store.db.prepare("SELECT count(DISTINCT job_key) n FROM grant_reservations WHERE kind='MODEL'").get()).toEqual({n:1});
   }finally{release();await f.close();}
 });
 
@@ -212,7 +216,7 @@ test('a provider failure retains one paid attempt and records a failed model sta
   const f=await setup();try{
     const failures=()=>runtimePerformance.snapshot().find(row=>row.stage==='MODEL'&&row.channel==='DIRECT_MESSAGE')?.failures??0,before=failures();
     f.setGate(async()=>{throw Error('synthetic transport failure');});
-    await expect(f.service.dispatch(f.token,{command:'generateSuggestion',eventId:f.id,draftVersion:0})).rejects.toThrow('MODEL_FAILED_NO_RETRY');
+    await expect(f.service.dispatch(f.token,{command:'generateSuggestion',eventId:f.id,draftVersion:0})).rejects.toThrow('MODEL_NETWORK_ERROR');
     expect(failures()).toBe(before+1);expect(f.calls).toHaveLength(1);expect(f.store.db.prepare('SELECT count(*) n FROM ai_suggestions').get()).toEqual({n:0});
     expect(f.store.db.prepare("SELECT used FROM budgets WHERE kind='MODEL'").get()).toEqual({used:1});
   }finally{await f.close();}

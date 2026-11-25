@@ -217,7 +217,7 @@ test.each([
       await expect.poll(()=>page.getByRole('button',{name:'正在同步评论…',exact:true}).isVisible(),{timeout:5000}).toBe(true);
       expect(await page.getByRole('button',{name:'正在同步评论…',exact:true}).isDisabled()).toBe(true);
       await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
-      await page.getByRole('heading',{name:'DeepSeek 辅助回复'}).waitFor();
+      await page.getByRole('heading',{name:'当前模型',exact:true}).waitFor();
       expect(await page.locator('details.fault-controls').evaluate(node=>(node as HTMLDetailsElement).open)).toBe(false);
       await page.getByText('故障处理',{exact:true}).click();
       expect(await page.getByRole('button',{name:'全局急停',exact:true}).isEnabled()).toBe(true);
@@ -317,7 +317,7 @@ test.each([
         .click();
       await expect
         .poll(() =>
-          page.getByRole("heading", { name: "DeepSeek 辅助回复" }).isVisible(),
+          page.getByRole("heading", { name: "当前模型", exact: true }).isVisible(),
         )
         .toBe(true);
       identityAvailable=false;
@@ -374,19 +374,14 @@ test.each([
       await page.getByRole('button',{name:'撤销自动回复策略',exact:true}).click();
       await expect.poll(async()=>((await service.dispatch(token,{command:'getStatus'})) as {automation:{replyPolicy:unknown}}).automation.replyPolicy).toBe(null);
       await page.getByRole('combobox',{name:'工作模式',exact:true}).selectOption('MANUAL');
-      await page.getByRole('button',{name:'模型详细配置',exact:true}).click();
-      await page
-        .getByRole("textbox", { name: "本次 API Key" })
-        .fill("synthetic-ui-memory-key");
-      await page
-        .getByRole("button", { name: "保存配置并清空 Key 输入" })
-        .click();
-      await expect
-        .poll(() =>
-          page.getByRole("textbox", { name: "本次 API Key" }).inputValue(),
-        )
-        .toBe("");
-      await page.getByRole('dialog',{name:'模型详细配置',exact:true}).getByRole('button',{name:'关闭并保留输入',exact:true}).click();
+      await page.getByRole('button',{name:'编辑 DeepSeek',exact:true}).click();
+      const modelEditor = page.getByRole('region',{name:'编辑连接 DeepSeek',exact:true});
+      const modelKey = modelEditor.getByLabel('本次 API Key',{exact:true});
+      await modelKey.fill('synthetic-ui-memory-key');
+      await modelEditor.getByRole('button',{name:'保存 Key',exact:true}).click();
+      await modelEditor.getByText('Key 已保存。',{exact:true}).waitFor();
+      await expect.poll(() => modelKey.inputValue()).toBe('');
+      await modelEditor.getByRole('button',{name:'收起编辑器',exact:true}).click();
       await page.getByText('故障处理',{exact:true}).click();
       await page.getByRole("button", { name: "全局急停", exact: true }).click();
       await expect.poll(() => service.authority.paused()).toBe(true);

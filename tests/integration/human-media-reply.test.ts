@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import {expect,test} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
@@ -114,7 +115,7 @@ test.each(['expiry','identity'] as const)('persisted human media qualification c
 
 test('human media eligibility never grants a model call or an automatic policy job',async()=>{
   const f=await setup();try{
-    await f.service.dispatch(f.token,{command:'configureAi',settings:defaultSettings,key:'synthetic-offline-only-key'});
+    await installFixtureKey(f.service,f.token,{key:'synthetic-offline-only-key',grant:true});
     await f.service.dispatch(f.token,{command:'setModelGrant',scope:{ownId:'own-1',channels:['DIRECT_MESSAGE'],model:defaultSettings.model,modelLimit:2,expiresAt:null},confirmed:true});
     await expect(f.service.dispatch(f.token,{command:'generateSuggestion',eventId:f.eventId,draftVersion:0})).rejects.toThrow('DM_CONTENT_UNVERIFIED');
     await f.service.dispatch(f.token,{command:'setReplyPolicy',confirmed:true,policy:{ownId:'own-1',channels:['DIRECT_MESSAGE'],model:defaultSettings.model,

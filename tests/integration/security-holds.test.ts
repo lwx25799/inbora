@@ -61,7 +61,7 @@ test.each(['deepseek','legacy'] as const)('%s provider rejects a held channel be
       new HttpDraftProvider({endpoint:'https://synthetic.invalid/model',model:'deepseek-flash',approvedAt:new Date().toISOString()},'synthetic',async()=>{
         calls++;return new Response(JSON.stringify({text:'Synthetic legacy response',model:'deepseek-flash',usage:{inputTokens:1,outputTokens:1},estimatedCost:null}));
       });
-    const run=()=>provider instanceof DeepSeekProvider?provider.generate(f.store,event,[],defaultSettings,'synthetic',true):provider.generate(f.store,event,[]);
+    const run=()=>provider instanceof DeepSeekProvider?provider.generate(f.store,event,[],defaultSettings,'fixture-auth-only',true):provider.generate(f.store,event,[]);
     await expect(run()).rejects.toThrow('SECURITY_CHANNEL_HELD');
     expect(calls).toBe(0);expect(f.store.budget('MODEL').used).toBe(0);
     expect(f.store.db.prepare('SELECT count(*) n FROM model_calls').get()).toEqual({n:0});
@@ -94,7 +94,7 @@ test.each(['deepseek','legacy'] as const)('%s direct model boundary blocks a per
       new HttpDraftProvider({endpoint:'https://synthetic.invalid/model',model:'deepseek-flash',approvedAt:new Date().toISOString()},'synthetic',async()=>{
         calls++;return new Response(JSON.stringify({text:'Synthetic legacy response',model:'deepseek-flash',usage:{inputTokens:1,outputTokens:1},estimatedCost:null}));
       });
-    const run=()=>provider instanceof DeepSeekProvider?provider.generate(f.store,candidate(),[],defaultSettings,'synthetic',true):provider.generate(f.store,candidate(),[]);
+    const run=()=>provider instanceof DeepSeekProvider?provider.generate(f.store,candidate(),[],defaultSettings,'fixture-auth-only',true):provider.generate(f.store,candidate(),[]);
     await expect(run()).rejects.toThrow('EMERGENCY_STOPPED');expect(calls).toBe(0);
     expect(f.store.budget('MODEL').used).toBe(0);expect(f.store.db.prepare('SELECT count(*) n FROM model_calls').get()).toEqual({n:0});
     expect(data.resumeEmergency(data.emergencyRevision())).toBe(true);
