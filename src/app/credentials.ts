@@ -1,15 +1,59 @@
 import { spawn } from "node:child_process";
-import { readFile, writeFile, rename, rm } from "node:fs/promises";
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync,
+import { open, writeFile, rename, rm } from "node:fs/promises";
+import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync,
   renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ModelKeyStorage } from "../contracts/model-providers.js";
 import { Blocked, digest, requireSafe } from "../core/contracts.js";
+import { getNativeWin32Bridge } from "../native/win32-bridge.js";
 
-function dpapi(input:Buffer,operation:'Protect'|'Unprotect',scopeDigest?:string):Promise<Buffer> {
+type DpapiCache = { cacheKey: string; mtimeMs: number };
+const dpapiCacheKey = (file: string) => digest(resolve(file).toLowerCase());
+
+async function clearDpapiCache(file: string): Promise<void> {
+  const bridge = getNativeWin32Bridge();
+  if (process.platform === 'win32' && bridge.isAvailable()) await bridge.clearDpapiCache(dpapiCacheKey(file));
+}
+
+async function clearDeletedDpapiCache(file: string): Promise<void> {
+  const bridge = getNativeWin32Bridge();
+  if (process.platform !== 'win32' || !bridge.isAvailable()) return;
+  try { await bridge.clearDpapiCache(dpapiCacheKey(file)); }
+  catch {
+    // The file is already gone. Keep cleanup retryable until the bridge confirms invalidation.
+    await bridge.clearDpapiCache();
+  }
+}
+
+type CacheInvalidation = { running: boolean; failed: boolean };
+const deletedCacheEntries = new Map<string, Map<string, CacheInvalidation>>();
+const cleanupRoot = (root: string) => resolve(root).toLowerCase();
+
+function invalidateDeletedKey(root: string, file: string): void {
+  if (process.platform !== 'win32' || !getNativeWin32Bridge().isAvailable()) return;
+  const key = cleanupRoot(root);
+  const entries = deletedCacheEntries.get(key) ?? new Map<string, CacheInvalidation>();
+  deletedCacheEntries.set(key, entries);
+  const entry = entries.get(file) ?? { running: false, failed: false };
+  if (entry.running) return;
+  entries.set(file, entry);
+  entry.running = true;
+  void clearDeletedDpapiCache(file).then(() => {
+    entries.delete(file);
+    if (entries.size === 0) deletedCacheEntries.delete(key);
+  }, () => {
+    entry.running = false;
+    entry.failed = true;
+  });
+}
+
+function dpapi(input:Buffer,operation:'Protect'|'Unprotect',scopeDigest?:string,cache?:DpapiCache):Promise<Buffer> {
   requireSafe(process.platform==='win32','DPAPI_WINDOWS_REQUIRED');
   const entropy=scopeDigest===undefined?'inbora:model-key:v1':`inbora:model-credential:v1:${scopeDigest}`;
+  const bridge = getNativeWin32Bridge();
+  if (bridge.isAvailable()) return operation === 'Protect'
+    ? bridge.dpapiProtect(input, entropy) : bridge.dpapiUnprotect(input, entropy, cache);
   // The secret travels on stdin, never argv, environment, a script file or a log.
   const script=`$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Security;$bytes=[Convert]::FromBase64String([Console]::In.ReadToEnd());
   try{$entropy=[Text.Encoding]::UTF8.GetBytes('${entropy}');$result=[Security.Cryptography.ProtectedData]::${operation}($bytes,$entropy,[Security.Cryptography.DataProtectionScope]::CurrentUser);
@@ -25,21 +69,42 @@ function dpapi(input:Buffer,operation:'Protect'|'Unprotect',scopeDigest?:string)
 }
 export class CredentialStore {
   private static queues=new Map<string,Promise<unknown>>();
-  private file:string;
-  constructor(root:string){this.file=join(root,'model-key.dpapi');}
+  private readonly file:string;
+  private readonly queueKey:string;
+  constructor(root:string){
+    this.file=resolve(root,'model-key.dpapi');
+    this.queueKey=process.platform==='win32'?this.file.toLowerCase():this.file;
+  }
+  static cacheInvalidationUnconfirmed(root: string): boolean {
+    return [...deletedCacheEntries.get(cleanupRoot(root))?.values() ?? []].some(entry => entry.failed);
+  }
   private sequence<T>(operation:()=>Promise<T>):Promise<T>{
-    const task=(CredentialStore.queues.get(this.file)??Promise.resolve()).catch(()=>{}).then(operation);
-    CredentialStore.queues.set(this.file,task);
-    void task.finally(()=>{if(CredentialStore.queues.get(this.file)===task)CredentialStore.queues.delete(this.file);}).catch(()=>{});
+    const task=(CredentialStore.queues.get(this.queueKey)??Promise.resolve()).catch(()=>{}).then(operation);
+    CredentialStore.queues.set(this.queueKey,task);
+    void task.finally(()=>{if(CredentialStore.queues.get(this.queueKey)===task)CredentialStore.queues.delete(this.queueKey);}).catch(()=>{});
     return task;
   }
   load():Promise<string|null> {return this.sequence(()=>this.read());}
   private async read():Promise<string|null> {
-    let encrypted:Buffer;
-    try{encrypted=await readFile(this.file);}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error;}
-    requireSafe(encrypted.byteLength<=16_000,'DPAPI_FILE_INVALID');
-    const key=await dpapi(encrypted,'Unprotect');
-    try{const text=key.toString('utf8');requireSafe(text.length>0&&text.length<=4000&&!/[\r\n]/u.test(text),'INVALID_MODEL_KEY');return text;}finally{key.fill(0);}
+    let file: Awaited<ReturnType<typeof open>>;
+    try { file = await open(this.file, 'r'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+    let encrypted: Buffer | undefined;
+    let key: Buffer | undefined;
+    try {
+      const { mtimeMs, size } = await file.stat();
+      requireSafe(size <= 16_000, 'DPAPI_FILE_INVALID');
+      encrypted = await file.readFile();
+      requireSafe(encrypted.byteLength <= 16_000, 'DPAPI_FILE_INVALID');
+      key = await dpapi(encrypted, 'Unprotect', undefined, { cacheKey: dpapiCacheKey(this.file), mtimeMs });
+      const text = key.toString('utf8');
+      requireSafe(text.length > 0 && text.length <= 4000 && !/[\r\n]/u.test(text), 'INVALID_MODEL_KEY');
+      return text;
+    } finally {
+      key?.fill(0);
+      encrypted?.fill(0);
+      await file.close();
+    }
   }
   save(key:string):Promise<void> {return this.sequence(()=>this.write(key));}
   private async write(key:string):Promise<void> {
@@ -47,10 +112,23 @@ export class CredentialStore {
     const plain=Buffer.from(key,'utf8');let encrypted:Buffer;
     try{encrypted=await dpapi(plain,'Protect');}finally{plain.fill(0);}
     const temporary=`${this.file}.${randomUUID()}.tmp`;
-    try{await writeFile(temporary,encrypted,{flag:'wx',mode:0o600});await rename(temporary,this.file);}
+    try {
+      await writeFile(temporary,encrypted,{flag:'wx',mode:0o600});
+      await clearDpapiCache(this.file);
+      await rename(temporary,this.file);
+    }
     finally{await rm(temporary,{force:true});encrypted.fill(0);}
   }
-  delete():Promise<void>{return this.sequence(async()=>{await rm(this.file,{force:true});});}
+  delete():Promise<void>{
+    return this.sequence(async()=>{
+      const root=statIfPresent(dirname(this.file));
+      if(root) {
+        requireSafe(root.isDirectory()&&!root.isSymbolicLink(),'INVALID_MODEL_CREDENTIAL_PATH');
+        removePrivateFile(this.file);
+      }
+      invalidateDeletedKey(dirname(this.file), this.file);
+    });
+  }
 }
 
 export type ModelCredentialRef = {
@@ -61,7 +139,7 @@ export type ModelCredentialRef = {
 
 export interface ModelCredentialProtector {
   protect(input: Buffer, ref: Readonly<ModelCredentialRef>): Promise<Buffer>;
-  unprotect(input: Buffer, ref: Readonly<ModelCredentialRef>): Promise<Buffer>;
+  unprotect(input: Buffer, ref: Readonly<ModelCredentialRef>, cache?: DpapiCache): Promise<Buffer>;
 }
 
 export interface ModelCredentialRegistry {
@@ -73,7 +151,7 @@ export interface ModelCredentialRegistry {
 const credentialScope = (ref: ModelCredentialRef) => digest([ref.connectionId, ref.credentialRevision]);
 const windowsProtector: ModelCredentialProtector = {
   protect: (input, ref) => dpapi(input, "Protect", credentialScope(ref)),
-  unprotect: (input, ref) => dpapi(input, "Unprotect", credentialScope(ref)),
+  unprotect: (input, ref, cache) => dpapi(input, "Unprotect", credentialScope(ref), cache),
 };
 
 const canonicalUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -96,6 +174,13 @@ function statIfPresent(path: string) {
   }
 }
 
+function removePrivateFile(file: string): void {
+  const stats = statIfPresent(file);
+  if (!stats) return;
+  requireSafe(stats.isFile() && !stats.isSymbolicLink() && stats.nlink === 1, "MODEL_CREDENTIAL_CLEANUP_FAILED");
+  unlinkSync(file);
+}
+
 export class ModelCredentialStore {
   private static readonly queues = new Map<string, Promise<unknown>>();
   private readonly root: string;
@@ -109,6 +194,8 @@ export class ModelCredentialStore {
     this.root = realpathSync.native(path);
     this.queueKey = process.platform === "win32" ? this.root.toLowerCase() : this.root;
   }
+
+  get cacheInvalidationUnconfirmed(): boolean { return CredentialStore.cacheInvalidationUnconfirmed(this.root); }
 
   private async sequence<T>(operation: () => Promise<T>): Promise<T> {
     const task = (ModelCredentialStore.queues.get(this.queueKey) ?? Promise.resolve()).catch(() => {}).then(operation);
@@ -138,19 +225,25 @@ export class ModelCredentialStore {
     return join(directory, ref.credentialRevision + ".dpapi");
   }
 
-  private readCiphertext(ref: ModelCredentialRef): Buffer {
+  private readCiphertext(ref: ModelCredentialRef): { encrypted: Buffer; cache: DpapiCache } {
     const file = this.credentialPath(ref, false);
     const stats = file ? statIfPresent(file) : null;
-    requireSafe(file && stats?.isFile() && !stats.isSymbolicLink() && stats.nlink === 1
+    requireSafe(file && stats && stats.isFile() && !stats.isSymbolicLink() && stats.nlink === 1
       && stats.size > 0 && stats.size <= 16_000, "DPAPI_RESTORE_FAILED");
-    return readFileSync(file);
+    const handle = openSync(file, "r");
+    try {
+      const opened = fstatSync(handle);
+      requireSafe(opened.dev === stats.dev && opened.ino === stats.ino && opened.nlink === 1
+        && opened.size > 0 && opened.size <= 16_000, "DPAPI_RESTORE_FAILED");
+      return { encrypted: readFileSync(handle), cache: { cacheKey: dpapiCacheKey(file), mtimeMs: opened.mtimeMs } };
+    } finally { closeSync(handle); }
   }
 
   private async openKey(ref: ModelCredentialRef): Promise<string> {
-    const encrypted = this.readCiphertext(ref);
+    const { encrypted, cache } = this.readCiphertext(ref);
     let plain: Buffer | undefined;
     try {
-      plain = await this.protector.unprotect(encrypted, ref);
+      plain = await this.protector.unprotect(encrypted, ref, cache);
       const key = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(plain);
       validateModelKey(key);
       return key;
@@ -184,6 +277,8 @@ export class ModelCredentialStore {
       catch { throw new Blocked("DPAPI_OPERATION_FAILED"); }
       requireSafe(encrypted.byteLength > 0 && encrypted.byteLength <= 16_000, "DPAPI_FILE_INVALID");
       const file = this.credentialPath(ref, true)!;
+      await clearDpapiCache(file);
+      requireSafe(this.credentialPath(ref, false) === file, "INVALID_MODEL_CREDENTIAL_PATH");
       requireSafe(!statIfPresent(file), "MODEL_CREDENTIAL_ALREADY_EXISTS");
       const temporary = file + ".tmp";
       const handle = openSync(temporary, "wx", 0o600);
@@ -195,7 +290,7 @@ export class ModelCredentialStore {
         requireSafe(this.credentialPath(ref, false) === file && !statIfPresent(file), "INVALID_MODEL_CREDENTIAL_PATH");
         renameSync(temporary, file);
       } catch (error) {
-        if (this.credentialPath(ref, false) === file) this.removePrivateFile(temporary);
+        if (this.credentialPath(ref, false) === file) removePrivateFile(temporary);
         throw error;
       }
     } finally {
@@ -204,20 +299,16 @@ export class ModelCredentialStore {
     }
   }
 
-  private remove(ref: ModelCredentialRef): void {
+  private async remove(ref: ModelCredentialRef, confirmCache = true): Promise<void> {
     if (ref.storage === "MEMORY") {
       this.memory.delete(credentialScope(ref));
       return;
     }
     const file = this.credentialPath(ref, false);
-    if (file) this.removePrivateFile(file);
-  }
-
-  private removePrivateFile(file: string): void {
-    const stats = statIfPresent(file);
-    if (!stats) return;
-    requireSafe(stats.isFile() && !stats.isSymbolicLink() && stats.nlink === 1, "MODEL_CREDENTIAL_CLEANUP_FAILED");
-    unlinkSync(file);
+    if (file) removePrivateFile(file);
+    const cachePath = file ?? join(this.root, "model-credentials", ref.connectionId, ref.credentialRevision + ".dpapi");
+    if (confirmCache) await clearDeletedDpapiCache(cachePath);
+    else invalidateDeletedKey(this.root, cachePath);
   }
 
   // Called under OwnerLock on startup. Only a marker written by save qualifies for reconciliation.
@@ -251,9 +342,9 @@ export class ModelCredentialStore {
             const marker = file + ".pending";
             const pending = statIfPresent(marker);
             if (!pending?.isFile() || pending.isSymbolicLink() || pending.nlink !== 1 || pending.size !== 0) continue;
-            if (!isRegistered(ref)) this.remove(ref);
-            this.removePrivateFile(file + ".tmp");
-            this.removePrivateFile(marker);
+            if (!isRegistered(ref)) await this.remove(ref);
+            removePrivateFile(file + ".tmp");
+            removePrivateFile(marker);
           } catch {
             // Keep the failed marker for reconciliation on the next startup.
             succeeded = false;
@@ -294,10 +385,10 @@ export class ModelCredentialStore {
           "MODEL_PROVIDER_TRANSACTION_HOOK_ASYNC");
       } catch (error) {
         try {
-          this.remove(ref);
+          await this.remove(ref);
           if (marker) {
-            this.removePrivateFile(file! + ".tmp");
-            this.removePrivateFile(marker);
+            removePrivateFile(file! + ".tmp");
+            removePrivateFile(marker);
           }
         }
         catch { throw new Blocked("MODEL_CREDENTIAL_CLEANUP_FAILED"); }
@@ -305,7 +396,7 @@ export class ModelCredentialStore {
       }
       // The authoritative row is committed. A marker left behind is resolved on the next startup.
       if (marker) {
-        try { this.removePrivateFile(marker); } catch { /* Keep the published credential. */ }
+        try { removePrivateFile(marker); } catch { /* Keep the published credential. */ }
       }
       return result;
     });
@@ -313,12 +404,14 @@ export class ModelCredentialStore {
 
   cleanup(registry: ModelCredentialRegistry): Promise<void> {
     return this.sequence(async () => {
+      for (const file of deletedCacheEntries.get(cleanupRoot(this.root))?.keys() ?? []) invalidateDeletedKey(this.root, file);
       for (const ref of registry.listCleanableCredentials()) {
         if (!registry.claimCredentialCleanup(ref)) continue;
         let removed = false;
         try {
           validateModelCredentialRef(ref);
-          this.remove(ref);
+          // The registry tracks ciphertext removal. Cache failures stay pending in this pipe generation.
+          await this.remove(ref, false);
           removed = true;
         } catch {
           // The revoked row records the fixed cleanup error and can be retried later.

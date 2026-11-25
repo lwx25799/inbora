@@ -7,7 +7,7 @@ import {browserResourceReasons,type BrowserResourceIdentity,type BrowserResource
 export type {BrowserResourceIdentity,BrowserResourcesSnapshot} from './browser-resource-contracts.js';
 export interface BrowserResourcesOptions {
   root:string;identity:()=>BrowserResourceIdentity;now?:()=>number;
-  sample?:(signal:AbortSignal)=>Promise<BrowserProcessResult>;onUpdated?:()=>void;
+  sample?:BrowserProcessSampler['sample'];onUpdated?:()=>void;
 }
 interface ResourceSample extends BrowserResourceLatest {sampledAt:number}
 const intervalMs=60_000,staleMs=150_000,retentionMs=86_400_000,maxSamples=1_440,maxReportBytes=2_097_152;
@@ -24,7 +24,7 @@ function summarize(samples:readonly ResourceSample[]):BrowserResourceWindow|null
 /** Sidecar-owned, single-flight OS sampler. Diagnostics only reads this bounded cache. */
 export class BrowserResources {
   private readonly now:()=>number;
-  private readonly sample:(signal:AbortSignal)=>Promise<BrowserProcessResult>;
+  private readonly sample:BrowserProcessSampler['sample'];
   private readonly sampler:BrowserProcessSampler;
   private readonly directory:string;
   private readonly report:string;
@@ -46,7 +46,7 @@ export class BrowserResources {
   constructor(private readonly options:BrowserResourcesOptions) {
     this.now=options.now??Date.now;
     this.sampler=new BrowserProcessSampler();
-    this.sample=options.sample??(signal=>this.sampler.sample(signal));
+    this.sample=options.sample??((signal,sampling)=>this.sampler.sample(signal,sampling));
     this.directory=join(resolve(options.root),'reports');
     this.report=join(this.directory,'browser-resources.json');
     this.temporary=this.report+'.tmp';
@@ -102,7 +102,8 @@ export class BrowserResources {
       const cancelled=new Promise<BrowserProcessResult>(resolveResult=>{
         controller.signal.addEventListener('abort',()=>resolveResult({ok:false,reason:timedOut?'TIMEOUT':'CANCELLED'}),{once:true});
       });
-      const result=await Promise.race([this.sample(controller.signal),cancelled]);
+      const sampling=this.segmentEpoch===before.epoch?undefined:{maxAgeMs:0};
+      const result=await Promise.race([this.sample(controller.signal,sampling),cancelled]);
       if(this.closed)return;
       const after=this.identity();
       if(!after||!after.open||before.epoch!==after.epoch||before.mode!==after.mode){

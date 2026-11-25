@@ -1,6 +1,7 @@
 import {execFile,type ChildProcess} from 'node:child_process';
 import {promisify} from 'node:util';
 import {z} from 'zod';
+import {getNativeWin32Bridge} from '../native/win32-bridge.js';
 
 const execute=promisify(execFile);
 const positive=z.number().finite().positive();
@@ -97,10 +98,33 @@ export class BrowserProcessSampler {
   private sidecarCreatedAt:number|null=null;
   private child:ChildProcess|null=null;
   private childClosed:Promise<void>|null=null;
-  async sample(signal:AbortSignal):Promise<BrowserProcessResult> {
+  private nativeSample:AbortController|null=null;
+
+  private attribute(rows:readonly BrowserProcessRow[]):BrowserProcessResult {
+    const root=rows.find(row=>row.pid===process.pid);
+    if(!root)return {ok:false,reason:'PROCESS_UNAVAILABLE'};
+    this.sidecarCreatedAt??=root.createdAt;
+    return attributeBrowserProcesses(rows,process.pid,this.sidecarCreatedAt);
+  }
+
+  async sample(signal:AbortSignal,{maxAgeMs=2000}:{maxAgeMs?:number}={}):Promise<BrowserProcessResult> {
     if(process.platform!=='win32')return {ok:false,reason:'UNSUPPORTED_PLATFORM'};
     if(signal.aborted)return {ok:false,reason:'CANCELLED'};
-    if(this.child)return {ok:false,reason:'PROCESS_UNAVAILABLE'};
+    if(this.child||this.nativeSample)return {ok:false,reason:'PROCESS_UNAVAILABLE'};
+    const bridge=getNativeWin32Bridge();
+    if(bridge.isAvailable()){
+      const controller=this.nativeSample=new AbortController();
+      const sampleSignal=AbortSignal.any([signal,controller.signal]);
+      try{
+        const sample=await bridge.sampleProcessTree(process.pid,{targetExe:'msedge.exe',maxAgeMs,signal:sampleSignal});
+        return this.attribute(sample.rows);
+      }catch(error){
+        const reason=sampleSignal.aborted?'CANCELLED':error instanceof Error?error.message:'';
+        if(reason==='ACCESS_DENIED'||reason==='CANCELLED'||reason==='TIMEOUT')return {ok:false,reason};
+        if(reason==='INVALID_SAMPLE'||reason==='NATIVE_BRIDGE_INVALID_RESPONSE')return {ok:false,reason:'INVALID_SAMPLE'};
+        return {ok:false,reason:'PROCESS_UNAVAILABLE'};
+      }finally{this.nativeSample=null;}
+    }
     try{
       const operation=execute('powershell.exe',['-NoProfile','-NonInteractive','-Command',windowsScript],{
         timeout:5_000,signal,windowsHide:true,maxBuffer:1_048_576,
@@ -117,10 +141,7 @@ export class BrowserProcessSampler {
       }
       const parsed=processListSchema.safeParse(raw);
       if(!parsed.success)return {ok:false,reason:'INVALID_SAMPLE'};
-      const root=parsed.data.find(row=>row.pid===process.pid);
-      if(!root)return {ok:false,reason:'PROCESS_UNAVAILABLE'};
-      this.sidecarCreatedAt??=root.createdAt;
-      return attributeBrowserProcesses(parsed.data,process.pid,this.sidecarCreatedAt);
+      return this.attribute(parsed.data);
     }catch(error){
       if(signal.aborted)return {ok:false,reason:'CANCELLED'};
       const code=(error as NodeJS.ErrnoException).code;
@@ -129,6 +150,7 @@ export class BrowserProcessSampler {
     }
   }
   async close():Promise<void> {
+    this.nativeSample?.abort();
     if(this.child&&this.child.exitCode===null)this.child.kill();
     await this.childClosed;
   }
