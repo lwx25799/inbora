@@ -1,3 +1,4 @@
+import type { ModelPresetId } from './model-providers.js';
 import type { Channel } from './events.js';
 import type { BrowserResourcesSnapshot } from './browser-resources.js';
 
@@ -5,12 +6,14 @@ export interface ModelUsageSummary {
   requests:number;knownUsageRequests:number;unknownUsageRequests:number;inputTokens:number;outputTokens:number;
   elapsedSamples:number;averageElapsedMs:number|null;p95ElapsedMs:number|null;
 }
-export interface ModelUsageGroup extends ModelUsageSummary {model:string;status:string}
+export interface ModelUsageGroup extends ModelUsageSummary {provider?:ModelPresetId|'UNKNOWN';model:string;status:string}
 export interface DiagnosticBlocker {source:string;code:string;count:number}
 export interface DiagnosticsSnapshot {
   version:1;timeRangeSupported:false;
   browserResources?:BrowserResourcesSnapshot;
   model:{total:ModelUsageSummary;groups:ModelUsageGroup[]};
+  modelBreakdownTruncated?:boolean;
+  modelBreakdownTotal?:number;
   blockers:DiagnosticBlocker[];
   collection:{channels:{source:string;nextAt:number;lastSuccess:number|null;lastError:string|null;failures:number;elapsedMs:number|null}[];
     works:{included:number;historical:number;review:number};conversations:{total:number;neverRead:number}};

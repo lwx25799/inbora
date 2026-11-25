@@ -30,8 +30,14 @@
     "check:source-size": "node scripts/check-source-size.mjs"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "4.0.105",
+    "@ai-sdk/deepseek": "3.0.87",
+    "@ai-sdk/google": "4.0.121",
+    "@ai-sdk/openai": "4.0.118",
+    "@ai-sdk/openai-compatible": "3.0.92",
     "@modelcontextprotocol/server": "2.4.0",
     "@tauri-apps/api": "2.12.4",
+    "ai": "7.0.173",
     "better-sqlite3": "13.0.3",
     "exceljs": "4.4.0",
     "mammoth": "1.13.0",

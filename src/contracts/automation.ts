@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { modelBindingSchema, modelIdSchema } from "./model-providers.js";
 
 export const channelsSchema = z.array(z.enum(["COMMENT_NOTIFICATION", "DIRECT_MESSAGE"])).min(1).max(2)
   .refine(values => new Set(values).size === values.length);
@@ -32,6 +33,19 @@ export const replyPolicySchema = modelGrantSchema.extend({
 }).strict().refine(p => p.startHour < p.endHour, "INVALID_POLICY_HOURS");
 export type ModelGrant = z.infer<typeof modelGrantSchema>;
 export type ReplyPolicy = z.infer<typeof replyPolicySchema>;
+export const modelGrantInputSchema = modelGrantSchema.extend({ model: modelIdSchema });
+export const replyPolicyInputSchema = replyPolicySchema.safeExtend({ model: modelIdSchema });
+
+const modelGrantV2Fields = {
+  contractVersion: z.literal(2),
+  model: modelIdSchema,
+  modelBinding: modelBindingSchema,
+};
+export const modelGrantV2Schema = modelGrantSchema.extend(modelGrantV2Fields).strict();
+export const replyPolicyV2Schema = replyPolicySchema.safeExtend(modelGrantV2Fields).strict();
+export type ModelGrantV2 = z.infer<typeof modelGrantV2Schema>;
+export type ReplyPolicyV2 = z.infer<typeof replyPolicyV2Schema>;
+
 export interface Grant<T = ModelGrant | ReplyPolicy> {
   version: number;
   kind: "MODEL" | "AUTO_REPLY";

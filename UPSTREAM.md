@@ -1,5 +1,20 @@
 # 来源与许可
 
+## 阶段 2 Wave 2.0 多模型 AI SDK
+
+六个直接依赖按下表精确锁定。上游为 [Vercel AI SDK](https://github.com/vercel/ai)，版本、源码目录及许可均核对自已安装包的 `package.json`，发布包完整性由 `pnpm-lock.yaml` 固定。
+
+| npm 包 | 锁定版本 | 上游目录 | 许可 | 采用范围 |
+|---|---|---|---|---|
+| `ai` | `7.0.173` | `packages/ai` | Apache-2.0 | 单次文本生成及统一结果 |
+| `@ai-sdk/openai` | `4.0.118` | `packages/openai` | Apache-2.0 | OpenAI Responses 和显式选择的 Chat |
+| `@ai-sdk/anthropic` | `4.0.105` | `packages/anthropic` | Apache-2.0 | Anthropic Messages |
+| `@ai-sdk/google` | `4.0.121` | `packages/google` | Apache-2.0 | Gemini GenerateContent |
+| `@ai-sdk/openai-compatible` | `3.0.92` | `packages/openai-compatible` | Apache-2.0 | 通用 Chat Completions 兼容端点 |
+| `@ai-sdk/deepseek` | `3.0.87` | `packages/deepseek` | Apache-2.0 | DeepSeek Chat 协议及专用参数 |
+
+六包均声明 Node `>=22` 和 Zod `^3.25.76 || ^4.1.8`，已在 Node 26.13.0 与 Zod 4.6.7 环境中导入。Wave 2.0 交付锁定依赖与纯共享契约，供应商工厂及网络调用由后续工作包接入。
+
 ## 2026-11-24 应用退出时关闭专属浏览器
 
 核对了 Apache-2.0 的 Playwright 1.64.1 固定提交 `cfe490d941f992655948eee8fd4fd94e1c4234bf` 中 `packages/playwright-core/src/server/utils/processLauncher.ts` 的 `gracefullyClose`，以及 MIT／Apache-2.0 的 Tauri 2.12.5 固定提交 `993038c49185307dfc895ab7657d77ca0d5ed7c7` 中 `crates/tauri/src/app.rs` 的 `AppHandle::exit` 和 `make_run_event_loop_callback`。沿用原生退出触发后端管道 EOF，以及 Playwright 关闭持久上下文并等待浏览器进程收尾的路径。项目在临时导入清理报错时仍关闭专属浏览器，随后完成助手控制端、数据库和运行锁收尾，并用非零退出状态记录失败。已有在途发送回读顺序保留。合成故障复现覆盖真实无头 Edge 和独立后端管道。上游代码和依赖许可继续沿用现有记录。

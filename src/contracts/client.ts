@@ -1,7 +1,8 @@
 import { z } from "zod";
 import {knowledgeCommandSchema} from './knowledge-commands.js';
-import { collectionSchema, modelGrantSchema, replyPolicySchema } from "./automation.js";
+import { collectionSchema, modelGrantInputSchema, replyPolicyInputSchema } from "./automation.js";
 import {manualRecoveryCommandSchema} from './manual-recovery.js';
+import { modelIdSchema, modelProvidersCommandSchema, type PublicModelState } from "./model-providers.js";
 
 export const protocolVersion = 1;
 export const modeSchema = z.enum([
@@ -63,9 +64,9 @@ const ordinaryCommandSchema = z.discriminatedUnion("command", [
   z.object({command:z.literal('sendHumanFollowup'),commandId:z.uuid(),input:humanReplySchema}).strict(),
   z.object({command:z.literal('saveHumanFollowupDraft'),...owned,expectedVersion:z.number().int().nonnegative(),text:z.string().max(2000),suggestionId:z.null()}).strict(),
   z.object({command:z.literal("configureCollection"),settings:collectionSchema}).strict(),
-  z.object({command:z.literal("setModelGrant"),scope:modelGrantSchema.nullable(),confirmed:z.literal(true)}).strict(),
-  z.object({command:z.literal("setReplyPolicy"),policy:replyPolicySchema.nullable(),confirmed:z.literal(true)}).strict(),
-  z.object({command:z.literal('enableReplyPolicy'),policy:replyPolicySchema,confirmed:z.literal(true)}).strict(),
+  z.object({command:z.literal("setModelGrant"),scope:modelGrantInputSchema.nullable(),confirmed:z.literal(true)}).strict(),
+  z.object({command:z.literal("setReplyPolicy"),policy:replyPolicyInputSchema.nullable(),confirmed:z.literal(true)}).strict(),
+  z.object({command:z.literal('enableReplyPolicy'),policy:replyPolicyInputSchema,confirmed:z.literal(true)}).strict(),
   z.object({command:z.literal('setAutomaticReply'),enabled:z.boolean()}).strict(),
   z.object({command:z.literal("resumeAutomation"),...event}).strict(),
   z.object({command:z.literal("clearModelKey")}).strict(),
@@ -159,16 +160,28 @@ const ordinaryCommandSchema = z.discriminatedUnion("command", [
   z
     .object({
       command: z.literal("configureAi"),
-      settings: settingsSchema,
-      key: z.string().max(4000),
+      settings: settingsSchema.extend({ model: modelIdSchema.optional() }),
+      key: z.string().max(4000).optional(),
     })
     .strict(),
   z
     .object({ command: z.literal("authorizeAi"), authorized: z.boolean() })
     .strict(),
 ]);
-export const commandSchema=z.union([ordinaryCommandSchema,browserCommandSchema,manualRecoveryCommandSchema,knowledgeCommandSchema]);
+export const commandSchema = z.union([
+  ordinaryCommandSchema, browserCommandSchema, manualRecoveryCommandSchema,
+  knowledgeCommandSchema, modelProvidersCommandSchema,
+]);
 export type ClientCommand = z.infer<typeof commandSchema>;
+export interface ModelProviderStatusFields {
+  modelProviders?: PublicModelState;
+  modelProvidersSupported?: true;
+  modelProvidersAvailable?: boolean;
+  modelProvidersError?: string | null;
+  modelProvidersUnavailableReason?: string | null;
+  modelGrantError?: "GRANT_CORRUPT" | null;
+  corruptModelGrantKinds?: ("MODEL" | "AUTO_REPLY")[];
+}
 export interface InboxSync {
   runId: string | null;
   running: boolean;
