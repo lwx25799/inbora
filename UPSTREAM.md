@@ -8,7 +8,8 @@
 
 | 类别 | npm / Rust 依赖 | 锁定版本 | 许可 | 采用范围与约束 |
 |---|---|---|---|---|
-| 桌面壳与前端 | `@tauri-apps/api` / `@tauri-apps/cli`、`react` / `react-dom`、`vite`、`typescript` | `2.12.4` / `19.3.1` / `8.3.6` / `7.0.2` | Apache-2.0 OR MIT / MIT | 桌面原生壳、React 工作台与热更新；Rust 依赖许可由构建 notices 脚本汇总 |
+| 桌面壳与前端 | `@tauri-apps/api` / `@tauri-apps/cli`、`react` / `react-dom`、`vite` / `@vitejs/plugin-react`、`typescript` | `2.12.4` / `19.3.1` / `8.3.6` / `6.3.0` / `7.0.2` | Apache-2.0 OR MIT / MIT | 桌面原生壳、React 工作台与热更新；Rust 依赖许可由构建 notices 脚本汇总 |
+| 设计系统与离线字体 | `@base-ui/react`、`tailwindcss` / `@tailwindcss/vite`、`lucide-react`、`class-variance-authority`、`clsx`、`tailwind-merge`、`misans`、`@fontsource-variable/inter` / `plus-jakarta-sans` / `jetbrains-mono` | `1.9.0` / `4.3.5` / `0.555.0` / `0.7.1` / `2.1.1` / `3.7.1` / `5.0.0` / `5.3.0` | MIT / ISC / Apache-2.0 / OFL-1.1 | 阶段 5 桌面前端基线（`desktop/src/components/ui/`、`desktop/src/lib/utils.ts`、`desktop/src/styles/globals.css`），全本地打包可变字体零外链 |
 | 浏览器与存储 | `playwright`、`better-sqlite3`、`zod`、`pino` | `1.64.1` / `13.0.3` / `4.6.7` / `10.4.0` | Apache-2.0 / MIT | 无头静音 Edge 自动化、单库 SQLite WAL（固定预编译 Node-API 包，禁隐式 `node-gyp`）、契约校验与脱敏日志 |
 | 本机 MCP 服务 | `@modelcontextprotocol/server` | `2.4.0` | MIT | 本地 stdio 16 工具受控入口；许可证存档于 `third_party/modelcontextprotocol/LICENSE` |
 | 本地文档解析 | `mammoth`、`pdfjs-dist`、`exceljs` | `1.13.0` / `6.5.438` / `4.4.0` | BSD-2-Clause / Apache-2.0 / MIT | 知识库与样本纯文本解析（DOCX / 文字 PDF / CSV / XLSX）；无 OCR、宏或外链下载 |
@@ -16,17 +17,18 @@
 
 ---
 
-## 二、阶段 5 品牌与前端视觉基线（`ui-preview/` 独立锁定）
+## 二、阶段 5 品牌与前端视觉基线（根目录与 `ui-preview/` 同步锁定）
 
-隔离于当前 `src/` 与 `desktop/`，由 `ui-preview/package-lock.json` 独立锁定：
+根目录 `package.json` + `pnpm-lock.yaml` 已按精确版本同步落地至 `desktop/`；`ui-preview/` 保留独立交互参考基线：
 
 | 来源 / npm 包 | 锁定版本 / Commit | 许可 | 采用范围与归档 |
 |---|---|---|---|
-| [cosscom/ui](https://github.com/cosscom/ui) | `11f4620946e5fb0e2c12a815388ccdf5b3120dd0` | MIT | 许可证存档于 `third_party/coss-ui-MIT.txt`；采用其 Base UI + Tailwind v4 原语组件落地至 `ui-preview/src/components/ui/` 与 `ui-preview/src/lib/utils.ts`，套用暖白纸感 + 深松青令牌 |
+| [cosscom/ui](https://github.com/cosscom/ui) | `11f4620946e5fb0e2c12a815388ccdf5b3120dd0` | MIT | 许可证存档于 `third_party/coss-ui-MIT.txt`；采用其 Base UI + Tailwind v4 原语组件落地至 `desktop/src/components/ui/`、`desktop/src/lib/utils.ts`（同步 `ui-preview/`），套用暖白纸感 + 深松青令牌 |
 | `@base-ui/react` | `1.9.0` | MIT | 无样式可访问性交互原语（Dialog / Sheet / Tabs / Switch / Tooltip 等） |
-| `misans` | `^5.0.0` | Apache-2.0 | 小米官方 MiSans VF 频度切片可变中文字体，全本地打包零外链 |
-| `@fontsource-variable/inter`、`plus-jakarta-sans`、`jetbrains-mono` | `^5.3.0` | OFL-1.1 | 拉丁正文、标题数字与等宽编码可变字体，全本地打包 |
-| `lucide-react`、`tailwindcss` / `@tailwindcss/vite` | `^0.555.0` / `^4.1.17` | ISC / MIT | 1.5px 细线桌面图标与 Tailwind CSS v4 样式编译 |
+| `class-variance-authority`、`clsx`、`tailwind-merge` | `0.7.1` / `2.1.1` / `3.7.1` | Apache-2.0 / MIT | 组件变体声明与 Tailwind 类名合并工具 |
+| `misans` | `5.0.0` | Apache-2.0 | 小米官方 MiSans VF 频度切片可变中文字体，全本地打包零外链 |
+| `@fontsource-variable/inter`、`plus-jakarta-sans`、`jetbrains-mono` | `5.3.0` | OFL-1.1 | 拉丁正文、标题数字与等宽编码可变字体，全本地打包 |
+| `lucide-react`、`tailwindcss` / `@tailwindcss/vite`、`@vitejs/plugin-react` | `0.555.0` / `4.3.5` / `6.3.0` | ISC / MIT | 1.5px 细线桌面图标、Tailwind CSS v4 样式编译与 Vite 8 React 插件 |
 
 说明：`ui-preview/public/avatars/` 仅包含 12 张合成演示头像，不含真实平台或用户数据。
 
