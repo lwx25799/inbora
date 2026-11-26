@@ -201,7 +201,7 @@ test.each([
       await page.goto(`http://127.0.0.1:${address.port}`);
       await page.getByRole("checkbox").nth(1).check();
       await page.getByRole("button", { name: "连接收件箱" }).click();
-      await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
+      await page.getByRole('heading',{name:'会话中心',exact:true}).waitFor();
       for(const name of ['全部','评论','私信'])expect(await page.getByRole('button',{name,exact:true}).count()).toBe(1);
       const dmRow=page.locator('.task[data-channel="DIRECT_MESSAGE"]').first(),commentRow=page.locator('.task[data-channel="COMMENT_NOTIFICATION"]').first();
       await dmRow.waitFor();await commentRow.waitFor();
@@ -216,13 +216,14 @@ test.each([
       await expect.poll(()=>syncCalls).toEqual(['works']);
       await expect.poll(()=>page.getByRole('button',{name:'正在同步评论…',exact:true}).isVisible(),{timeout:5000}).toBe(true);
       expect(await page.getByRole('button',{name:'正在同步评论…',exact:true}).isDisabled()).toBe(true);
-      await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+      await page.getByRole('button',{name:'多模型配置',exact:true}).click();
       await page.getByRole('heading',{name:'当前模型',exact:true}).waitFor();
+      await page.getByRole('button',{name:'系统设置',exact:true}).click();
       expect(await page.locator('details.fault-controls').evaluate(node=>(node as HTMLDetailsElement).open)).toBe(false);
       await page.getByText('故障处理',{exact:true}).click();
       expect(await page.getByRole('button',{name:'全局急停',exact:true}).isEnabled()).toBe(true);
       releaseSyncRead?.();await expect.poll(()=>syncCalls).toEqual(['works','dm']);
-      await page.getByRole('button',{name:'收件箱',exact:true}).click();
+      await page.getByRole('button',{name:'会话中心',exact:true}).click();
       await page.getByRole('button',{name:/同步新增评论/}).waitFor();
       await page.reload();
       await expect.poll(()=>page.getByRole('button',{name:'正在同步私信…',exact:true}).isVisible(),{timeout:5000}).toBe(true);
@@ -262,10 +263,10 @@ test.each([
       await editor.fill('暂停期间保留的完整人稿');
       await expect.poll(()=>controlTrace.filter(item=>item.command==='openHumanDialog').at(-1)?.isMine).toBe(true);
       await expect.poll(()=>service.authority.draftFor(dm)?.text).toBe('暂停期间保留的完整人稿');
-      await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+      await page.getByRole('button',{name:'系统设置',exact:true}).click();
       await page.getByRole('button',{name:'恢复运行',exact:true}).click();
       await expect.poll(()=>service.authority.paused()).toBe(false);
-      await page.getByRole('button',{name:'收件箱',exact:true}).click();
+      await page.getByRole('button',{name:'会话中心',exact:true}).click();
       await page.getByRole('button',{name:/合成评论作者/}).click();
       await page.getByRole('heading',{name:'合成评论作者',exact:true}).waitFor();
       expect(await page.locator('.detail-heading h2').evaluate(node=>getComputedStyle(node).color)).toBe(commentTone);
@@ -313,13 +314,14 @@ test.each([
         path: join(output, `inbox-${viewport.width}x${viewport.height}.png`),
       });
       await page
-        .getByRole("button", { name: "AI 与设置", exact: true })
+        .getByRole("button", { name: "多模型配置", exact: true })
         .click();
       await expect
         .poll(() =>
           page.getByRole("heading", { name: "当前模型", exact: true }).isVisible(),
         )
         .toBe(true);
+      await page.getByRole('button',{name:'自动化规则',exact:true}).click();
       identityAvailable=false;
       await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
       await expect.poll(()=>page.getByRole('combobox',{name:'工作模式',exact:true}).inputValue()).toBe('MANUAL');
@@ -334,8 +336,8 @@ test.each([
       await expect.poll(()=>page.getByRole('combobox',{name:'工作模式',exact:true}).inputValue()).toBe('MANUAL');
       expect(await service.dispatch(token,{command:'getStatus'})).toMatchObject({mode:'DRAFT_ONLY',configuredMode:'MANUAL'});
       identityAvailable=true;
+      await page.getByRole('button',{name:'账号与通道',exact:true}).click();
       await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
-      await page.getByText('连接详情',{exact:true}).click();
       for(const state of ['READ_OK','SEND_REVIEW_ONLY','BLOCKED','SEND_AVAILABLE'] as const){
         service.authority.attest('COMMENT_NOTIFICATION',state,service.browser.identity('COMMENT_NOTIFICATION')!,'synthetic-capability-state');
         await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
@@ -348,6 +350,7 @@ test.each([
       await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
       await expect.poll(()=>page.locator('dl > div').filter({has:page.getByText('评论能力',{exact:true})}).textContent()).toContain('请先打开专属浏览器并同步此通道');
       identityAvailable=true;
+      await page.getByRole('button',{name:'自动化规则',exact:true}).click();
       await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
       await service.dispatch(token,{command:'pause',eventId:null});
       await page.getByRole('spinbutton',{name:'本次持续授权的模型次数',exact:true}).fill('2');
@@ -374,6 +377,7 @@ test.each([
       await page.getByRole('button',{name:'撤销自动回复策略',exact:true}).click();
       await expect.poll(async()=>((await service.dispatch(token,{command:'getStatus'})) as {automation:{replyPolicy:unknown}}).automation.replyPolicy).toBe(null);
       await page.getByRole('combobox',{name:'工作模式',exact:true}).selectOption('MANUAL');
+      await page.getByRole('button',{name:'多模型配置',exact:true}).click();
       await page.getByRole('button',{name:'编辑 DeepSeek',exact:true}).click();
       const modelEditor = page.getByRole('region',{name:'编辑连接 DeepSeek',exact:true});
       const modelKey = modelEditor.getByLabel('本次 API Key',{exact:true});
@@ -382,6 +386,7 @@ test.each([
       await modelEditor.getByText('Key 已保存。',{exact:true}).waitFor();
       await expect.poll(() => modelKey.inputValue()).toBe('');
       await modelEditor.getByRole('button',{name:'收起编辑器',exact:true}).click();
+      await page.getByRole('button',{name:'系统设置',exact:true}).click();
       await page.getByText('故障处理',{exact:true}).click();
       await page.getByRole("button", { name: "全局急停", exact: true }).click();
       await expect.poll(() => service.authority.paused()).toBe(true);
@@ -395,7 +400,7 @@ test.each([
       await expect
         .poll(() =>
           page
-            .getByRole("heading", { name: "收件箱", exact: true })
+            .getByRole("heading", { name: "会话中心", exact: true })
             .isVisible(),
         )
         .toBe(true);

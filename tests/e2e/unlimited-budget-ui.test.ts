@@ -28,7 +28,7 @@ test('unlimited model and send choices apply only on explicit policy save and ke
     fixture.__TAURI_INTERNALS__={invoke:(command:string,args:unknown)=>fixture.fixtureInvoke(command,args)};});
   try{
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
-    await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.getByRole('button',{name:'自动化规则',exact:true}).click();
     expect(await page.getByLabel('自动回复楼中楼评论',{exact:true}).isChecked()).toBe(true);
     expect(await page.getByRole('spinbutton',{name:'本次持续授权的模型次数',exact:true}).inputValue()).toBe('10');
     expect(await page.getByRole('spinbutton',{name:'本次持续授权的发送次数',exact:true}).inputValue()).toBe('10');
@@ -42,7 +42,7 @@ test('unlimited model and send choices apply only on explicit policy save and ke
     expect((data.active('AUTO_REPLY')!.scope as ReplyPolicy).replyToNestedComments).toBe(false);
     expect(store.budgets()).toEqual([{kind:'MODEL',used:4,maximum:null},{kind:'SEND',used:6,maximum:null}]);
     await expect.poll(()=>page.locator('.settings').innerText()).toContain('MODEL 4/无上限');
-    await page.getByRole('button',{name:'收件箱',exact:true}).click();await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.getByRole('button',{name:'会话中心',exact:true}).click();await page.getByRole('button',{name:'自动化规则',exact:true}).click();
     expect(await page.getByLabel('模型次数无上限',{exact:true}).isChecked()).toBe(true);expect(await page.getByLabel('发送次数无上限',{exact:true}).isChecked()).toBe(true);
     expect(await page.getByLabel('自动回复楼中楼评论',{exact:true}).isChecked()).toBe(false);
     await page.getByLabel('模型次数无上限',{exact:true}).uncheck();await page.getByLabel('发送次数无上限',{exact:true}).uncheck();
@@ -52,7 +52,7 @@ test('unlimited model and send choices apply only on explicit policy save and ke
     await expect.poll(()=>store.budget('MODEL').maximum).toBe(7);expect(store.budget('SEND')).toMatchObject({used:6,maximum:8});
     await service.dispatch(token,{command:'setReplyPolicy',policy:null,confirmed:true});
     await service.dispatch(token,{command:'setModelGrant',scope:{ownId:'own-1',channels:['DIRECT_MESSAGE'],model:'deepseek-flash',modelLimit:null,expiresAt:null},confirmed:true});
-    await page.reload();await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.reload();await page.getByRole('button',{name:'自动化规则',exact:true}).click();
     expect(await page.getByLabel('模型次数无上限',{exact:true}).isChecked()).toBe(true);expect(await page.getByLabel('发送次数无上限',{exact:true}).isChecked()).toBe(false);
     expect(store.budget('SEND')).toMatchObject({used:6,maximum:8});
     expect(store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});expect(calls.some(command=>['sendHumanReply','generateSuggestion'].includes(command))).toBe(false);

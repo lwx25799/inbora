@@ -64,11 +64,12 @@ test.each([{width:900,height:640},{width:1240,height:800}])('emergency reason an
     const box=await recover.boundingBox();expect(box!.y+box!.height).toBeLessThan(viewport.height);
     await mkdir(resolve('.local/emergency-stop-ui'),{recursive:true});
     await page.screenshot({path:resolve(`.local/emergency-stop-ui/recorded-${viewport.width}.png`)});
-    await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.getByRole('button',{name:'系统设置',exact:true}).click();
     expect(await page.getByRole('button',{name:'恢复运行',exact:true}).isVisible()).toBe(true);
+    await page.getByRole('button',{name:'自动化规则',exact:true}).click();
     expect(await page.getByRole('button',{name:'保存收取范围',exact:true}).isVisible()).toBe(true);
-    await page.getByRole('button',{name:'操作审计',exact:true}).click();expect(await recover.isVisible()).toBe(true);
-    await page.getByRole('button',{name:'收件箱',exact:true}).click();
+    await page.getByRole('button',{name:'调度与审计',exact:true}).click();expect(await recover.isVisible()).toBe(true);
+    await page.getByRole('button',{name:'会话中心',exact:true}).click();
     await recover.click();await expect.poll(()=>calls.filter(c=>c.command==='resume').length).toBe(1);
     expect(await notice.isVisible()).toBe(true);
     expect(await notice.getByRole('button',{name:'处理登录或验证',exact:true}).count()).toBe(0);
@@ -99,7 +100,7 @@ test.each([{width:900,height:640},{width:1240,height:800}])('emergency reason an
     await held.getByRole('button',{name:'检查并恢复运行',exact:true}).click();
     await held.waitFor({state:'detached'});expect(status.browser.mode).toBe('headless');expect(status.securityHolds).toEqual([]);
     expect(calls.filter(c=>c.command==='resume')).toHaveLength(3);
-    await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.getByRole('button',{name:'系统设置',exact:true}).click();
     await page.getByText('安全检查运行版本',{exact:true}).click();
     expect(await page.getByText('ab'.repeat(32),{exact:true}).isVisible()).toBe(true);
     expect(await page.getByText('synthetic-loaded-instance',{exact:true}).count()).toBe(2);

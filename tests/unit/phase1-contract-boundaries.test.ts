@@ -15,7 +15,7 @@ function isWithin(root: string, file: string): boolean {
   return !isAbsolute(path) && path !== '..' && !path.startsWith('..' + sep);
 }
 
-function violations(root: string, allowedRoots: string[], allowedPackages: RegExp): string[] {
+function violations(root: string, allowedRoots: string[], allowedPackages: RegExp, aliasRoot?: string): string[] {
   const files = readdirSync(root, { recursive: true, withFileTypes: true })
     .filter(entry => entry.isFile() && /\.[cm]?tsx?$/u.test(entry.name));
   expect(files.length).toBeGreaterThan(0);
@@ -23,6 +23,7 @@ function violations(root: string, allowedRoots: string[], allowedPackages: RegEx
     const file = resolve(entry.parentPath, entry.name);
     return imports(readFileSync(file, 'utf8')).filter(specifier =>
       specifier.startsWith('.') ? !allowedRoots.some(path => isWithin(path, resolve(entry.parentPath, specifier)))
+        : aliasRoot && specifier.startsWith('@/') ? !allowedRoots.some(path => isWithin(path, resolve(aliasRoot, specifier.slice(2))))
         : !allowedPackages.test(specifier),
     ).map(specifier => `${relative(process.cwd(), file)} -> ${specifier}`);
   });
@@ -44,6 +45,10 @@ test('shared contracts depend only on other contracts and pure schema validation
 });
 
 test('desktop source imports shared contracts without reaching backend modules', () => {
-  expect(violations(desktop, [desktop, contracts], /^(?:react|react-dom(?:\/[\w-]+)?|@tauri-apps\/api\/[\w-]+|vitest)$/u))
-    .toEqual([]);
+  expect(violations(
+    desktop,
+    [desktop, contracts],
+    /^(?:react|react-dom(?:\/[\w-]+)?|@tauri-apps\/api\/[\w-]+|@base-ui\/react(?:\/[\w-]+)?|@fontsource-variable\/(?:inter|plus-jakarta-sans|jetbrains-mono)|misans\/lib\/Normal\/MiSansVF\.min\.css|lucide-react|class-variance-authority|clsx|tailwind-merge|vitest)$/u,
+    desktop,
+  )).toEqual([]);
 });

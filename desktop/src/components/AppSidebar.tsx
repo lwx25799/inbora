@@ -267,7 +267,20 @@ export function AppSidebar({
       </div>
 
       {/* Real Workspace & Runtime Status Card */}
-      {!collapsed && (
+      {collapsed ? (
+        <div className="runtime-status sr-only">
+          <p>
+            {emergencyStopped
+              ? "已急停"
+              : browserOpen
+                ? "账号保持连接"
+                : "正在连接账号"}
+          </p>
+          <small>
+            浏览器：{browserState(status.browser.state, status.automation?.emergencyStopped)}
+          </small>
+        </div>
+      ) : (
         <div className="space-y-2 px-3 pb-2">
           <button
             type="button"
@@ -364,7 +377,8 @@ export function AppSidebar({
                   <button
                     key={item.id}
                     type="button"
-                    title={item.label}
+                    aria-label={item.label}
+                    title={badgeCount > 0 ? `${item.label} (${badgeText})` : item.label}
                     aria-current={active ? "page" : undefined}
                     onClick={() => onSelectPage(item.id)}
                     className={cn(

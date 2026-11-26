@@ -277,7 +277,7 @@ async function openSettings(status: Status, viewport = {width: 1240, height: 800
   });
   try {
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port: number}).port}`);
-    await page.getByRole('button', {name: 'AI 与设置', exact: true}).click();
+    await page.getByRole('button', {name: '多模型配置', exact: true}).click();
     await page.getByRole('heading', {name: '当前模型', exact: true}).waitFor();
   } catch (error) {
     await page.close();
@@ -346,7 +346,7 @@ test('P16 saves a draft, manages Key and catalogs, tests once, applies and delet
     await key.fill('synthetic-follow-up');
     expect(await button(page, '正在更新 Key…').isDisabled()).toBe(true);
     expect(await button(page, '保存连接').isEnabled()).toBe(true);
-    expect(await button(page, '编辑业务提示词').isEnabled()).toBe(true);
+    expect(await button(page, '自动化规则').isEnabled()).toBe(true);
     deferred.release();
     await text(page, 'Key 已保存。').waitFor();
     expect(await key.inputValue()).toBe('synthetic-follow-up');
@@ -370,7 +370,7 @@ test('P16 saves a draft, manages Key and catalogs, tests once, applies and delet
     await expect.poll(() => testCall.entered).toBe(true);
     expect(await button(page, '正在测试连接…').isDisabled()).toBe(true);
     expect(await button(page, '获取模型').isEnabled()).toBe(true);
-    expect(await button(page, '收件箱').isEnabled()).toBe(true);
+    expect(await button(page, '会话中心').isEnabled()).toBe(true);
     testCall.release();
     await page.getByText('连接测试通过。', {exact: false}).waitFor();
     const sentTest = calls.find(call => call.action === 'test');
@@ -399,6 +399,7 @@ test('P16 saves a draft, manages Key and catalogs, tests once, applies and delet
     expect(calls.at(-1)).not.toHaveProperty('key');
     expect(await key.inputValue()).toBe('');
 
+    await button(page, '自动化规则').click();
     await button(page, '编辑业务提示词').click();
     const persona = page.getByRole('textbox', {name: '账号人设', exact: true});
     await persona.fill('合成业务人设');
@@ -409,11 +410,12 @@ test('P16 saves a draft, manages Key and catalogs, tests once, applies and delet
     await page.getByRole('dialog', {name: '业务提示词'}).getByText('业务提示词已保存', {exact: true}).waitFor();
     expect(fixture.prompts).toEqual([{command: 'configureAi', settings: {persona: '合成业务人设', business: '', rules: ''}}]);
     await page.keyboard.press('Escape');
+    await button(page, '多模型配置').click();
     expect(await current.getByRole('definition').filter({hasText: '路由备用 · OpenRouter'}).isVisible()).toBe(true);
     expect(await current.getByRole('definition').filter({hasText: secondModel}).isVisible()).toBe(true);
     expect(await current.getByRole('definition').filter({hasText: '未配置'}).isVisible()).toBe(true);
     expect(fixture.errors).toEqual([]);
-    expect(await page.locator('.settings-compact').evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    expect(await page.locator('#main-content').evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
   } finally { await fixture.close(); }
 });
 
@@ -446,11 +448,11 @@ test('P16 scopes results to the originating editor and does not replay after res
     const switching = fixture.hold('apply');
     await button(page, '应用切换').click();
     await expect.poll(() => switching.entered).toBe(true);
-    await button(page, '收件箱').click();
-    await page.getByRole('heading', {name: '收件箱', exact: true}).waitFor();
+    await button(page, '会话中心').click();
+    await page.getByRole('heading', {name: '会话中心', exact: true}).waitFor();
     switching.release();
     await expect.poll(() => status.modelProviders?.selection.connectionId).toBe(secondId);
-    await button(page, 'AI 与设置').click();
+    await button(page, '多模型配置').click();
     await page.getByRole('definition').filter({hasText: '同品牌备用 · DeepSeek'}).waitFor();
     const before = calls.length;
     const readsBeforeRestart = all.filter(name => name === 'getStatus').length;
@@ -462,7 +464,7 @@ test('P16 scopes results to the originating editor and does not replay after res
     await page.getByRole('definition').filter({hasText: status.modelAuthorized ? '当前有效' : '当前无效'}).waitFor();
     expect(calls.slice(before).filter(command => command.action !== 'list')).toEqual([]);
     await page.reload();
-    await button(page, 'AI 与设置').click();
+    await button(page, '多模型配置').click();
     await button(page, '编辑 原连接').click();
     expect(await control(page, '本次 API Key').inputValue()).toBe('');
     expect(calls.slice(before).every(command => command.action === 'list')).toBe(true);
@@ -700,7 +702,7 @@ test('P16 displays specific status reasons and keeps diagnostic provider and mod
     await interruption.waitFor();
     expect(await interruption.innerText()).toContain(errorMessages.MODEL_TIMEOUT);
     expect(await interruption.innerText()).not.toContain('目录已达到保留上限');
-    await text(page, '运行诊断与用量详情').click();
+    await button(page, '调度与审计').click();
     const table = page.getByRole('table', {name: '模型与状态累计'});
     await text(page, '模型明细仅展示 3 组（共 5 组），上方累计包含全部记录。').waitFor();
     await table.getByRole('row').filter({hasText: 'OpenRouter'}).getByText(secondModel, {exact: true}).waitFor();
@@ -736,6 +738,7 @@ test.each(['missing-state', 'disabled-flag', 'initialization-failed'] as const)(
     } else await legacy.waitFor();
     expect(await button(page, '新建连接').isDisabled()).toBe(true);
     expect(await control(page, '本次 API Key').count()).toBe(0);
+    await button(page, '自动化规则').click();
     expect(await button(page, '编辑业务提示词').isEnabled()).toBe(true);
     await button(page, '编辑业务提示词').click();
     const save = button(page, '保存业务提示词');

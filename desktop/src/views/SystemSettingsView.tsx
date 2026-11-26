@@ -58,7 +58,7 @@ export function SystemSettingsView({
   }, [emergencyStopped]);
 
   return (
-    <div className="mx-auto max-w-[1160px] space-y-5 px-6 py-5">
+    <div className="settings mx-auto max-w-[1160px] space-y-5 px-6 py-5">
       <PageHeader
         title="系统设置"
         description="管理本机助手连接（MCP）、外观主题与快捷键、运行目录安全退出以及独立的故障处理与全局急停"
@@ -209,7 +209,7 @@ export function SystemSettingsView({
             <OctagonAlertIcon className="size-4 text-destructive" />
             <div>
               <span className="font-heading text-[15px] font-semibold text-foreground">
-                故障处理与全局急停
+                故障处理
               </span>
               <p className="text-xs text-muted-foreground">
                 网页未发送内容核对清理，以及独立的全局急停与显式恢复入口

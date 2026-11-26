@@ -96,14 +96,15 @@ export function AutomationView({
     const submitted = latestPrompts.current;
     try {
       const next = await saveBusinessPrompts(status, submitted);
-      if (!active.current || runtimeSession(next) !== session) return;
+      if (runtimeSession(next) !== session) return;
       const saved = businessPrompts(next.settings);
+      updatePrompts(session, saved);
+      if (!active.current) return;
       syncedPrompts.current = saved;
       if (samePrompts(latestPrompts.current, submitted)) {
         latestPrompts.current = saved;
         setPrompts(saved);
       }
-      updatePrompts(session, saved);
       setPromptNotice('业务提示词已保存');
     } catch (cause) {
       if (active.current) setPromptError(explainSafe(cause, '业务提示词保存失败。'));
@@ -117,7 +118,7 @@ export function AutomationView({
     status.configuredMode === 'LIMITED_AUTO' && Boolean(status.automation?.replyPolicy);
 
   return (
-    <div className="mx-auto max-w-[1200px] space-y-5 px-6 py-5">
+    <div className="settings mx-auto max-w-[1200px] space-y-5 px-6 py-5">
       <PageHeader
         title="自动化规则"
         description="统一管理自动回复总开关、工作模式、后台收取范围、持续授权额度与业务提示词"
@@ -194,7 +195,7 @@ export function AutomationView({
           </CardFrameHeader>
           <Card className="space-y-3 p-4">
             <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground">
-              当前工作模式
+              工作模式
               <select
                 className={selectCls}
                 value={status.configuredMode}

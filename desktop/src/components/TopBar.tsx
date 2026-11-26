@@ -93,7 +93,11 @@ export function TopBar({
           <span aria-hidden="true" className="text-muted-foreground/50">
             /
           </span>
-          <span className="truncate font-semibold text-foreground">{crumb.title}</span>
+          {page === "inbox" ? (
+            <h1 className="truncate font-semibold text-foreground">{crumb.title}</h1>
+          ) : (
+            <span className="truncate font-semibold text-foreground">{crumb.title}</span>
+          )}
         </div>
 
         <div className="hidden items-center gap-1.5 border-l border-border/80 pl-3 lg:flex">

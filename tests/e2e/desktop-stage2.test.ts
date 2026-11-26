@@ -102,15 +102,18 @@ test.each<Delivery>(['new-model', 'new-session', 'same-batch'])('App reconciles 
     const persona = page.getByRole('textbox', {name:'账号人设', exact:true});
     const current = page.getByRole('region', {name:'当前模型'});
     const advancedModel = current.getByRole('definition').filter({hasText:'deepseek-pro'});
-    await button('AI 与设置').click();
+    await button('自动化规则').click();
     await button('编辑业务提示词').click();
     await persona.fill('已保存人设');
     await button('保存业务提示词').click();
     await page.getByText('正在保存业务提示词…', {exact:true}).waitFor();
     await page.keyboard.press('Escape');
 
-    if (delivery === 'new-session') await button('同步收件箱').click();
-    else {
+    if (delivery === 'new-session') {
+      await button('同步收件箱').click();
+      await button('多模型配置').click();
+    } else {
+      await button('多模型配置').click();
       await page.getByRole('combobox', {name:'切换到模型', exact:true}).selectOption('deepseek-pro');
       await button('应用切换').click();
     }
@@ -121,14 +124,9 @@ test.each<Delivery>(['new-model', 'new-session', 'same-batch'])('App reconciles 
     await page.evaluate(() => (window as unknown as {fixture:Fixture}).fixture.release());
     await advancedModel.waitFor();
     if (delivery === 'same-batch') await page.getByText('已应用模型切换。', {exact:true}).waitFor();
-    if (delivery === 'new-model') {
-      await button('编辑业务提示词').click();
-      await page.getByText('业务提示词已保存', {exact:true}).waitFor();
-      await page.keyboard.press('Escape');
-    }
-    // A new Settings mount initializes from App state. The fixture holds fresh reads for this assertion.
-    await button('收件箱').click();
-    await button('AI 与设置').click();
+    // A new AutomationView mount initializes from App state. The fixture holds fresh reads for this assertion.
+    await button('会话中心').click();
+    await button('自动化规则').click();
     await button('编辑业务提示词').click();
     expect(await persona.inputValue()).toBe(delivery === 'new-session' ? '新会话人设' : '已保存人设');
   } finally { await page.close(); }

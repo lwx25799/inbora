@@ -27,7 +27,7 @@ test('saved policy budgets remain visible and an empty selected scope cannot be 
     bridge.__TAURI_INTERNALS__={invoke:(command:string,args:unknown)=>bridge.fixtureInvoke(command,args)};});
   try{
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
-    await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.getByRole('button',{name:'自动化规则',exact:true}).click();
     expect(await page.getByRole('switch',{name:'设置中的自动回复',exact:true}).count()).toBe(1);
     expect(await page.getByRole('textbox',{name:'入站须包含任一词',exact:false}).count()).toBe(0);
     expect(await page.getByRole('textbox',{name:'屏蔽词',exact:false}).count()).toBe(1);

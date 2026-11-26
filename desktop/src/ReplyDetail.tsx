@@ -54,7 +54,7 @@ export function ReplyDetail(props: ReplyViewProps) {
   return (
     <section
       ref={detailElement}
-      className="detail scroll min-h-0 min-w-0 flex-1 overflow-y-auto bg-background px-6 py-5 overscroll-contain max-[1050px]:px-4 max-[1050px]:py-4"
+      className="detail scroll flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto bg-background px-6 py-5 overscroll-contain max-[1050px]:px-4 max-[1050px]:py-4"
       aria-label="消息详情"
       data-channel="COMMENT_NOTIFICATION"
     >
@@ -71,8 +71,8 @@ export function ReplyDetail(props: ReplyViewProps) {
           </p>
         </div>
       ) : (
-        <div className="mx-auto flex w-full max-w-[780px] flex-col gap-4">
-          <header className="detail-heading flex flex-wrap items-start justify-between gap-3 rounded-2xl border border-border/80 bg-card px-5 py-4 shadow-xs/5">
+        <>
+          <header className="detail-heading mx-auto flex w-full max-w-[780px] flex-wrap items-start justify-between gap-3 rounded-2xl border border-border/80 bg-card px-5 py-4 shadow-xs/5">
             <div className="flex min-w-0 items-center gap-3">
               <span
                 aria-hidden="true"
@@ -88,7 +88,7 @@ export function ReplyDetail(props: ReplyViewProps) {
                   {thread.event.payload.kind === 'REPLY' ? '楼中楼评论' : '作品评论'} ·{' '}
                   {sourceNames[thread.event.payload.discovery ?? 'NOTIFICATION']}
                 </p>
-                <h2 className="mt-0.5 truncate font-heading text-base font-semibold text-foreground">{actorName}</h2>
+                <h2 className="mt-0.5 truncate font-heading text-base font-semibold text-warning-foreground">{actorName}</h2>
               </div>
             </div>
             <span className={commentBadgeClass(thread.replyStatus)}>{replyStatusLabel(thread.replyStatus)}</span>
@@ -96,7 +96,7 @@ export function ReplyDetail(props: ReplyViewProps) {
 
           <details
             key={thread.event.id}
-            className="identity rounded-xl border border-border/80 bg-muted/40 px-4 py-2.5 text-xs text-foreground"
+            className="identity mx-auto w-full max-w-[780px] rounded-xl border border-border/80 bg-muted/40 px-4 py-2.5 text-xs text-foreground"
           >
             <summary className="cursor-pointer select-none font-medium text-muted-foreground transition-colors hover:text-foreground">
               消息信息
@@ -148,9 +148,11 @@ export function ReplyDetail(props: ReplyViewProps) {
           </details>
 
           {thread.commentContext ? (
-            <CommentThreadContext thread={thread} choose={props.choose} />
+            <div className="mx-auto w-full max-w-[780px]">
+              <CommentThreadContext thread={thread} choose={props.choose} />
+            </div>
           ) : (
-            <section className="original rounded-2xl border border-border/80 bg-card p-4 shadow-xs/5">
+            <section className="original mx-auto w-full max-w-[780px] rounded-2xl border border-border/80 bg-card p-4 shadow-xs/5">
               <h3 className="font-heading text-xs font-semibold text-muted-foreground">原父评论</h3>
               <p className="mt-2 text-[14px] leading-relaxed text-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">
                 <MessageText text={thread.event.payload.text} />
@@ -168,7 +170,7 @@ export function ReplyDetail(props: ReplyViewProps) {
 
           {!thread.commentContext && !!thread.timeline?.items.some(message => message.direction === 'OUTGOING') && (
             <section
-              className="original space-y-2.5 rounded-2xl border border-primary/25 bg-primary/[0.045] p-4"
+              className="original mx-auto w-full max-w-[780px] space-y-2.5 rounded-2xl border border-primary/25 bg-primary/[0.045] p-4"
               aria-label="我的回复"
             >
               <h3 className="font-heading text-xs font-semibold text-primary">我的回复</h3>
@@ -189,7 +191,7 @@ export function ReplyDetail(props: ReplyViewProps) {
 
           {unresolved && (
             <section
-              className="original rounded-2xl border border-warning/35 bg-warning/10 p-4 text-foreground"
+              className="original mx-auto w-full max-w-[780px] rounded-2xl border border-warning/35 bg-warning/10 p-4 text-foreground"
               aria-label="回复结果待确认"
             >
               <h3 className="font-heading text-xs font-semibold text-warning-foreground">回复结果待确认</h3>
@@ -201,7 +203,7 @@ export function ReplyDetail(props: ReplyViewProps) {
           )}
 
           {!thread.commentContext && (
-            <details className="history rounded-xl border border-border/80 bg-card/70 px-4 py-3 text-xs">
+            <details className="history mx-auto w-full max-w-[780px] rounded-xl border border-border/80 bg-card/70 px-4 py-3 text-xs">
               <summary className="cursor-pointer select-none font-medium text-muted-foreground transition-colors hover:text-foreground tabular-nums">
                 有限上下文 · {thread.history.length} 条
               </summary>
@@ -228,7 +230,7 @@ export function ReplyDetail(props: ReplyViewProps) {
             </details>
           )}
 
-          <div className="flex items-center gap-3 pt-1">
+          <div className="mx-auto flex w-full max-w-[780px] items-center gap-3 pt-1">
             <button
               type="button"
               className="primary inline-flex h-9 cursor-pointer items-center justify-center rounded-lg border border-primary bg-primary px-4 text-sm font-medium text-primary-foreground shadow-xs shadow-primary/20 transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
@@ -316,7 +318,7 @@ export function ReplyDetail(props: ReplyViewProps) {
               <ReplyComposer {...props} thread={thread} />
             </div>
           </dialog>
-        </div>
+        </>
       )}
     </section>
   );

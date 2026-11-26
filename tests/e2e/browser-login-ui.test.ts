@@ -32,7 +32,7 @@ test('settings keeps an explicit headed browser button and a headless return wit
     fixture.__TAURI_INTERNALS__={invoke:(command:string,args:unknown)=>fixture.fixtureInvoke(command,args)};});
   try{
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
-    await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.getByRole('button',{name:'账号与通道',exact:true}).click();
     expect(calls.filter(body=>body.command==='browser'&&body.action==='inspectSavedDraftRecovery')).toEqual([]);
     expect(await page.getByRole('button',{name:'打开专属浏览器',exact:true}).count()).toBe(0);
     await page.getByRole('button',{name:'打开有头浏览器',exact:true}).click();
@@ -49,6 +49,7 @@ test('settings keeps an explicit headed browser button and a headless return wit
     await headedNotice.getByRole('button',{name:'返回无头运行',exact:true}).click();
     await expect.poll(()=>native.loginRecovery).toBe(false);
     await expect.poll(()=>page.getByRole('button',{name:'打开有头浏览器',exact:true}).isEnabled()).toBe(true);
+    await page.getByRole('button',{name:'系统设置',exact:true}).click();
     await page.getByText('故障处理',{exact:true}).click();
     await expect.poll(()=>calls.filter(body=>body.command==='browser'&&body.action==='inspectSavedDraftRecovery').length).toBe(1);
     expect(calls.filter(body=>body.command==='browser')).toEqual([

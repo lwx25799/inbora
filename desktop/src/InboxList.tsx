@@ -139,8 +139,12 @@ export function InboxList({
               className={cn(
                 'task relative flex w-full cursor-pointer items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                 active
-                  ? 'selected border-primary/35 bg-card shadow-xs ring-1 ring-primary/15 before:absolute before:top-2.5 before:bottom-2.5 before:left-0 before:w-[3px] before:rounded-r-full before:bg-primary'
-                  : 'border-transparent bg-card/55 hover:border-border/80 hover:bg-card',
+                  ? isDm
+                    ? 'selected border-primary/35 bg-info/[0.08] shadow-xs ring-1 ring-primary/15 before:absolute before:top-2.5 before:bottom-2.5 before:left-0 before:w-[3px] before:rounded-r-full before:bg-primary dark:bg-info/[0.14]'
+                    : 'selected border-primary/35 bg-warning/[0.08] shadow-xs ring-1 ring-primary/15 before:absolute before:top-2.5 before:bottom-2.5 before:left-0 before:w-[3px] before:rounded-r-full before:bg-primary dark:bg-warning/[0.14]'
+                  : isDm
+                    ? 'border-transparent bg-info/[0.035] hover:border-border/80 hover:bg-info/[0.065] dark:bg-info/[0.05] dark:hover:bg-info/[0.1]'
+                    : 'border-transparent bg-warning/[0.04] hover:border-border/80 hover:bg-warning/[0.07] dark:bg-warning/[0.055] dark:hover:bg-warning/[0.1]',
               )}
               aria-pressed={active}
               onClick={() => {

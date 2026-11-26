@@ -88,7 +88,7 @@ async function setup(viewport={width:1240,height:800},weakMedia=false,nested=fal
     fixture.fixtureEmit=name=>{for(const [id,listener]of listeners)if(listener.event==='inbora_status_updated')
       callbacks.get(listener.handler)?.({event:listener.event,id,payload:{event:name}});};
   });
-  await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
+  await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);await page.getByRole('heading',{name:'会话中心',exact:true}).waitFor();
   await page.waitForFunction(()=>(window as unknown as {fixtureListenerCount:()=>number}).fixtureListenerCount()>0);
   const forward=({event}:{event:string})=>{void page.evaluate(name=>(window as unknown as {fixtureEmit:(name:string)=>void}).fixtureEmit(name),event).catch(()=>{});};
   service.events.on('update',forward);
@@ -271,7 +271,7 @@ test('the settings switch controls all conversations while viewing stays passive
     await editor(f.page).fill('统一开关保持这份人稿');
     await expect.poll(()=>f.calls.some(call=>call.command==='openHumanDialog')).toBe(true);
     await expect.poll(()=>f.service.authority.draftFor(f.a)?.text).toBe('统一开关保持这份人稿');
-    await f.page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await f.page.getByRole('button',{name:'自动化规则',exact:true}).click();
     const toggle=f.page.getByRole('switch',{name:'设置中的自动回复',exact:true});await toggle.uncheck();
     await expect.poll(()=>f.service.authority.mode()).toBe('MANUAL');await expect.poll(()=>toggle.isChecked()).toBe(false);await toggle.check();
     await expect.poll(()=>f.service.authority.mode()).toBe('LIMITED_AUTO');

@@ -119,7 +119,7 @@ async function setup(viewport={width:1240,height:800},comment=false){
     fixture.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:(_event:string,id:number)=>{const listener=listeners.get(id);if(listener)callbacks.delete(listener.handler);listeners.delete(id);}};
   });
   await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
-  await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'会话中心',exact:true}).waitFor();
   return {root,page,a,b,calls,errors,commands,store,
     durableUncertain:()=>{durableUncertain=true;},
     status:(value:string,reason:string|null=null)=>{nextStatus=value;nextReason=reason;},reject:(value:string)=>{rejectSend=value;},

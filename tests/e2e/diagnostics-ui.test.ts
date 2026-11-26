@@ -47,9 +47,8 @@ test('settings shows cumulative diagnostics, combines events and rejects results
   const emit=(count=1)=>page.evaluate(count=>{for(let n=0;n<count;n++)(window as unknown as {fixtureEmit:()=>void}).fixtureEmit();},count);
   try{
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
-    await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();expect(calls).not.toContain('getDiagnostics');
-    await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
-    await page.getByText('运行诊断与用量详情',{exact:true}).click();
+    await page.getByRole('heading',{name:'会话中心',exact:true}).waitFor();expect(calls).not.toContain('getDiagnostics');
+    await page.getByRole('button',{name:'调度与审计',exact:true}).click();
     await page.getByRole('heading',{name:'运行诊断',exact:true}).waitFor({timeout:1000});
     const panel=page.getByRole('region',{name:'运行诊断'});await panel.getByText('已知输入 500 / 输出 80 Token',{exact:true}).waitFor();
     await panel.getByRole('region',{name:'后台浏览器资源'}).getByText('当前内核未提供浏览器资源监测数据。',{exact:true}).waitFor();
@@ -78,7 +77,7 @@ test('settings shows cumulative diagnostics, combines events and rejects results
     expect(await browserResources.innerText()).not.toContain('工作集 0.0 MiB');
     const before=calls.filter(name=>name==='getDiagnostics').length;hold=true;await emit(30);await expect.poll(()=>entered).toBe(true);
     await emit(30);expect(calls.filter(name=>name==='getDiagnostics').length).toBe(before+1);
-    await page.getByRole('button',{name:'收件箱',exact:true}).click();release?.();
+    await page.getByRole('button',{name:'会话中心',exact:true}).click();release?.();
     await page.waitForTimeout(300);expect(calls.filter(name=>name==='getDiagnostics').length).toBe(before+1);
     await emit();await page.waitForTimeout(200);expect(calls.filter(name=>name==='getDiagnostics').length).toBe(before+1);
     await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await page.waitForTimeout(200);

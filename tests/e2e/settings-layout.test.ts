@@ -33,22 +33,21 @@ test.each([{width:900,height:640},{width:1240,height:800}])('compact settings re
   });
   try{
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
-    await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
-    const settings=page.locator('.settings-compact');await settings.waitFor();
+    await page.getByRole('button',{name:'自动化规则',exact:true}).click();
+    const settings=page.locator('.settings');await settings.waitFor();
     expect(await page.getByRole('switch',{name:'设置中的自动回复'}).isVisible()).toBe(true);
-    const columns=await page.locator('.settings-column').evaluateAll(elements=>elements.map(element=>{
+    const cards=await settings.locator('> div.grid > div').evaluateAll(elements=>elements.map(element=>{
       const rect=element.getBoundingClientRect();return {x:rect.x,y:rect.y,width:rect.width,height:rect.height};
     }));
     if(viewport.width===1240){
-      expect(columns[1]!.x).toBeGreaterThan(columns[0]!.x+columns[0]!.width);
-      expect(Math.abs(columns[1]!.y-columns[0]!.y)).toBeLessThan(1);
+      expect(cards[1]!.x).toBeGreaterThan(cards[0]!.x+cards[0]!.width);
+      expect(Math.abs(cards[1]!.y-cards[0]!.y)).toBeLessThan(1);
     }else{
-      expect(Math.abs(columns[0]!.x-columns[1]!.x)).toBeLessThan(1);
-      expect(columns[1]!.y).toBeGreaterThan(columns[0]!.y+columns[0]!.height);
+      expect(Math.abs(cards[0]!.x-cards[1]!.x)).toBeLessThan(1);
+      expect(cards[1]!.y).toBeGreaterThan(cards[0]!.y+cards[0]!.height);
     }
     expect(await settings.evaluate(element=>element.scrollWidth<=element.clientWidth+1)).toBe(true);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-    expect(await page.locator('.settings-diagnostics').getAttribute('open')).toBeNull();
     expect(await page.locator('.settings-disclosure').first().getAttribute('open')).toBeNull();
     await page.getByText('轮询参数 · 评论 30 秒 / 私信 15 秒',{exact:true}).click();
     await page.getByRole('spinbutton',{name:'评论轮询秒数',exact:true}).fill('42');
@@ -71,6 +70,8 @@ test.each([{width:900,height:640},{width:1240,height:800}])('compact settings re
     await page.getByRole('button',{name:'编辑业务提示词',exact:true}).click();
     expect(await page.getByRole('textbox',{name:'账号人设',exact:true}).inputValue()).toBe('未保存的合成账号人设');
     await prompts.getByRole('button',{name:'关闭并保留输入',exact:true}).click();
+    await page.getByRole('button',{name:'多模型配置',exact:true}).click();
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     const editConnection=page.getByRole('button',{name:'编辑 DeepSeek',exact:true});
     expect(await editConnection.getAttribute('aria-expanded')).toBe('false');
     await editConnection.click();
@@ -85,7 +86,6 @@ test.each([{width:900,height:640},{width:1240,height:800}])('compact settings re
     expect(await key.inputValue()).toBe('synthetic-only-never-saved');
     expect(await connectionName.inputValue()).toBe('未保存的连接名称');
     await editor.getByRole('button',{name:'收起编辑器',exact:true}).click();
-    await settings.evaluate(element=>element.scrollTop=0);
     await page.screenshot({path:join(root,`settings-${viewport.width}.png`)});
     expect(commands).not.toContain('configureAi');expect(commands).not.toContain('enableReplyPolicy');
     expect(modelActions.filter(action=>action!=='list')).toEqual([]);

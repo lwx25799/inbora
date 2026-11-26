@@ -60,10 +60,11 @@ test('backend events update the inbox and audit promptly, and focus only refresh
     const before=f.trace.length;f.add('事件新增');await f.emit('inbox_updated',40);
     await f.page.getByRole('button',{name:/事件新增/}).waitFor({timeout:1000});
     expect(f.trace.slice(before).filter(call=>call.command==='getStatus').length).toBeLessThanOrEqual(2);
-    await f.page.getByRole('button',{name:'操作审计',exact:true}).click();
+    await f.page.getByRole('button',{name:'调度与审计',exact:true}).click();
+    await f.page.getByRole('tab',{name:'操作审计账本',exact:true}).click();
     f.store.audit('SYNTHETIC_EVENT_REFRESH','fixture');await f.emit('status_updated');
     await f.page.getByRole('cell',{name:'SYNTHETIC_EVENT_REFRESH',exact:true}).waitFor({timeout:1000});
-    await f.page.getByRole('button',{name:'收件箱',exact:true}).click();
+    await f.page.getByRole('button',{name:'会话中心',exact:true}).click();
     const focusStart=f.trace.length;f.add('焦点补查');await f.page.evaluate(()=>window.dispatchEvent(new Event('focus')));
     await f.page.getByRole('button',{name:/焦点补查/}).waitFor({timeout:1000});
     expect(f.trace.slice(focusStart).every(call=>['getStatus','getInbox','getThread','getAudit'].includes(call.command))).toBe(true);
@@ -102,7 +103,7 @@ test('quiet views use a fifteen-second read-only fallback instead of the former 
 test('a slow background status cannot revert a newer user control response',async()=>{
   const f=await setup();try{
     await f.page.waitForTimeout(250);f.hold('getStatus');await f.emit('status_updated');await expect.poll(f.held).toBe(true);
-    await f.page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await f.page.getByRole('button',{name:'自动化规则',exact:true}).click();
     const mode=f.page.getByRole('combobox',{name:'工作模式',exact:true});await mode.selectOption('OBSERVE');
     await expect.poll(()=>mode.inputValue()).toBe('OBSERVE');f.release();await f.page.waitForTimeout(300);
     expect(await mode.inputValue()).toBe('OBSERVE');expect(f.service.authority.mode()).toBe('OBSERVE');expect(f.errors).toEqual([]);
@@ -116,7 +117,7 @@ test('an automatic reply switch keeps the clicked state while its backend respon
       containsAny:['never-match'],excludesAny:[],instructions:'Synthetic only',startHour:0,endHour:24}});
     await f.service.dispatch(f.token,{command:'setAutomaticReply',enabled:true});await f.emit('status_updated');
     await expect.poll(()=>f.page.getByRole('switch',{name:'自动回复',exact:true}).isChecked()).toBe(true);
-    await f.page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await f.page.getByRole('button',{name:'自动化规则',exact:true}).click();
     const toggle=f.page.getByRole('switch',{name:'设置中的自动回复',exact:true});
     f.hold('setAutomaticReply');await toggle.uncheck();await expect.poll(f.held).toBe(true);
     expect(await toggle.isChecked()).toBe(false);expect(await toggle.isDisabled()).toBe(true);

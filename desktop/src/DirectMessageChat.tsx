@@ -221,8 +221,8 @@ export function DirectMessageChat(props: ReplyViewProps & { thread: Thread }) {
               {avatarInitial(actorName)}
             </span>
             <div className="min-w-0">
-              <p className="eyebrow text-[11px] font-medium text-muted-foreground">私信会话</p>
-              <h2 className="truncate font-heading text-[15px] font-semibold text-foreground">{actorName}</h2>
+              <p className="eyebrow text-[11px] font-medium text-info-foreground/80">私信会话</p>
+              <h2 className="truncate font-heading text-[15px] font-semibold text-info-foreground">{actorName}</h2>
             </div>
           </div>
           <span className={headerBadgeClass(headerReplyStatus)}>{replyStatusLabel(headerReplyStatus)}</span>

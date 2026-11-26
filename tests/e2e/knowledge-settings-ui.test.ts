@@ -10,7 +10,7 @@ function fixturePlugin():Plugin {
   const entry='\0knowledge-ui-fixture';
   return {name:'synthetic-knowledge-ui',resolveId:id=>id==='/knowledge-ui-entry.ts'?entry:undefined,
     load:id=>id===entry?`import React from 'react';import {createRoot} from 'react-dom/client';
-      import {KnowledgeSettings} from '/src/KnowledgeSettings.tsx';import '/src/styles.css';import '/src/settings.css';
+      import {KnowledgeSettings} from '/src/KnowledgeSettings.tsx';import '/src/styles/globals.css';
       createRoot(document.getElementById('root')).render(React.createElement('main',{className:'settings settings-compact'},
         React.createElement(KnowledgeSettings,{accountId:'account_001'})));`:undefined,
     configureServer(server){server.middlewares.use(async(req,res,next)=>{
