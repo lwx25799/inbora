@@ -19,7 +19,7 @@ const PAGE_CRUMBS: Record<PageId, { group: string; title: string }> = {
   automation: { group: "资产与智能", title: "自动化规则" },
   knowledge: { group: "资产与智能", title: "知识库与人格" },
   models: { group: "资产与智能", title: "多模型配置" },
-  runtime: { group: "治理与系统", title: "运行与审计" },
+  runtime: { group: "治理与系统", title: "调度与审计" },
   analytics: { group: "治理与系统", title: "数据统计" },
   settings: { group: "治理与系统", title: "系统设置" },
 };

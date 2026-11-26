@@ -478,15 +478,15 @@ export const PERSONA_RADAR_AXES: Array<{ label: string; value: number; baseline:
 export const TASK_ROUTING_ROWS: Array<{
   task: string;
   desc: string;
-  model: string;
-  provider: string;
+  usesActiveModel: boolean;
+  fixedBadge?: string;
   calls: number;
   guard: string;
 }> = [
-  { task: "自动回复与草稿生成", desc: "结合店铺知识与温和主理人风格生成回复建议", model: "deepseek-chat", provider: "DeepSeek", calls: 492, guard: "不重复扣费" },
-  { task: "知识冲突检查与提炼", desc: "自动识别同主题冲突条款并提炼核心回复要点", model: "qwen-plus", provider: "通义千问", calls: 148, guard: "仅整理知识" },
-  { task: "试聊效果对比", desc: "上线前预览新风格回复效果，不会发给真实客户", model: "gpt-4.1-mini", provider: "OpenAI", calls: 44, guard: "试聊不外发" },
-  { task: "敏感词与联系方式保护", desc: "发送前自动拦截敏感词、手机号和外部链接", model: "本地规则", provider: "内置保护", calls: 684, guard: "实时拦截" },
+  { task: "自动回复与草稿生成", desc: "结合店铺知识与温和主理人风格生成回复建议", usesActiveModel: true, calls: 492, guard: "不重复扣费" },
+  { task: "知识冲突检查与提炼", desc: "自动识别同主题冲突条款并提炼核心回复要点", usesActiveModel: true, calls: 148, guard: "仅整理知识" },
+  { task: "试聊效果对比", desc: "上线前预览新风格回复效果，不会发给真实客户", usesActiveModel: true, calls: 44, guard: "试聊不外发" },
+  { task: "敏感词与联系方式保护", desc: "发送前自动拦截敏感词、手机号和外部链接", usesActiveModel: false, fixedBadge: "本地规则", calls: 684, guard: "实时拦截" },
 ];
 
 export const THREAD_CRM_EXTRA: Record<

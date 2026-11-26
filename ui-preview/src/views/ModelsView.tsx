@@ -162,12 +162,12 @@ export function ModelsView({
 
         <CardFrame>
           <CardFrameHeader>
-            <CardFrameTitle>分场景调用路由与边界</CardFrameTitle>
-            <CardFrameDescription>明确每类任务绑定的模型路由与安全隔离策略</CardFrameDescription>
+            <CardFrameTitle>当前模型适用场景与边界</CardFrameTitle>
+            <CardFrameDescription>全应用统一使用当前生效模型，各业务链路保持独立权限与费用隔离</CardFrameDescription>
             <CardFrameAction>
               <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
                 <GitBranchIcon className="size-3.5 text-primary" />
-                4 项任务链路
+                单一全局模型
               </span>
             </CardFrameAction>
           </CardFrameHeader>
@@ -179,7 +179,9 @@ export function ModelsView({
                   <div className="text-[11px] text-muted-foreground">{r.desc}</div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <Badge variant="outline" size="sm" className="font-mono">{r.model}</Badge>
+                  <Badge variant={r.usesActiveModel ? "outline" : "secondary"} size="sm" className={r.usesActiveModel ? "font-mono" : ""}>
+                    {r.usesActiveModel ? selectedModelId : (r.fixedBadge ?? "本地规则")}
+                  </Badge>
                   <Badge variant="secondary" size="sm">{r.guard}</Badge>
                 </div>
               </div>
