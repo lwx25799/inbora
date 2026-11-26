@@ -1,24 +1,32 @@
 import {randomUUID} from 'node:crypto';
-import {digest,requireSafe,targetKey,type StoredEvent} from '../core/contracts.js';
+import {digest,requireSafe,targetKey,type StoredEvent,type InboundEvent} from '../core/contracts.js';
 import type {EventStore} from '../storage/store.js';
 import type {AutomationStore} from '../storage/automation-store.js';
+import type {ModelProviderController} from './model-provider-controller.js';
 import type {DeepSeekProvider} from '../ai/deepseek.js';
 import type {WorkbenchAuthority} from './authority.js';
-import type {BrowserService} from './browser-service.js';
+import type {PlatformConnector} from '../platform/platform-connector.js';
 import type {HumanReplyWorkflow} from './human-reply-workflow.js';
 import type {AiSettings,SendParams} from './contracts.js';
 import type {Grant,ReplyPolicy} from './automation-contracts.js';
-import {replyPolicySchema} from './automation-contracts.js';
+import {grantMatchesModel} from '../storage/model-grant-binding.js';
+import {sameReplyPolicy} from './model-route-guard.js';
+import {modelCallFailureReason} from '../ai/business-model-call.js';
 import {recoverPolicyDraft} from './policy-draft-recovery.js';
 import {readCommentThreadContext,commentThreadModelHistory} from '../storage/comment-thread-context.js';
-import {collectionStops} from './collection-scheduler.js';
+import {shouldStopGlobally,securityCandidateCodes} from '../core/emergency-stop.js';
+import {assertSecurityRevision,securityRevision} from '../storage/security-holds.js';
 import {runtimePerformance} from '../observability/runtime-performance.js';
+import type {ReplyKnowledgeContext} from '../knowledge/contracts.js';
+import {assertReplyKnowledgeCurrent,bindReplyKnowledge,replySettingsFingerprint} from '../knowledge/generation-context.js';
 
 interface AutomaticReplyContext {
-  store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore;browser:BrowserService;
-  provider:DeepSeekProvider;humanReplies:HumanReplyWorkflow;settings:AiSettings;key:string;
+  store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore;browser:PlatformConnector;
+  models:ModelProviderController;provider:DeepSeekProvider;humanReplies:HumanReplyWorkflow;settings:AiSettings;
   modelPending:Set<string>;automaticSignal:AbortSignal;modelSignal:AbortSignal;
   isClosing():boolean;updated():void;stop(code:string):void;beforeWork():void;statusUpdated():void;errorCode(error:unknown):string;
+  knowledgeContext?(event:InboundEvent):ReplyKnowledgeContext|null;
+  currentSettings?():AiSettings;
 }
 
 async function qualifyPolicyTarget(c:AutomaticReplyContext,grant:Grant<ReplyPolicy>,event:StoredEvent,signal:AbortSignal):Promise<void>{
@@ -30,28 +38,29 @@ async function qualifyPolicyTarget(c:AutomaticReplyContext,grant:Grant<ReplyPoli
     requireSafe(proof.ownId===grant.scope.ownId&&identity.identityDigest===digest(proof.ownId),'ACCOUNT_CHANGED');
     requireSafe(proof.accountId===event.payload.accountId&&proof.eventBinding===event.binding&&
       proof.targetKey===targetKey(event.payload)&&proof.composerKey===proof.targetKey,'TARGET_CHANGED');
-  });}finally{handle.dispose();}
+  });}finally{await handle.dispose();}
 }
 
 /** Consume the existing one-time unpaid qualification before a fresh read. No old intent or paid generation can enter. */
 async function recoverUnpaidCommentRoot(c:AutomaticReplyContext,grant:Grant<ReplyPolicy>):Promise<void>{
   if(!c.automation.allowance(grant.version,'MODEL')||!c.automation.allowance(grant.version,'SEND'))return;
-  const jobs=c.store.db.prepare(`SELECT j.event_id,j.context_version,j.grant_version,g.scope_json FROM automation_jobs j
+  const jobs=c.store.db.prepare(`SELECT j.event_id,j.context_version,j.grant_version,g.scope_json,g.scope_digest FROM automation_jobs j
     JOIN automation_grants g ON g.version=j.grant_version AND g.kind='AUTO_REPLY'
     WHERE j.state='REVIEW' AND j.reason='COMMENT_REPLY_ROOT_NOT_UNIQUE' AND j.draft_version=0
     AND NOT EXISTS(SELECT 1 FROM grant_reservations r WHERE r.job_key=j.event_id AND r.kind IN ('MODEL','SEND'))
     AND NOT EXISTS(SELECT 1 FROM reply_drafts d WHERE d.event_id=j.event_id)
     AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=j.event_id)
     AND NOT EXISTS(SELECT 1 FROM audit_events a WHERE a.event_type='AUTO_QUALIFICATION_RESUMED' AND a.entity_id=j.event_id)`)
-    .all() as {event_id:string;context_version:string;grant_version:number;scope_json:string}[];
+    .all() as {event_id:string;context_version:string;grant_version:number;scope_json:string;scope_digest:string}[];
+  const {selection,route}=c.models.guard.current();
   for(const job of jobs){
-    const previous=replyPolicySchema.safeParse(JSON.parse(job.scope_json));if(!previous.success)continue;
+    let previous:ReplyPolicy;
+    try{previous=c.automation.readGrantScope('AUTO_REPLY',job) as ReplyPolicy;}catch{continue;}
+    if(!grantMatchesModel({...grant,version:job.grant_version,scope:previous},selection,route))continue;
     const event=c.store.event(job.event_id);
-    const rules=({modelLimit:_model,sendLimit:_send,expiresAt:_expiry,replyToNestedComments,...scope}:ReplyPolicy)=>({
-      ...scope,...(event.payload.kind==='REPLY'?{replyToNestedComments:replyToNestedComments!==false}:{})});
-    if(event.payload.channel!=='COMMENT_NOTIFICATION'||digest(rules(previous.data))!==digest(rules(grant.scope))||
+    if(event.payload.channel!=='COMMENT_NOTIFICATION'||!sameReplyPolicy(previous,grant.scope,event.payload.kind==='REPLY')||
       !c.automation.policyMatches(grant,event)||c.authority.contextVersion(event)!==job.context_version)continue;
-    const generation=c.authority.ownership(event).generation,signal=AbortSignal.any([c.modelSignal,c.automaticSignal]);
+    const generation=c.authority.ownership(event).generation,signal=AbortSignal.any([c.modelSignal,c.automaticSignal,c.models.signal]);
     c.beforeWork();
     const claimed=c.store.db.transaction(()=>{
       if(c.isClosing()||signal.aborted||!c.automation.policyMatches(grant,c.store.event(event.id))||
@@ -83,7 +92,7 @@ async function recoverUnpaidCommentRoot(c:AutomaticReplyContext,grant:Grant<Repl
     }catch(error){
       const code=c.errorCode(error);c.store.db.prepare("UPDATE automation_jobs SET reason=?,updated_at=? WHERE event_id=? AND state='REVIEW' AND draft_version=0")
         .run(code,c.authority.now(),event.id);
-      if(collectionStops.has(code))c.stop(code);
+      if(shouldStopGlobally(code))c.stop(code);
     }finally{c.modelPending.delete(event.id);c.updated();}
     return;
   }
@@ -91,9 +100,16 @@ async function recoverUnpaidCommentRoot(c:AutomaticReplyContext,grant:Grant<Repl
 
 /** Existing policy orchestration extracted unchanged so the application service can own lifecycle controls. */
 export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
-    const grant=c.automation.active('AUTO_REPLY') as Grant<ReplyPolicy>|null;
+    const grant=c.models.guard.eligibleGrant('AUTO_REPLY') as Grant<ReplyPolicy>|null;
     if(!grant||grant.scope.model!==c.settings.model)return;
-    if(await recoverPolicyDraft(c.store,c.authority,c.automation,c.humanReplies,grant,c.beforeWork)){
+    const heldJobs=c.store.db.prepare(`SELECT event_id,reason FROM automation_jobs WHERE state='REVIEW' AND draft_version=0
+      AND NOT EXISTS(SELECT 1 FROM grant_reservations r WHERE r.job_key=automation_jobs.event_id)
+      AND NOT EXISTS(SELECT 1 FROM reply_drafts d WHERE d.event_id=automation_jobs.event_id)
+      AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=automation_jobs.event_id)`).all() as {event_id:string;reason:string}[];
+    for(const job of heldJobs)if((securityCandidateCodes.has(job.reason)||job.reason==='SECURITY_CHANNEL_HELD')&&
+      c.automation.policyMatches(grant,c.store.event(job.event_id)))
+      c.store.db.prepare("DELETE FROM automation_jobs WHERE event_id=? AND state='REVIEW' AND draft_version=0").run(job.event_id);
+    if(await recoverPolicyDraft(c.store,c.authority,c.automation,c.humanReplies,grant,c.beforeWork,c.models.guard)){
       c.updated();return;
     }
     await recoverUnpaidCommentRoot(c,grant);
@@ -113,32 +129,55 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
     if(!event)return;
     c.beforeWork();
     const generation=c.authority.ownership(event).generation,context=c.authority.contextVersion(event),now=c.authority.now();
+    const security=securityRevision(c.store,event.payload.channel);
     c.store.db.prepare('INSERT INTO automation_jobs VALUES(?,?,?,?,?,?,NULL,NULL,?,?)').run(event.id,grant.version,'QUALIFYING',context,generation,0,now,now);
     c.modelPending.add(event.id);
     c.statusUpdated();
-    const automaticSignal=c.automaticSignal,signal=AbortSignal.any([c.modelSignal,automaticSignal]);
+    const automaticSignal=c.automaticSignal,routeSignal=c.models.signal,signal=AbortSignal.any([c.modelSignal,automaticSignal,routeSignal]);
+    let callId:string|undefined;
     try {
       await qualifyPolicyTarget(c,grant,event,signal);
       requireSafe(!signal.aborted&&c.automation.policyMatches(grant,c.store.event(event.id))&&c.authority.contextVersion(event)===context&&c.authority.ownership(event).generation===generation,'AUTO_RESULT_STALE');
       c.store.db.prepare("UPDATE automation_jobs SET state='GENERATING',updated_at=? WHERE event_id=?").run(c.authority.now(),event.id);
+      const knowledge=c.knowledgeContext?.(event.payload)??null;
+      const settings={...c.settings,rules:grant.scope.instructions},settingsFingerprint=replySettingsFingerprint(settings,knowledge?.persona);
+      const checkSettings=()=>requireSafe(replySettingsFingerprint(c.currentSettings?.()??c.settings,knowledge?.persona,grant.scope.instructions)===settingsFingerprint,'AI_SETTINGS_CHANGED');
+      const binding={controller:c.models,kind:grant.kind,snapshot:c.models.guard.snapshot(grant,'REPLY_GENERATION')};
+      const validate=()=>{
+        checkSettings();
+        requireSafe(c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
+        requireSafe(c.authority.ownership(event).generation===generation&&c.authority.contextVersion(event)===context&&!c.authority.draftFor(event.id),'AUTO_RESULT_STALE');
+      };
       const modelEnd=runtimePerformance.start('MODEL',event.payload.channel);
       const result=await c.provider.generate(c.store,event.payload,c.store.history(event.payload).filter(item=>!item.observationIssue&&!item.contentType),
-        {...c.settings,rules:grant.scope.instructions},c.key,true,signal,()=>{
+        settings,'',true,signal,()=>{
           requireSafe(!signal.aborted,'MODEL_CANCELLED');
+          c.models.guard.assertCurrent(binding.snapshot,'AUTO_REPLY');
+          checkSettings();
+          assertReplyKnowledgeCurrent(c.store,knowledge);
           requireSafe(c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
           requireSafe(c.automation.allowance(grant.version,'SEND'),'SEND_GRANT_EXHAUSTED');
           c.automation.reserve(grant.version,'MODEL',event.id);
-        }).then(result=>{modelEnd();return result;},error=>{modelEnd(signal.aborted?'CANCELLED':'FAILED');throw error;});
-      requireSafe(!signal.aborted,'MODEL_CANCELLED');
+        },undefined,knowledge,binding,validate).then(result=>{modelEnd();return result;},error=>{modelEnd(signal.aborted?'CANCELLED':'FAILED');throw error;});
+      callId=result.callId;
+      if(signal.aborted)throw signal.reason;
+      checkSettings();
+      assertSecurityRevision(c.store,event.payload.channel,security);
       const commandId=randomUUID(),selectionId=randomUUID();
       const token=c.authority.issueSession();
       try {
         c.store.db.transaction(()=>{
+          c.models.guard.assertCurrent(binding.snapshot,'AUTO_REPLY');
+          checkSettings();
+          assertReplyKnowledgeCurrent(c.store,knowledge);
+          assertSecurityRevision(c.store,event.payload.channel,security);
           requireSafe(!c.isClosing()&&c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
           requireSafe(c.authority.ownership(event).generation===generation&&c.authority.contextVersion(event)===context&&!c.authority.draftFor(event.id),'AUTO_RESULT_STALE');
           const draftId=randomUUID();
           c.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,?,1,'DRAFT',NULL,NULL)").run(draftId,event.id,result.text,result.model);
           c.store.db.prepare("INSERT INTO draft_revisions VALUES(?,1,'AUTO_POLICY',?,?,?)").run(draftId,result.text,`policy:${grant.version}`,c.authority.now());
+          bindReplyKnowledge(c.store,'DRAFT',draftId,1,knowledge);
+          c.models.models.bindGeneration({ownerKind:'DRAFT',ownerId:draftId,ownerVersion:1},result.callId);
           c.store.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(event.id);
           const params:SendParams={eventId:event.id,generation,draftId,draftVersion:1,text:result.text,contextVersion:context,selectionId};
           c.store.db.prepare("INSERT INTO manual_send_commands VALUES(?,?,?,?,?,'PREPARING',NULL,NULL,?)").run(commandId,event.id,
@@ -146,16 +185,18 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
           c.store.db.prepare('INSERT INTO policy_commands VALUES(?,?,?)').run(commandId,grant.version,generation);
           c.store.db.prepare("UPDATE automation_jobs SET state='PREPARING',draft_version=1,command_id=?,updated_at=? WHERE event_id=?").run(commandId,c.authority.now(),event.id);
         }).immediate();
+        callId=undefined;
         await c.humanReplies.prepare(token,commandId);
         const command=c.authority.command(commandId);
         c.store.db.prepare('UPDATE automation_jobs SET state=?,reason=?,updated_at=? WHERE event_id=?').run(command.status,command.reason,c.authority.now(),event.id);
       }finally{c.authority.revoke(token);}
     }catch(error){
-      const code=c.errorCode(error);
+      const code=c.errorCode(routeSignal.aborted?routeSignal.reason:error);
+      if(callId)c.models.models.discardUnpublishedCall(callId,modelCallFailureReason(routeSignal.aborted?routeSignal.reason:error));
       const paid=c.store.db.prepare("SELECT job_key FROM grant_reservations WHERE grant_version=? AND kind='MODEL' AND job_key=?").get(grant.version,event.id);
       if(automaticSignal.aborted&&!paid)c.store.db.prepare("DELETE FROM automation_jobs WHERE event_id=? AND command_id IS NULL AND state IN ('QUALIFYING','GENERATING')").run(event.id);
       else c.store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE event_id=?").run(code,c.authority.now(),event.id);
-      if(collectionStops.has(code))c.stop(code);
+      if(shouldStopGlobally(code))c.stop(code);
       c.store.audit('AUTO_REPLY_STOPPED',event.id);
     }finally{c.modelPending.delete(event.id);c.updated();}
 }

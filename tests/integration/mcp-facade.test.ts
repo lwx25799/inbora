@@ -1,11 +1,12 @@
-import {expect,test} from 'vitest';
+import {expect,test,vi} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {AssistantFacade} from '../../src/mcp/assistant-facade.js';
-import {operationSchema,replySchema,statusSchema,threadSchema} from '../../src/mcp/tool-contracts.js';
+import {assistantTools,operationSchema,replySchema,statusSchema,threadSchema,diagnosticsSchema} from '../../src/mcp/tool-contracts.js';
 import {ChatMessageStore} from '../../src/storage/chat-messages.js';
 import {setupAssistant} from '../mcp-helpers.js';
 import {candidate,pending} from '../helpers.js';
 import {targetKey} from '../../src/core/contracts.js';
+import {providerState} from '../model-provider-helpers.js';
 
 async function fixture(){
   const f=await setupAssistant();f.service.authority.release(f.token,f.eventId,f.input.generation);
@@ -21,6 +22,34 @@ async function fixture(){
   };
   return {...f,facade,session,call,run,open,async close(){await facade.close();await f.close();}};
 }
+
+test('assistant CONTROL cannot use the seven model management actions or compatibility commands',async()=>{
+  const f=await fixture();
+  try{
+    const before=await providerState(f.service,f.gui);
+    const connection=before.connections[0]!;
+    const ref={connectionId:connection.id,routeRevision:connection.draftRevision};
+    const target={...ref,modelId:'example/model:revision',confirmed:true,commandId:randomUUID()};
+    for(const fields of [
+      {action:'list'},
+      {action:'save',connectionId:null,expectedVersion:0,name:'Synthetic',presetId:'custom',protocol:'OPENAI_CHAT',
+        baseUrl:'https://models.example.com/v1',region:null,manualModels:[]},
+      {action:'setKey',connectionId:connection.id,expectedVersion:connection.version,storage:'MEMORY',key:'synthetic-only'},
+      {action:'discover',...ref},
+      {action:'test',...target},
+      {action:'apply',...target,expectedSelectionRevision:before.selection.selectionRevision},
+      {action:'delete',connectionId:connection.id,expectedVersion:connection.version},
+    ]) await expect(f.service.dispatch(f.token,{command:'modelProviders',...fields})).rejects.toThrow('ASSISTANT_PERMISSION_REQUIRED');
+    for(const command of [
+      {command:'configureAi',settings:{persona:'',business:'',rules:''}},
+      {command:'clearModelKey'},
+      {command:'setKeyStorage',storage:'DPAPI'},
+    ])await expect(f.service.dispatch(f.token,command)).rejects.toThrow('ASSISTANT_PERMISSION_REQUIRED');
+    expect(await providerState(f.service,f.gui)).toEqual(before);
+    expect(Object.keys(assistantTools)).toHaveLength(16);
+    expect(threadSchema.parse(await f.call('inbora_get_thread',{eventId:f.eventId})).event.id).toBe(f.eventId);
+  }finally{await f.close();}
+});
 
 test('first authenticated assistant connection enables the existing account range and inherits global allowance',async()=>{
   const f=await fixture();try{
@@ -82,6 +111,24 @@ test('public status and diagnostics are body-free, reads and mutations cannot se
     await expect(f.call('setLocalAssistantGrant',{scope:{}})).rejects.toThrow('ASSISTANT_TOOL_NOT_ALLOWED');
     expect(f.store.budgets().every(row=>row.used===0)).toBe(true);
   }finally{await f.close();}
+});
+
+test('public diagnostics explicitly preserve the bounded resource summary without new permissions or sampler controls',async()=>{
+  const f=await fixture(),dispatch=f.service.dispatch.bind(f.service);
+  const resources={state:'STALE',reason:'SAMPLE_STALE',intervalMs:60_000,sampledAt:1000,segmentStartedAt:500,
+    latest:{workingSetBytes:2048,privateBytes:1024,browserProcesses:6,pageCount:2,elapsedMs:15},hour:null,run:null};
+  const spy=vi.spyOn(f.service,'dispatch').mockImplementation(async(token,body)=>{
+    const result=await dispatch(token,body);
+    return (body as {command:string}).command==='getDiagnostics'?{...result as object,browserResources:resources}:result;
+  });
+  try{
+    await f.service.dispatch(f.gui,{command:'setLocalAssistantGrant',enabled:false,confirmed:true});
+    const result=diagnosticsSchema.parse(await f.call('inbora_get_diagnostics'));
+    expect(result.browserResources).toEqual(resources);
+    expect(JSON.stringify(result)).not.toMatch(/"(?:pid|rootPid|commandLine|url)":|"samples":\[/iu);
+    await expect(f.call('inbora_get_diagnostics',{sampleNow:true})).rejects.toThrow();
+    expect(f.browser.clicks).toBe(0);expect(f.store.budgets().every(row=>row.used===0)).toBe(true);
+  }finally{spy.mockRestore();await f.close();}
 });
 
 test('GUI draft lease wins, stale assistant context/draft refused, stable operation IDs never overwrite twice',async()=>{

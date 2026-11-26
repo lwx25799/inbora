@@ -140,3 +140,41 @@ test('retention is bounded to one hundred files, cancellable, idle-only and coal
     await f.maintenance.close();expect(await f.maintenance.runIfDue(true)).toBeNull();
   }finally{await f.close();}
 });
+
+test('expired routine observations without business references are pruned while recent or referenced evidence stays protected',async()=>{
+  const root=privateTemp('evidence-observations-'),directory=join(root,'evidence'),db=new Database(':memory:');
+  await writeFile(join(root,'runtime.json'),JSON.stringify({version:1,modelGrant:null,evidenceRetentionDays:14}));
+  db.exec(`CREATE TABLE observations(id TEXT PRIMARY KEY,channel TEXT,scope TEXT,observed_at TEXT,count INTEGER,evidence_ref TEXT);
+    CREATE TABLE inbound_events(payload TEXT);CREATE TABLE source_collisions(evidence_ref TEXT,payload TEXT);
+    CREATE TABLE delivery_receipts(proof_ref TEXT);CREATE TABLE audit_events(entity_id TEXT,detail_redacted TEXT);
+    CREATE TABLE verification_results(evidence_ref TEXT);CREATE TABLE channel_capabilities(evidence_ref TEXT);
+    CREATE TABLE controlled_trials(evidence_ref TEXT);CREATE TABLE chat_messages(payload TEXT);`);
+  const maintenance=new EvidenceMaintenance({db},root,{now:()=>now});
+  const writeOld=async()=>{
+    const id=await recordEvidence(directory,input),file=join(directory,id+'.json'),value=JSON.parse(await readFile(file,'utf8'));
+    value.time='2026-10-01T00:00:00Z';await writeFile(file,JSON.stringify(value));return id;
+  };
+  try{
+    const [expiredRoutine,recentObs,referencedByEvent,referencedByReceipt,referencedByAudit]=await Promise.all([
+      writeOld(),writeOld(),writeOld(),writeOld(),writeOld(),
+    ]);
+    db.prepare('INSERT INTO observations VALUES(?,?,?,?,?,?)').run('o1','DIRECT_MESSAGE','conv-a','2026-10-01T00:00:00Z',0,expiredRoutine);
+    db.prepare('INSERT INTO observations VALUES(?,?,?,?,?,?)').run('o2','DIRECT_MESSAGE','conv-a','2026-11-05T00:00:00Z',0,recentObs);
+    db.prepare('INSERT INTO observations VALUES(?,?,?,?,?,?)').run('o3','DIRECT_MESSAGE','conv-a','2026-10-01T00:00:00Z',1,referencedByEvent);
+    db.prepare('INSERT INTO inbound_events VALUES(?)').run(JSON.stringify({evidenceId:referencedByEvent}));
+    db.prepare('INSERT INTO observations VALUES(?,?,?,?,?,?)').run('o4','DIRECT_MESSAGE','conv-a','2026-10-01T00:00:00Z',0,referencedByReceipt);
+    db.prepare('INSERT INTO delivery_receipts VALUES(?)').run(referencedByReceipt);
+    db.prepare('INSERT INTO observations VALUES(?,?,?,?,?,?)').run('o5','DIRECT_MESSAGE','conv-a','2026-10-01T00:00:00Z',0,referencedByAudit);
+    db.prepare('INSERT INTO audit_events VALUES(?,?)').run(referencedByAudit,'{}');
+    const report=await maintenance.prune();
+    expect(report).toMatchObject({referencesComplete:true,recognized:{files:5},protected:{files:4},eligible:{files:1},deleted:{files:1}});
+    await expect(readFile(join(directory,expiredRoutine+'.json'))).rejects.toMatchObject({code:'ENOENT'});
+    for(const keep of [recentObs,referencedByEvent,referencedByReceipt,referencedByAudit])
+      expect(await readFile(join(directory,keep+'.json'),'utf8')).toContain(keep);
+    const badTimeId=await writeOld();
+    db.prepare('INSERT INTO observations VALUES(?,?,?,?,?,?)').run('o6','DIRECT_MESSAGE','conv-a','not-a-timestamp',0,badTimeId);
+    const badReport=await maintenance.prune();
+    expect(badReport).toMatchObject({referencesComplete:false,deleted:{files:0}});
+    expect(await readFile(join(directory,badTimeId+'.json'),'utf8')).toContain(badTimeId);
+  }finally{await maintenance.close();db.close();await rm(root,{recursive:true,force:true});}
+});

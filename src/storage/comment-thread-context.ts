@@ -1,14 +1,8 @@
 import {digest,eventBinding,eventSchema,isStrong,requireSafe,targetKey,type InboundEvent,type StoredEvent} from '../core/contracts.js';
 import type {EventStore} from './store.js';
+import type {CommentThreadItem, CommentThreadContext, CommentThreadPage} from '../contracts/inbox.js';
+export type {CommentThreadItem, CommentThreadContext} from '../contracts/inbox.js';
 
-export interface CommentThreadItem {
-  id:string;eventId:string;direction:'INCOMING'|'OUTGOING';text:string;occurredAt:string|null;historical:boolean;
-  origin:'OBSERVED'|'CONFIRMED';isRoot:boolean;payload:InboundEvent;verifiedForModel:boolean;
-}
-export interface CommentThreadContext {
-  group:string;root:CommentThreadItem|null;rootVerified:boolean;rootMissing:boolean;rootAmbiguous:boolean;
-  items:CommentThreadItem[];projectionRevision:string;localRecordsOnly:true;observedOwnHistoryComplete:false;
-}
 interface ThreadIdentity {accountId:string;workId:string;rootId:string}
 interface Row {id:string;payload:string;binding:string;status:StoredEvent['status']}
 const native=/^[1-9]\d{0,63}$/u;
@@ -106,13 +100,13 @@ export function commentThreadModelHistory(context:CommentThreadContext,event:Inb
 }
 
 /** Native root remains pinned on every local timeline page; pagination never changes the currently selected reply target. */
-export function commentThreadPage(context:CommentThreadContext,before?:string,pageSize=30){
+export function commentThreadPage(context:CommentThreadContext,before?:string,pageSize=30):CommentThreadPage{
   requireSafe(Number.isSafeInteger(pageSize)&&pageSize>=1&&pageSize<=100,'COMMENT_CONTEXT_LIMIT_INVALID');
   let cursor:{group:string;at:number;order:string}|null=null;
   if(before!==undefined){
     try{cursor=JSON.parse(Buffer.from(before,'base64url').toString('utf8'));}catch{requireSafe(false,'TIMELINE_CURSOR_INVALID');}
     requireSafe(cursor&&cursor.group===context.group&&Number.isFinite(cursor.at)&&typeof cursor.order==='string'&&
-      /^(in|out|retry):[a-f0-9-]{36}$/iu.test(cursor.order),'TIMELINE_CURSOR_INVALID');
+      /^(in|out|retry|followup):[a-f0-9-]{36}$/iu.test(cursor.order),'TIMELINE_CURSOR_INVALID');
   }
   const all=context.items.filter(item=>!item.isRoot&&(!cursor||at(item)<cursor.at||at(item)===cursor.at&&item.id.localeCompare(cursor.order)<0));
   const selected=all.slice(-pageSize),hasMore=all.length>pageSize,oldest=selected[0];

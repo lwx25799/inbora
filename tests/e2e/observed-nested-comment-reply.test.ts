@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -56,7 +57,7 @@ async function setup(ownContextLink=false,inline=false){
     comments:await owner.notification.evaluate(()=>(window as unknown as {nestedRows:unknown[]}).nestedRows)}}));
   if(inline)await owner.notification.route('**/aweme/v1/web/comment/list/?**',async route=>route.fulfill({json:{status_code:0,comments:[{cid:'11',aweme_id:'10',
     reply_comment:await owner.notification.evaluate(()=>(window as unknown as {nestedRows:unknown[]}).nestedRows)}]}}));
-  const batch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,evidenceId:'synthetic-child-target',allCommentAuthors:true});
+  const batch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-child-target',allCommentAuthors:true});
   const event=batch.events.find(event=>event.commentId==='21')!;store.observe('COMMENT_NOTIFICATION','work:10',[],'100','synthetic');
   const [eventId]=store.observe('COMMENT_NOTIFICATION','work:10',[event],'100','synthetic');const draft=store.saveDraft(eventId!,'exact one reply to child','mock');
   const adapter=new ObservedCommentReply(owner.notification,mapping,300);

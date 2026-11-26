@@ -4,17 +4,13 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { runtimeRoot, initRuntime, loadRuntime, loadMapping, loadObservationMapping, loadDmReplyMapping,loadCommentReplyMapping } from './config/runtime.js';
+import { runtimeRoot, initRuntime, loadRuntime } from './config/runtime.js';
 import { validateMapping, validateObservationMapping, validateDmReplyMapping,validateCommentReplyMapping } from './config/site-mapping.js';
 import { OwnerLock } from './browser/owner-lock.js';
-import { BrowserProfileOwner } from './browser/profile-owner.js';
-import { DomAdapter } from './adapters/dom-adapter.js';
-import { ObservedReader } from './adapters/observed-reader.js';
-import { ObservedDmReply } from './adapters/observed-dm-reply.js';
-import { ObservedCommentReply } from './adapters/observed-comment-reply.js';
 import { EventStore } from './storage/store.js';
+import { assertSecurityChannelClear } from './storage/security-holds.js';
 import { HttpDraftProvider, generateDraft } from './ai/draft-service.js';
-import { Blocked, digest, requireSafe, targetKey, type ReplyAdapter } from './core/contracts.js';
+import { Blocked, digest, requireSafe, targetKey } from './core/contracts.js';
 import { SendCoordinator } from './core/send-coordinator.js';
 import { ManualCommentRetry } from './core/manual-comment-retry.js';
 import { diagnostic } from './observability/audit.js';
@@ -23,6 +19,8 @@ import {readDiagnostics} from './app/diagnostics.js';
 import {EvidenceMaintenance} from './app/evidence-maintenance.js';
 import { ClientService } from './app/service.js';
 import { BrowserService } from './app/browser-service.js';
+import { DouyinPlatformConnector } from './platform/douyin-platform-connector.js';
+import type { PlatformConnector } from './platform/platform-connector.js';
 import { randomUUID } from 'node:crypto';
 import { WorkbenchAuthority } from './app/authority.js';
 
@@ -66,25 +64,30 @@ async function ask(message: string): Promise<string> {
 function print(value: unknown): void { stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
 function safeCode(error: unknown): string { return error instanceof Blocked ? error.code : 'OPERATION_FAILED_PRIVATE_DIAGNOSTICS'; }
 
-async function replyCommand(command:string,id:string,store:EventStore,browser:BrowserProfileOwner,adapter:ReplyAdapter,root:string,headless:boolean):Promise<void>{
-  const d=store.draft(id),e=store.event(d.eventId);
+function isVersionedSchema(store: EventStore): boolean {
+  const version = store.db.pragma('user_version', { simple: true });
+  return version === 3 || version === 4;
+}
+
+async function replyCommand(command:string,id:string,store:EventStore,port:PlatformConnector):Promise<void>{
+  const d=store.draft(id),e=store.event(d.eventId),root=port.root;
   if(command==='calibrate-client'){
-    requireSafe(store.db.pragma('user_version',{simple:true})===3,'CLIENT_MIGRATION_REQUIRED');
-    const port=BrowserService.adopt(root,browser,headless?'headless':'headed'),handle=await port.adapter(e.payload);
+    requireSafe(isVersionedSchema(store),'CLIENT_MIGRATION_REQUIRED');
+    const handle=await port.adapter(e.payload,store,undefined,{nativeReplyOnly:true});
     try{
-      const snapshot=await browser.actor.run(()=>handle.adapter.inspect(e.payload));
-      const evidence=await recordEvidence(join(root,'evidence'),{caseId:e.payload.channel==='DIRECT_MESSAGE'?'D04':'C03',browserVersion:browser.version(),
-        mode:headless?'headless':'headed',taskId:e.id,action:'OBSERVE',result:'UNVERIFIED',source:'AUTOMATED_REAL',
+      const snapshot=await port.actor.run(()=>handle.adapter.inspect(e.payload));
+      const evidence=await recordEvidence(join(root,'evidence'),{caseId:e.payload.channel==='DIRECT_MESSAGE'?'D04':'C03',browserVersion:port.status().version!,
+        mode:port.status().mode,taskId:e.id,action:'OBSERVE',result:'UNVERIFIED',source:'AUTOMATED_REAL',
         diagnostics:['CONTROLLED_GUI_TRIAL_READY','ONLY_CURRENT_TARGET_DRAFT_VERSION','NO_SEND_NO_APPROVAL'],proofDigest:digest(snapshot)});
       new WorkbenchAuthority(store).calibrateTrial(d.id,snapshot,port.identity(e.payload.channel)!,evidence);
       print({calibrated:true,eventId:e.id,draftVersion:d.version,evidenceId:evidence,sendApproved:false,expiresInSeconds:3600});
-    }finally{handle.dispose();}return;
+    }finally{await handle.dispose();}return;
   }
-  if(store.db.pragma('user_version',{simple:true})===3&&command==='approve'){
+  if(isVersionedSchema(store)&&command==='approve'){
     requireSafe(false,'CLIENT_SCHEMA_CONFIRM_IN_GUI_OR_SEND_ONCE');
   }
-  if(store.db.pragma('user_version',{simple:true})===3&&command==='send-once'){
-    const service=new ClientService(store,BrowserService.adopt(root,browser,headless?'headless':'headed'));
+  if(isVersionedSchema(store)&&command==='send-once'){
+    const service=new ClientService(store,port);
     const token=service.authority.issueSession();
     try {
       const ownership=service.authority.ownership(e),claimed=service.authority.claim(token,e.id,ownership.generation),selectionId=randomUUID();
@@ -100,33 +103,39 @@ async function replyCommand(command:string,id:string,store:EventStore,browser:Br
       await service.drain();print(await service.dispatch(token,{command:'getSendResult',commandId:preview.commandId}));
     }finally{service.authority.revoke(token);}return;
   }
-  if(command==='retry-comment-once'){
-    requireSafe(e.payload.channel==='COMMENT_NOTIFICATION'&&e.status==='UNCERTAIN','MANUAL_RETRY_REQUIRES_UNKNOWN_COMMENT');
-    const snapshot=await browser.actor.run(()=>adapter.inspect(e.payload));
+  const retry=command==='retry-comment-once';
+  if(retry)requireSafe(e.payload.channel==='COMMENT_NOTIFICATION'&&e.status==='UNCERTAIN','MANUAL_RETRY_REQUIRES_UNKNOWN_COMMENT');
+  const handle=await port.adapter(e.payload,store,undefined,{nativeCommentOnly:retry});
+  const {adapter}=handle;
+  try{
+  const {mode,version}=port.status();requireSafe(version,'BROWSER_NOT_RUNNING');
+  if(retry){
+    const snapshot=await port.actor.run(()=>adapter.inspect(e.payload));
     requireSafe(stdin.isTTY&&stdout.isTTY,'INTERACTIVE_TERMINAL_REQUIRED');
     print({original:e.payload,retryText:d.text,version:d.version,previousResult:'UNCERTAIN',oldIntentRetained:true});
     const challenge=`RETRY ${digest([d.id,d.version,d.text,snapshot]).slice(0,12)}`;
     requireSafe(await ask(`只批准再提交一次，原未知结果及可能迟到回复仍保留。输入 ${challenge}：`)===challenge,'CANCELLED');
     const grantId=store.authorizeCommentRetry(d.id,snapshot,challenge);
-    const result=await new ManualCommentRetry(store,browser.actor).send(grantId,adapter,true);
-    const evidenceId=await recordEvidence(join(root,'evidence'),{caseId:'N06',browserVersion:browser.version(),mode:headless?'headless':'headed',
+    const result=await new ManualCommentRetry(store,port.actor).send(grantId,adapter,true);
+    const evidenceId=await recordEvidence(join(root,'evidence'),{caseId:'N06',browserVersion:version,mode,
       taskId:e.id,action:'SEND',result:result==='CONFIRMED'?'PASS':'BLOCKED',source:'AUTOMATED_REAL',
       diagnostics:['EXPLICIT_MANUAL_RETRY',result,'ORIGINAL_UNKNOWN_RETAINED'],proofDigest:digest(store.stats().manualRetries)});
     print({result,grantId,evidenceId,originalStillFrozen:true});return;
   }
   if(command==='approve'){
-    const snapshot=await browser.actor.run(()=>adapter.inspect(e.payload));
+    const snapshot=await port.actor.run(()=>adapter.inspect(e.payload));
     requireSafe(stdin.isTTY&&stdout.isTTY,'INTERACTIVE_TERMINAL_REQUIRED');
     print({original:e.payload,approvedText:d.text,version:d.version,target:snapshot.targetKey});
     const challenge=`APPROVE ${digest([d.id,d.version,d.text,snapshot]).slice(0,12)}`;
     requireSafe(await ask(`逐条核对账号、目标和文本。输入 ${challenge}：`)===challenge,'CANCELLED');
     store.approve(d.id,snapshot,d.version,d.text);print({approved:true});return;
   }
-  const result=await new SendCoordinator(store,browser.actor).send(d.id,adapter,true);
+  const result=await new SendCoordinator(store,port.actor,store.accountId).send(d.id,adapter,true);
   const evidenceId=await recordEvidence(join(root,'evidence'),{caseId:e.payload.channel==='DIRECT_MESSAGE'?'D05':'N06',
-    browserVersion:browser.version(),mode:headless?'headless':'headed',taskId:e.id,action:'SEND',
+    browserVersion:version,mode,taskId:e.id,action:'SEND',
     result:result==='CONFIRMED'?'PASS':'BLOCKED',source:'AUTOMATED_REAL',diagnostics:[result],proofDigest:digest(store.receiptForEvent(e.id))});
   print({result,evidenceId});
+  }finally{await handle.dispose();}
 }
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
@@ -146,7 +155,6 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   requireSafe(!values.headed||command==='login','HEADED_ONLY_FOR_LOGIN');
   requireSafe(command!=='compare-modes','BROWSER_MODE_COMPARISON_DISABLED');
   requireSafe(command!=='login'||!values.headless,'LOGIN_REQUIRES_HEADED');
-  const headless=command!=='login';
   const root = runtimeRoot(values.runtime);
   // Dedicated control path: never calls recover() while another worker may own an active intent.
   if (command === 'pause') {
@@ -159,14 +167,15 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     } finally { try { controlStore?.close(); } finally { await control.close(); } }
   }
   const lock = await OwnerLock.acquire(root);
-  let store: EventStore | undefined; let browser: BrowserProfileOwner | undefined;
+  let store: EventStore | undefined;
+  let connector: PlatformConnector | undefined;
   const realAccess = (): void => requireSafe(values['real-account'] && values['private-access'], 'EXPLICIT_PRIVATE_ACCESS_REQUIRED');
   try {
     if (command === 'init') {
       await initRuntime(root); store = new EventStore(join(root, 'poc.sqlite'), true); print({ initialized: true }); return;
     }
     const config = await loadRuntime(root); store = new EventStore(join(root, 'poc.sqlite'));
-    if(!['diagnostics','prune-evidence'].includes(command))store.recover();
+    if(!['diagnostics','prune-evidence','verify-comment','observe'].includes(command))store.recover();
     if (command === 'status') { print(store.stats()); return; }
     if(command==='diagnostics'){print(readDiagnostics(store));return;}
     if (command === 'install-mapping') {
@@ -175,27 +184,27 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       if(raw&&typeof raw==='object'&&'purpose' in raw&&raw.purpose==='comment-reply'){
         const mapping=validateCommentReplyMapping(raw,true);
         requireSafe(await ask(`安装已校准一级评论回复映射，账号摘要 ${digest(mapping.observation.self.uid).slice(0,12)}。每条发送仍需独立审批。输入 INSTALL：`)==='INSTALL','CANCELLED');
-        store.bindAccount(mapping.observation.self.uid);
+        store.bindAccount(store.accountId,mapping.observation.self.uid);
         await writeFile(join(root,'comment-reply-mapping.json'),JSON.stringify(mapping,null,2),{mode:0o600});
         print({installed:true,purpose:'comment-reply',individualApprovalRequired:true});return;
       }
       if(raw&&typeof raw==='object'&&'purpose' in raw&&raw.purpose==='dm-reply'){
         const mapping=validateDmReplyMapping(raw,true);
         requireSafe(await ask(`安装已校准私信回复映射，账号摘要 ${digest(mapping.observation.self.uid).slice(0,12)}。每条发送仍需独立审批。输入 INSTALL：`)==='INSTALL','CANCELLED');
-        store.bindAccount(mapping.observation.self.uid);
+        store.bindAccount(store.accountId,mapping.observation.self.uid);
         await writeFile(join(root,'dm-reply-mapping.json'),JSON.stringify(mapping,null,2),{mode:0o600});
         print({installed:true,purpose:'dm-reply',individualApprovalRequired:true});return;
       }
       if (raw && typeof raw === 'object' && 'purpose' in raw && raw.purpose === 'observation') {
         const mapping = validateObservationMapping(raw,true);
         requireSafe(await ask(`安装已校准只读映射，账号摘要 ${digest(mapping.self.uid).slice(0,12)}。不会启用发送。输入 INSTALL：`) === 'INSTALL','CANCELLED');
-        store.bindAccount(mapping.self.uid);
+        store.bindAccount(store.accountId,mapping.self.uid);
         await writeFile(join(root,'observation-mapping.json'),JSON.stringify(mapping,null,2),{mode:0o600});
         print({installed:true,purpose:'observation',sendsEnabled:false}); return;
       }
       const mapping = validateMapping(raw, true);
       requireSafe(await ask(`仅安装已实际观察的网页映射。账号标识摘要 ${digest(mapping.ownId).slice(0,12)}。输入 INSTALL：`) === 'INSTALL', 'CANCELLED');
-      store.bindAccount(mapping.ownId);
+      store.bindAccount(store.accountId,mapping.ownId);
       await writeFile(join(root, 'site-mapping.json'), JSON.stringify(mapping, null, 2), { mode: 0o600 }); print({ installed: true }); return;
     }
     if (command === 'authorize-model') {
@@ -222,7 +231,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       } else if (command === 'edit') {
         requireSafe(values.file, 'FILE_REQUIRED'); const d = store.draft(id);
         const text=await readFile(values.file,'utf8');
-        if(store.db.pragma('user_version',{simple:true})===3){
+        if(isVersionedSchema(store)){
           const authority=new WorkbenchAuthority(store),token=authority.issueSession();
           try{const generation=authority.claim(token,d.eventId,authority.ownership(store.event(d.eventId)).generation).generation;
             print({draftId:authority.save(token,d.eventId,generation,d.version,text).id});authority.release(token,d.eventId,generation);
@@ -238,107 +247,49 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     }
     realAccess();
     if (command === 'login') {
-      browser = await BrowserProfileOwner.launch(join(root, 'profile'), false); await browser.open('https://www.douyin.com');
+      connector=new DouyinPlatformConnector(new BrowserService(root,undefined,store.accountId));
+      connector.bindStore(store);
+      await connector.beginLoginRecovery(false,undefined,undefined,true);
       await ask('请在可见浏览器扫码或处理验证码。完成后按回车关闭并保存专属 Profile（不代表身份核验通过）：');
-      print({ profileSaved: true, identityVerified: false, browserVersion: browser.version() }); return;
+      print({ profileSaved: true, identityVerified: false, browserVersion: connector.status().version }); return;
     }
-    if (command === 'observe' && ['dm','works'].includes(id ?? '')) {
-      const observation = await loadObservationMapping(root);
-      if (observation) {
-        browser = await BrowserProfileOwner.launch(join(root,'profile'),headless);
-        await browser.open(observation.entryUrl);
-        const reader = new ObservedReader(id === 'dm' ? browser.dm : browser.notification,observation);
-        const result = await browser.actor.run(async()=>{
-          const tasks: string[] = []; let loaded = 0, unsupported = 0;
-          const count = id === 'dm' ? observation.peers.length : observation.works.length;
-          for (let index = 0; index < count; index++) {
-            const batch = id === 'dm' ? await reader.dm(index) : await reader.comments(index);
-            const evidenceId = await recordEvidence(join(root,'evidence'),{caseId:id === 'dm'?'D01':'N01',
-              browserVersion:browser!.version(),mode:headless?'headless':'headed',taskId:null,action:'OBSERVE',
-              result:'UNVERIFIED',source:'AUTOMATED_REAL',diagnostics:['READ_ONLY_CAPTURE_COMPLETE',
-                id === 'dm'?'PERMITTED_CONVERSATION':'ALLOWED_WORK_FALLBACK','SEND_UNVERIFIED'],proofDigest:digest(batch)});
-            const scope = id === 'dm' ? observation.peers[index]!.conversationId : `work:${observation.works[index]!.id}`;
-            tasks.push(...store!.observe(id === 'dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION',scope,
-              batch.events.map(e=>({...e,evidenceId})),observation.self.uid,evidenceId));
-            loaded += batch.loaded; unsupported += batch.unsupported;
-          }
-          return {newEventIds:tasks,loaded,unsupported,sendsEnabled:false};
-        });
-        print(result); return;
+    if (command === 'observe' || command === 'verify-comment') {
+      connector = new DouyinPlatformConnector(new BrowserService(root, undefined, store.accountId));
+      connector.bindStore(store);
+      if (command === 'observe') {
+        requireSafe(id === 'notifications' || id === 'dm' || id === 'works','CHANNEL_REQUIRED');
+        print(await connector.observe(store, id));
+      } else {
+        requireSafe(id,'DRAFT_ID_REQUIRED');
+        const { verified, evidenceId } = await connector.verifyExisting(store, store.draft(id).eventId, { commentDraftId: id });
+        print({ verified, evidenceId, originalReceiptsRetained: true });
       }
-      requireSafe(id !== 'works','OBSERVATION_MAPPING_REQUIRED');
+      return;
     }
-    if(['approve','send-once','calibrate-client','retry-comment-once','verify-comment'].includes(command)){
+    if(['approve','send-once','calibrate-client','retry-comment-once'].includes(command)){
       requireSafe(id,'DRAFT_ID_REQUIRED');
       const event=store.event(store.draft(id).eventId);
-      if(command==='verify-comment'){
-        requireSafe(event.payload.channel==='COMMENT_NOTIFICATION','COMMENT_REPLY_SCOPE_REQUIRED');
-        const native=await loadCommentReplyMapping(root);requireSafe(native,'NATIVE_COMMENT_REPLY_MAPPING_REQUIRED');
-        const retry=(store.stats().manualRetries as {retryId:string;eventId:string}[]).find(r=>r.eventId===event.id);
-        const intent=store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(event.id) as {id:string}|undefined;
-        requireSafe(intent,'COMMENT_REPLY_INTENT_REQUIRED');
-        const boundary=retry?store.commentRetryBoundary(retry.retryId):store.intentBoundary(intent.id);
-        browser=await BrowserProfileOwner.launch(join(root,'profile'),headless);
-        const adapter=new ObservedCommentReply(browser.notification,native);
-        try{
-          const proof=await browser.actor.run(()=>adapter.verifyExisting(event.payload,store!.draft(id).text,boundary));
-          const evidenceId=await recordEvidence(join(root,'evidence'),{caseId:'C05',browserVersion:browser.version(),mode:headless?'headless':'headed',
-            taskId:event.id,action:'OBSERVE',result:proof?'PASS':'BLOCKED',source:'AUTOMATED_REAL',
-            diagnostics:['AUTOMATED_READ_ONLY_RECHECK',proof?'BOUND_PROOF':'NO_BOUND_PROOF','ORIGINAL_RECEIPTS_RETAINED'],proofDigest:proof?digest(proof):null});
-          print({verified:!!proof,evidenceId,originalReceiptsRetained:true});
-        }finally{adapter.dispose();}return;
-      }
-      if(command==='retry-comment-once')requireSafe(event.payload.channel==='COMMENT_NOTIFICATION','MANUAL_RETRY_REQUIRES_UNKNOWN_COMMENT');
-      if(event.payload.channel==='DIRECT_MESSAGE'){
-        const native=await loadDmReplyMapping(root);
-        if(native){
-          browser=await BrowserProfileOwner.launch(join(root,'profile'),headless);await browser.open(native.observation.entryUrl);
-          await replyCommand(command,id,store,browser,new ObservedDmReply(browser.dm,native),root,headless);return;
-        }
-      }else{
-        const native=await loadCommentReplyMapping(root);
-        if(native){
-          browser=await BrowserProfileOwner.launch(join(root,'profile'),headless);await browser.open(native.observation.entryUrl);
-          await replyCommand(command,id,store,browser,new ObservedCommentReply(browser.notification,native),root,headless);return;
-        }
-      }
+      assertSecurityChannelClear(store,event.payload.channel);
+      connector=new DouyinPlatformConnector(new BrowserService(root,undefined,store.accountId));
+      connector.bindStore(store);
+      await replyCommand(command,id,store,connector);return;
     }
-    requireSafe(command!=='retry-comment-once','NATIVE_COMMENT_REPLY_MAPPING_REQUIRED');
-    const mapping = await loadMapping(root);
-    browser = await BrowserProfileOwner.launch(join(root, 'profile'),headless); await browser.open(mapping.origin);
-    const notification = new DomAdapter(browser.notification, 'COMMENT_NOTIFICATION', mapping);
-    const dm = new DomAdapter(browser.dm, 'DIRECT_MESSAGE', mapping);
-    if (command === 'observe') {
-      const ids = await browser.actor.run(async () => {
-        if (id === 'notifications') {
-          const batch = await notification.observeNotifications();
-          return store!.observe('COMMENT_NOTIFICATION', 'notifications', batch.events, mapping.ownId, batch.evidenceId);
-        }
-        requireSafe(id === 'dm', 'CHANNEL_REQUIRED'); const collected: string[] = [];
-        for (const conversation of await dm.conversations()) {
-          const batch = await dm.observeDm(conversation.id, conversation.peerId);
-          collected.push(...store!.observe('DIRECT_MESSAGE', conversation.id, batch.events, mapping.ownId, batch.evidenceId));
-        }
-        return collected;
-      }); print({ newEventIds: ids }); return;
-    }
-    if (command === 'real-test') {
-      requireSafe(values.case && caseIds.includes(values.case as typeof caseIds[number]), 'VALID_CASE_REQUIRED');
-      await browser.actor.run(async () => { await notification.guard(); await dm.guard(); });
-      const answer = await ask(`按 tests/manual/real-account-checklist.md 执行 ${values.case}。输入 PASS / FAIL / BLOCKED；此记录为人工声明，不能替代自动收据：`);
-      requireSafe(['PASS','FAIL','BLOCKED'].includes(answer), 'INVALID_RESULT');
-      const evidenceId = await recordEvidence(join(root, 'evidence'), { caseId: values.case as typeof caseIds[number], browserVersion: browser.version(),
-        mode:headless ? 'headless' : 'headed', taskId: null, action: 'MANUAL_CHECK', result: answer as 'PASS'|'FAIL'|'BLOCKED',
-        source: 'MANUAL_ATTESTATION', diagnostics: ['CHECKLIST_MANUAL_ATTESTATION'], proofDigest: digest(mapping) });
-      print({ evidenceId, source: 'MANUAL_ATTESTATION' }); return;
-    }
-    requireSafe(id && ['approve','send-once'].includes(command), 'DRAFT_ID_REQUIRED');
-    const event=store.event(store.draft(id).eventId);
-    await replyCommand(command,id,store,browser,event.payload.channel==='DIRECT_MESSAGE'?dm:notification,root,headless);
+    requireSafe(command==='real-test','UNKNOWN_COMMAND');
+    const caseId=values.case as typeof caseIds[number];
+    requireSafe(caseIds.includes(caseId),'VALID_CASE_REQUIRED');
+    connector=new DouyinPlatformConnector(new BrowserService(root,undefined,store.accountId));
+    connector.bindStore(store);
+    const checked=await connector.verifyManualCheck();
+    const answer = await ask(`按 tests/manual/real-account-checklist.md 执行 ${caseId}。输入 PASS / FAIL / BLOCKED；此记录为人工声明，不能替代自动收据：`);
+    requireSafe(['PASS','FAIL','BLOCKED'].includes(answer), 'INVALID_RESULT');
+    const evidenceId = await recordEvidence(join(root, 'evidence'), { caseId, ...checked,
+      taskId: null, action: 'MANUAL_CHECK', result: answer as 'PASS'|'FAIL'|'BLOCKED',
+      source: 'MANUAL_ATTESTATION', diagnostics: ['CHECKLIST_MANUAL_ATTESTATION'] });
+    print({ evidenceId, source: 'MANUAL_ATTESTATION' });
   } finally {
-    try { if (browser) await browser.close(); }
+    try { await connector?.close(); }
     finally { try { if (store) store.close(); } finally { await lock.close(); } }
   }
 }
 
-main().catch(error => { diagnostic(safeCode(error)); process.exitCode = 1; });
+if (import.meta.main) main().catch(error => { diagnostic(safeCode(error)); process.exitCode = 1; });

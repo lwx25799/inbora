@@ -1,3 +1,4 @@
+import {isSecurityFailure,reportSecurityFailure} from './security-signal.js';
 import type { Page } from 'playwright';
 import type { ObservationMapping } from '../config/site-mapping.js';
 import { eventBinding,isStrong,type InboundEvent } from '../core/contracts.js';
@@ -44,6 +45,53 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
   const {mapping:m,event,imageIndex,peer}=input,s=m.selectors;
   let phase:'ENVIRONMENT'|'IDENTITY'|'CHAT'|'HEADER'|'ID'|'PEERSEC'|'TITLE'|'MESSAGE'|'TIME'='ENVIRONMENT';
   const dom={
+    securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
+      if(value)return;
+      const matches=[];
+      for(const selector of selectors.slice(0,8))for(const node of Array.from(document.querySelectorAll(selector)).slice(0,12-matches.length)){
+        const r=node.getBoundingClientRect();matches.push({selector:selector.slice(0,2000),tag:node.tagName.slice(0,24),id:node.id.slice(0,160),
+          left:r.left,top:r.top,right:r.right,bottom:r.bottom,visible:dom.securityVisible(node)});
+      }
+      const frames=Array.from(document.querySelectorAll('iframe')).slice(0,8).map(node=>{const r=node.getBoundingClientRect();
+        return{src:(node.getAttribute('src')??'').slice(0,2048),title:node.title.slice(0,160),left:r.left,top:r.top,right:r.right,bottom:r.bottom};});
+      const signal={version:1,state:'SUSPECT',kind,href:location.href.slice(0,2048),origin:location.origin.slice(0,256),title:document.title.slice(0,160),
+        documentStartedAt:performance.timeOrigin,observedAt:Date.now(),scope:'TARGET',target:{conversationId:event.conversationId??undefined},matches,frames};
+      throw Error('OBSERVATION_SECURITY_SUSPECT INBORA_SECURITY_SIGNAL:'+JSON.stringify(signal));
+    },
+    securityVisible(element:Element):boolean {
+      for(const node of [element,...element.querySelectorAll('*')]){
+        if(!node.isConnected)continue;
+        let shown=true;
+        for(let current:Element|null=node;current;current=current.parentElement){
+          const style=getComputedStyle(current);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
+        }
+        if(!shown)continue;
+        const candidates:{rect:DOMRect;parent:Element|null}[]=/^(?:IFRAME|IMG|CANVAS|VIDEO|AUDIO|INPUT|BUTTON|SELECT|TEXTAREA|SVG|OBJECT|EMBED)$/u.test(node.tagName)?Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement})):[];
+        for(const child of node.childNodes){
+          if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
+          const range=document.createRange();range.selectNodeContents(child);
+          for(const rect of range.getClientRects())candidates.push({rect,parent:node});
+        }
+        for(const {rect,parent} of candidates){
+          let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(innerWidth,rect.right),bottom=Math.min(innerHeight,rect.bottom);
+          if(!(right>left&&bottom>top))continue;
+          for(let current=parent;current;current=current.parentElement){
+            const style=getComputedStyle(current);
+            if(style.display==='contents')continue;
+            const clipX=['hidden','clip','auto','scroll','overlay'].includes(style.overflowX);
+            const clipY=['hidden','clip','auto','scroll','overlay'].includes(style.overflowY);
+            if(!clipX&&!clipY)continue;
+            const box=current.getBoundingClientRect();
+            if(clipX){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+            if(clipY){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+            if(!(right>left&&bottom>top))break;
+          }
+          if(right>left&&bottom>top)return true;
+        }
+      }
+      return false;
+    },
     check(condition:unknown):void{if(!condition)throw new Error('MESSAGE_PREVIEW_INSPECT_'+phase+'_FAILED');},
     imageValue(image:HTMLImageElement,key:'currentSrc'|'complete'|'naturalWidth'|'naturalHeight'):unknown{
       return Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,key)?.get?.call(image);
@@ -273,8 +321,9 @@ export async function inspectMessageImage(input:InspectionInput):Promise<ImageIn
         pointerEvents:style?.pointerEvents??null,position:style?.position??null,zIndex:style?.zIndex??null,...(paint?{paint}:{}),...(node?{flow:dom.flowEvidence(node,image)}:{}),...(stack?{stack}:{})};
     },
   };
-  dom.check(location.origin===m.origin&&!/验证码|安全验证/u.test(document.title));
-  dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible));
+  dom.check(location.origin===m.origin);
+  dom.securityCheck(!/验证码|安全验证|访问受限/u.test(document.title),[m.securityBlockers],'TITLE');
+  dom.securityCheck(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.securityVisible),[m.securityBlockers]);
   phase='IDENTITY';
   const own=dom.props(dom.one(s.selfAvatar),s.selfFiberDepth);
   dom.check(dom.value(own,'uid')===m.self.uid&&dom.value(own,'secUid')===m.self.secUid);
@@ -373,7 +422,7 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
     let observedBinding=eventBinding(event);
     let inspectionStage:'SHARE_INSPECT'|'VERIFY_BINDING'='SHARE_INSPECT';
     try{
-      const inspected=await page.evaluate(inspectMessageShare,{mapping,event,peer});diagnostics.snapshot.shareInspected++;
+      const inspected=await page.evaluate(inspectMessageShare,{mapping,event,peer}).catch(error=>reportSecurityFailure(page,error));diagnostics.snapshot.shareInspected++;
       if(inspected.diagnostic&&diagnostics.snapshot.shareSamples.length<8)diagnostics.snapshot.shareSamples.push({...inspected.diagnostic,eventBinding:eventBinding(event),phase:'SHARE'});
       if(Object.hasOwn(inspected,'displayText'))try{store.saveDisplayText(event,mapping.self.uid,inspected.displayText??null);}
       catch{diagnostics.increment('caught','MESSAGE_PREVIEW_DISPLAY_TEXT_WRITE_FAILED');}
@@ -387,8 +436,8 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
       }
       if(typeof inspected.displayText==='string'){
         inspectionStage='VERIFY_BINDING';
-        const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'message-preview-only',dmWindow:true,peer};
-        const current=await page.evaluate(captureObserved,input),matching=current.events.filter(item=>item.platformEventId===event.platformEventId);
+        const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,accountId:event.accountId,evidenceId:'message-preview-only',dmWindow:true,peer};
+        const current=await page.evaluate(captureObserved,input).catch(error=>reportSecurityFailure(page,error)),matching=current.events.filter(item=>item.platformEventId===event.platformEventId);
         const fresh=matching.length===1?matching[0]:undefined;
         const identity=(item:InboundEvent)=>JSON.stringify([item.accountId,item.channel,item.platformEventId,item.actorId,item.conversationId,
           item.direction,item.kind,item.occurredAt,item.occurredAtPrecisionMs,item.videoId,item.commentId,item.rootCommentId,item.replyToCommentId]);
@@ -403,7 +452,8 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
         // Keep the persisted weak carrier; compare the complete current body again after capture.
         observedBinding=eventBinding(fresh);
       }
-    }catch{
+    }catch(error){
+      if(isSecurityFailure(error))throw error;
       diagnostics.increment('caught',inspectionStage);
       const reason=inspectionStage==='SHARE_INSPECT'?'MESSAGE_PREVIEW_SHARE_INSPECT_FAILED':'MESSAGE_PREVIEW_TARGET_CHANGED';
       try{store.save(event,mapping.self.uid,[{label:null,reason}]);}catch{diagnostics.increment('caught','CACHE_WRITE');}
@@ -417,7 +467,8 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
       let before:ImageInspection;
       diagnostics.snapshot.inspected++;
       const beforeInput:InspectionInput={mapping,event,imageIndex,peer,mode:'CANVAS'};
-      try{before=await page.evaluate(inspectMessageImage,beforeInput);}catch(error){
+      try{before=await page.evaluate(inspectMessageImage,beforeInput).catch(error=>reportSecurityFailure(page,error));}catch(error){
+        if(isSecurityFailure(error))throw error;
         const reason=error instanceof Error?/MESSAGE_PREVIEW_INSPECT_(?:ENVIRONMENT|IDENTITY|CONVERSATION|CHAT|HEADER|ID|PEERSEC|TITLE|MESSAGE|TIME)_FAILED/u.exec(error.message)?.[0]:undefined;
         diagnostics.increment('caught','INSPECT_BEFORE');images.push({label:null,reason:reason??'MESSAGE_PREVIEW_INSPECT_FAILED'});break;
       }
@@ -431,19 +482,19 @@ export async function saveMessagePreviews(page:Page,mapping:ObservationMapping,b
           await page.screenshot({type:'png',scale:'css',clip:before.clip!,timeout:2000,animations:'allow',caret:'initial'});
         if(signal.aborted)return;
         stage='INSPECT_AFTER';
-        const after=await page.evaluate(inspectMessageImage,{mapping,event,imageIndex,peer,...(before.canvas?{mode:'CANVAS_VERIFY' as const}:{})});
+        const after=await page.evaluate(inspectMessageImage,{mapping,event,imageIndex,peer,...(before.canvas?{mode:'CANVAS_VERIFY' as const}:{})}).catch(error=>reportSecurityFailure(page,error));
         if(after.reason||after.sourceFingerprint!==before.sourceFingerprint||after.label!==before.label||
           (before.canvas?!after.canvas||after.canvas.width!==before.canvas.width||after.canvas.height!==before.canvas.height:JSON.stringify(after.clip)!==JSON.stringify(before.clip))){
           images.push({label:before.label,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'});break;
         }
         stage='VERIFY_BINDING';
-        const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'message-preview-only',dmWindow:true,peer};
-        const final=await page.evaluate(captureObserved,input);
+        const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,accountId:event.accountId,evidenceId:'message-preview-only',dmWindow:true,peer};
+        const final=await page.evaluate(captureObserved,input).catch(error=>reportSecurityFailure(page,error));
         const matching=final.events.filter(item=>item.platformEventId===event.platformEventId);
         if(matching.length!==1||eventBinding(matching[0]!)!==observedBinding){images.push({label:before.label,reason:'MESSAGE_PREVIEW_TARGET_CHANGED'});break;}
         images.push(bytes.length<=maximumPreviewBytes?{label:before.label,png:bytes,width:before.canvas?.width??Math.round(before.clip!.width),height:before.canvas?.height??Math.round(before.clip!.height)}:
           {label:before.label,reason:'MESSAGE_PREVIEW_TOO_LARGE'});
-      }catch{diagnostics.increment('caught',stage);images.push({label:before.label,reason:'MESSAGE_PREVIEW_CAPTURE_FAILED'});break;}
+      }catch(error){if(isSecurityFailure(error))throw error;diagnostics.increment('caught',stage);images.push({label:before.label,reason:'MESSAGE_PREVIEW_CAPTURE_FAILED'});break;}
     }
     for(const image of images)if(!image.png)diagnostics.increment('unavailable',image.reason??'MESSAGE_PREVIEW_CAPTURE_FAILED');
     if(images.length&&!signal.aborted)try{

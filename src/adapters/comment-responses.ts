@@ -1,7 +1,7 @@
 import type {Page,Request,Response,Frame} from 'playwright';
 import {z} from 'zod';
 import {nativeCommentReplyPath,type CommentReplyMapping} from '../config/site-mapping.js';
-import {eventBinding,type InboundEvent} from '../core/contracts.js';
+import {dmClockToleranceMs,eventBinding,type InboundEvent} from '../core/contracts.js';
 import type {CommentResponseStats} from './comment-readback-diagnostics.js';
 import {readNormalJsonResponse} from './normal-response-reader.js';
 import {runtimePerformance} from '../observability/runtime-performance.js';
@@ -93,7 +93,7 @@ export class CommentResponses{
         const sample=z.object({status_code:z.literal(0),extra:z.object({now:z.number().int().positive()})}).safeParse(body),at=Date.now();
         if(sample.success&&token.clockSequence===this.clockSequence){
           const server=sample.data.extra.now,header=Date.parse(response.headers()['date']??''),lag=at-server;
-          if(Math.floor(server/1000)*1000===header&&lag>=0&&lag<=5000)this.clock={sampledAt:at,lagMs:lag};
+          if(Math.floor(server/1000)*1000===header&&lag>=-dmClockToleranceMs&&lag<=5000)this.clock={sampledAt:at,lagMs:lag};
         }
       }
       const endCheck=runtimePerformance.start('CONTENT_CHECK','COMMENT_NOTIFICATION');let verified=false;

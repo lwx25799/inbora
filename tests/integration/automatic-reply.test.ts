@@ -1,3 +1,4 @@
+import {applyModel,installFixtureKey,stageFixtureModel} from '../model-provider-helpers.js';
 import { expect, test } from "vitest";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -8,12 +9,12 @@ import { DeepSeekProvider } from "../../src/ai/deepseek.js";
 import { migrateClient } from "../../src/storage/client-migration.js";
 import { candidate, database, pending, privateTemp, snapshot } from "../helpers.js";
 import { Blocked,digest, targetKey, type InboundEvent } from "../../src/core/contracts.js";
-import { defaultSettings } from "../../src/app/contracts.js";
 import type { ReplyPolicy } from "../../src/app/automation-contracts.js";
 
 class AutoFixtureBrowser extends BrowserService {
   private queue=new AccountActor();clicks=0;
   beforePrepare:()=>Promise<void>=async()=>{};
+  beforeInspect:()=>void=()=>{};
   afterClick:()=>Promise<void>=async()=>{};
   afterIdentity:()=>void=()=>{};
   wrongIdentity=false;
@@ -21,7 +22,7 @@ class AutoFixtureBrowser extends BrowserService {
   override identity(){return{identityDigest:digest(this.wrongIdentity?'wrong-account':'own-1'),mappingDigest:'synthetic',browserVersion:'1.0.0.0',browserMode:'headed' as const};}
   override async refreshIdentity(){this.afterIdentity();return this.identity();}
   override async close(){}
-  override async adapter(e:InboundEvent){let text='';return{dispose:()=>{},adapter:{inspect:async()=>snapshot(e),prepare:async(_e:InboundEvent,t:string)=>{await this.beforePrepare();text=t;},
+  override async adapter(e:InboundEvent){let text='';return{dispose:()=>{},adapter:{inspect:async()=>{this.beforeInspect();return snapshot(e);},prepare:async(_e:InboundEvent,t:string)=>{await this.beforePrepare();text=t;},
     verifyPrepared:async()=>snapshot(e),baseline:async()=>[],clickOnce:async()=>{this.clicks++;await this.afterClick();await new Promise(r=>setTimeout(r,5));},
     readback:async()=>({id:randomUUID(),ownId:'own-1',targetKey:targetKey(e),text,pending:false,sentAt:new Date().toISOString()}),
   }};}
@@ -34,11 +35,41 @@ async function setup(wait:()=>Promise<void>=async()=>{}){
   const browser=new AutoFixtureBrowser(root);let models=0;
   const provider=new DeepSeekProvider(async()=>{models++;await wait();return new Response(JSON.stringify({model:'deepseek-flash',choices:[{index:0,finish_reason:'stop',message:{role:'assistant',content:'Fixture automatic response '+models}}],usage:{prompt_tokens:2,completion_tokens:3,total_tokens:5}}));});
   const service=new ClientService(store,browser,provider);await service.loadSettings();const token=service.authority.issueSession();
-  await service.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-contract-key'});
+  await installFixtureKey(service,token,{key:'synthetic-contract-key'});
   await service.dispatch(token,{command:'setReplyPolicy',policy,confirmed:true});
   await service.dispatch(token,{command:'setMode',mode:'LIMITED_AUTO'});
   return{store,service,browser,token,dm,comment,models:()=>models,close:async()=>{await service.close();store.close();}};
 }
+test.each(['same route','corrupt digest','same model on another connection','prior reservation'])(
+  'unpaid comment root recovery checks the original grant (%s)',async scenario=>{
+    const f=await setup();try{
+      const commentPolicy={...policy,channels:['COMMENT_NOTIFICATION']};
+      await f.service.dispatch(f.token,{command:'setReplyPolicy',policy:commentPolicy,confirmed:true});
+      f.browser.beforeInspect=()=>{throw new Blocked('COMMENT_REPLY_ROOT_NOT_UNIQUE');};
+      await f.service.runAutomaticReply();
+      const job=f.store.db.prepare('SELECT grant_version,state,reason FROM automation_jobs WHERE event_id=?');
+      const original=job.get(f.comment) as {grant_version:number};
+      expect(original).toMatchObject({state:'REVIEW',reason:'COMMENT_REPLY_ROOT_NOT_UNIQUE'});
+      expect(f.models()).toBe(0);
+      if(scenario==='same model on another connection'){
+        const target=await stageFixtureModel(f.service,f.token);
+        await applyModel(f.service,f.token,target.connectionId,target.routeRevision,policy.model);
+      }else{
+        await f.service.dispatch(f.token,{command:'setReplyPolicy',policy:{...commentPolicy,modelLimit:1},confirmed:true});
+        if(scenario==='corrupt digest')f.store.db.prepare("UPDATE automation_grants SET scope_digest='invalid' WHERE version=?").run(original.grant_version);
+        if(scenario==='prior reservation')f.store.db.prepare("INSERT INTO grant_reservations VALUES(?,'MODEL',?,1)").run(original.grant_version,f.comment);
+      }
+      f.browser.beforeInspect=()=>{};
+      await f.service.runAutomaticReply();
+      if(scenario==='same route'){
+        expect(f.models()).toBe(1);expect(f.browser.clicks).toBe(1);
+      }else{
+        expect(job.get(f.comment)).toEqual(original);
+        expect(f.models()).toBe(0);expect(f.browser.clicks).toBe(0);
+        expect(f.store.db.prepare("SELECT 1 FROM audit_events WHERE event_type='AUTO_QUALIFICATION_RESUMED' AND entity_id=?").get(f.comment)).toBeUndefined();
+      }
+    }finally{await f.close();}
+  });
 test('a missing nested root resumes automatically only after context arrives, without a paid retry',async()=>{
   const f=await setup();try{
     await f.service.dispatch(f.token,{command:'setReplyPolicy',policy:{...policy,channels:['COMMENT_NOTIFICATION'],workIds:['10']},confirmed:true});

@@ -1,20 +1,17 @@
-import {Blocked,digest,isStrong,requireSafe,targetKey,type InboundEvent,type ReplyAdapter,type TargetSnapshot} from '../core/contracts.js';
+import {Blocked,digest,isStrong,requireSafe,targetKey} from '../core/contracts.js';
 import {lstat,mkdir,rename,unlink,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import type {EventStore} from '../storage/store.js';
 import type {WorkbenchAuthority} from './authority.js';
-import type {BrowserService} from './browser-service.js';
+import type {PlatformConnector,PlatformReplyAdapter} from '../platform/platform-connector.js';
 import {collectionStops} from './collection-scheduler.js';
 import {sendParamsSchema,type BrowserDraftChoice,type ClientCommand} from './contracts.js';
+import {assertSecurityChannelClear} from '../storage/security-holds.js';
 
-interface SavedDraftAdapter extends ReplyAdapter {
-  readSavedDraft(event:InboundEvent):Promise<{text:string;snapshot:TargetSnapshot}>;
-  clearSavedDraft(event:InboundEvent,text:string):Promise<void>;
-  locateSavedDraft?(event:InboundEvent,signal:AbortSignal):Promise<void>;
-}
-function supported(adapter:ReplyAdapter):adapter is SavedDraftAdapter {
-  return typeof (adapter as Partial<SavedDraftAdapter>).readSavedDraft==='function'&&typeof (adapter as Partial<SavedDraftAdapter>).clearSavedDraft==='function';
+type SavedDraftAdapter = PlatformReplyAdapter & Required<Pick<PlatformReplyAdapter,'readSavedDraft'|'clearSavedDraft'>>;
+function supported(adapter:PlatformReplyAdapter):adapter is SavedDraftAdapter {
+  return typeof adapter.readSavedDraft==='function'&&typeof adapter.clearSavedDraft==='function';
 }
 const unavailable='BROWSER_DRAFT_NOT_RECOVERABLE';
 class RecoveryRejection extends Blocked {
@@ -40,7 +37,8 @@ interface RecoveryDiagnostic {
 
 /** Explicit user recovery only. It never creates, retries, approves or submits a send command. */
 export class BrowserDraftRecovery {
-  constructor(readonly store:EventStore,readonly authority:WorkbenchAuthority,readonly browser:BrowserService){}
+  constructor(readonly store:EventStore,readonly authority:WorkbenchAuthority,
+    readonly browser:Pick<PlatformConnector,'root'|'loginRecovery'|'status'|'ownerEpoch'|'actor'|'adapter'>){}
   hasStartupCandidate():boolean{
     return !!this.store.db.prepare(`SELECT d.id FROM reply_drafts d JOIN draft_revisions r ON r.draft_id=d.id AND r.version=d.version
       JOIN manual_send_commands c ON c.event_id=d.event_id JOIN policy_commands p ON p.command_id=c.command_id
@@ -49,6 +47,7 @@ export class BrowserDraftRecovery {
   }
   private candidate(eventId:string):BrowserDraftChoice{
     const event=this.store.event(eventId),payload=event.payload,draft=this.authority.draftFor(eventId);
+    assertSecurityChannelClear(this.store,payload.channel);
     gate(payload.channel==='DIRECT_MESSAGE'&&isStrong(payload)&&!!payload.conversationId,'dbRejected','EVENT_NOT_STRONG_DM');
     gate(draft&&draft.text.trim()&&['DRAFT','APPROVED'].includes(draft.status),'dbRejected','DRAFT_STATE_OR_EMPTY');
     gate(['AWAITING_APPROVAL','APPROVED'].includes(event.status),'dbRejected','EVENT_STATE');
@@ -94,7 +93,7 @@ export class BrowserDraftRecovery {
     report.phase='CANDIDATES';report.candidates=candidates.length;
     return await this.browser.actor.run(async()=>{
       requireSafe(this.browser.ownerEpoch===epoch&&!this.browser.loginRecovery&&this.browser.status().state.startsWith('OPEN'),'BROWSER_NOT_RUNNING');
-      for(const row of candidates){let dispose=()=>{};
+      for(const row of candidates){let dispose:()=>void|Promise<void>=()=>{};
         try{requireSafe(!signal.aborted,'BROWSER_DRAFT_INSPECTION_CANCELLED');const choice=this.candidate(row.event_id);report.dbAccepted++;report.phase='FRAME';
           const handle=await this.browser.adapter(this.store.event(row.event_id).payload,this.store);dispose=handle.dispose;
           requireSafe(this.browser.ownerEpoch===epoch&&!this.browser.loginRecovery,'BROWSER_CLOSED');
@@ -116,7 +115,7 @@ export class BrowserDraftRecovery {
           if(signal.aborted||error instanceof RecoveryRejection&&['TEXT_MISMATCH','IDENTITY_OR_TARGET_MISMATCH'].includes(error.reason)||
             error.code==='OBSERVATION_EXISTING_HUMAN_INPUT'){report.phase='NO_MATCH';return null;}
           /* A nonmatching current page cannot authorize another target. */}
-        finally{dispose();}
+        finally{await dispose();}
       }
       report.phase='NO_MATCH';return null;
     });
@@ -145,7 +144,7 @@ export class BrowserDraftRecovery {
         requireSafe(this.browser.ownerEpoch===epoch&&!this.browser.loginRecovery,'BROWSER_CLOSED');
         await handle.adapter.clearSavedDraft(event.payload,choice.text);
         this.store.audit('USER_CLEARED_SAVED_BROWSER_DRAFT',choice.draftId,{version:choice.draftVersion});return {cleared:true};
-      }finally{handle.dispose();}
+      }finally{await handle.dispose();}
     });
   }
 }

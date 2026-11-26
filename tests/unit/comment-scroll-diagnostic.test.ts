@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {afterEach,expect,test,vi} from 'vitest';
 import {captureObserved} from '../../src/adapters/observed-reader.js';
 import {observedMapping} from '../fixtures/observed-site.js';
@@ -28,9 +29,9 @@ function fixture(length=9,scrollDepth=6){
     return selector===mapping.selectors.selfAvatar?[avatar]:selector===mapping.selectors.commentList?[nodes[0]]:
       human&&selector==='[contenteditable="true"],textarea,input'?[editor]:[];}});
   vi.stubGlobal('getComputedStyle',(node:typeof nodes[number])=>node.style);
-  const capture=()=>captureObserved({mapping,channel:'diagnostic',diagnosticSource:'comments',index:0,evidenceId:'synthetic-scroll-shape'});
+  const capture=()=>captureObserved({mapping,channel:'diagnostic',diagnosticSource:'comments',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-scroll-shape'});
   return{nodes,avatar,editor,documentNode,capture,writes:()=>writes,human:()=>{human=true;},
-    scroll:(offset?:number)=>captureObserved({mapping,channel:'commentScroll',index:0,evidenceId:'synthetic-scroll-action',...(offset===undefined?{}:{commentOffset:offset})})};
+    scroll:(offset?:number)=>captureObserved({mapping,channel:'commentScroll',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-scroll-action',...(offset===undefined?{}:{commentOffset:offset})})};
 }
 
 test('diagnostic identifies a deeper actual scroll candidate using the same bounded contract as collection',()=>{

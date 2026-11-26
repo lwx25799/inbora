@@ -223,8 +223,9 @@ test('native observation suppresses only the matching followup annotation and pr
 test('additive followup migration preserves all existing rows and schema versions and creates a restorable backup',async()=>{
   const f=await setup();try{
     f.store.db.exec('DROP TABLE human_reply_turns;DROP TABLE human_reply_drafts');const before=f.originalRows(),backup=join(f.root,'followup-backup.sqlite');
+    const beforeVersion = f.store.db.pragma('user_version', { simple: true });
     expect(await migrateFollowups(f.store,backup)).toBe(true);expect(await migrateFollowups(f.store,backup)).toBe(false);
-    expect(f.originalRows()).toEqual(before);expect(f.store.db.pragma('user_version',{simple:true})).toBe(3);
+    expect(f.originalRows()).toEqual(before);expect(f.store.db.pragma('user_version',{simple:true})).toBe(beforeVersion);
     expect(f.store.db.prepare('SELECT version FROM automation_schema').get()).toEqual({version:3});
     const saved=new Database(backup,{readonly:true});try{expect(saved.pragma('quick_check',{simple:true})).toBe('ok');
       expect(saved.prepare('SELECT count(*) n FROM inbound_events').get()).toEqual({n:1});}finally{saved.close();}

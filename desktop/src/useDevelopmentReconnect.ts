@@ -7,7 +7,7 @@ interface Ref<T> {current:T}
 interface ReconnectView {
   selectedRef:Ref<string|null>;selection:Ref<string>;detailRequest:Ref<number>;latestEditor:Ref<Editor>;dialogOpen:boolean;
   setStatus:Dispatch<SetStateAction<Status|null>>;setThread:Dispatch<SetStateAction<Thread|null>>;
-  setReview:(value:null)=>void;setSend:(value:null)=>void;setError:(value:string)=>void;setNotice:(value:string)=>void;
+  setSend:(value:null)=>void;setError:(value:string)=>void;setNotice:(value:string)=>void;
 }
 
 /** Development transport recovery never replays a draft, provider request, or send. */
@@ -24,7 +24,7 @@ export function useDevelopmentReconnect(view:ReconnectView){
       const version=++epoch.current,alive=()=>!disposed&&epoch.current===version;
       const start=current.current;start.detailRequest.current++;
       draftGuard.current={...start.latestEditor.current};
-      start.setReview(null);start.setSend(null);setRestoring(true);
+      start.setSend(null);setRestoring(true);
       start.setThread(thread=>thread?{...thread,ownership:{...thread.ownership,isMine:false}}:thread);
       try{
         const status=await request<Status>({command:'getStatus'});
@@ -59,5 +59,6 @@ export function useDevelopmentReconnect(view:ReconnectView){
     })).then(stop=>{if(disposed)stop();else unlisten=stop;}).catch(()=>{});
     return()=>{disposed=true;epoch.current++;unlisten?.();};
   },[]);
-  return {restoring,blockAutosave:restoring||draftGuard.current!==null};
+  const generation=epoch.current;
+  return {restoring,generation,isCurrent:()=>epoch.current===generation,blockAutosave:restoring||draftGuard.current!==null};
 }

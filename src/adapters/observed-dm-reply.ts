@@ -1,7 +1,9 @@
+import {reportSecurityFailure} from './security-signal.js';
 import { randomUUID } from 'node:crypto';
 import type { Page } from 'playwright';
 import type { DmReplyMapping } from '../config/site-mapping.js';
-import { digest, dmClockToleranceMs, eventBinding, isStrong, isManualMediaCandidate, requireSafe, targetKey, validText,
+import {DEFAULT_ACCOUNT_ID,type AccountId} from '../contracts/account.js';
+import { digest, dmClockToleranceMs, eventBinding, isStrong, isManualMediaCandidate, proofTimeValid, requireSafe, targetKey, validText,
   type InboundEvent, type ReplyAdapter, type SendProof, type TargetSnapshot } from '../core/contracts.js';
 import { ObservedReader } from './observed-reader.js';
 import {SubmissionResponse,type SubmissionAck} from './submission-response.js';
@@ -39,6 +41,53 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     context:unknown[];latestId:string|null;viewport:ReplyViewport|null;remove:()=>void};
   const host=window as unknown as {__inboraDmReplyGate?:Gate;__inboraDmPreparation?:Preparation};
   const dom={
+    securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
+      if(value)return;
+      const matches=[];
+      for(const selector of selectors.slice(0,8))for(const node of Array.from(document.querySelectorAll(selector)).slice(0,12-matches.length)){
+        const r=node.getBoundingClientRect();matches.push({selector:selector.slice(0,2000),tag:node.tagName.slice(0,24),id:node.id.slice(0,160),
+          left:r.left,top:r.top,right:r.right,bottom:r.bottom,visible:dom.securityVisible(node)});
+      }
+      const frames=Array.from(document.querySelectorAll('iframe')).slice(0,8).map(node=>{const r=node.getBoundingClientRect();
+        return{src:(node.getAttribute('src')??'').slice(0,2048),title:node.title.slice(0,160),left:r.left,top:r.top,right:r.right,bottom:r.bottom};});
+      const signal={version:1,state:'SUSPECT',kind,href:location.href.slice(0,2048),origin:location.origin.slice(0,256),title:document.title.slice(0,160),
+        documentStartedAt:performance.timeOrigin,observedAt:Date.now(),scope:'TARGET',target:{conversationId:expected.conversationId??undefined},matches,frames};
+      throw Error('OBSERVATION_SECURITY_SUSPECT INBORA_SECURITY_SIGNAL:'+JSON.stringify(signal));
+    },
+    securityVisible(element:Element):boolean {
+      for(const node of [element,...element.querySelectorAll('*')]){
+        if(!node.isConnected)continue;
+        let shown=true;
+        for(let current:Element|null=node;current;current=current.parentElement){
+          const style=getComputedStyle(current);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
+        }
+        if(!shown)continue;
+        const candidates:{rect:DOMRect;parent:Element|null}[]=/^(?:IFRAME|IMG|CANVAS|VIDEO|AUDIO|INPUT|BUTTON|SELECT|TEXTAREA|SVG|OBJECT|EMBED)$/u.test(node.tagName)?Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement})):[];
+        for(const child of node.childNodes){
+          if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
+          const range=document.createRange();range.selectNodeContents(child);
+          for(const rect of range.getClientRects())candidates.push({rect,parent:node});
+        }
+        for(const {rect,parent} of candidates){
+          let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(innerWidth,rect.right),bottom=Math.min(innerHeight,rect.bottom);
+          if(!(right>left&&bottom>top))continue;
+          for(let current=parent;current;current=current.parentElement){
+            const style=getComputedStyle(current);
+            if(style.display==='contents')continue;
+            const clipX=['hidden','clip','auto','scroll','overlay'].includes(style.overflowX);
+            const clipY=['hidden','clip','auto','scroll','overlay'].includes(style.overflowY);
+            if(!clipX&&!clipY)continue;
+            const box=current.getBoundingClientRect();
+            if(clipX){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+            if(clipY){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+            if(!(right>left&&bottom>top))break;
+          }
+          if(right>left&&bottom>top)return true;
+        }
+      }
+      return false;
+    },
     check(ok: unknown,code='NATIVE_REPLY_GUARD_BLOCKED'): void {if(!ok)throw new Error(code);},
     // Same MIT dataField adaptation as observed-reader; see UPSTREAM and third_party notice.
     data(object: unknown,key: string): unknown {
@@ -103,7 +152,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     },
     time(value: unknown): string|null {
       let time=NaN;try{time=Date.prototype.getTime.call(value);}catch{/* no native date */}
-      return Number.isFinite(time)&&time>=Date.UTC(2000,0,1)&&time<=Date.now()?new Date(time).toISOString():null;
+      return Number.isFinite(time)&&time>=Date.UTC(2000,0,1)&&time<=Date.now()+2000?new Date(time).toISOString():null;
     },
     binding(e: InboundEvent): unknown[] {
       return[e.accountId,e.channel,e.platformEventId,e.actorId,e.text,e.occurredAt,e.videoId,e.commentId,e.conversationId,e.direction,e.kind];
@@ -235,9 +284,10 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     capture(): CapturedReplyFrame {
       sourceBudget=1_048_576;
       dom.check(peer&&expected.channel==='DIRECT_MESSAGE'&&expected.direction==='INCOMING'&&expected.kind==='DM','NATIVE_REPLY_SCOPE_REQUIRED');
-      dom.check(location.origin===o.origin&&!/验证码|安全验证|访问受限/.test(document.title),'NATIVE_REPLY_PAGE_BLOCKED');
-      dom.check(!Array.from(document.querySelectorAll(m.blockers)).some(dom.visible),'NATIVE_REPLY_PAGE_BLOCKED');
-      dom.check(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.visible),'NATIVE_REPLY_PAGE_BLOCKED');
+      dom.check(location.origin===o.origin,'OBSERVATION_UNEXPECTED_ORIGIN');
+      dom.securityCheck(!/验证码|安全验证|访问受限/.test(document.title),[o.securityBlockers],'TITLE');
+      dom.securityCheck(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.securityVisible),[o.securityBlockers]);
+      dom.check(!Array.from(document.querySelectorAll(m.blockers)).some(dom.securityVisible),'NATIVE_REPLY_INTERACTION_BLOCKED');
       const own=dom.fiber(dom.one(document,s.selfAvatar),s.selfFiberDepth);
       dom.check(dom.data(own,'uid')===o.self.uid&&dom.data(own,'secUid')===o.self.secUid,'NATIVE_REPLY_ACCOUNT_CHANGED');
       const chat=dom.one(document,s.chat),header=dom.one(chat,s.chatHeader),conversation=dom.data(dom.childProps(header),'conversation');
@@ -392,7 +442,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
     dom.check(input.editorShape===state.editorShape,'NATIVE_REPLY_EDITOR_CHANGED');
     host.__inboraDmReplyGate?.remove();
     const button=state.button,editor=state.editor,editorShape=state.editorShape,baseline=JSON.stringify(state.context);
-    const gate={token:token!,enabled:false,attempted:false,used:false,blocked:false,
+    const gate={token:token!,enabled:false,attempted:false,used:false,blocked:false,securityFailure:null as string|null,
       validate():void {
         const current=dom.preparedWindow(dom.capture(),input.preparationToken);
         dom.check(current.button===button&&current.editor===editor&&current.editorShape===editorShape&&
@@ -403,7 +453,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
         if(!event.composedPath().includes(button))return;
         try {dom.check(gate.enabled&&!gate.used&&!gate.blocked);gate.validate();
           if(event.currentTarget===button)gate.used=true;
-        } catch {gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}
+        } catch(error) {if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}
       },
       submit():boolean {
         dom.check(!gate.attempted&&!gate.blocked);gate.attempted=true;gate.validate();
@@ -413,7 +463,7 @@ export function captureDmReply(input: ReplyCaptureInput): ReplyFrame {
           if(m.submission==='html-click')(button as HTMLElement).click();
           else button.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,composed:true,view:window}));
         } finally {gate.enabled=false;gate.remove();const owned=host.__inboraDmPreparation;if(owned&&owned.token===input.preparationToken)owned.remove();}
-        return gate.used&&!gate.blocked;
+        if(gate.securityFailure)throw Error(gate.securityFailure);return gate.used&&!gate.blocked;
       },
       remove():void {window.removeEventListener('click',gate.handle,true);button.removeEventListener('click',gate.handle,true);},
     };
@@ -440,9 +490,10 @@ export class ObservedDmReply implements ReplyAdapter {
   private readbackAck=false;
   private readonly submission:SubmissionResponse|null;
   constructor(readonly page:Page,readonly mapping:DmReplyMapping,private readonly receiptTimeoutMs=5000,
-    private readonly options:{manualMedia?:boolean;onContextChanged?:(report:DmContextChange)=>void;onReadbackDiagnostic?:(report:DmReadbackDiagnostic)=>void;readonlySignal?:AbortSignal}={}){
+    private readonly options:{accountId?:AccountId;manualMedia?:boolean;onContextChanged?:(report:DmContextChange)=>void;onReadbackDiagnostic?:(report:DmReadbackDiagnostic)=>void;readonlySignal?:AbortSignal}={}){
     this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;
   }
+  private get accountId(){return this.options.accountId??DEFAULT_ACCOUNT_ID;}
   dispose():void{
     this.submission?.dispose();this.inspectedContext=null;this.preparedContext=null;
     this.preparationToken=null;this.prepared=null;this.pendingEvent=null;this.gateToken=null;
@@ -465,10 +516,11 @@ export class ObservedDmReply implements ReplyAdapter {
   }
   private async frame(event:InboundEvent,action:ReplyCaptureInput['action']='snapshot',text:string|null=null,token:string|null=null,
     before:ReplyCaptureInput['before']=null,editorShape:string|null=null):Promise<ReplyFrame>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
-    try{const frame=await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape,manualMedia:this.options.manualMedia===true,preparationToken:this.preparationToken});
+    try{const frame=await this.page.evaluate(captureDmReply,{mapping:this.mapping,event,action,text,token,before,editorShape,manualMedia:this.options.manualMedia===true,preparationToken:this.preparationToken}).catch(error=>reportSecurityFailure(this.page,error));
       requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');return frame;}
-    catch(error){const code=error instanceof Error?error.message.match(/NATIVE_REPLY_[A-Z_]+/)?.[0]:null;
+    catch(error){const code=error instanceof Error?error.message.match(/(?:NATIVE_REPLY|OBSERVATION)_[A-Z_]+/)?.[0]:null;
       if(code)requireSafe(false,code);throw error;}
   }
   private snapshot(event:InboundEvent,frame:ReplyFrame):TargetSnapshot {
@@ -479,20 +531,22 @@ export class ObservedDmReply implements ReplyAdapter {
         nativeKind:frame.media.nativeKind,mediaDigest:digest(frame.media.witness),freshExact:true as const}}:{})};
   }
   async inspect(event:InboundEvent):Promise<TargetSnapshot>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     this.gateToken=null;
     const o=this.mapping.observation,index=o.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
     requireSafe(event.channel==='DIRECT_MESSAGE'&&(isStrong(event)||this.options.manualMedia===true&&isManualMediaCandidate(event))&&index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
-    await new ObservedReader(this.page,o,undefined,this.options.readonlySignal).dm(index,o.peers[index],true);
+    await new ObservedReader(this.page,o,undefined,this.options.readonlySignal,this.accountId).dm(index,o.peers[index],true);
     const frame=await this.frame(event);
     requireSafe(frame.editorText===''||this.prepared?.binding===eventBinding(event)&&this.prepared.text===frame.editorText,'NATIVE_REPLY_EXISTING_DRAFT');
     this.inspectedContext=frame.context;
     return this.snapshot(event,frame);
   }
   async locateSavedDraft(event:InboundEvent,signal:AbortSignal):Promise<void>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     requireSafe(!signal.aborted,'BROWSER_DRAFT_INSPECTION_CANCELLED');
     const o=this.mapping.observation,index=o.peers.findIndex(peer=>peer.uid===event.actorId&&peer.conversationId===event.conversationId);
     requireSafe(event.channel==='DIRECT_MESSAGE'&&isStrong(event)&&index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
-    await new ObservedReader(this.page,o,undefined,signal).dm(index,o.peers[index],true);
+    await new ObservedReader(this.page,o,undefined,signal,this.accountId).dm(index,o.peers[index],true);
     requireSafe(!signal.aborted,'BROWSER_DRAFT_INSPECTION_CANCELLED');
   }
   async prepare(event:InboundEvent,text:string):Promise<void>{
@@ -534,16 +588,24 @@ export class ObservedDmReply implements ReplyAdapter {
     await this.frame(event,'clearSaved',text);
     requireSafe((await this.frame(event)).editorText==='','NATIVE_REPLY_SAVED_DRAFT_NOT_CLEARED');
   }
-  async clickOnce(notBefore?:string):Promise<void>{
+  async clickOnce(notBefore?:string,check?:()=>void,permitExpiresAt?:number):Promise<void>{
+    check?.();
     this.submissionStarted=true;
     const token=this.gateToken;this.gateToken=null;requireSafe(token,'NATIVE_REPLY_NOT_PREPARED');
     if(this.submission){requireSafe(notBefore&&this.pendingEvent&&this.prepared,'NATIVE_REPLY_INTENT_REQUIRED');
       this.submission.arm(this.pendingEvent,this.prepared.text,notBefore);}
-    const accepted=await this.page.evaluate(token=>{
+    const accepted=await this.page.evaluate(({token,permitExpiresAt})=>{
       const gate=(window as unknown as {__inboraDmReplyGate?:{token:string;submit:()=>boolean;remove:()=>void}}).__inboraDmReplyGate;
       if(!gate||gate.token!==token)throw new Error('NATIVE_REPLY_NOT_PREPARED');
-      try{return gate.submit();}finally{gate.remove();}
-    },token);
+      try{
+        if(permitExpiresAt!==undefined&&Date.now()>=permitExpiresAt)throw new Error('WORKER_SEND_PERMIT_EXPIRED');
+        return gate.submit();
+      }finally{gate.remove();}
+    },{token,permitExpiresAt}).catch(error=>{
+      if(error instanceof Error&&/^(?:page\.evaluate: )?(?:Error: )?WORKER_SEND_PERMIT_EXPIRED(?:\r?\n|$)/u.test(error.message))
+        requireSafe(false,'WORKER_SEND_PERMIT_EXPIRED');
+      return reportSecurityFailure(this.page,error);
+    });
     requireSafe(accepted,'NATIVE_REPLY_CLICK_BLOCKED');
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
@@ -555,10 +617,11 @@ export class ObservedDmReply implements ReplyAdapter {
       if(!ack){this.readDiagnostic('ACK_WAIT','ACK_MISSING');return null;}
     }
     this.readbackAck=!!ack;this.readDiagnostic('ACK_WAIT','OK');
-    return await this.refreshedProof(event,text,before,notBefore,ack??undefined,this.prepared?.contextDigest);
+    return await this.refreshedProof(event,text,before,notBefore,ack??undefined,this.prepared?.contextDigest,true);
     }catch(error){this.readFailure(error);throw error;}
   }
   async verifyExisting(event:InboundEvent,text:string,notBefore:string,baselineContextDigest?:string):Promise<SendProof|null>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     this.proofWindowReads=0;this.readbackAck=false;this.readbackStage='RESELECT';
     try{
     requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
@@ -566,12 +629,12 @@ export class ObservedDmReply implements ReplyAdapter {
     await this.inspect(event);
     // A new read-only adapter cannot reconstruct the prior attempt's ephemeral acknowledgement.
     // Small clock differences require the persisted pre-send context, never an invented acknowledgement.
-    return await this.refreshedProof(event,text,[],notBefore,undefined,baselineContextDigest);
+    return await this.refreshedProof(event,text,[],notBefore,undefined,baselineContextDigest,false);
     }catch(error){this.readFailure(error);throw error;}
   }
-  private async refreshedProof(event:InboundEvent,text:string,before:string[],notBefore:string,ack?:SubmissionAck,baselineContextDigest?:string):Promise<SendProof|null>{
+  private async refreshedProof(event:InboundEvent,text:string,before:string[],notBefore:string,ack?:SubmissionAck,baselineContextDigest?:string,hasBaseline=true):Promise<SendProof|null>{
     this.readbackStage='FIRST_POLL';
-    const initial=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest);
+    const initial=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest,hasBaseline);
     if(!initial){this.readDiagnostic('FIRST_POLL','NO_COMPLETE_PROOF');return null;}
     // A serverId can coexist with a temporary local createdAt. Require a fresh page model.
     this.readbackStage='EMPTY_EDITOR';requireSafe((await this.frame(event,'proofs')).editorText==='','NATIVE_REPLY_EXISTING_DRAFT');
@@ -579,12 +642,13 @@ export class ObservedDmReply implements ReplyAdapter {
     this.readbackStage='REFRESH';await Promise.all([this.page.waitForNavigation({waitUntil:'domcontentloaded',timeout:15_000}),this.frame(event,'refresh')]);
     const index=this.mapping.observation.peers.findIndex(p=>p.uid===event.actorId&&p.conversationId===event.conversationId);
     requireSafe(index>=0,'NATIVE_REPLY_SCOPE_REQUIRED');
-    this.readbackStage='RESELECT';await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).dm(index,this.mapping.observation.peers[index],true);
+    this.readbackStage='RESELECT';await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal,this.accountId).dm(index,this.mapping.observation.peers[index],true);
     this.readbackStage='REFRESH_POLL';
-    const refreshed=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest);
+    const refreshed=await this.poll(event,text,before,notBefore,ack?.id,baselineContextDigest,hasBaseline);
     if(ack&&this.submission!.current()!==ack)return null;
-    const result=refreshed?.id===initial.id?{...refreshed,...(ack?{submission:ack.submission}:{}),
+    const candidate=refreshed?.id===initial.id?{...refreshed,...(ack?{submission:ack.submission}:{}),
       ...(refreshed.clockSkew?{clockSkew:{...refreshed.clockSkew,refreshedId:refreshed.id}}:{})}:null;
+    const result=candidate&&proofTimeValid(candidate,notBefore,hasBaseline)?candidate:null;
     this.submission?.dispose();this.readDiagnostic('RESULT',result?'OK':'NO_COMPLETE_PROOF');return result;
   }
   private readDiagnostic(stage:DmReadbackDiagnostic['stage'],code:string,fields:Partial<DmReadbackDiagnostic>={}):void{
@@ -621,7 +685,7 @@ export class ObservedDmReply implements ReplyAdapter {
   private async seekClockContext(event:InboundEvent,frame:ReplyFrame,candidate:SendProof,expected:string):Promise<{frame:ReplyFrame;restore:()=>Promise<void>}|null>{
     const viewport=frame.scroll,peer=this.mapping.observation.peers.find(peer=>peer.uid===event.actorId&&peer.conversationId===event.conversationId);
     if(!viewport||!peer||frame.editorText!=='')return null;
-    const reader=new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal),step=Math.max(1,Math.floor(viewport.viewport*0.8));
+    const reader=new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal,this.accountId),step=Math.max(1,Math.floor(viewport.viewport*0.8));
     const candidates=[Math.max(viewport.minimum,viewport.top-step),Math.min(viewport.maximum,viewport.top+step)];
     for(const top of new Set(candidates)){
       if(top===viewport.top||this.proofWindowReads>=2)continue;this.proofWindowReads++;this.readDiagnostic('CONTEXT_WINDOW','CONTEXT_INCOMPLETE');
@@ -638,30 +702,30 @@ export class ObservedDmReply implements ReplyAdapter {
     }
     return null;
   }
-  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string,baselineContextDigest?:string):Promise<SendProof|null>{
+  private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string,baselineContextDigest?:string,hasBaseline=true):Promise<SendProof|null>{
     const deadline=Date.now()+this.receiptTimeoutMs,stage=this.readbackStage;let previous:string|null=null,diagnosed=false,searched=false,restore:(()=>Promise<void>)|undefined,failed=false;
     try{
     do {
       requireSafe(!this.options.readonlySignal?.aborted,'VERIFICATION_CANCELLED');
       let frame=await this.frame(event,'proofs');
-      const start=Date.parse(notBefore);
-      const possible=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&Date.parse(p.sentAt)>=start-dmClockToleranceMs&&Date.parse(p.sentAt)<=Date.now());
+      const start=Date.parse(notBefore),strictStart=hasBaseline?start:start+dmClockToleranceMs;
+      const possible=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&Date.parse(p.sentAt)>=start-dmClockToleranceMs&&Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs);
       if(!ackId)requireSafe(possible.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
       const skew=possible[0];
-      if(!ackId&&!searched&&skew&&Date.parse(skew.sentAt)<=start&&frame.latestId===skew.id&&baselineContextDigest&&
+      if(!ackId&&!searched&&skew&&Date.parse(skew.sentAt)<=strictStart&&frame.latestId===skew.id&&baselineContextDigest&&
         !this.clockContext(frame,event,skew.id,baselineContextDigest).matches){
         searched=true;const found=await this.seekClockContext(event,frame,skew,baselineContextDigest);if(found){frame=found.frame;restore=found.restore;}
       }
       const matches=frame.proofs.filter(p=>!before.includes(p.id)&&p.text===text&&!p.pending&&
-        (ackId?p.id===ackId:Date.parse(p.sentAt)>start||Boolean(baselineContextDigest&&
+        (ackId?p.id===ackId:Date.parse(p.sentAt)>strictStart||Boolean(baselineContextDigest&&
           Date.parse(p.sentAt)>=start-dmClockToleranceMs&&frame.latestId===p.id&&
-          this.clockContext(frame,event,p.id,baselineContextDigest).matches))&&Date.parse(p.sentAt)<=Date.now());
+          this.clockContext(frame,event,p.id,baselineContextDigest).matches))&&Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs);
       requireSafe(matches.length<=1,'NATIVE_REPLY_RECEIPT_AMBIGUOUS');
-      const candidate=matches[0],proof=candidate&&!ackId&&Date.parse(candidate.sentAt)<=start?{...candidate,
+      const candidate=matches[0],proof=candidate&&!ackId&&Date.parse(candidate.sentAt)<=strictStart?{...candidate,
         clockSkew:{boundary:notBefore,baselineContextDigest:baselineContextDigest!,
           remainingContextDigest:this.clockContext(frame,event,candidate.id,baselineContextDigest).digest!,refreshedId:''}}:candidate;
       if(!diagnosed){const context=skew?this.clockContext(frame,event,skew.id,baselineContextDigest):{matches:false,trimmed:0};
-        this.readDiagnostic(stage,proof?'OK':'CONTEXT_INCOMPLETE',{candidateCount:possible.length,within2s:!!skew&&Date.parse(skew.sentAt)<=start,
+        this.readDiagnostic(stage,proof?'OK':'CONTEXT_INCOMPLETE',{candidateCount:possible.length,within2s:!!skew&&Date.parse(skew.sentAt)<=strictStart,
           candidateLatest:!!skew&&frame.latestId===skew.id,contextMatches:context.matches,rawRows:frame.context.length,trimmedRows:context.trimmed});diagnosed=true;}
       if(proof&&digest(proof)===previous)return frame.editorText===''?proof:null;
       previous=proof?digest(proof):null;

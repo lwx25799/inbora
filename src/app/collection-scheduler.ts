@@ -1,9 +1,11 @@
 import { Blocked, requireSafe } from "../core/contracts.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type {CollectionSettings} from './automation-contracts.js';
-import {platformStopCodes} from '../core/emergency-stop.js';
+import {platformStopCodes,securityCandidateCodes,shouldStopGlobally} from '../core/emergency-stop.js';
+import {readSecurityHold} from '../storage/security-holds.js';
+import type { CollectionSource } from '../platform/platform-connector.js';
 
-export type CollectionSource = "works" | "dm";
+export type { CollectionSource } from '../platform/platform-connector.js';
 export type CollectionTrigger = 'BACKGROUND'|'MANUAL';
 interface TurnResult {error:string|null;deferredCode:string|null;cancelled:boolean}
 /** An object-specific failure was persisted; the channel can serve a different object next turn. */
@@ -20,6 +22,8 @@ export class CollectionScheduler {
   private fatal: string | null = null;
   private suspended=false;
   private cancelGeneration=0;
+  private transientFailures=0;
+  private retryAt=0;
   constructor(readonly persistence: AutomationStore,
     private readonly collect: (source: CollectionSource, signal: AbortSignal,trigger:CollectionTrigger) => Promise<void>,
     private readonly updated: () => void = () => {},
@@ -31,22 +35,43 @@ export class CollectionScheduler {
     void this.pulse();
   }
   private async pulse():Promise<void> {
-    try {await this.tick();}catch {
-      this.fatal='COLLECTION_STATE_UNAVAILABLE';
-      this.closed=true;clearInterval(this.timer);this.timer=undefined;
-      this.updated();
+    if (this.closed || this.running || this.suspended || this.persistence.now() < this.retryAt) return;
+    try {
+      const ran = await this.runTick();
+      if (!ran) return;
+      this.transientFailures = 0;
+      this.retryAt = 0;
+      if (this.fatal) {
+        this.fatal = null;
+        this.updated();
+      }
+    } catch {
+      if (this.closed) return;
+      this.transientFailures = Math.min(this.transientFailures + 1, 8);
+      this.retryAt = this.persistence.now() + Math.min(60_000, 2_000 * 2 ** (this.transientFailures - 1));
+      const changed = this.fatal !== 'COLLECTION_STATE_UNAVAILABLE';
+      this.fatal = 'COLLECTION_STATE_UNAVAILABLE';
+      if (changed) this.updated();
     }
   }
   cancel(): void { this.cancelGeneration++;this.abort?.abort(); }
-  suspend(value:boolean):void {this.suspended=value;if(value)this.cancel();}
+  suspend(value:boolean):void {
+    this.suspended=value;
+    if(value)this.cancel();
+    else { this.transientFailures = 0; this.retryAt = 0; }
+  }
   status() {
     return {running: !!this.running, source: this.running ? this.last : null, fatal:this.fatal,
       channels: this.persistence.store.db.prepare("SELECT * FROM collection_progress ORDER BY source").all()};
   }
   async tick(): Promise<void> {
-    if (this.closed || this.running || this.suspended) return;
+    await this.runTick();
+  }
+  private async runTick(): Promise<boolean> {
+    if (this.closed || this.running || this.suspended) return false;
     const {collection, emergencyStopped} = this.persistence.state();
-    if (!collection || emergencyStopped) return;
+    if (emergencyStopped) return false;
+    if (!collection) return true;
     const progress = this.persistence.store.db.prepare("SELECT source,next_at,last_error FROM collection_progress").all() as {source: CollectionSource; next_at: number;last_error:string|null}[];
     const now=this.persistence.now();
     for(const row of progress){
@@ -61,11 +86,19 @@ export class CollectionScheduler {
         row.next_at=now+interval;
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=? WHERE source=? AND last_error='COLLECTION_CANCELLED'").run(row.next_at,row.source);
       }
+      if(row.last_error&&securityCandidateCodes.has(row.last_error)&&row.next_at>now+interval&&
+        readSecurityHold(this.persistence.store,row.source==='works'?'COMMENT_NOTIFICATION':'DIRECT_MESSAGE')){
+        // A persisted hold needs bounded recovery checks, independent of the channel's old fault count.
+        row.next_at=now+interval;
+        this.persistence.store.db.prepare('UPDATE collection_progress SET next_at=? WHERE source=? AND last_error=?')
+          .run(row.next_at,row.source,row.last_error);
+      }
     }
     const due = progress.filter(p => (p.source === "works" ? collection.comments : collection.inbox) && p.next_at <= this.persistence.now());
     const next = due.find(p => p.source !== this.last) ?? due[0];
-    if (!next) return;
+    if (!next) return true;
     await this.runTurn(next.source,'BACKGROUND',collection);
+    return true;
   }
   async runNow(source:CollectionSource,signal?:AbortSignal):Promise<{deferredCode:string|null}> {
     const generation=this.cancelGeneration;
@@ -112,13 +145,20 @@ export class CollectionScheduler {
           .run(now+interval,Math.max(0,now-started),source);
       }else if (error) {
         const old = this.persistence.store.db.prepare("SELECT failures FROM collection_progress WHERE source=?").get(source) as {failures: number};
-        const delay = objectDeferred?interval:Math.min(Math.max(interval, 600_000), interval * 2 ** Math.min(old.failures + 1, 10));
-        this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_error=?,failures=failures+1,elapsed_ms=? WHERE source=?")
-          .run(now + delay, error, Math.max(0, now - started),source);
-        if (collectionStops.has(error)) this.persistence.stop(true,error,source==='works'?'COLLECTION_COMMENTS':'COLLECTION_DM');
+        const heldCandidate=securityCandidateCodes.has(error)&&!!readSecurityHold(this.persistence.store,source==='works'?'COMMENT_NOTIFICATION':'DIRECT_MESSAGE');
+        const delay = objectDeferred||error==='SECURITY_CHANNEL_HELD'||heldCandidate?interval:Math.min(Math.max(interval, 600_000), interval * 2 ** Math.min(old.failures + 1, 10));
+        const nextFailures = objectDeferred ? old.failures : old.failures + 1;
+        this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_error=?,failures=?,elapsed_ms=? WHERE source=?")
+          .run(now + delay, error, nextFailures, Math.max(0, now - started),source);
+        if (shouldStopGlobally(error)) this.persistence.stop(true,error,source==='works'?'COLLECTION_COMMENTS':'COLLECTION_DM');
       } else {
         this.persistence.store.db.prepare("UPDATE collection_progress SET next_at=?,last_success=?,last_error=NULL,failures=0,elapsed_ms=? WHERE source=?")
           .run(now + interval, now, Math.max(0, now - started),source);
+      }
+      if(!cancelled&&(!error||objectDeferred)){
+        this.transientFailures=0;
+        this.retryAt=0;
+        this.fatal=null;
       }
       return {error,deferredCode:objectDeferred?error:null,cancelled};
     }).finally(() => {

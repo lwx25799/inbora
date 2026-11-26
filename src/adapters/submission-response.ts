@@ -45,6 +45,8 @@ export function decodeDmAcknowledgement(body:Buffer,sent:ParsedSubmission,ownId:
   return id;
 }
 export interface SubmissionAck{ id:string;submission:NonNullable<SendProof['submission']> }
+export const defaultConfirmedCommentPublishStatuses:readonly number[]=[7];
+export interface SubmissionResponseOptions{confirmedCommentStatuses?:readonly number[]}
 
 /** Observes only one armed attempt on its dedicated Page; no request issuance or fallback. */
 export class SubmissionResponse{
@@ -53,7 +55,10 @@ export class SubmissionResponse{
   private count=0;private ack:SubmissionAck|null=null;private blocked=false;
   private failure:string|null=null;
   private refreshExpected=false;
-  constructor(private readonly page:Page,private readonly mapping:ObservationMapping){
+  private readonly confirmedCommentStatuses:ReadonlySet<number>;
+  constructor(private readonly page:Page,private readonly mapping:ObservationMapping,options:SubmissionResponseOptions={}){
+    const statuses=options.confirmedCommentStatuses??defaultConfirmedCommentPublishStatuses;
+    this.confirmedCommentStatuses=new Set(statuses.filter(status=>Number.isSafeInteger(status)));
     page.on('request',this.request);page.on('response',this.response);page.on('framenavigated',this.navigation);page.once('close',this.dispose);
   }
   arm(event:InboundEvent,text:string,boundary:string):void{
@@ -104,7 +109,8 @@ export class SubmissionResponse{
         if(!root||data.status_code!==0||!c||!native(c.cid)||c.reply_id!==root||
           c.aweme_id!==undefined&&c.aweme_id!==attempt.event.videoId||c.text!==attempt.text||
           c.user?.uid!==this.mapping.self.uid||c.user?.sec_uid!==this.mapping.self.secUid||
-          c.reply_to_reply_id!==(nested?attempt.event.commentId:'0')||c.status!==7||!Number.isFinite(c.create_time))throw Error('COMMENT_RESPONSE_BINDING');
+          c.reply_to_reply_id!==(nested?attempt.event.commentId:'0')||
+          typeof c.status!=='number'||!this.confirmedCommentStatuses.has(c.status)||!Number.isFinite(c.create_time))throw Error('COMMENT_RESPONSE_BINDING');
         id=c.cid;
       }
       if(token.epoch!==this.epoch||attempt!==this.attempt||this.blocked||this.count!==1)return;

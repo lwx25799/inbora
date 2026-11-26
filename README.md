@@ -1,128 +1,66 @@
 # inbora
 
-**把抖音作品评论和私信放进一个本地收件箱。**
+Windows 本地优先的智能客服桌面工作台（Tauri v2 + React + Node.js/TypeScript + Playwright + SQLite）。当前开发版仍维持版本号 **0.3.5**，在单账号抖音实机基线之上，已按 [架构决策与演进路线](docs/ARCHITECTURE-DECISIONS.md)（修订版路线 A+）合入 **阶段 0 ~ 阶段 3** 的底层架构演进代码（纯 `contracts` 契约层、`PlatformConnector`、多模型提供商 V1.0、显式 `schema4` 与 `legacy_target_aliases`、协议 v2、独立 Node Browser Worker 及 Tauri Rust Win32 能力桥），下一步待推进 **阶段 4（多平台分批接入）** 与 **阶段 5（9 页正式版工作台逐批替换）**。
 
-面向国内媒体账号运营的 Windows 桌面工作台，后续将逐步扩展到多个国内媒体平台。当前从抖音单账号起步：集中查看消息、直接人工回复，也可以在明确的账号、通道、规则和额度范围内启用 AI 自动回复。
+## 当前代码基线与验证边界（0.3.5 开发版）
 
-[开始开发](#开始开发) · [日常使用](#日常使用) · [操作与恢复](docs/AUTOMATION-OPERATIONS.md) · [模型约定](docs/MODEL-CONTRACT.md)
+- **单账号抖音双通道自动化与安全发送（已有实机范围 GO）**：专属无头静音 Edge Profile、单持有者锁、持久运行起点、新作品自动发现、评论（含楼中楼）与私信增量补收及对象级公平退避；会话级人工接管与自动保稿、唯一 `SendCoordinator` 事务持久意图与单次提交、`UNCERTAIN` 与崩溃恢复严禁自动重发、网页未发送人稿零覆盖、原无头页内安全验证接管。
+- **本地知识库、回复人格与本机 MCP 助手**：内置本地知识库导入（TXT/MD/DOCX/文字 PDF/CSV/XLSX）、聊天样本筛选、人格草稿学习与试聊对比（见 [知识与回复人格](docs/KNOWLEDGE-PERSONA.zh-CN.md)）；内置 `@modelcontextprotocol/server` 2.4.0 stdio 入口与 16 个受控工具（DPAPI 鉴权，复用客户端授权与唯一发送协调器，见 [操作与恢复说明](docs/AUTOMATION-OPERATIONS.md)）。
+- **多模型提供商 V1.0（阶段 2 代码与离线/合成回归已合入；付费调用与原生 GUI 人工交互待本人实测）**：支持 DeepSeek、OpenAI、Claude、Gemini、通义千问、豆包、硅基流动、OpenRouter 与自定义云端连接，全应用维护唯一当前模型选择（SQLite `m_selection`），独立凭据存储于后端内存或 Windows CurrentUser DPAPI，禁止自动重试（见 [多模型提供商 V1.0 路由契约](docs/MODEL-CONTRACT.md)）。
+- **内核解耦与多账号隔离底座（阶段 1 与阶段 3 代码与离线/合成回归已合入）**：已抽离纯共享 `src/contracts/` 与 `src/platform/`（`PlatformConnector`），落地显式 `schema4` 迁移、`legacy_target_aliases`、鉴权 stdio 协议 v2、独立 Node Browser Worker（`src/workers/`，禁止直连 SQLite）、Tauri Rust Win32 能力桥（`src/native/`）及 3 页过渡界面内的最小账号面板；真实多平台接入留待阶段 4，9 页正式界面替换留待阶段 5。
 
-<p align="center">
-  <img src="assets/readme/workflow.svg" width="100%" alt="inbora 工作流程：作品评论和私信汇入统一收件箱，经人工回复或规则自动回复，共用单次提交与回读通道。">
-</p>
+## 启动入口与阶段 5 前端视觉基线区分
 
-## 一个收件箱，两种回复方式
+- **当前开发启动入口（`启动inbora.cmd`）**：位于项目根目录。脚本优先使用当前 `PATH` 中的 `pnpm`（缺失时尝试开发机本地回退工具链目录）；若本机存在私有开发启动脚本则转交执行，否则直接调用 `pnpm desktop:dev` 启动当前过渡版 3 页 Tauri 开发壳与 Vite 热更新，由用户在连接页打开或恢复本机私有运行目录。该入口依赖本机 Node/pnpm 与 Rust/MSVC 开发环境，不是独立可分发安装包；仅在明确要求打包时才执行 `pnpm desktop:build`。
+- **阶段 5 正式版前端视觉与交互基线（`ui-preview/` 与 `assets/brand/`）**：采用已定稿的 **Harbor Frame（归港方匣）** 品牌套件、暖白纸感 + 深松青浅深双主题、`cosscom/ui` + `@base-ui/react@1.9.0` + Tailwind CSS v4 组件体系，以及全离线打包的可变字体栈（`MiSans VF` + `Plus Jakarta Sans Variable` + `Inter Variable` + `JetBrains Mono Variable`），完整覆盖 9 大业务工作区与 7 个核心抽屉/弹窗，落实用户体验第一准则与账号/客户头像本机采集展示规范。
+  - `ui-preview/` 使用离线合成数据与合成演示头像，完全独立于当前 `src/` 与 `desktop/`，不连接真实后端、数据库、浏览器或平台账号，不代表阶段 5 正式界面已完成真实后端接线。
+  - 7 张 2x 实渲染视觉参考图见 `assets/brand/screenshots/`，完整设计与阶段 5 迁移规范见 [品牌标识与阶段 5 前端视觉规范](assets/brand/BRAND-AND-UI-SPEC.md)，本地交互预览说明见 [阶段 5 前端交互基线说明](ui-preview/README.md)。
 
-- **集中收取**：按会话查看私信，按作品与父评论查看评论。后台保存收取进度，重启后继续补查停机期间的新消息。
-- **人工处理**：输入后点一次“发送”，后台完成保存、目标核验、排队提交和结果回读。人工回复无需模型 Key。
-- **按规则自动回复**：为准确账号和通道保存策略，设置回复要求、屏蔽词、时段及额度，再用“自动回复：开／关”控制日常运行。
-- **保留处理记录**：草稿、发送意图、回执和累计用量保存在本机。无法确认送达的消息保留原因，后台有界核验，避免重复发送。
+## 环境与常用开发命令
 
-关闭自动回复后，账号在线、双通道收取和人工回复继续运行；关闭状态在重启后保留。全局急停用于故障处理，会停止采集、模型和发送调度，须显式检查恢复。
-
-## 日常使用
-
-1. **连接已有运行目录**，沿用专属浏览器 Profile 和已保存状态。普通后台浏览器以无头、静音方式运行；需要登录或处理平台验证时由本人接管。
-2. **收取并处理消息**，在收件箱查看私信与作品评论；需要手动更新时使用“同步收件箱”。打开准确会话或评论，输入回复并发送。
-3. **按需启用 AI**，从左侧“AI 与设置”配置模型，在“后台收取与持续授权”保存准确范围和规则。自动回复默认关闭，保存有效策略后再开启。
-
-“生成 AI 建议”提供可编辑的候选回复，也可使用已保存策略内的模型许可。图片、表情和分享内容的展示资格与模型资格分别核验；预览不可用时显示原因，不让模型猜正文。
-
-模型 Key 默认只在后端内存中保留，也可明确选择 Windows 当前用户 DPAPI 安全保存。浏览器 Profile、数据库、消息和原始证据均留在本机私有运行目录。
-
-详细操作、草稿保护及异常处理见[操作与恢复说明](docs/AUTOMATION-OPERATIONS.md)。
-
-## 开始开发
-
-当前版本为 **0.3.5 开发版**，技术栈为 Tauri v2、React、TypeScript、Node.js、Playwright 和 SQLite。
-
-### 环境
-
-| 项目 | 要求或当前状态 |
-| --- | --- |
-| 系统 | 当前实测 Windows 10 专业版 x64，Build 19045；Windows 11 待专项验证 |
-| Node.js | `>=24.22.1 <25` 或 `>=26.13.0 <27` |
-| pnpm | `11.25.0` |
-| 浏览器 | Microsoft Edge，使用独立 Profile |
-| 原生开发 | Rust、MSVC C++ 工具链、Windows SDK、WebView2 |
+支持目标为 Windows 10 / Windows 11 x64（当前实机基线为 Windows 10 专业版 x64 Build 19045，Windows 11 列为正式版待验）。依赖锁定为 Node `24.22.1+` 或 `26.13.0+`、pnpm `11.25.0`、Microsoft Edge 与 `better-sqlite3@13.0.3` 预编译 Node-API 包（禁止隐式 `node-gyp` 构建）。
 
 ```powershell
-git clone https://github.com/lwx25799/inbora.git
-Set-Location inbora
 pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
-pnpm inbora --help
+pnpm test:integration
+pnpm test:e2e
+pnpm build
+pnpm test:built
+pnpm check:privacy
+pnpm check:source-size
 ```
 
-首次成功应能看到 CLI 帮助并通过类型检查与单元测试。以上命令不连接真实账号、不调用模型，也不发送消息。仓库当前为私有，克隆需要访问权限。
-
-准备好原生工具链后启动桌面开发模式：
+桌面、CLI 与阶段 5 界面基线预览入口：
 
 ```powershell
-pnpm desktop:dev
+pnpm desktop:dev:web          # 启动当前桌面前端 Vite 开发服务
+pnpm desktop:dev              # 启动当前 Tauri 开发窗口 + Vite 热更新 + Node Sidecar
+pnpm inbora --help            # 源码 CLI 帮助（tsx 链）
+node dist/cli.js --help       # 编译后 CLI 帮助（普通 Node 链）
+
+# 独立浏览阶段 5 前端视觉与交互基线（不连接真实数据）
+cd ui-preview; npm.cmd install; npm.cmd run dev
 ```
 
-仅查看前端可用 `pnpm desktop:dev:web`；该入口不启动原生客户端及其业务内核。前端支持热更新，Node 源码修改按需安全重载后端，原生层变化才重新编译相应部分。
+CLI 默认数据目录为 `%LOCALAPPDATA%\inbora`，开发调试可通过 `--runtime <私有目录>` 指定独立私有运行目录。浏览器 Profile、Cookie、API Key、真实 SQLite 数据库、私人消息、本机缓存的真实头像与原始页面证据仅保存在本机私有运行目录，严禁提交到仓库；切勿通过删除数据库重新初始化来清除发送意图或预算记录。
 
-新检出不包含真实账号的运行目录或页面映射。首次真实使用需要本人登录、完成准确页面校准并设置授权；合成测试页面不能替代真实映射。已有运行目录应直接连接，避免重新初始化。维护者本机另有根目录启动入口，其路径与依赖见操作说明。
+## 现行文档导航（Git 追踪）
 
-### 验证命令
+| 文档 | 用途 |
+|---|---|
+| [架构决策与演进路线](docs/ARCHITECTURE-DECISIONS.md) | 唯一权威架构裁决（ADR-001 ~ ADR-006：修订版路线 A+、6 阶段路线与现状、分域规则、硬安全红线、三轮审查纪律与阶段 5 视觉/交互基线） |
+| [核心契约与 schema4 规范](docs/CORE-PROTOCOL-AND-SCHEMA4.md) | 阶段 1/3 已合入底层契约：`PlatformConnector`、鉴权协议 v2、单库 `schema4` 迁移、独立 Browser Worker 与 Rust Win32 能力桥 |
+| [阶段交接与实机待验总表](docs/STAGE-HANDOFF.md) | 全 6 阶段基线提交、离线/合成覆盖、待本人实机补验项与阶段 4 新会话接棒指引 |
+| [品牌标识与阶段 5 前端视觉规范](assets/brand/BRAND-AND-UI-SPEC.md) | Harbor Frame 品牌套件、暖白纸感/深松青令牌、离线可变字体、用户优先准则、头像采集边界、9 页逐页功能与契约对照及迁移清单 |
+| [阶段 5 前端交互基线说明](ui-preview/README.md) | `ui-preview/` 本地预览命令、目录结构与演示边界 |
+| [多模型提供商 V1.0 路由契约](docs/MODEL-CONTRACT.md) | 现行阶段 2 多模型单一全局路由（`m_selection`）、四协议与 9 供应商验证矩阵 |
+| [0.3.x 操作与恢复手册](docs/AUTOMATION-OPERATIONS.md) | 当前过渡版桌面端操作指引：日常值守、多模型与单库多账号入口、原无头页内安全验证、本机 MCP 16 工具与备份恢复 |
+| [知识与回复人格](docs/KNOWLEDGE-PERSONA.zh-CN.md) | 本地知识库导入、聊天样本采纳、人格学习、试聊对比及数据调用边界 |
+| [第三方来源与许可台账](UPSTREAM.md) | 全仓依赖版本、固定上游源码核对记录与许可证归档索引 |
 
-| 命令 | 检查范围 |
-| --- | --- |
-| `pnpm typecheck` | Node 内核与桌面前端类型 |
-| `pnpm test` | 单元测试 |
-| `pnpm test:integration` | 持久化、服务合同及源码运行链 |
-| `pnpm test:e2e` | 本地合成页面的浏览器与界面回归 |
-| `pnpm test:built` | 构建后普通 Node 的浏览器夹具链 |
-| `pnpm check:source-size` | 代码文件不超过 800 个物理行 |
-| `pnpm check:privacy` | 暂存区与 Git 历史中的敏感路径和凭据特征 |
+## 历史记录与已清理资产说明
 
-E2E 会启动浏览器，但使用合成数据。真实账号测试、模型调用和外发须在明确授权范围内单独验收；开发期间沿用现有开发模式，只有用户明确要求时才构建安装包。
-
-## 工作原理
-
-```text
-Tauri / React 桌面界面与 CLI
-              ↓
-      共享 Node 业务服务
-       ↙             ↘
-SQLite 状态与审计    账号级串行队列
-                         ↓
-              独立 Edge Profile
-              评论 Page / 私信 Page
-```
-
-同一账号只有一个 Profile 持有者，浏览器操作按账号串行，发送并发固定为一。人工回复与规则自动回复共用发送协调器：发送前绑定准确账号、原消息、目标和全文，先持久化意图，再单次提交并回读。
-
-重启与重连恢复连接、进度和权威状态，已提交或结果未知的消息不自动重发。网页中已有人工输入时保留人稿；遇到身份变化、平台验证或目标不唯一时停止对应动作。
-
-### 为什么使用 Playwright，而不是直接调用平台接口？
-
-本项目当前使用普通抖音个人号，没有可申请的官方评论、私信收发接口，因此通过 Playwright 操作本人登录后的网页，完成收取与回复。
-
-当前选择 Playwright，主要基于三个实际需要：
-
-- **复用本人网页会话**：登录状态留在专属 Edge Profile，由本人处理扫码和验证码，网页通过正常流程发起请求，无需向第三方 Cookie 签名服务提交登录资料。
-- **核对实际操作对象**：读取准确会话或父评论、可见正文和编辑器状态，保护网页中已有的人稿；发送前再次核对目标及全文，再操作绑定的网页控件。
-- **把提交与结果对应起来**：结合页面回读和正常网页请求的业务回执，核对原生消息 ID、发送方和全文，支撑单次提交、未知结果不重发的处理方式。
-
-网页内部接口与官方开放接口分别看待。直接调用前者会增加非公开请求格式及鉴权逻辑的维护成本，当前实现不主动构造或重放私有发送请求。同时，页面自动化也会[监听正常页面产生的网络响应](https://playwright.dev/docs/network#network-events)，在已校准范围内与可见内容交叉核验，用于读取字段和确认回执。
-
-这个选择需要承担常驻浏览器的 CPU、内存开销，以及页面定位、轮询和加载等待带来的延迟；页面结构变化时还须维护映射与校准。后续扩展其他国内媒体平台时，会逐个平台核对可申请的官方接口、账号权限和通道覆盖，再选择适合的接入方式，并分别验收收取、发送和回执能力。
-
-## 当前边界
-
-- **首个平台、单账号**：当前已实现抖音单账号、本地操作员的作品评论与私信工作台。多个国内媒体平台属于后续扩展方向，多账号运营不在当前迭代范围。
-- **开发版结论有范围**：已有 Windows 10 本机开发版的单账号双通道 PoC 验收记录；它不代表完整历史测试矩阵、Windows 11、安装包或正式产品上线均已通过。
-- **网页能力依赖校准**：收取通过平台正常页面完成，轮询不等于实时推送，也不承诺读取平台尚未向本人送达的内容。页面变化或缺少准确证据时保留阻断原因。
-- **媒体能力分别判断**：受限预览可展示已核验图片、表情或分享信息，当前不据此承诺媒体 AI 理解与自动回复。
-
-## 文档与来源
-
-- [操作与恢复](docs/AUTOMATION-OPERATIONS.md)：日常配置、开发重载、停止与恢复。
-- [模型约定](docs/MODEL-CONTRACT.md)：模型配置、上下文、用量和失败处理。
-- [上游来源与复用记录](UPSTREAM.md)：固定来源、适配方式和许可证记录。
-- [复用与诊断说明](docs/UPSTREAM-REUSE-DIAGNOSTICS.md)：响应分类、运行诊断及维护边界。
-
-界面设计探索保存在 [UI 效果图合集](Inbora_UI_效果图合集/README.md)，其中均为概念图，不能作为当前功能截图或验收证据。真实账号的页面映射、私人消息与原始验收证据不随仓库分发。
+- 早期单账号 PoC CLI（含已停用的 `compare-modes` 与在 schema3/4 下禁用的 `approve`、`retry-comment-once`）及 0.2.9 最小客户端阶段验收材料已归档至本机被忽略的历史归档目录，仅供审计回溯，不再作为当前操作指引或后续研发依据。
+- 早期静态概念效果图（旧 `Inbora_UI_效果图合集/`）与旧版单页 HTML 原型（旧 `Inbora原型.html` 与 `prototype/`）已正式清理移除，阶段 5 前端统一以 `assets/brand/` 与 `ui-preview/` 为准。

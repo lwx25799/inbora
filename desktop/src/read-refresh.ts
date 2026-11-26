@@ -3,7 +3,7 @@ const allTargets:readonly ReadTarget[]=['status','inbox','thread','audit'];
 
 /** Backend notifications only invalidate read views; they never repeat business commands. */
 export function refreshTargets(event:string):readonly ReadTarget[] {
-  if(event==='diagnostics_updated')return [];
+  if(event==='diagnostics_updated'||event==='knowledge_updated'||event==='sidecar_response_too_large')return [];
   if(event==='backend_restarted')return ['status','inbox','audit'];
   if(['sidecar_closed','backend_unavailable','backend_watch_unavailable'].includes(event))return ['status','audit'];
   if(event==='draft_updated')return ['inbox','thread','audit'];

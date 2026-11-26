@@ -2,14 +2,14 @@ import { expect, test } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { OwnerLock } from '../../src/browser/owner-lock.js';
 import { readAssistantDiscovery, discoveryFilename } from '../../src/mcp/discovery.js';
 import { privateTemp } from '../helpers.js';
 
-test.each(['init', 'runtime', 'client', 'automation', 'settings', 'control', 'request'])(
+test.each(['init', 'runtime', 'client', 'automation', 'settings', 'control', 'request', 'cleanup'])(
   'EOF during accepted %s work safely closes the service and releases the real runtime lock', async phase => {
     const folder = privateTemp('sidecar-close-'), runtime = join(folder, 'runtime');
     const trace = join(folder, 'trace.txt'), release = join(folder, 'release');
@@ -43,7 +43,7 @@ test.each(['init', 'runtime', 'client', 'automation', 'settings', 'control', 're
       export const runtimeRoot=(value:string)=>resolve(value);
       export const initRuntime=()=>gate('init'),loadRuntime=()=>gate('runtime');
       export const migrateClient=()=>gate('client'),migrateAutomation=()=>gate('automation');
-      export class BrowserService {constructor(readonly root:string){note('browser.created');}}
+      export class BrowserService {constructor(readonly root:string,_launch:unknown,readonly accountId:string){note('browser.created');}}
       export class ClientService {
         statuses=0;cancelRequest:(()=>void)|undefined;
         events=new EventEmitter();
@@ -61,7 +61,10 @@ test.each(['init', 'runtime', 'client', 'automation', 'settings', 'control', 're
           }
           return{schema:3};
         }
-        async close(){note('service.close');this.cancelRequest?.();}
+        async close(){
+          note('service.close');this.cancelRequest?.();
+          if(phase==='cleanup')throw new Error('SYNTHETIC_CLEANUP_FAILURE');
+        }
       }
       export class AssistantFacade {
         instanceId='';
@@ -101,8 +104,10 @@ test.each(['init', 'runtime', 'client', 'automation', 'settings', 'control', 're
         await expect.poll(() => messages.some(item => item.ok === true)).toBe(true);
         child.stdin.write(JSON.stringify({ protocol: 1, requestId: randomUUID(), secret, body: { command: 'getStatus' } }) + '\n');
       }
-      await expect.poll(() => messages.some(item => item.fixtureGate === phase)).toBe(true);
-      if (phase === 'control' || phase === 'request') {
+      if (phase === 'cleanup') await expect.poll(() => messages.some(item => item.ok === true)).toBe(true);
+      else await expect.poll(() => messages.some(item => item.fixtureGate === phase)).toBe(true);
+      const connected=phase==='request'||phase==='cleanup';
+      if (phase === 'control' || connected) {
         const discovery=await readAssistantDiscovery(runtime);
         expect(discovery).toMatchObject({runtime,pid:child.pid});
         expect(discovery.port).toBeGreaterThan(0);
@@ -111,22 +116,23 @@ test.each(['init', 'runtime', 'client', 'automation', 'settings', 'control', 're
       child.stdin.end();
       await expect.poll(async () => (await readFile(trace, 'utf8')).includes('stdin.end')).toBe(true);
       await writeFile(release, 'release synthetic connection work');
-      expect(await exited, stderr).toBe(0);
+      expect(await exited, stderr).toBe(phase === 'cleanup' ? 1 : 0);
       const stages = (await readFile(trace, 'utf8')).trim().split('\n');
-      if (phase === 'request') {
+      if (connected) {
         expect(stages.filter(stage => stage === 'service.online')).toHaveLength(1);
         expect(stages.indexOf('service.online')).toBeLessThan(stages.indexOf('stdin.end'));
-        expect(stages.indexOf('request.cancelled')).toBeGreaterThan(stages.indexOf('service.close'));
+        if(phase==='request')expect(stages.indexOf('request.cancelled')).toBeGreaterThan(stages.indexOf('service.close'));
       } else {
         expect(stages).not.toContain('service.online');
         expect(messages.filter(item => item.ok === true)).toEqual([]);
       }
-      expect(messages.find(item => item.ok === false)).toMatchObject({ error: 'CLIENT_CLOSING' });
-      if (phase === 'settings' || phase === 'control') {
+      if(phase==='cleanup')expect(stderr).toBe('');
+      else expect(messages.find(item => item.ok === false)).toMatchObject({ error: 'CLIENT_CLOSING' });
+      if (phase === 'settings' || phase === 'control' || phase === 'cleanup') {
         expect(stages.indexOf('service.close')).toBeGreaterThan(stages.indexOf('leave.settings'));
         expect(stages.indexOf('store.close')).toBeGreaterThan(stages.indexOf('service.close'));
       } else if (phase !== 'request') expect(stages).not.toContain('service.created');
-      if(phase==='control'||phase==='request'){
+      if(phase==='control'||connected){
         expect(stages.indexOf('control.started')).toBeGreaterThan(stages.indexOf('assistant.created'));
         expect(stages.indexOf('control.close.begin')).toBeLessThan(stages.indexOf('service.close'));
         expect(stages.indexOf('assistant.close')).toBeGreaterThan(stages.indexOf('service.close'));
@@ -137,6 +143,7 @@ test.each(['init', 'runtime', 'client', 'automation', 'settings', 'control', 're
     } finally {
       if (child.exitCode === null) { child.stdin.end(); child.kill(); }
       await exited; lines.close(); await guard?.close();
+      await rm(folder,{recursive:true,force:true,maxRetries:4,retryDelay:100});
     }
   },
 );

@@ -9,8 +9,7 @@ export function qualifyLateArrivals(data:AutomationStore,input:LateArrivalInput)
   const {store}=data,state=data.state(),settings=state.collection,now=data.now();
   if(input.signal.aborted||state.emergencyStopped||!settings||settings.ownId!==input.ownId||
     !(input.source==='dm'?settings.inbox:settings.comments))return;
-  const own=store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
-  if(own?.own_id!==input.ownId)return;
+  if(store.accountOwnId(data.accountId)!==input.ownId)return;
   const channel=input.source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION';
   const observation=store.db.prepare('SELECT rowid,observed_at FROM observations WHERE channel=? AND scope=? AND evidence_ref=? ORDER BY rowid DESC LIMIT 1')
     .get(channel,input.scope,input.evidence) as {rowid:number;observed_at:string}|undefined;
@@ -21,7 +20,7 @@ export function qualifyLateArrivals(data:AutomationStore,input:LateArrivalInput)
   store.db.transaction(()=>{
     for(const fresh of input.events){
       if(input.signal.aborted)return;
-      if(fresh.channel!==channel||fresh.accountId!=='account_001'||!isEligible(fresh,input.ownId)||!isStrong(fresh))continue;
+      if(fresh.channel!==channel||fresh.accountId!==data.accountId||!isEligible(fresh,input.ownId)||!isStrong(fresh))continue;
       const at=Date.parse(fresh.occurredAt??'');
       if(!Number.isFinite(at)||at<=state.startedAt||at<=baselineTime||at>now)continue;
       const row=store.db.prepare("SELECT id,binding FROM inbound_events WHERE account_id=? AND channel=? AND source_key=? AND scope=? AND status='MANUAL_REVIEW'")

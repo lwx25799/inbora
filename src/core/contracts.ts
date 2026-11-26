@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
+import { dmClockToleranceMs, type InboundEvent, type SendProof, type TargetSnapshot } from '../contracts/events.js';
+
+export * from '../contracts/account.js';
+export * from '../contracts/events.js';
 
 export class Blocked extends Error {
   constructor(readonly code: string) { super(code); }
@@ -7,39 +10,7 @@ export class Blocked extends Error {
 export function requireSafe(condition: unknown, code: string): asserts condition {
   if (!condition) throw new Blocked(code);
 }
-export const channelSchema = z.enum(['COMMENT_NOTIFICATION', 'DIRECT_MESSAGE']);
-export type Channel = z.infer<typeof channelSchema>;
-export const eventSchema = z.object({
-  accountId: z.literal('account_001'),
-  channel: channelSchema,
-  platformEventId: z.string().min(1).nullable(),
-  actorId: z.string().min(1).nullable(),
-  actorName: z.string().nullable(),
-  text: z.string().min(1).max(10_000),
-  occurredAt: z.string().min(1).nullable(),
-  occurredAtPrecisionMs: z.number().int().min(1).max(86_400_000).optional(),
-  videoId: z.string().min(1).nullable(),
-  commentId: z.string().min(1).nullable(),
-  rootCommentId: z.string().regex(/^[1-9]\d{0,63}$/).optional(),
-  // The exact inbound child to reply to; not the original message's intermediate parent.
-  replyToCommentId: z.string().regex(/^[1-9]\d{0,63}$/).optional(),
-  conversationId: z.string().min(1).nullable(),
-  direction: z.enum(['INCOMING', 'OUTGOING', 'SYSTEM', 'UNKNOWN']),
-  kind: z.enum(['COMMENT', 'REPLY', 'DM', 'LIKE', 'FOLLOW', 'SYSTEM', 'UNKNOWN']),
-  evidenceId: z.string().min(1),
-  discovery: z.enum(['NOTIFICATION', 'ALLOWED_WORK', 'DIRECT_MESSAGE']).optional(),
-  observationIssue: z.enum(['COMMENT_TEXT_UNVERIFIED', 'COMMENT_PARENT_UNVERIFIED', 'DM_CONTENT_UNVERIFIED']).optional(),
-  contentType: z.enum(['IMAGE', 'VIDEO', 'AUDIO', 'MIXED']).optional(),
-}).refine(event=>!event.contentType||event.channel==='DIRECT_MESSAGE'&&event.observationIssue==='DM_CONTENT_UNVERIFIED',
-  {message:'DM_MEDIA_NEEDS_UNVERIFIED_CONTENT',path:['contentType']})
-  .refine(event=>event.observationIssue!=='DM_CONTENT_UNVERIFIED'||event.channel==='DIRECT_MESSAGE',
-    {message:'DM_CONTENT_REQUIRES_DIRECT_MESSAGE',path:['observationIssue']})
-  .refine(event=>event.rootCommentId===undefined&&event.replyToCommentId===undefined||event.channel==='COMMENT_NOTIFICATION'&&
-    event.kind==='REPLY'&&event.rootCommentId!==undefined&&event.rootCommentId!==event.commentId&&event.replyToCommentId===event.commentId,
-    {message:'NESTED_COMMENT_TARGET_REQUIRED',path:['rootCommentId']})
-  .refine(event=>event.observationIssue!=='COMMENT_PARENT_UNVERIFIED'||event.channel==='COMMENT_NOTIFICATION'&&event.kind==='REPLY',
-    {message:'COMMENT_PARENT_REQUIRES_REPLY',path:['observationIssue']});
-export type InboundEvent = z.infer<typeof eventSchema>;
+
 export function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
@@ -66,23 +37,6 @@ export function isEligible(e: InboundEvent, ownId: string): boolean {
   return e.direction === 'INCOMING' && e.actorId !== ownId &&
     (e.channel === 'DIRECT_MESSAGE' ? e.kind === 'DM' : ['COMMENT', 'REPLY'].includes(e.kind));
 }
-export type EventStatus = 'BASELINE' | 'AWAITING_DRAFT' | 'AWAITING_APPROVAL' | 'APPROVED' |
-  'MANUAL_REVIEW' | 'INTENT_RECORDED' | 'CONFIRMED' | 'UNCERTAIN' | 'REJECTED';
-export interface StoredEvent { id: string; payload: InboundEvent; binding: string; status: EventStatus }
-export interface TargetSnapshot {
-  accountId: string;
-  ownId: string;
-  targetKey: string;
-  eventBinding: string;
-  contextDigest: string;
-  composerKey: string;
-  mappingDigest: string;
-  manualObservation?:ManualMediaProof;
-}
-export interface ManualMediaProof {
-  kind:'DM_MEDIA';channel:'DIRECT_MESSAGE';eventBinding:string;contextDigest:string;
-  contentType:'IMAGE'|'VIDEO'|'AUDIO'|'MIXED';nativeKind:number;mediaDigest:string;freshExact:true;
-}
 export function isManualMediaCandidate(event:InboundEvent):boolean {
   return event.channel==='DIRECT_MESSAGE'&&event.direction==='INCOMING'&&event.kind==='DM'&&event.observationIssue==='DM_CONTENT_UNVERIFIED'&&
     !!event.contentType&&!!event.platformEventId&&!!event.actorId&&!!event.conversationId&&!!event.occurredAt&&Number.isFinite(Date.parse(event.occurredAt));
@@ -95,22 +49,11 @@ export function validManualMediaProof(event:InboundEvent,snapshot:TargetSnapshot
     /^[a-f0-9]{64}$/u.test(proof.mediaDigest)&&/^[a-f0-9]{64}$/u.test(proof.contextDigest)&&
     snapshot.accountId===event.accountId&&snapshot.targetKey===targetKey(event)&&snapshot.composerKey===snapshot.targetKey&&event.actorId!==snapshot.ownId;
 }
-export interface Draft {
-  id: string; eventId: string; text: string; model: string; version: number;
-  status: 'DRAFT' | 'APPROVED' | 'REJECTED';
-  approval: { snapshot: TargetSnapshot; textDigest: string; version: number } | null;
-}
-export interface SendProof {
-  id: string; ownId: string; targetKey: string; text: string; pending: boolean; sentAt: string;
-  submission?:{boundary:string;requestAt:string;responseAt:string;requestDigest:string;responseDigest:string};
-  clockSkew?:{boundary:string;baselineContextDigest:string;remainingContextDigest:string;refreshedId:string};
-}
-export const dmClockToleranceMs=2000;
-export function proofTimeValid(proof:SendProof,boundary:string):boolean{
+export function proofTimeValid(proof:SendProof,boundary:string,hasBaseline=true):boolean{
   const at=Date.parse(proof.sentAt),start=Date.parse(boundary),now=Date.now();
-  if(!Number.isFinite(at)||at<Date.UTC(2000,0,1)||!Number.isFinite(start)||at>now)return false;
+  if(!Number.isFinite(at)||at<Date.UTC(2000,0,1)||!Number.isFinite(start)||at>now+dmClockToleranceMs)return false;
   if(!proof.submission){
-    if(!proof.clockSkew)return at>start;
+    if(!proof.clockSkew)return at>(hasBaseline?start:start+dmClockToleranceMs);
     const skew=proof.clockSkew;
     return proof.targetKey.startsWith('dm:')&&at>=start-dmClockToleranceMs&&skew.boundary===boundary&&
       skew.refreshedId===proof.id&&/^[a-f0-9]{64}$/.test(skew.baselineContextDigest)&&
@@ -119,15 +62,6 @@ export function proofTimeValid(proof:SendProof,boundary:string):boolean{
   const ack=proof.submission,request=Date.parse(ack.requestAt),response=Date.parse(ack.responseAt);
   return ack.boundary===boundary&&Number.isFinite(request)&&Number.isFinite(response)&&start<=request&&request<=response&&response<=now&&
     /^[a-f0-9]{64}$/.test(ack.requestDigest)&&/^[a-f0-9]{64}$/.test(ack.responseDigest);
-}
-export interface ReplyAdapter {
-  inspect(event: InboundEvent): Promise<TargetSnapshot>;
-  prepare(event: InboundEvent, text: string): Promise<void>;
-  cancelPreparation?(event: InboundEvent, text: string): Promise<void>;
-  verifyPrepared(event: InboundEvent, text: string): Promise<TargetSnapshot>;
-  baseline(event: InboundEvent): Promise<string[]>;
-  clickOnce(notBefore?:string): Promise<void>;
-  readback(event: InboundEvent, text: string, before: string[], notBefore: string): Promise<SendProof | null>;
 }
 export function validText(text: string): string {
   // The browser editor uses LF; canonicalize before persistence and human approval.

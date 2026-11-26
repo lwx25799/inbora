@@ -28,6 +28,7 @@ import {locatePreviewTarget,type PreviewTargetResult} from './preview-target.js'
 import {resolvePreviewDisplay,saveDisplayPreview,type PreviewDisplayTarget} from './media-preview-request.js';
 import {recordCommentWindow,type CommentWindowRead} from '../observability/comment-window-diagnostics.js';
 import {CommentListDiagnostics} from '../adapters/comment-list-diagnostics.js';
+import {assertSecurityChannelClear} from '../storage/security-holds.js';
 
 const worksCursorSchema = z.object({phase: z.enum(["discovery", "comments"]).default("discovery"),
   workIndex: z.number().int().nonnegative().default(0), first: z.boolean().default(true),
@@ -60,15 +61,17 @@ export class InboxCollector {
     this.discovery = new OwnWorksDiscovery(owner.notification, mapping);
   }
   private check(source: CollectionSource, signal: AbortSignal):void {
+    assertSecurityChannelClear(this.data.store,source==='dm'?'DIRECT_MESSAGE':'COMMENT_NOTIFICATION');
     const state=this.data.state(),settings=state.collection;
     requireSafe(!this.disposed&&!signal.aborted&&!state.emergencyStopped&&settings&&(source==='works'?settings.comments:settings.inbox),'COLLECTION_CANCELLED');
     this.data.requireAccount(this.mapping.self.uid);
     requireSafe(settings.ownId===this.mapping.self.uid,'ACCOUNT_CHANGED');
   }
-  async collect(source:CollectionSource,signal:AbortSignal):Promise<void> {
+  async collect(source:CollectionSource,signal:AbortSignal,onPlatformFault?:(error:unknown)=>Promise<void>):Promise<void> {
     this.check(source,signal);
     // Known root backlog may use its existing two-window quantum; never drain a catalog or inbox inside the lock.
     await this.owner.actor.run(async()=>{
+      try{
       this.check(source,signal);
       await (source==='works'?this.owner.notification:this.owner.dm).bringToFront();
       this.check(source,signal);
@@ -82,6 +85,11 @@ export class InboxCollector {
         this.check(source,signal);
         await this.works(signal);
       }
+      }catch(error){
+        // Capture the fault location before the account queue can navigate another page.
+        if(error instanceof Blocked&&collectionStops.has(error.code))await onPlatformFault?.(error).catch(()=>{});
+        throw error;
+      }
     },'background');
   }
   prioritize(ownId:string,conversationId:string,target?:string|PreviewDisplayTarget,trigger:'AUTOMATIC'|'SELECTION'='SELECTION'):boolean {
@@ -90,14 +98,14 @@ export class InboxCollector {
     if(display&&(display.purpose!=='DISPLAY'||trigger!=='SELECTION'||this.priority))return false;
     if(this.disposed||state.emergencyStopped||!state.collection?.inbox||state.collection.ownId!==ownId||ownId!==this.mapping.self.uid||
       this.lastPriority?.id===conversationId&&this.data.now()-this.lastPriority.at<objectRetryMs)return false;
-    const own=this.data.store.db.prepare("SELECT own_id FROM accounts WHERE id='account_001'").get() as {own_id:string}|undefined;
+    const boundOwnId=this.data.store.accountOwnId(this.data.accountId);
     const peer=this.data.store.db.prepare('SELECT own_id,sec_uid FROM discovered_conversations WHERE id=?').get(conversationId) as {own_id:string;sec_uid:string}|undefined;
     const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
-    if(own?.own_id!==ownId||peer?.own_id!==ownId||!peer.sec_uid||cursor.deferred.some(item=>item.id===conversationId&&item.until>this.data.now()))return false;
+    if(boundOwnId!==ownId||peer?.own_id!==ownId||!peer.sec_uid||cursor.deferred.some(item=>item.id===conversationId&&item.until>this.data.now()))return false;
     if(eventId){
       let event;try{event=display?resolvePreviewDisplay(this.data.store,eventId,display.source).event:this.data.store.event(eventId).payload;}catch{return false;}
-      if(event.accountId!=='account_001'||event.channel!=='DIRECT_MESSAGE'||event.kind!=='DM'||!display&&event.direction!=='INCOMING'||
+      if(event.accountId!==this.data.accountId||event.channel!=='DIRECT_MESSAGE'||event.kind!=='DM'||!display&&event.direction!=='INCOMING'||
         event.conversationId!==conversationId||!event.actorId||!display&&event.actorId===ownId||!event.platformEventId||
         !/^[1-9]\d{0,63}$/u.test(event.platformEventId)||!event.occurredAt)return false;
     }
@@ -112,7 +120,7 @@ export class InboxCollector {
     const current=this.data.store.db.prepare('SELECT uid,sec_uid,title FROM discovered_conversations WHERE own_id=? AND id=?')
       .get(this.mapping.self.uid,id) as {uid:string|null;sec_uid:string;title:string}|undefined;
     requireSafe(current,'OBSERVATION_CONVERSATION_CHANGED');
-    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal),peer={uid:current.uid,secUid:current.sec_uid,title:current.title,conversationId:id};
+    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal,this.data.accountId),peer={uid:current.uid,secUid:current.sec_uid,title:current.title,conversationId:id};
     let top:number|undefined,canRestore=false,restoring=false;
     let targetResult:PreviewTargetResult={found:false,windows:0,persisted:0,reason:'INTERRUPTED'};
     try{
@@ -176,7 +184,7 @@ export class InboxCollector {
         this.mapping.self.uid,evidence,new Date(this.data.now()).toISOString(),this.data.state().startedAt);
       qualifyLateArrivals(this.data,{source,scope,ownId:this.mapping.self.uid,workIds:this.mapping.works.map(work=>work.id),events:batch.events,evidence,signal});
       if(source==='dm')new ChatMessageStore(this.data.store).observe(batch.events,this.mapping.self.uid,this.data.state().startedAt,this.data.now());
-      if(displayChanged)this.data.store.audit('MESSAGE_DISPLAY_CHANGED',digest(['account_001','dm:'+scope]));
+      if(displayChanged)this.data.store.audit('MESSAGE_DISPLAY_CHANGED',digest([this.data.accountId,'dm:'+scope]));
     }).immediate();
     if(source==='dm')classifyStoredShares(this.data.store,this.root,scope);
     requireSafe(!batch.incomplete||!!dmWindowCoverage(batch,this.data.state().startedAt),'OBSERVATION_DM_CONTENT_DOM_NOT_READY');
@@ -323,7 +331,7 @@ export class InboxCollector {
     return reader.dmWindow(peer,top,true);
   }
   private async dm(signal:AbortSignal):Promise<void> {
-    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal);
+    const reader=new ObservedReader(this.owner.dm,this.mapping,this.data.state().startedAt,signal,this.data.accountId);
     const saved=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='dm'").get() as {cursor_json:string};
     const cursor=dmCursorSchema.parse(JSON.parse(saved.cursor_json));
     const park=(sweep:DmSweep)=>{cursor.parked=cursor.parked.filter(item=>item.peer.conversationId!==sweep.peer.conversationId);cursor.parked.push(sweep);};
@@ -434,7 +442,7 @@ export class InboxCollector {
     const row=this.data.store.db.prepare("SELECT cursor_json FROM collection_progress WHERE source='works'").get() as {cursor_json:string};
     const cursor=worksCursorSchema.parse(JSON.parse(row.cursor_json));
     if(cursor.phase==='discovery') {
-      const reader=new ObservedReader(this.owner.notification,this.mapping,undefined,signal);
+      const reader=new ObservedReader(this.owner.notification,this.mapping,undefined,signal,this.data.accountId);
       const result=await this.discovery.scan(reader,cursor.first,signal,cursor.pending as PendingWork[]);
       this.check('works',signal);
       for(const work of result.works)this.data.registerWork(work);
@@ -464,15 +472,21 @@ export class InboxCollector {
           if(more===false)cursor.pendingRootPages=cursor.pendingRootPages.filter(id=>id!==work.id);
           if(typeof more==='boolean')this.data.store.db.prepare("UPDATE collection_progress SET cursor_json=? WHERE source='works'").run(JSON.stringify(cursor));
         };
-        let batch:ObservationBatch|undefined,threadsPending=false,persisted=false;
-        const reader=new ObservedReader(this.owner.notification,mapping,undefined,signal);
+        let batch:ObservationBatch|undefined,threadsPending=false,persisted=false,freshDocumentReused=false;
+        const reader=new ObservedReader(this.owner.notification,mapping,undefined,signal,this.data.accountId);
         try{
         try{
-          batch=await reader.comments(0,true,headRead?0:progress?.scroll_top??0,{holdScroll:true,
+          const read=await reader.comments(0,true,headRead?0:progress?.scroll_top??0,{holdScroll:true,
             stay:!headRead&&cursor.commentThreads.some(item=>item.workId===work.id&&!item.done&&item.retryAt<=this.data.now()),
+            freshWithinMs:this.data.state().collection!.commentIntervalMs,
             onRestoreWindow:async part=>{window.responseSummary=await responses.summary(signal);notePages(window.responseSummary?.hasMore);
               await this.persist('works',`work:${work.id}`,part,signal,undefined,window);}});
-          window.responseSummary=await responses.summary(signal);notePages(window.responseSummary?.hasMore);
+          batch=read;freshDocumentReused=!!read.freshDocumentReused;
+          window.responseSummary=await responses.summary(signal);
+          // Startup may have loaded the first native GET before this turn's observer existed.
+          // Keep that window unfinished until a later normal response proves its pagination.
+          if(freshDocumentReused&&window.responseSummary?.hasMore==null)notePages(true);
+          notePages(window.responseSummary?.hasMore);
           if(batch.commentRestoreIncomplete&&!(batch.commentRestoreStableEnd&&window.responseSummary?.hasMore===false)){
             this.check('works',signal);cursor.threadBurst=0;cursor.workIndex++;
             if(cursor.workIndex>=works.length){cursor.phase='discovery';cursor.workIndex=0;}
@@ -550,7 +564,7 @@ export class InboxCollector {
         const rootPagesPending=cursor.pendingRootPages.includes(work.id),incomplete=threadIncomplete||rootPagesPending||changedResponse;
         const end=!threadsPending&&!rootPagesPending&&!changedResponse&&scroll.atEnd&&(progress?.last_height??scroll.height)===scroll.height?(progress?.end_observations??0)+1:0;
         done=end>=2;
-        continueRoots=!yieldWork&&(hadRootPages||rootPagesPending);
+        continueRoots=!freshDocumentReused&&!yieldWork&&(hadRootPages||rootPagesPending);
         if(done){cursor.threadBurst=0;cursor.headPending=cursor.headPending.filter(id=>id!==work.id);}
         this.data.store.db.prepare(`INSERT INTO work_collection_progress VALUES(?,?,?,?,?,?,0) ON CONFLICT(work_id)
           DO UPDATE SET scroll_top=excluded.scroll_top,last_height=excluded.last_height,end_observations=excluded.end_observations,last_read=excluded.last_read,last_error=excluded.last_error,next_at=0`)

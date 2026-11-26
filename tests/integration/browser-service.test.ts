@@ -10,14 +10,22 @@ import { mapping } from "../fixtures/site.js";
 
 function fakeOwner() {
   const context = new EventEmitter();
+  const pages = [0, 1].map(() => {
+    let currentUrl = "about:blank";
+    return { url: () => currentUrl, goto: async (url: string) => { currentUrl = url; },
+      evaluate: async () => ({ originMatches: true, empty: true }) };
+  });
   let closed = 0,
     opened = "";
   const owner = {
     context,
+    notification: pages[0],
+    dm: pages[1],
     actor: new AccountActor(),
     version: () => "synthetic-edge-1",
     open: async (origin: string) => {
       opened = origin;
+      for (const page of pages) await page.goto(origin);
     },
     close: async () => {
       closed++;
@@ -26,6 +34,20 @@ function fakeOwner() {
   } as unknown as BrowserProfileOwner;
   return { owner, context, closed: () => closed, opened: () => opened };
 }
+
+test('resource identity reads actual Context pages without entering the account queue and changes on close',async()=>{
+  const fake=fakeOwner();
+  Object.assign(fake.context,{pages:()=>[{},{}]});
+  const browser=BrowserService.adopt(privateTemp('resource-identity-'),fake.owner,'headless');
+  let release!:()=>void;
+  const busy=fake.owner.actor.run(()=>new Promise<void>(resolve=>{release=resolve;}));
+  await Promise.resolve();
+  const before=browser.resourceIdentity();
+  expect(before).toEqual({open:true,epoch:0,mode:'headless',pageCount:2});
+  release();await busy;
+  await browser.close();
+  expect(browser.resourceIdentity()).toEqual({...before,open:false,epoch:1,pageCount:0});
+});
 test("browser launch is single-flight, loads current mapping identity, and releases natural close before reopening", async () => {
   const root = privateTemp("browser-lifecycle-"),
     config = { ...mapping("https://www.douyin.com"), environment: "douyin" };

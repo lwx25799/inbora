@@ -37,13 +37,14 @@ test.each([{width:900,height:640},{width:1240,height:800}])('emergency reason an
         elapsedSamples:0,averageElapsedMs:null,p95ElapsedMs:null},groups:[]},blockers:[],
       collection:{channels:[],works:{included:0,historical:0,review:0},conversations:{total:0,neverRead:0}},performance:[],evidence:null};
     if(body.command==='browser'&&body.action==='inspectSavedDraftRecovery')return null;
+    if(body.command==='securityRecovery')throw Error('MANUAL_RECOVERY_ORIGINAL_PAGE_UNAVAILABLE');
     if(body.command==='browser'){
       status.browser={...status.browser,mode:body.mode as 'headed'|'headless',loginRecovery:body.mode==='headed',
         state:body.mode==='headed'?'MANUAL_VISIBLE':'OPEN_LAST_READ_VERIFIED'};return status;
     }
     if(body.command==='resume'){
       if(refuseRecovery)throw Error('OBSERVATION_PAGE_BLOCKED');
-      status.automation!.emergencyStopped=false;return status;
+      status.automation!.emergencyStopped=false;status.securityHolds=[];return status;
     }
     if(body.command==='getStatus'||body.command==='connect')return status;
     throw Error('UNEXPECTED_BUSINESS_COMMAND_'+String(body.command));
@@ -63,26 +64,46 @@ test.each([{width:900,height:640},{width:1240,height:800}])('emergency reason an
     const box=await recover.boundingBox();expect(box!.y+box!.height).toBeLessThan(viewport.height);
     await mkdir(resolve('.local/emergency-stop-ui'),{recursive:true});
     await page.screenshot({path:resolve(`.local/emergency-stop-ui/recorded-${viewport.width}.png`)});
-    await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.getByRole('button',{name:'系统设置',exact:true}).click();
     expect(await page.getByRole('button',{name:'恢复运行',exact:true}).isVisible()).toBe(true);
+    await page.getByRole('button',{name:'自动化规则',exact:true}).click();
     expect(await page.getByRole('button',{name:'保存收取范围',exact:true}).isVisible()).toBe(true);
-    await page.getByRole('button',{name:'操作审计',exact:true}).click();expect(await recover.isVisible()).toBe(true);
-    await page.getByRole('button',{name:'收件箱',exact:true}).click();
+    await page.getByRole('button',{name:'调度与审计',exact:true}).click();expect(await recover.isVisible()).toBe(true);
+    await page.getByRole('button',{name:'会话中心',exact:true}).click();
     await recover.click();await expect.poll(()=>calls.filter(c=>c.command==='resume').length).toBe(1);
     expect(await notice.isVisible()).toBe(true);
-    await notice.getByRole('button',{name:'处理登录或验证',exact:true}).click();
-    expect(status.automation!.emergencyStopped).toBe(true);
-    expect(calls.filter(c=>c.command==='browser'&&!c.action).at(-1)).toMatchObject({mode:'headed',loginRecovery:true,manualVisible:true});
-    await notice.getByRole('button',{name:'返回无头并检查恢复',exact:true}).click();
-    await expect.poll(()=>calls.filter(c=>c.command==='resume').length).toBe(2);
-    expect(status.browser.mode).toBe('headless');expect(await notice.isVisible()).toBe(true);
+    expect(await notice.getByRole('button',{name:'处理登录或验证',exact:true}).count()).toBe(0);
+    expect(calls.filter(c=>c.command==='browser'&&!c.action)).toEqual([]);
     status.automation!.emergencyStop={reason:'EMERGENCY_REASON_UNAVAILABLE',source:'UNKNOWN',stoppedAt:null,legacy:true};
     await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
     await expect.poll(()=>notice.innerText()).toContain('旧版本未记录急停时间');
     expect(await page.getByRole('alert').count()).toBe(0);
     await page.screenshot({path:resolve(`.local/emergency-stop-ui/legacy-${viewport.width}.png`)});
     refuseRecovery=false;await recover.click();await notice.waitFor({state:'detached'});
+    expect(calls.filter(c=>c.command==='resume')).toHaveLength(2);
+    status.securityHolds=[{channel:'COMMENT_NOTIFICATION',reason:'OBSERVATION_SECURITY_SUSPECT',incidentId:'synthetic-held-incident',
+      revision:'synthetic-held-revision',heldAt:1794399998894,mode:'headless'}];
+    status.securityRuntime={ruleVersion:'synthetic-rules',fingerprint:'ab'.repeat(32),instanceId:'synthetic-loaded-instance'};
+    status.localAssistantConnection={ready:true,instanceId:'synthetic-loaded-instance',transport:'stdio',tools:16};
+    await page.getByRole('button',{name:'重新连接内核',exact:true}).click();
+    const held=page.getByRole('region',{name:'通道安全状态待核验'});await held.waitFor();
+    expect(await held.innerText()).toContain('评论通道');expect(await held.innerText()).toContain('synthetic-held-incident');
+    expect(await held.innerText()).toContain('在客户端内处理当前无头验证页面');
+    expect(await held.innerText()).toContain('点击处理会重新检查原授权地址');
+    expect(await held.innerText()).toContain('已正常则恢复对应通道，仍有验证则显示新的实时画面');
+    expect(await notice.count()).toBe(0);expect(await held.getByRole('button').count()).toBe(2);
+    await held.getByRole('button',{name:'处理原验证页面',exact:true}).click();
+    await held.getByRole('alert').waitFor();expect(await held.getByRole('alert').innerText()).toContain('无法继续操作这个现场');
+    expect(status.browser.mode).toBe('headless');expect(status.securityHolds).toHaveLength(1);
+    expect(calls.filter(c=>c.command==='browser'&&!c.action)).toEqual([]);
+    expect(calls.filter(c=>c.command==='securityRecovery')).toEqual([{command:'securityRecovery',action:'start',channel:'COMMENT_NOTIFICATION'}]);
+    await held.getByRole('button',{name:'检查并恢复运行',exact:true}).click();
+    await held.waitFor({state:'detached'});expect(status.browser.mode).toBe('headless');expect(status.securityHolds).toEqual([]);
     expect(calls.filter(c=>c.command==='resume')).toHaveLength(3);
+    await page.getByRole('button',{name:'系统设置',exact:true}).click();
+    await page.getByText('安全检查运行版本',{exact:true}).click();
+    expect(await page.getByText('ab'.repeat(32),{exact:true}).isVisible()).toBe(true);
+    expect(await page.getByText('synthetic-loaded-instance',{exact:true}).count()).toBe(2);
     expect(calls.some(c=>/send|suggestion|generate/i.test(String(c.command)))).toBe(false);expect(errors).toEqual([]);
   }finally{await browser.close();await server.close();}
 });

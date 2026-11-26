@@ -46,7 +46,9 @@ test('fault recovery shows the persisted automatic draft and clears only after i
     fixture.__TAURI_INTERNALS__={invoke:(command:string,args:unknown)=>fixture.fixtureInvoke(command,args)};});
   try{
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
-    web='';await page.getByRole('button',{name:'AI 与设置',exact:true}).click();await page.getByText('故障处理',{exact:true}).click();
+    web='';await page.getByRole('button',{name:'系统设置',exact:true}).click();
+    expect(calls.filter(command=>command==='inspectSavedDraftRecovery')).toHaveLength(0);
+    await page.getByText('故障处理',{exact:true}).click();
     const recovery=page.getByRole('region',{name:'网页未发送内容恢复'});
     await recovery.getByText('当前没有可安全清理的已保存自动回复稿，网页输入已保留。',{exact:true}).waitFor();
     expect(clears).toBe(0);web=saved;await page.clock.fastForward(15_000);
@@ -54,22 +56,23 @@ test('fault recovery shows the persisted automatic draft and clears only after i
     expect(calls.filter(command=>command==='inspectSavedDraftRecovery')).toHaveLength(2);
     await page.clock.fastForward(60_000);expect(calls.filter(command=>command==='inspectSavedDraftRecovery')).toHaveLength(2);
     expect(await recovery.innerText()).toContain('保留已保存的应用回复草稿和版本');expect(clears).toBe(0);expect(web).toBe(saved);
-    await page.getByRole('button',{name:'收件箱',exact:true}).click();await page.getByRole('button',{name:'AI 与设置',exact:true}).click();await page.getByText('故障处理',{exact:true}).click();
+    await page.getByRole('button',{name:'会话中心',exact:true}).click();await page.getByRole('button',{name:'系统设置',exact:true}).click();await page.getByText('故障处理',{exact:true}).click();
     await recovery.getByRole('button',{name:'保留应用回复稿并清空网页未发送内容',exact:true}).click();
     await recovery.getByText('网页未发送内容已清空，应用回复草稿和版本已保留；未发送或重试。',{exact:true}).waitFor();
     expect(clears).toBe(1);expect(web).toBe('');expect(calls.filter(command=>command==='clearSavedDraftRecovery')).toHaveLength(1);
     expect(['reply_drafts','draft_revisions','manual_send_commands','send_intents','delivery_receipts','budgets'].map(name=>store.db.prepare('SELECT * FROM '+name).all())).toEqual(before);
     expect(calls.some(command=>['sendHumanReply','generateSuggestion'].includes(command))).toBe(false);expect(store.db.prepare('SELECT count(*) n FROM model_calls').get()).toEqual({n:0});expect(errors).toEqual([]);
-    await page.getByRole('button',{name:'收件箱',exact:true}).click();await page.getByRole('button',{name:'AI 与设置',exact:true}).click();
-    await expect.poll(()=>calls.filter(command=>command==='inspectSavedDraftRecovery').length).toBe(4);
+    await page.getByRole('button',{name:'会话中心',exact:true}).click();await page.getByRole('button',{name:'系统设置',exact:true}).click();
+    expect(calls.filter(command=>command==='inspectSavedDraftRecovery')).toHaveLength(3);
     await page.getByText('故障处理',{exact:true}).click();
+    await expect.poll(()=>calls.filter(command=>command==='inspectSavedDraftRecovery').length).toBe(4);
     await recovery.getByText('当前没有可安全清理的已保存自动回复稿，网页输入已保留。',{exact:true}).waitFor();
     for(const count of [5,6,7]){
       await page.clock.fastForward(15_000);await expect.poll(()=>calls.filter(command=>command==='inspectSavedDraftRecovery').length).toBe(count);
       await recovery.getByText('当前没有可安全清理的已保存自动回复稿，网页输入已保留。',{exact:true}).waitFor();
     }
     await page.clock.fastForward(60_000);expect(calls.filter(command=>command==='inspectSavedDraftRecovery')).toHaveLength(7);
-    await page.getByRole('button',{name:'收件箱',exact:true}).click();await page.clock.fastForward(60_000);
+    await page.getByRole('button',{name:'会话中心',exact:true}).click();await page.clock.fastForward(60_000);
     expect(calls.filter(command=>command==='inspectSavedDraftRecovery')).toHaveLength(7);
   }finally{await browser.close();await server.close();await service.close();store.close();}
 });

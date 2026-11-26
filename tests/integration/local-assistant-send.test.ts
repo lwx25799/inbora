@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import {expect,test} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {WorkbenchAuthority} from '../../src/app/authority.js';
@@ -75,8 +76,8 @@ test('a pure media event cannot acquire assistant sending or consume a human-med
 
 test('paid suggestions reserve existing model grant and assistant grant with one global charge',async()=>{
   const f=await setup({modelLimit:1});try{
+    await installFixtureKey(f.service,f.gui,{key:'synthetic-only'});
     const model=f.auto.grant('MODEL',{ownId:'own-1',channels:['DIRECT_MESSAGE'],model:'deepseek-flash',modelLimit:1,expiresAt:null});
-    await f.service.dispatch(f.gui,{command:'configureAi',settings:{model:'deepseek-flash',persona:'',business:'',rules:''},key:'synthetic-only'});
     f.store.db.prepare("UPDATE budget_limits SET maximum=1 WHERE kind='MODEL'").run();
     expect(await f.service.dispatch(f.token,{command:'generateSuggestion',eventId:f.eventId,draftVersion:0})).toMatchObject({text:'Synthetic assistant suggestion'});
     expect(f.calls()).toBe(1);expect(f.store.budget('MODEL').used).toBe(1);
@@ -89,8 +90,8 @@ test('paid suggestions reserve existing model grant and assistant grant with one
 test('late assistant revocation rejects a paid result but retains model spend and the existing draft',async()=>{
   let release=()=>{},entered=()=>{};const gate=new Promise<void>(resolve=>{release=resolve;}),waiting=new Promise<void>(resolve=>{entered=resolve;});
   const f=await setup({modelGate:async()=>{entered();await gate;}});try{
+    await installFixtureKey(f.service,f.gui,{key:'synthetic-only'});
     f.auto.grant('MODEL',{ownId:'own-1',channels:['DIRECT_MESSAGE'],model:'deepseek-flash',modelLimit:2,expiresAt:null});
-    await f.service.dispatch(f.gui,{command:'configureAi',settings:{model:'deepseek-flash',persona:'',business:'',rules:''},key:'synthetic-only'});
     f.service.authority.save(f.token,f.eventId,f.input.generation,0,'Existing assistant draft');
     const request=f.service.dispatch(f.token,{command:'generateSuggestion',eventId:f.eventId,draftVersion:1});await waiting;
     f.service.authority.assistant.revoke();release();await expect(request).rejects.toThrow('ASSISTANT_PERMISSION_REQUIRED');
@@ -102,8 +103,8 @@ test('late assistant revocation rejects a paid result but retains model spend an
 test.each(['CONTEXT','DRAFT','OWNERSHIP','SELECTION'] as const)('late %s change rejects assistant model results before candidate persistence',async change=>{
   let release=()=>{},entered=()=>{};const gate=new Promise<void>(resolve=>{release=resolve;}),waiting=new Promise<void>(resolve=>{entered=resolve;});
   const f=await setup({modelGate:async()=>{entered();await gate;}});try{
+    await installFixtureKey(f.service,f.gui,{key:'synthetic-only'});
     f.auto.grant('MODEL',{ownId:'own-1',channels:['DIRECT_MESSAGE'],model:'deepseek-flash',modelLimit:2,expiresAt:null});
-    await f.service.dispatch(f.gui,{command:'configureAi',settings:{model:'deepseek-flash',persona:'',business:'',rules:''},key:'synthetic-only'});
     const request=f.service.dispatch(f.token,{command:'generateSuggestion',eventId:f.eventId,draftVersion:0});await waiting;
     if(change==='CONTEXT')pending(f.store,candidate({platformEventId:'arrived-during-model',occurredAt:new Date().toISOString(),text:'New context'}));
     if(change==='DRAFT')f.service.authority.save(f.token,f.eventId,f.input.generation,0,'Later edited draft');

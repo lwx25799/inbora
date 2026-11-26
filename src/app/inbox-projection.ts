@@ -3,7 +3,8 @@ import {decodeEventRow,type EventRow,type EventStore} from '../storage/store.js'
 import {commentThreadGroupKey} from '../storage/comment-thread-context.js';
 import {readNoReplyEventIds} from './message-disposition.js';
 
-export type ReplyStatus='WAITING'|'REPLIED'|'NOT_REQUIRED'|'MANUAL_ONLY';
+import type {ReplyStatus} from '../contracts/inbox.js';
+export type {ReplyStatus} from '../contracts/inbox.js';
 interface OrderedRow extends EventRow {ordinal:number;scope:string}
 interface IntentRow {event_id:string;attempt_started_at:string;target_digest:string;text_digest:string;text:string;approval:string|null;verified:number|null}
 interface ResumeRow {event_id:string;text:string;ordinal:number;saved_at:number}
@@ -33,14 +34,14 @@ export class InboxProjection {
   private readonly mediaIdentityConflicts=new Set<string>();
   private readonly confirmedFollowups=new Map<string,number>();
   constructor(store:EventStore,channel:string='ALL',target?:{key:string;accountId:string;eventId?:string}) {
-    const where=["e.status<>'BASELINE'"],args:string[]=[];
+    const where=["e.status<>'BASELINE'",'e.account_id=?'],args:string[]=[store.accountId];
     if(channel!=='ALL'){where.push('e.channel=?');args.push(channel);}
-    if(target){where.push('e.account_id=?');args.push(target.accountId);
+    if(target){store.assertAccount(target.accountId);
       where.push(target.eventId?'e.id=?':'e.target_key=?');args.push(target.eventId??target.key);}
     const filter=where.join(' AND '),db=store.db;
     const tables=this.tables=new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('verification_results','draft_revisions','human_reply_turns','chat_messages','chat_delivery_links')").all() as {name:string}[]).map(row=>row.name));
     const rows=db.prepare(`SELECT e.rowid AS ordinal,e.id,e.payload,e.binding,e.status,e.scope FROM inbound_events e WHERE ${filter} ORDER BY e.rowid`).all(...args) as OrderedRow[];
-    this.events=rows.map(decodeEventRow);this.order=new Map(rows.map(row=>[row.id,row.ordinal]));
+    this.events=rows.map(row=>decodeEventRow(row,store.accountId));this.order=new Map(rows.map(row=>[row.id,row.ordinal]));
     this.intents=new Map((db.prepare(`SELECT i.event_id,i.attempt_started_at,i.target_digest,i.text_digest,d.text,d.approval,
       ${tables.has('verification_results')?'(SELECT v.verified FROM verification_results v WHERE v.intent_id=i.id ORDER BY v.rowid DESC LIMIT 1)':'NULL'} AS verified
       FROM send_intents i JOIN inbound_events e ON e.id=i.event_id JOIN reply_drafts d ON d.id=i.draft_id WHERE ${filter}`).all(...args) as IntentRow[]).map(row=>[row.event_id,row]));
@@ -62,7 +63,7 @@ export class InboxProjection {
       WHERE ${filter} AND d.status IN ('DRAFT','APPROVED') AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=d.event_id)`)
       .all(...args) as ResumeRow[]).map(row=>[row.event_id,row]));
     this.own=new Map((db.prepare('SELECT id,own_id FROM accounts').all() as {id:string;own_id:string}[]).map(row=>[row.id,row.own_id]));
-    this.noReply=readNoReplyEventIds(store,this.own.get('account_001')??null);
+    this.noReply=readNoReplyEventIds(store,this.own.get(store.accountId)??null);
     const peers=new Map<string,string>();
     for(const event of this.events){
       if(event.payload.channel!=='DIRECT_MESSAGE'||!event.payload.conversationId)continue;

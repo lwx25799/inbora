@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import { expect, test } from 'vitest';
 import { join } from 'node:path';
 import { BrowserProfileOwner } from '../../src/browser/profile-owner.js';
@@ -149,7 +150,7 @@ test('an empty native window cannot count as a completed conversation read',asyn
   try{
     await mount(owner,server.origin);await owner.dm.evaluate(()=>document.querySelectorAll('.message').forEach(row=>row.remove()));
     const mapping=config(server.origin),input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,
-      evidenceId:'fixture-empty-window',peer:mapping.peers[0]!,dmWindow:true};
+      accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-empty-window',peer:mapping.peers[0]!,dmWindow:true};
     await expect(owner.dm.evaluate(captureObserved,input)).rejects.toThrow('OBSERVATION_DM_MESSAGES_DOM_NOT_READY');
   }finally{await owner.close();await server.close();}
 });
@@ -208,7 +209,7 @@ test.each([false,true])('DM diagnostic samples the business window and prioritiz
       for(const box of document.querySelectorAll('#chat > .box'))box.remove();
       document.querySelector('#chat')!.append(list);list.scrollTop=64;
     },missing);
-    const mapping=config(server.origin),peer=mapping.peers[0]!,input={mapping,channel:'dm' as const,index:0,evidenceId:'fixture-window',peer,dmWindow:true};
+    const mapping=config(server.origin),peer=mapping.peers[0]!,input={mapping,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-window',peer,dmWindow:true};
     if(missing)await expect(owner.dm.evaluate(captureObserved,input)).rejects.toThrow('OBSERVATION_DM_CONTENT_DOM_NOT_READY');
     else expect((await owner.dm.evaluate(captureObserved,input)).events.map(event=>event.platformEventId)).toEqual(['1002','1003','1004']);
     const report=await new ObservedReader(owner.dm,mapping).diagnostic('dm',0,peer);
@@ -254,7 +255,7 @@ test('DM diagnostic uses the same unique native sender proof for an uncalibrated
     const report=await reader.diagnostic('dm',0,peer);
     expect(report.messageSamples![0]).toMatchObject({senderKnown:true,nativeKind:8,nativeStatus:0,timeValid:true,
       nativeShare:{aweType:800,awemeType:55,slides:null,itemIdPresent:true,route:'VIDEO'}});
-    const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'fixture-unknown-peer',peer,dmWindow:true};
+    const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-unknown-peer',peer,dmWindow:true};
     const batch=await owner.dm.evaluate(captureObserved,input);
     expect(batch.bindings![0]!.uid).toBe('200');
     for(const secret of ['1234567890123456789','conv-a','peer-sec','controlled-1'])expect(JSON.stringify(report)).not.toContain(secret);
@@ -277,7 +278,7 @@ test('DM kind77 diagnostic measures existing share fields without promoting a mi
     const report=await new ObservedReader(owner.dm,mapping).diagnostic('dm',0,peer);
     expect(report.messageSamples![0]).toMatchObject({nativeKind:77,contentMissing:true,senderKnown:true,
       nativeShare:{aweType:800,awemeType:68,slides:true,itemIdPresent:true,route:'NOTE'}});
-    const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'fixture-kind77-measurement',peer,dmWindow:true};
+    const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-kind77-measurement',peer,dmWindow:true};
     await expect(owner.dm.evaluate(captureObserved,input)).rejects.toThrow('OBSERVATION_DM_CONTENT_DOM_NOT_READY');
     for(const secret of ['1234567890123456789','conv-a','peer-sec'])expect(JSON.stringify(report)).not.toContain(secret);
   }finally{await owner.close();await server.close();}
@@ -295,7 +296,7 @@ test.each(['MULTIPLE','KNOWN_CONFLICT','GETTER'] as const)('DM diagnostic and bu
     const mapping=config(server.origin),peer={...mapping.peers[0]!,conversationId:mapping.peers[0]!.conversationId!,uid:fault==='KNOWN_CONFLICT'?'999':null};
     const code=fault==='GETTER'?'RENDERED_ACCESSOR_UNSUPPORTED':'OBSERVATION_SENDER_UNVERIFIED';
     await expect(new ObservedReader(owner.dm,mapping).diagnostic('dm',0,peer)).rejects.toThrow(code);
-    const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,evidenceId:'fixture-sender-conflict',peer,dmWindow:true};
+    const input:Parameters<typeof captureObserved>[0]={mapping,channel:'dm',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-sender-conflict',peer,dmWindow:true};
     await expect(owner.dm.evaluate(captureObserved,input)).rejects.toThrow(code);
     expect(await owner.dm.evaluate(()=>(window as unknown as {senderGetterCalls:number}).senderGetterCalls)).toBe(0);
   }finally{await owner.close();await server.close();}
@@ -624,7 +625,7 @@ test('work discovery requires exact work, author, tooltip ID and visible text', 
     expect(batch.events[0]).toMatchObject({platformEventId:'50',videoId:'10',commentId:'50',actorId:'200',discovery:'ALLOWED_WORK'});
     await owner.notification.locator('.body').evaluate(e=>e.textContent='changed visible text');
     const changed=await owner.notification.evaluate(captureObserved,
-      {mapping:config(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture'});
+      {mapping:config(server.origin),channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture'});
     expect(changed.events[0]).toMatchObject({text:'one comment',observationIssue:'COMMENT_TEXT_UNVERIFIED'});
     expect(changed.unsupported).toBe(1);
     const outside=config(server.origin);outside.works[0]!.url='https://example.com/video/10';
@@ -642,10 +643,10 @@ test('only an explicitly mapped empty comment state permits a successful empty w
     const batch=await new ObservedReader(owner.notification,config(server.origin)).comments(0);
     expect(batch.loaded).toBe(0);expect(batch.events).toEqual([]);
     const unmapped=config(server.origin);unmapped.selectors.commentEmpty=null;
-    await expect(owner.notification.evaluate(captureObserved,{mapping:unmapped,channel:'comments' as const,index:0,evidenceId:'fixture'}))
+    await expect(owner.notification.evaluate(captureObserved,{mapping:unmapped,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture'}))
       .rejects.toThrow('OBSERVATION_COMMENT_ROOTS_DOM_NOT_READY');
     await owner.notification.locator('#empty-comments').evaluate(node=>node.remove());
-    await expect(owner.notification.evaluate(captureObserved,{mapping:config(server.origin),channel:'comments' as const,index:0,evidenceId:'fixture'}))
+    await expect(owner.notification.evaluate(captureObserved,{mapping:config(server.origin),channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture'}))
       .rejects.toThrow('OBSERVATION_COMMENT_ROOTS_DOM_NOT_READY');
   }finally{await owner.close();await server.close();}
 });

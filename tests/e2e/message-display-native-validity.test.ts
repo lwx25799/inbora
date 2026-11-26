@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {afterAll,beforeAll,expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -34,7 +35,7 @@ test.each([
     const native=Object.getOwnPropertyDescriptor(row,'__reactProps$fixture')!.value.children.props.message;
     native.serverId='99891';native.type=7;native.createdAt=new Date(at);native._parsedContent.text=witness;
   },{at,witness});
-  const input={mapping,channel:'dm' as const,index:0,evidenceId:'synthetic-native-validity',peer:mapping.peers[0]!,dmWindow:true};
+  const input={mapping,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-native-validity',peer:mapping.peers[0]!,dmWindow:true};
   const batch=await owner.dm.evaluate(captureObserved,input),event=batch.events[0]!,original=JSON.stringify(event),cache=new MessagePreviewStore(root);
   const prior=await owner.dm.evaluate(inspectMessageShare,{mapping,event,peer:mapping.peers[0]!});
   expect(prior.displayText).toBe(witness);expect(event.observationIssue).toBe('DM_CONTENT_UNVERIFIED');

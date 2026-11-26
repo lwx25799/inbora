@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test,vi} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -23,7 +24,7 @@ async function setup(outgoing=false,mixed=false){
     native.serverId='99711';native.type=7;native.sender=outgoing?'100':'200';native.createdAt=new Date(at);native._parsedContent.text=(mixed?'hello ':'')+'[微笑]';
   },{at,url:server.origin+'/emoji.png',outgoing,mixed});
   await owner.dm.locator('.message img').evaluate(image=>(image as HTMLImageElement).decode());
-  const input={mapping,channel:'dm' as const,index:0,evidenceId:'synthetic-carrier-preview',dmWindow:true,peer:mapping.peers[0]!};
+  const input={mapping,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-carrier-preview',dmWindow:true,peer:mapping.peers[0]!};
   const batch=await owner.dm.evaluate(captureObserved,input),fresh=batch.events[0]!;
   expect(isStrong(fresh)).toBe(true);
   const event:InboundEvent={...fresh,text:mixed?'[含媒体的消息，需人工查看]':'[图片或表情消息，需人工查看]',

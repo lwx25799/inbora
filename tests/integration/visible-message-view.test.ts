@@ -1,9 +1,10 @@
 import {afterEach,expect,test,vi} from 'vitest';
 import {EventEmitter} from 'node:events';
 import {join} from 'node:path';
-import {writeFile} from 'node:fs/promises';
+import {rm,writeFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {BrowserService} from '../../src/app/browser-service.js';
+import {inspectRecoveryNavigation} from '../../src/app/browser-recovery-locations.js';
 import {ClientService} from '../../src/app/service.js';
 import {AutomationStore} from '../../src/storage/automation-store.js';
 import {ChatMessageStore} from '../../src/storage/chat-messages.js';
@@ -11,6 +12,8 @@ import {AccountActor} from '../../src/browser/account-actor.js';
 import type {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
 import {ObservedReader} from '../../src/adapters/observed-reader.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
+import * as runtime from '../../src/config/runtime.js';
+import {EventStore} from '../../src/storage/store.js';
 import {observedMapping} from '../fixtures/observed-site.js';
 import {candidate,database,privateTemp} from '../helpers.js';
 import {VerificationScheduler} from '../../src/app/verification-scheduler.js';
@@ -21,11 +24,11 @@ afterEach(()=>vi.restoreAllMocks());
 async function setup(kind:'CURRENT'|'HISTORY'|'OWN'='CURRENT'){
   const root=privateTemp('visible-message-view-'),store=database();await migrateClient(store,join(root,'client.sqlite'));
   const windows:(number|undefined)[]=[],sequence:string[]=[],owners:{closed:boolean;dirty:boolean;actor:AccountActor;context:EventEmitter;
-    dm:{bringToFront:()=>Promise<void>;evaluate:()=>Promise<boolean>;locator:()=>{evaluateAll:()=>Promise<boolean>}}}[]=[];
+    dm:{url:()=>string;bringToFront:()=>Promise<void>;evaluate:(fn:unknown)=>Promise<boolean|{originMatches:boolean;empty:boolean}>}}[]=[];
   const browser=new BrowserService(root,async(_profile,headless)=>{
     expect(owners.every(owner=>owner.closed)).toBe(true);sequence.push(headless?'headless':'headed');
-    const context=new EventEmitter(),state={closed:false,dirty:false,actor:new AccountActor(),context,dm:{bringToFront:async()=>{sequence.push('front');},evaluate:async()=>windows.at(-1)===500,
-      locator:()=>({evaluateAll:async()=>!state.dirty})}};owners.push(state);
+    const context=new EventEmitter(),state={closed:false,dirty:false,actor:new AccountActor(),context,dm:{url:()=> 'https://www.douyin.com/',bringToFront:async()=>{sequence.push('front');},
+      evaluate:async(fn:unknown)=>fn===inspectRecoveryNavigation?{originMatches:true,empty:!state.dirty}:windows.at(-1)===500}};owners.push(state);
     return {...state,notification:state.dm,version:()=> 'fixture',open:async()=>{},close:async()=>{sequence.push('close');state.closed=true;context.emit('close');}} as unknown as BrowserProfileOwner;
   });
   const mapping={...observedMapping('https://www.douyin.com'),environment:'douyin'};await writeFile(join(root,'observation-mapping.json'),JSON.stringify(mapping));
@@ -107,7 +110,8 @@ test('a superseded visible request cannot locate after a newer manual request ha
     await f.browser.open();let enter=()=>{};const entered=new Promise<void>(r=>{enter=r;}),gate=new Promise<void>(r=>{release=r;});
     const held=f.browser.actor.run(async()=>{enter();await gate;});await entered;
     const first=f.service.dispatch(f.token,{command:'openTarget',eventId:f.eventId,visible:true});
-    const failed=expect(first).rejects.toThrow('MESSAGE_VIEW_CANCELLED');await expect.poll(()=>f.browser.loginRecovery).toBe(true);
+    const failed=expect(first).rejects.toThrow('MESSAGE_VIEW_CANCELLED');
+    await expect.poll(()=>(f.browser as unknown as {loginGeneration:number}).loginGeneration).toBe(1);
     const second=f.service.dispatch(f.token,{command:'openTarget',eventId:f.eventId,visible:true});
     await expect.poll(()=>(f.browser as unknown as {loginGeneration:number}).loginGeneration).toBe(2);release();await held;await failed;
     expect(await second).toEqual({opened:true,located:true});expect(f.windows).toEqual([undefined,500]);expect(f.sequence.filter(item=>item==='headed')).toHaveLength(1);
@@ -159,8 +163,35 @@ test('a human preparation already awaiting inspection fails before intent when e
     const snapshot={accountId:'account_001',ownId:'100',targetKey:'dm:conv-a',eventBinding:eventBinding(f.event),contextDigest:'fixture',composerKey:'dm:conv-a',mappingDigest:'fixture'};
     vi.spyOn(f.browser,'adapter').mockResolvedValue({dispose:()=>{},adapter:{inspect:async()=>{enter();await gate;return snapshot;},prepare:async()=>{},
       verifyPrepared:async()=>snapshot,baseline:async()=>[],clickOnce:async()=>{throw Error('MUST_NOT_CLICK');},readback:async()=>null}});
-    await f.browser.open();const task=workflow.prepare(f.token,id);await entered;Object.assign(f.browser,{viewRequests:1});release();await task;
+    await f.browser.open();const task=workflow.prepare(f.token,id);await entered;(f.browser as unknown as {viewRequests:Set<number>}).viewRequests.add(1);release();await task;
     expect(await f.service.dispatch(f.token,{command:'getSendResult',commandId:id})).toMatchObject({status:'FAILED_BEFORE_CLICK',reason:'LOGIN_RECOVERY_IN_PROGRESS',accepted:false,intentId:null});
     expect(f.service.authority.draftFor(f.eventId)?.text).toBe(input.text);expect(f.store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});
-  }finally{Object.assign(f.browser,{viewRequests:0});release();await f.close();}
+  }finally{(f.browser as unknown as {viewRequests:Set<number>}).viewRequests.clear();release();await f.close();}
+});
+
+test('a stored view delayed on mapping cannot reopen the browser after binding another store',async()=>{
+  const f=await setup(),b=new EventStore(join(f.root,'store-b.sqlite'),true);
+  await f.browser.open();
+  const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();
+  const load=runtime.loadObservationMapping;
+  const lookup=vi.spyOn(runtime,'loadObservationMapping').mockImplementationOnce(async root=>{
+    entered.resolve();await release.promise;return load(root);
+  });
+  const beforeOpen=vi.fn(async()=>new AbortController().signal);
+  const view=f.browser.openStoredMessage(f.store,f.eventId,beforeOpen,()=>{}).catch(error=>error);
+  try{
+    await Promise.race([entered.promise,view.then(error=>{throw error;})]);
+    await f.browser.close();
+    f.browser.bindStore(b);
+    await f.browser.open();
+    const sequence=[...f.sequence];
+    release.resolve();
+    expect(await view).toMatchObject({code:'MESSAGE_VIEW_CANCELLED'});
+    expect(beforeOpen).not.toHaveBeenCalled();
+    expect(f.read).not.toHaveBeenCalled();
+    expect(f.sequence).toEqual(sequence);
+  }finally{
+    release.resolve();await view;lookup.mockRestore();
+    await f.close();b.close();await rm(f.root,{recursive:true,force:true});
+  }
 });

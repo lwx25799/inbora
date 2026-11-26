@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import {reuseDevelopmentWeb} from './dev-web-reuse.mjs';
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const env = { ...process.env };
 const cargo = join(root, ".local", "toolchains", "cargo");
@@ -19,9 +20,11 @@ const args = [
 ];
 if (!dev) args.push("--ci", "--", "--locked");
 else {
+  const reuseWeb = await reuseDevelopmentWeb(root);
   const configuration = join(root, ".local", "desktop-dev.conf.json");
   mkdirSync(join(root, ".local"), { recursive: true });
-  writeFileSync(configuration, JSON.stringify({ identifier: "app.inbora.development", app: { windows: [{
+  writeFileSync(configuration, JSON.stringify({ identifier: "app.inbora.development",
+    ...(reuseWeb?{build:{beforeDevCommand:null}}:{}),app: { windows: [{
     label: "main", title: "inbora · 开发调试", width: 1240, height: 800, minWidth: 900, minHeight: 640,
     dataDirectory: join(root, ".local", "desktop-dev-webview"),
   }] } }));

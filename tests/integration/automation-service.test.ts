@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import { expect, test } from "vitest";
 import { join } from "node:path";
 import { ClientService } from "../../src/app/service.js";
@@ -50,12 +51,15 @@ test('waiting replies include review and uncertain records while replied records
   }finally{await service.close();store.close();}
 });
 
-test('saving an API key enables bounded model consent without a second checkbox or automatic sending',async()=>{
+test('saving and applying a key does not create persistent model consent',async()=>{
   const root=privateTemp('key-consent-'),store=database();await migrateClient(store,join(root,'backup.sqlite'));pending(store);
   const service=new ClientService(store,new BrowserService(root));await service.loadSettings();const token=service.authority.issueSession();
   try{
-    expect(await service.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-contract-key'}))
-      .toMatchObject({keyPresent:true,modelAuthorized:true,configuredMode:'DRAFT_ONLY',automation:{replyPolicy:null}});
+    await expect(service.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-contract-key'}))
+      .rejects.toThrow('USE_MODEL_PROVIDER_SETTINGS');
+    await installFixtureKey(service,token);
+    expect(await service.dispatch(token,{command:'getStatus'}))
+      .toMatchObject({keyPresent:true,modelAuthorized:false,configuredMode:'DRAFT_ONLY',automation:{replyPolicy:null,modelGrant:null}});
     expect(store.db.prepare('SELECT count(*) n FROM model_calls').get()).toEqual({n:0});
     expect(store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});
     expect(store.db.prepare('SELECT used FROM budgets ORDER BY kind').all()).toEqual([{used:0},{used:0}]);
@@ -122,7 +126,7 @@ test.each([false,true])('manual AI suggestion refuses an unverified comment befo
     pending(store,later?clean:issue);const eventId=store.events()[0]!.id;
     if(later)store.observe(clean.channel,'notifications',[issue],'own-1','fixture');
     await service.loadSettings();const token=service.authority.issueSession();
-    await service.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-contract-key'});
+    await installFixtureKey(service,token);
     await service.dispatch(token,{command:'setModelGrant',scope:{ownId:'own-1',channels:['COMMENT_NOTIFICATION'],model:'deepseek-flash',modelLimit:1,expiresAt:null},confirmed:true});
     await expect(service.dispatch(token,{command:'generateSuggestion',eventId,draftVersion:0})).rejects.toThrow('COMMENT_TEXT_UNVERIFIED');
     expect(calls).toBe(0);expect(store.db.prepare("SELECT used FROM budgets WHERE kind='MODEL'").get()).toEqual({used:0});
@@ -139,7 +143,7 @@ test("scope consent survives service restart and ordinary settings saves preserv
   let service=new ClientService(store,new BrowserService(root),provider);
   try {
     const eventId=pending(store);await service.loadSettings();let token=service.authority.issueSession();
-    await service.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-contract-key'});
+    await installFixtureKey(service,token);
     await service.dispatch(token,{command:'setModelGrant',scope:{ownId:'own-1',channels:['DIRECT_MESSAGE'],model:'deepseek-flash',modelLimit:1,expiresAt:null},confirmed:true});
     const modelVersion=(await service.dispatch(token,{command:'getStatus'}) as {automation:{modelGrant:{version:number}}}).automation.modelGrant.version;
     await service.dispatch(token,{command:'configureAi',settings:{...defaultSettings,business:'Ordinary business update'},key:''});
@@ -163,7 +167,8 @@ test.each(['setKeyStorage','clearModelKey'] as const)('later %s cannot be undone
   try{
     const saving=service.dispatch(token,{command:'configureAi',settings:defaultSettings,key:'synthetic-late-config-key'});
     const clearing=service.dispatch(token,command==='setKeyStorage'?{command,storage:'DELETE'}:{command});
-    await Promise.all([saving,clearing]);
+    await expect(saving).rejects.toThrow('USE_MODEL_PROVIDER_SETTINGS');
+    await clearing;
     expect(await service.dispatch(token,{command:'getStatus'})).toMatchObject({keyPresent:false,keyStored:false});
   }finally{await service.close();store.close();}
 });

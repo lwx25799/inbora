@@ -1,15 +1,21 @@
-import { digest, requireSafe, isStrong, targetKey, validText, type Channel, type TargetSnapshot } from '../core/contracts.js';
+import { DEFAULT_ACCOUNT_ID, digest, requireSafe, isStrong, targetKey, validText, type Channel, type TargetSnapshot } from '../core/contracts.js';
 import type { EventStore } from '../storage/store.js';
-
-export interface CapabilityIdentity {
-  identityDigest: string;
-  mappingDigest: string;
-  browserVersion: string;
-  browserMode: "headed" | "headless";
-}
+import type { CapabilityIdentity } from '../platform/platform-connector.js';
+export type { CapabilityIdentity } from '../platform/platform-connector.js';
 /** Channel evidence and historical controlled trials; independent from operator/session ownership. */
 export class ChannelAuthority {
   constructor(readonly store: EventStore, readonly now: () => number) {}
+  private capabilityScope() {
+    return this.store.schemaVersion() >= 4
+      ? { table: "account_channel_capabilities", filter: "account_id=? AND connector=(SELECT connector FROM accounts WHERE id=?) AND ",
+          args: [this.store.accountId, this.store.accountId] }
+      : { table: "channel_capabilities", filter: "", args: [] };
+  }
+  hasSendCapability(): boolean {
+    const { table, filter, args } = this.capabilityScope();
+    return !!this.store.db.prepare(`SELECT 1 FROM ${table} WHERE ${filter}state='SEND_AVAILABLE' AND expires_at>? LIMIT 1`)
+      .get(...args, this.now());
+  }
   attest(
     channel: Channel,
     state: "READ_OK" | "SEND_REVIEW_ONLY" | "SEND_AVAILABLE" | "BLOCKED",
@@ -20,23 +26,25 @@ export class ChannelAuthority {
       evidence.length > 0 && identity.browserVersion !== "unknown",
       "CAPABILITY_EVIDENCE_REQUIRED",
     );
-    this.store.db
-      .prepare(
-        `INSERT INTO channel_capabilities VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(channel,browser_mode)
-      DO UPDATE SET state=excluded.state,identity_digest=excluded.identity_digest,mapping_digest=excluded.mapping_digest,
-      browser_version=excluded.browser_version,evidence_ref=excluded.evidence_ref,verified_at=excluded.verified_at,expires_at=excluded.expires_at`,
-      )
-      .run(
-        channel,
-        identity.browserMode,
-        state,
-        identity.identityDigest,
-        identity.mappingDigest,
-        identity.browserVersion,
-        evidence,
-        this.now(),
-        this.now() + 24 * 3600_000,
-      );
+    const { db, accountId } = this.store;
+    const now = this.now();
+    const values = [channel, identity.browserMode, state, identity.identityDigest, identity.mappingDigest,
+      identity.browserVersion, evidence, now, now + 24 * 3600_000];
+    const update = `DO UPDATE SET state=excluded.state,identity_digest=excluded.identity_digest,mapping_digest=excluded.mapping_digest,
+      browser_version=excluded.browser_version,evidence_ref=excluded.evidence_ref,verified_at=excluded.verified_at,expires_at=excluded.expires_at`;
+    db.transaction(() => {
+      const schema4 = this.store.schemaVersion() >= 4;
+      if (schema4) {
+        const connector = db.prepare("SELECT connector FROM accounts WHERE id=?").pluck().get(accountId);
+        requireSafe(typeof connector === "string", "ACCOUNT_NOT_FOUND");
+        db.prepare(`INSERT INTO account_channel_capabilities
+          (account_id,connector,channel,browser_mode,state,identity_digest,mapping_digest,browser_version,evidence_ref,verified_at,expires_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id,channel,connector,browser_mode) ${update}`)
+          .run(accountId, connector, ...values);
+      }
+      if (!schema4 || accountId === DEFAULT_ACCOUNT_ID) db.prepare(`INSERT INTO channel_capabilities VALUES(?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(channel,browser_mode) ${update}`).run(...values);
+    }).immediate();
   }
   calibrateTrial(
     draftId: string,
@@ -100,8 +108,9 @@ export class ChannelAuthority {
   ): boolean {
     if (!identity) return false;
     const row = this.store.db
-      .prepare("SELECT * FROM controlled_trials WHERE event_id=?")
-      .get(eventId) as
+      .prepare(`SELECT t.* FROM controlled_trials t JOIN inbound_events e ON e.id=t.event_id
+        WHERE t.event_id=? AND e.account_id=?`)
+      .get(eventId, this.store.accountId) as
       | {
           draft_id: string;
           draft_version: number;
@@ -128,9 +137,10 @@ export class ChannelAuthority {
   ): void {
     const trial = this.store.db
       .prepare(
-        "SELECT identity_json,evidence_ref FROM controlled_trials WHERE event_id=? AND used=1",
+        `SELECT t.identity_json,t.evidence_ref FROM controlled_trials t JOIN inbound_events e ON e.id=t.event_id
+          WHERE t.event_id=? AND e.account_id=? AND t.used=1`,
       )
-      .get(eventId) as
+      .get(eventId, this.store.accountId) as
       { identity_json: string; evidence_ref: string } | undefined;
     if (
       !trial ||
@@ -163,26 +173,28 @@ export class ChannelAuthority {
       })
       .immediate();
   }
+  capabilitySnapshot(
+    channel: Channel,
+    identity: CapabilityIdentity | null,
+  ) {
+    const { table, filter, args } = this.capabilityScope();
+    if (!identity) return null;
+    const row = this.store.db.prepare(`SELECT * FROM ${table} WHERE ${filter}channel=? AND browser_mode=?`)
+      .get(...args, channel, identity.browserMode) as {
+        state: string;
+        identity_digest: string;
+        mapping_digest: string;
+        browser_version: string;
+        evidence_ref: string;
+        expires_at: number;
+      } | undefined;
+    return row ?? null;
+  }
   capability(
     channel: Channel,
     identity: CapabilityIdentity | null,
   ): { state: string; reason: string; evidence: string | null } {
-    const row = identity
-      ? (this.store.db
-          .prepare(
-            "SELECT * FROM channel_capabilities WHERE channel=? AND browser_mode=?",
-          )
-          .get(channel, identity.browserMode) as
-          | {
-              state: string;
-              identity_digest: string;
-              mapping_digest: string;
-              browser_version: string;
-              evidence_ref: string;
-              expires_at: number;
-            }
-          | undefined)
-      : undefined;
+    const row = this.capabilitySnapshot(channel, identity);
     if (!row || !identity)
       return {
         state: "SEND_REVIEW_ONLY",

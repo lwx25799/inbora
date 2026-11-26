@@ -32,7 +32,7 @@ async function setup(share:SharedWork,copyFails=false,viewport={width:900,height
     fixture.__TAURI_INTERNALS__={invoke:(command:string,args:unknown)=>fixture.fixtureInvoke(command,args)};fixture.copiedLinks=[];
     Object.defineProperty(navigator,'clipboard',{value:{writeText:async(text:string)=>{if(copyFails)throw new Error('PRIVATE_CLIPBOARD_ERROR');fixture.copiedLinks.push(text);}}});
   },copyFails);
-  await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
+  await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);await page.getByRole('heading',{name:'会话中心',exact:true}).waitFor();
   return {root,id,page,commands,errors,close:async()=>{await browser.close();await server.close();await service.close();store.close();}};
 }
 

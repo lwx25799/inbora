@@ -1,19 +1,21 @@
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
 import {mountCommentReply,commentReplyMapping} from '../tests/fixtures/observed-site.ts';
 const source=process.argv[2]==='source',root=source?'src':'dist';
 const moduleUrl=name=>pathToFileURL(resolve(root,name.replace(/\.js$/,source?'.ts':'.js'))).href;
+const {DEFAULT_ACCOUNT_ID}=await import(moduleUrl('contracts/account.js'));
 const {BrowserProfileOwner}=await import(moduleUrl('browser/profile-owner.js'));
 const {captureObserved}=await import(moduleUrl('adapters/observed-reader.js'));
 const {captureCommentReply}=await import(moduleUrl('adapters/observed-comment-reply.js'));
 const {isStrong}=await import(moduleUrl('core/contracts.js'));
 const base=resolve('.local/tests/comment-inline-icon-smoke');await mkdir(base,{recursive:true});
-const dir=await mkdtemp(join(base,'run-')),server=await fixtureServer();
-const owner=await BrowserProfileOwner.launch(join(dir,'profile'),true),checks=[];
+const dir=await mkdtemp(join(base,'run-')),checks=[];
+let server,owner;
 try{
+  server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(dir,'profile'),true);
   await mountCommentReply(owner,server.origin);
   const mapping=commentReplyMapping(server.origin);
   await owner.notification.evaluate(()=>{
@@ -27,7 +29,7 @@ try{
         status:1,user:{uid:'100',secUid:'self-sec'}}}}}});
     root.append(child);
   });
-  const read=()=>owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,evidenceId:'synthetic'});
+  const read=()=>owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic'});
   const batch=await read(),event=batch.events[0];
   checks.push(['incoming inline icon preserves exact text',isStrong(event)&&event.text==='root fixture input']);
   // Keep the proof check independent so a collection failure cannot mask a readback failure.
@@ -50,4 +52,4 @@ try{
   checks.push(['incoming unknown element remains weak',!isStrong((await read()).events[0])]);
   const failed=checks.filter(([,ok])=>!ok).map(([name])=>name);
   assert.deepEqual(failed,[]);console.log(`${source?'source':'built'}: ${checks.length} comment inline-icon assertions passed`);
-}finally{await owner.close();await server.close();}
+}finally{await owner?.close();await server?.close();assert.ok(dir.startsWith(`${base}\\`)||dir.startsWith(`${base}/`));await rm(dir,{recursive:true,force:true});}

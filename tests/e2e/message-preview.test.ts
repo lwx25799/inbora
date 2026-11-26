@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test,vi} from 'vitest';
 import {join} from 'node:path';
 import {readdirSync,readFileSync,utimesSync,writeFileSync} from 'node:fs';
@@ -141,7 +142,7 @@ test('oversized and unloaded body images retain unavailable reasons and source f
     await f.owner.dm.evaluate(()=>{
       const row=document.querySelector('.message')!;row.innerHTML='<a href="/card"><div class="unknown-card">unmapped card title</div></a>';
     });
-    const cardInput:Parameters<typeof captureObserved>[0]={mapping:f.mapping,channel:'dm',index:0,evidenceId:'synthetic-card',dmWindow:true,peer:f.mapping.peers[0]!};
+    const cardInput:Parameters<typeof captureObserved>[0]={mapping:f.mapping,channel:'dm',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-card',dmWindow:true,peer:f.mapping.peers[0]!};
     await expect(f.owner.dm.evaluate(captureObserved,cardInput))
       .rejects.toThrow('OBSERVATION_DM_CONTENT_DOM_NOT_READY');
     expect(f.store.events().some(event=>event.payload.text.includes('unmapped card'))).toBe(false);f.noExternal();

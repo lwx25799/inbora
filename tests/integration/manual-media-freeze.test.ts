@@ -1,3 +1,4 @@
+import {installFixtureKey} from '../model-provider-helpers.js';
 import {expect,test} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
@@ -95,7 +96,7 @@ test.each(['intent','followup'])('native identity separates a new text/media mes
 test('a later text automatically replies once while the old media outcome stays immutable',async()=>{
   const f=await setup(true,null);try{
     const before=f.oldRows();
-    await f.service.dispatch(f.token,{command:'configureAi',settings:defaultSettings,key:'synthetic-offline-key'});
+    await installFixtureKey(f.service,f.token,{key:'synthetic-offline-key',grant:true});
     await f.service.dispatch(f.token,{command:'setReplyPolicy',confirmed:true,policy:{ownId:'own-1',channels:['DIRECT_MESSAGE'],
       model:defaultSettings.model,modelLimit:1,sendLimit:1,expiresAt:null,workIds:[],futureOwnWorks:false,
       conversationIds:[f.next.conversationId!],entireInbox:false,containsAny:[],excludesAny:[],instructions:'synthetic only',startHour:0,endHour:24}});

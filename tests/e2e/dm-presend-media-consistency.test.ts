@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -28,7 +29,7 @@ test('a formerly strong text original is blocked when its exact row gains visibl
     await owner.dm.locator('.message').evaluate(row=>{
       const image=document.createElement('img');image.width=16;image.height=16;image.alt='external media';row.append(image);
     });
-    const batch=await owner.dm.evaluate(captureObserved,{mapping:mapping.observation,channel:'dm' as const,index:0,evidenceId:'synthetic-after-media',
+    const batch=await owner.dm.evaluate(captureObserved,{mapping:mapping.observation,channel:'dm' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-after-media',
       peer:mapping.observation.peers[0]!,dmWindow:true});
     expect(batch.events).toHaveLength(1);expect(batch.events[0]?.observationIssue).toBe('DM_CONTENT_UNVERIFIED');
     expect(isStrong(batch.events[0]!)).toBe(false);
@@ -49,7 +50,7 @@ test('an outgoing row with external media cannot prove the approved plain reply 
       native.serverId='88961';native.type=7;native.serverStatus=0;native.createdAt=new Date(at);native._parsedContent.text='INCOMING BODY';
     },at);
     const event=(await owner.dm.evaluate(captureObserved,{mapping:mapping.observation,channel:'dm' as const,index:0,
-      evidenceId:'synthetic-proof-media',peer:mapping.observation.peers[0]!,dmWindow:true})).events[0]!;
+      accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-proof-media',peer:mapping.observation.peers[0]!,dmWindow:true})).events[0]!;
     expect(isStrong(event)).toBe(true);
     await owner.dm.evaluate(at=>{
       document.querySelector('.box')!.setAttribute('data-index','1');

@@ -1,10 +1,12 @@
+import {hasVisibleSecurityComponent} from './security-components.js';
 import { randomUUID } from 'node:crypto';
 import type { Locator, Page } from 'playwright';
 import { z } from 'zod';
 import type { Field, SiteMapping, EventFields } from '../config/site-mapping.js';
+import { DEFAULT_ACCOUNT_ID, type AccountId } from '../contracts/account.js';
 import { digest, eventBinding, eventSchema, isStrong, requireSafe, targetKey,
   type Channel, type InboundEvent, type ReplyAdapter, type SendProof, type TargetSnapshot } from '../core/contracts.js';
-import { captureAndGuard } from './click-guard.js';
+import { captureAndGuard, releaseMappedPreparation, type NavigationInput } from './click-guard.js';
 
 type Root = Page | Locator;
 export async function unique(root: Root, selector: string): Promise<Locator> {
@@ -30,30 +32,32 @@ async function visibleAny(page: Page, selector: string): Promise<boolean> {
   return false;
 }
 export class DomAdapter implements ReplyAdapter {
-  private sendButton: Locator | null = null;
-  private gateToken: string | null = null;
+  private preparation:{token:string;binding:string;text:string}|null=null;
   constructor(readonly page: Page, readonly channel: Channel, readonly mapping: SiteMapping,
-    private readonly receiptTimeoutMs = 5000) {}
+    private readonly receiptTimeoutMs = 5000, readonly accountId: AccountId = DEFAULT_ACCOUNT_ID) {}
   async guard(): Promise<void> {
     requireSafe(new URL(this.page.url()).origin === this.mapping.origin, 'UNEXPECTED_ORIGIN');
     for (const [code, selector] of [
       ['PLATFORM_STOP', this.mapping.guards.stopped], ['CHALLENGE_REQUIRED', this.mapping.guards.challenge],
       ['LOGIN_REQUIRED', this.mapping.guards.loginRequired],
-    ] as const) requireSafe(!await visibleAny(this.page, selector), code);
+    ] as const) requireSafe(!await this.page.evaluate(hasVisibleSecurityComponent,[selector]), code);
     await unique(this.page, this.mapping.guards.loggedIn);
     requireSafe(await field(this.page, this.mapping.guards.ownIdentity) === this.mapping.ownId, 'ACCOUNT_NOT_VERIFIED');
+  }
+  private async navigate(navigation:NavigationInput['navigation']):Promise<void>{
+    await this.page.evaluate(captureAndGuard,{mapping:this.mapping,channel:this.channel,accountId:this.accountId,navigation});
   }
   private async parse(root: Locator, fields: EventFields, evidenceId: string): Promise<InboundEvent> {
     const raw: Record<string, string | null> = {};
     for (const [key, spec] of Object.entries(fields)) raw[key] = await field(root, spec);
-    return eventSchema.parse({ ...raw, accountId: 'account_001', channel: this.channel, evidenceId,
+    return eventSchema.parse({ ...raw, accountId: this.accountId, channel: this.channel, evidenceId,
       direction: this.mapping.directionValues[raw.direction ?? ''] ?? 'UNKNOWN',
       kind: this.mapping.kindValues[raw.kind ?? ''] ?? 'UNKNOWN' });
   }
   async openNotifications(): Promise<void> {
     await this.guard();
     if (!await visibleAny(this.page, this.mapping.notification.panel))
-      await (await unique(this.page, this.mapping.notification.entry)).click();
+      await this.navigate({selector:this.mapping.notification.entry});
     await this.page.locator(this.mapping.notification.panel).waitFor({ state: 'visible' });
     await unique(this.page, this.mapping.notification.panel); await this.guard();
   }
@@ -69,7 +73,7 @@ export class DomAdapter implements ReplyAdapter {
   async openDm(): Promise<void> {
     await this.guard();
     if (!await visibleAny(this.page, this.mapping.dm.list))
-      await (await unique(this.page, this.mapping.dm.entry)).click();
+      await this.navigate({selector:this.mapping.dm.entry});
     await this.page.locator(this.mapping.dm.list).waitFor({ state: 'visible' });
     await unique(this.page, this.mapping.dm.list); await this.guard();
   }
@@ -92,13 +96,7 @@ export class DomAdapter implements ReplyAdapter {
     const activePane = await panes.count() === 1 && await panes.isVisible() ? panes : null;
     if (activeRowMatches && activePane && await field(activePane, this.mapping.dm.activeId) === id &&
       await field(activePane, this.mapping.dm.activePeerId) === peerId) return;
-    const list = await unique(this.page, this.mapping.dm.list); const matches: Locator[] = [];
-    for (const row of await list.locator(this.mapping.dm.rows).all()) {
-      if (await row.isVisible() && await field(row, this.mapping.dm.conversationId) === id &&
-        await field(row, this.mapping.dm.peerId) === peerId) matches.push(row);
-    }
-    requireSafe(matches.length === 1, 'CONVERSATION_NOT_UNIQUE');
-    await (await unique(matches[0]!, this.mapping.dm.select)).click();
+    await this.navigate({scope:this.mapping.dm.list,rows:this.mapping.dm.rows,selector:this.mapping.dm.select,match:{id,peerId}});
     // A composer can appear before the new conversation has finished loading.
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
@@ -127,15 +125,9 @@ export class DomAdapter implements ReplyAdapter {
     const t = this.mapping.targets.COMMENT_NOTIFICATION;
     if (await this.matchingRoot(e, false)) return;
     await this.openNotifications();
-    const panel = await unique(this.page, this.mapping.notification.panel); const matches: Locator[] = [];
-    for (const row of await panel.locator(this.mapping.notification.rows).all()) {
-      if (await row.isVisible() && eventBinding(await this.parse(row, this.mapping.notification.fields, e.evidenceId)) === eventBinding(e)) matches.push(row);
-    }
-    requireSafe(matches.length === 1 && this.mapping.notification.jump, 'NOTIFICATION_TARGET_UNRESOLVED');
-    const jump = await unique(matches[0]!, this.mapping.notification.jump);
-    const href = await jump.getAttribute('href');
-    if (href) requireSafe(new URL(href, this.page.url()).origin === this.mapping.origin, 'UNSAFE_COMMENT_LINK');
-    await jump.click();
+    const {panel,rows,jump}=this.mapping.notification;
+    requireSafe(jump,'NOTIFICATION_TARGET_UNRESOLVED');
+    await this.navigate({scope:panel,rows,selector:jump,match:{event:e,fields:this.mapping.notification.fields}});
     await this.page.locator(t.roots).filter({visible:true}).first().waitFor({ state: 'visible' });
     await this.guard();
   }
@@ -150,34 +142,44 @@ export class DomAdapter implements ReplyAdapter {
     return matches[0] ?? null;
   }
   async inspect(e: InboundEvent): Promise<TargetSnapshot> {
-    this.sendButton = null;
+    requireSafe(e.accountId === this.accountId, 'ACCOUNT_CHANGED');
     requireSafe(e.channel === this.channel && isStrong(e), 'WEAK_TARGET');
     await this.guard();
     if (this.channel === 'DIRECT_MESSAGE') await this.selectConversation(e.conversationId!, e.actorId!);
     else await this.locateComment(e);
-    const root = (await this.matchingRoot(e))!; const t = this.mapping.targets[this.channel];
-    if (t.openReply && !await visibleAny(this.page, t.composer)) await (await unique(root, t.openReply)).click();
+    const t = this.mapping.targets[this.channel];
+    if(t.openReply&&!await visibleAny(this.page,t.composer))await this.navigate({rows:t.roots,selector:t.openReply,match:{event:e,fields:t.fields}});
     return this.snapshot(e);
   }
   private async snapshot(e: InboundEvent, text: string | null = null, token: string | null = null): Promise<TargetSnapshot> {
-    const state = await this.page.evaluate(captureAndGuard, { mapping:this.mapping,channel:this.channel,event:e,text,token });
+    requireSafe(e.accountId===this.accountId,'ACCOUNT_CHANGED');
+    const state = await this.page.evaluate(captureAndGuard, { mapping:this.mapping,channel:this.channel,accountId:this.accountId,event:e,text,token });
+    requireSafe(state,'CLICK_DOM_GUARD_BLOCKED');
     return { accountId: e.accountId, ownId: this.mapping.ownId, targetKey: targetKey(e),
       eventBinding: eventBinding(e), contextDigest: digest(state.context), composerKey: targetKey(e), mappingDigest: digest(this.mapping) };
   }
   async prepare(e: InboundEvent, text: string): Promise<void> {
-    await this.snapshot(e);
-    await (await unique(this.page, this.mapping.targets[this.channel].composer)).fill(text);
+    requireSafe(e.accountId===this.accountId,'ACCOUNT_CHANGED');
+    requireSafe(!this.preparation,'MAPPED_EDITOR_ALREADY_PREPARED');
+    const token=randomUUID();
+    this.preparation={token,binding:eventBinding(e),text};
+    try{
+      const state=await this.page.evaluate(captureAndGuard,{mapping:this.mapping,channel:this.channel,
+        accountId:this.accountId,event:e,text:null,token:null,prepare:text,preparationToken:token});
+      requireSafe(state&&!state.existingDraft,'NATIVE_REPLY_EXISTING_DRAFT');
+    }catch(error){await this.dispose();throw error;}
   }
-  async verifyPrepared(e: InboundEvent, text: string): Promise<TargetSnapshot> {
-    const snapshot = await this.snapshot(e); const t = this.mapping.targets[this.channel];
-    const composer = await unique(this.page, t.composer);
-    const actual = await composer.evaluate(el => el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : el.textContent);
-    requireSafe(actual === text, 'APPROVED_TEXT_CHANGED');
-    this.sendButton = await unique(this.page, t.send);
-    requireSafe(await this.sendButton.isEnabled(), 'SEND_BUTTON_DISABLED');
-    this.gateToken = randomUUID();
-    const armed = await this.snapshot(e,text,this.gateToken);
-    requireSafe(digest(armed) === digest(snapshot), 'TARGET_CHANGED_REAPPROVE'); return armed;
+  async verifyPrepared(e:InboundEvent,text:string):Promise<TargetSnapshot>{
+    const preparation=this.preparation;
+    requireSafe(preparation?.binding===eventBinding(e)&&preparation.text===text,'SEND_NOT_PREPARED');
+    return this.snapshot(e,text,preparation.token);
+  }
+  async cancelPreparation(e:InboundEvent,text:string):Promise<void>{
+    if(this.preparation?.binding===eventBinding(e)&&this.preparation.text===text)await this.dispose();
+  }
+  async dispose():Promise<void>{
+    const preparation=this.preparation;this.preparation=null;
+    if(preparation)await this.page.evaluate(releaseMappedPreparation,{token:preparation.token,discard:true}).catch(()=>{});
   }
   private async proofs(e: InboundEvent): Promise<SendProof[]> {
     const t = this.mapping.targets[this.channel]; const result: SendProof[] = [];
@@ -198,16 +200,26 @@ export class DomAdapter implements ReplyAdapter {
   async baseline(e: InboundEvent): Promise<string[]> {
     await this.snapshot(e); return (await this.proofs(e)).map(p => p.id);
   }
-  async clickOnce(): Promise<void> {
-    requireSafe(this.sendButton && this.gateToken, 'SEND_NOT_PREPARED');
-    this.sendButton = null;
-    // One browser task owns final validation and DOM submission after durable intent.
-    const accepted = await this.page.evaluate(token => {
-      const gate = (window as unknown as {__inboraGate?:{token:string;submit:()=>boolean}}).__inboraGate;
-      if (!gate || gate.token !== token) throw new Error('CLICK_GUARD_NOT_ARMED');
-      return gate.submit();
-    },this.gateToken);
-    this.gateToken = null; requireSafe(accepted,'CLICK_GUARD_BLOCKED');
+  async clickOnce(_notBefore?:string,check?:()=>void):Promise<void>{
+    const preparation=this.preparation;
+    requireSafe(preparation,'SEND_NOT_PREPARED');
+    this.preparation=null;
+    try{
+      check?.();
+      const accepted=await this.page.evaluate(token=>{
+        const host=window as unknown as {__inboraGate?:{token:string;submit:()=>boolean;remove:()=>void};__inboraPreparation?:{token:string;release:(discard:boolean)=>void}};
+        const gate=host.__inboraGate;
+        if(gate?.token!==token)throw new Error('CLICK_GUARD_NOT_ARMED');
+        try{return gate.submit();}finally{
+          gate.remove();if(host.__inboraGate===gate)delete host.__inboraGate;
+          if(host.__inboraPreparation?.token===token){host.__inboraPreparation.release(false);delete host.__inboraPreparation;}
+        }
+      },preparation.token);
+      requireSafe(accepted,'CLICK_GUARD_BLOCKED');
+    }catch(error){
+      await this.page.evaluate(releaseMappedPreparation,{token:preparation.token,discard:false}).catch(()=>{});
+      throw error;
+    }
   }
   async readback(e: InboundEvent, text: string, before: string[], notBefore: string): Promise<SendProof | null> {
     const deadline = Date.now() + this.receiptTimeoutMs;

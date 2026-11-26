@@ -23,7 +23,6 @@ export interface ReplyViewProps {
   text:string;
   setText:(text:string)=>void;
   setSuggestionId:(id:string|null)=>void;
-  setReview:(value:null)=>void;
   refreshThread:()=>Promise<unknown>;
   block:string;
   send:{commandId:string;status:string;reason:string|null}|null;

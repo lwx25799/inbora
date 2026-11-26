@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">inbora logo symbol reversed</title>
+  <g id="symbol" fill="#FAFAFA">
+    <path d="M69 25 H78 A7 7 0 0 1 85 32 V52 A7 7 0 0 1 78 59 H71 A12 12 0 0 0 59 71 V185 A12 12 0 0 0 71 197 H185 A12 12 0 0 0 197 185 V71 A12 12 0 0 0 185 59 H178 A7 7 0 0 1 171 52 V32 A7 7 0 0 1 178 25 H187 A44 44 0 0 1 231 69 V187 A44 44 0 0 1 187 231 H69 A44 44 0 0 1 25 187 V69 A44 44 0 0 1 69 25 Z"/>
+    <rect x="110" y="25" width="36" height="34" rx="9"/>
+    <rect x="110" y="85" width="36" height="86" rx="9"/>
+  </g>
+</svg>

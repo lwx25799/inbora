@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {afterAll,beforeAll,expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -16,13 +17,22 @@ let server:Awaited<ReturnType<typeof fixtureServer>>,owner:BrowserProfileOwner;
 beforeAll(async()=>{server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(privateTemp('dm-batch-triage-'),'profile'),true);});
 afterAll(async()=>{await owner?.close();await server?.close();});
 
+test('the account ID travels through the native reader into the serialized DM capture', async () => {
+  await mountObserved(owner, server.origin);
+  const mapping = observedMapping(server.origin), accountId = 'synthetic-dm-account';
+  const reader = new ObservedReader(owner.dm, mapping, undefined, undefined, accountId);
+  const batch = await reader.dm(0, mapping.peers[0]!);
+  expect(batch.events[0]).toMatchObject({ platformEventId: '1', accountId });
+  expect(new Set(batch.events.map(event => event.accountId))).toEqual(new Set([accountId]));
+});
+
 test.each(['locate','conversations'] as const)('a metadata-incomplete unrelated list row does not poison an exact valid target (%s)',async channel=>{
   await mountObserved(owner,server.origin);await owner.dm.evaluate(()=>{
     const incomplete=document.createElement('div');incomplete.className='conversation';incomplete.innerHTML='<span class="title">Unrelated fixture</span>';
     Object.defineProperty(incomplete,'__reactFiber$fixture',{value:{return:{memoizedProps:{conversation:{_toParticipantSecUserId:'unrelated-sec'}}}}});
     document.querySelector('#dm-panel')!.prepend(incomplete);
   });
-  const mapping=observedMapping(server.origin),input:Parameters<typeof captureObserved>[0]={mapping,channel,index:0,evidenceId:'synthetic-list-isolation',peer:mapping.peers[0]!};
+  const mapping=observedMapping(server.origin),input:Parameters<typeof captureObserved>[0]={mapping,channel,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-list-isolation',peer:mapping.peers[0]!};
   const batch=await owner.dm.evaluate(captureObserved,input);
   if(channel==='locate')expect(batch.conversation?.rowIndex).toBe(1);
   else expect(batch.peers?.map(({activity,...peer})=>{expect(typeof activity).toBe('string');return peer;})).toEqual([mapping.peers[0]]);
@@ -90,6 +100,6 @@ test.each([null,'200'] as const)('an exact native header cannot authorize confli
     native.sender='999';
   });
   const mapping=observedMapping(server.origin),peer={...mapping.peers[0]!,uid},input:Parameters<typeof captureObserved>[0]={
-    mapping,channel:'dm',index:0,evidenceId:'synthetic-sender-conflict',peer,dmWindow:true};
+    mapping,channel:'dm',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-sender-conflict',peer,dmWindow:true};
   await expect(owner.dm.evaluate(captureObserved,input)).rejects.toThrow('OBSERVATION_SENDER_UNVERIFIED');
 });

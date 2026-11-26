@@ -1,10 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { requireSafe } from '../core/contracts.js';
-import { assistantTools } from './tool-contracts.js';
+import { assistantTools, diagnosticsSchema, legacyDiagnosticModelId, modelProviderDiagnosticsHeader } from './tool-contracts.js';
 import { canonicalAssistantRoot, publishAssistantDiscovery } from './discovery.js';
 import {
-  assistantError, assistantRoute, bridgeRequestSchema, maxAssistantRequestBytes,
+  assistantError, assistantRoute, browserResourcesHeader, securityStatusHeader, bridgeRequestSchema, maxAssistantRequestBytes,
   maxAssistantResponseBytes, type AssistantToolRegistry,
 } from './bridge-contracts.js';
 
@@ -71,6 +71,10 @@ export async function startAssistantControl(options: AssistantControlOptions): P
       const expectedBytes = Buffer.from(expected);
       requireSafe(oneHeader(request, 'authorization') && suppliedBytes.length === expectedBytes.length &&
         timingSafeEqual(suppliedBytes, expectedBytes), 'ASSISTANT_AUTHENTICATION_FAILED');
+      for (const name of [browserResourcesHeader, modelProviderDiagnosticsHeader, securityStatusHeader]) {
+        const value = request.headers[name];
+        requireSafe(value === undefined || oneHeader(request, name) && value === '1', 'ASSISTANT_INVALID_REQUEST');
+      }
       requireSafe(request.headers['content-type'] === 'application/json', 'ASSISTANT_INVALID_REQUEST');
       const envelope = bridgeRequestSchema.parse(await readBody(request));
       requireSafe(!closing, 'APP_NOT_RUNNING');
@@ -85,7 +89,28 @@ export async function startAssistantControl(options: AssistantControlOptions): P
       const result = await options.dispatch(envelope.sessionId, envelope.tool, input.data);
       const checked = definition.outputSchema.safeParse(result);
       requireSafe(checked.success, 'ASSISTANT_RESPONSE_INVALID');
-      send(response, 200, { ok: true, instanceId, result: checked.data });
+      let compatible = checked.data;
+      if (envelope.tool === 'inbora_get_diagnostics' &&
+        (request.headers[browserResourcesHeader] === undefined || request.headers[modelProviderDiagnosticsHeader] === undefined)) {
+        // Existing stdio processes retain the previous strict output schema until their next start.
+        const diagnostics = diagnosticsSchema.safeParse(compatible);
+        requireSafe(diagnostics.success, 'ASSISTANT_RESPONSE_INVALID');
+        const { browserResources, model, ...rest } = diagnostics.data;
+        const groups = request.headers[modelProviderDiagnosticsHeader] === '1' ? model.groups
+          : model.groups.map(({ provider: _provider, ...group }) => ({
+            ...group, model: legacyDiagnosticModelId.test(group.model) ? group.model : 'UNKNOWN_MODEL',
+          }));
+        compatible = {
+          ...rest, model: { total: model.total, groups },
+          ...(request.headers[browserResourcesHeader] === '1' && browserResources ? { browserResources } : {}),
+        };
+      }
+      if(envelope.tool==='inbora_get_status'&&request.headers[securityStatusHeader]===undefined&&
+        compatible!==null&&typeof compatible==='object'&&!Array.isArray(compatible)){
+        const legacy:Record<string,unknown>={...compatible};
+        delete legacy.securityRuntime;delete legacy.securityHolds;compatible=legacy;
+      }
+      send(response, 200, { ok: true, instanceId, result: compatible });
     } catch (error) {
       const code = assistantError(error);
       send(response, code === 'ASSISTANT_AUTHENTICATION_FAILED' ? 401 : 400, { ok: false, error: code });

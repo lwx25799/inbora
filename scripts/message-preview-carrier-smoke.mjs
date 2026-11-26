@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
@@ -7,15 +7,16 @@ import {mountObserved,observedMapping} from '../tests/fixtures/observed-site.ts'
 
 const source=process.argv[2]==='source',directory=source?'src':'dist';
 const moduleUrl=name=>pathToFileURL(resolve(directory,name.replace(/\.js$/,source?'.ts':'.js'))).href;
+const {DEFAULT_ACCOUNT_ID}=await import(moduleUrl('contracts/account.js'));
 const {BrowserProfileOwner}=await import(moduleUrl('browser/profile-owner.js'));
 const {captureObserved}=await import(moduleUrl('adapters/observed-reader.js'));
 const {inspectMessageImage,saveMessagePreviews}=await import(moduleUrl('adapters/message-preview.js'));
 const {MessagePreviewStore}=await import(moduleUrl('storage/message-previews.js'));
-const root=resolve('.local/message-preview-carrier-smoke',source?'source':'built');await mkdir(root,{recursive:true});
-const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
+const base=resolve('.local/tests/message-preview-carrier-smoke');await mkdir(base,{recursive:true});const root=await mkdtemp(join(base,'run-'));
 const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jntkAAAAASUVORK5CYII=';
-let assertions=0;const equal=(actual,expected)=>{assert.deepEqual(actual,expected);assertions++;};
+let assertions=0,server,owner;const equal=(actual,expected)=>{assert.deepEqual(actual,expected);assertions++;};
 try{
+  server=await fixtureServer();owner=await BrowserProfileOwner.launch(join(root,'profile'),true);
   const imageSource=server.origin+'/emoji.png';
   await owner.dm.route(imageSource,route=>route.fulfill({contentType:'image/png',body:Buffer.from(png.split(',')[1],'base64')}));
   for(const outgoing of [false,true]){
@@ -29,7 +30,7 @@ try{
       native.serverId=outgoing?'99722':'99721';native.type=7;native.sender=outgoing?'100':'200';native.createdAt=new Date(at);native._parsedContent.text='hello [微笑]';
     },{at,png:imageSource,outgoing});
     await owner.dm.locator('.message img').evaluate(image=>image.decode());
-    const input={mapping,channel:'dm',index:0,evidenceId:'synthetic-carrier-smoke',dmWindow:true,peer:mapping.peers[0]};
+    const input={mapping,channel:'dm',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-carrier-smoke',dmWindow:true,peer:mapping.peers[0]};
     const batch=await owner.dm.evaluate(captureObserved,input),fresh=batch.events[0];
     equal(fresh.text,'hello [微笑]');equal(fresh.observationIssue,undefined);
     const event={...fresh,text:'[含媒体的消息，需人工查看]',contentType:'MIXED',observationIssue:'DM_CONTENT_UNVERIFIED'};
@@ -54,4 +55,4 @@ try{
     equal(foreground.obstruction.stack.treeOrder.foreign.display,'GRID');equal(foreground.obstruction.stack.treeOrder.image.display,'FLEX');
   }
   console.log(JSON.stringify({messagePreviewCarrierSmoke:'PASS',runtime:source?'tsx-source':'compiled-node',assertions,realSends:0,modelCalls:0}));
-}finally{await owner.close();await server.close();}
+}finally{await owner?.close();await server?.close();assert.ok(root.startsWith(`${base}\\`)||root.startsWith(`${base}/`));await rm(root,{recursive:true,force:true});}

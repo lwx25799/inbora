@@ -4,14 +4,16 @@ import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
 import {digest,requireSafe,type InboundEvent} from '../core/contracts.js';
 import {runtimeSchema} from '../config/runtime.js';
+import type {MessageShare} from '../contracts/inbox.js';
+export type {MessageShare} from '../contracts/inbox.js';
 
-export interface MessageShare {kind:'DOUYIN_WORK';url:string;workId:string}
 const shareSchema=z.object({kind:z.literal('DOUYIN_WORK'),url:z.string().regex(/^https:\/\/www\.douyin\.com\/(?:video|note)\/[0-9]{1,64}$/u),
   workId:z.string().regex(/^[0-9]{1,64}$/u)}).strict().refine(value=>value.url.endsWith('/'+value.workId));
 const manifestSchema=z.object({version:z.literal(1),key:z.string().regex(/^[a-f0-9]{64}$/u),share:shareSchema}).strict();
 
 /** A canonical public work link is display data; the original message, binding and quality remain unchanged. */
 export class MessageShareStore {
+  private cachedRetention:{mtimeMs:number|null;size:number;ms:number}|null=null;
   constructor(readonly root:string){}
   private key(event:InboundEvent,ownId:string):string {
     requireSafe(ownId&&event.channel==='DIRECT_MESSAGE'&&event.platformEventId&&event.conversationId&&event.actorId&&
@@ -29,7 +31,16 @@ export class MessageShareStore {
   }
   private retentionMs():number {
     const file=join(this.root,'runtime.json');
-    return (existsSync(file)?runtimeSchema.parse(JSON.parse(readFileSync(file,'utf8'))).evidenceRetentionDays:14)*86_400_000;
+    let stat:ReturnType<typeof lstatSync>|null=null;
+    try{stat=lstatSync(file);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    if(!stat){
+      this.cachedRetention={mtimeMs:null,size:0,ms:14*86_400_000};
+      return this.cachedRetention.ms;
+    }
+    if(this.cachedRetention&&this.cachedRetention.mtimeMs===stat.mtimeMs&&this.cachedRetention.size===stat.size)return this.cachedRetention.ms;
+    const ms=runtimeSchema.parse(JSON.parse(readFileSync(file,'utf8'))).evidenceRetentionDays*86_400_000;
+    this.cachedRetention={mtimeMs:stat.mtimeMs,size:stat.size,ms};
+    return ms;
   }
   read(event:InboundEvent,ownId:string):MessageShare|null {
     try{

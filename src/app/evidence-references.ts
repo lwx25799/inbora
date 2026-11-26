@@ -7,12 +7,14 @@ type Store={db:Database.Database};
 const referenceKeys=new Set(['evidenceId','evidenceRef','evidence_ref','proofRef','proof_ref']);
 const uuidInText=/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/giu;
 
+export interface EvidenceReferenceOptions {retentionCutoffMs?:number}
+
 /** A malformed/unknown reference fails closed. Only UUID metadata files are candidates for retention. */
-export function collectEvidenceReferences(store:Store,root:string):EvidenceProtection {
+export function collectEvidenceReferences(store:Store,root:string,options:EvidenceReferenceOptions={}):EvidenceProtection {
   const ids=new Set<string>();let unknownReferences=0;
-  const reference=(value:unknown):void=>{
+  const reference=(value:unknown,protect=true):void=>{
     if(typeof value!=='string'||!value){unknownReferences++;return;}
-    if(evidenceUuid.test(value.toLowerCase())){ids.add(value.toLowerCase());return;}
+    if(evidenceUuid.test(value.toLowerCase())){if(protect)ids.add(value.toLowerCase());return;}
     // These existing fields also store proof digests or fixed internal outcomes; neither names an evidence file.
     if(/^[a-f0-9]{64}$/u.test(value)||/^[A-Z][A-Z0-9_:]{0,299}$/u.test(value)||/^readonly-contract:[a-f0-9]{64}$/u.test(value))return;
     for(const match of value.matchAll(uuidInText))ids.add(match[0].toLowerCase());
@@ -36,8 +38,25 @@ export function collectEvidenceReferences(store:Store,root:string):EvidenceProte
     visit(value);if(requireReference&&references===0)unknownReferences++;
   };
   store.db.transaction(()=>{
+    const observationsPresent=!!store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='observations'").get();
+    if(!observationsPresent)unknownReferences++;
+    else{
+      try{
+        const columns=new Set((store.db.prepare('PRAGMA table_info(observations)').all() as {name:string}[]).map(column=>column.name));
+        if(options.retentionCutoffMs!==undefined&&Number.isFinite(options.retentionCutoffMs)&&columns.has('observed_at')){
+          for(const row of store.db.prepare('SELECT DISTINCT evidence_ref AS value, observed_at AS observedAt FROM observations').iterate() as Iterable<{value:unknown;observedAt:unknown}>){
+            const observedAt=typeof row.observedAt==='string'?Date.parse(row.observedAt):NaN;
+            if(!Number.isFinite(observedAt)){unknownReferences++;reference(row.value,true);continue;}
+            reference(row.value,observedAt>=options.retentionCutoffMs);
+          }
+        }else{
+          for(const row of store.db.prepare('SELECT DISTINCT evidence_ref AS value FROM observations').iterate() as Iterable<{value:unknown}>)
+            reference(row.value,true);
+        }
+      }catch{unknownReferences++;}
+    }
     for(const [table,column,kind,required] of [
-      ['observations','evidence_ref','reference',true],['inbound_events','payload','json',true],
+      ['inbound_events','payload','json',true],
       ['source_collisions','evidence_ref','reference',true],['source_collisions','payload','json',true],
       ['delivery_receipts','proof_ref','reference',true],['verification_results','evidence_ref','reference',false],
       ['channel_capabilities','evidence_ref','reference',false],['controlled_trials','evidence_ref','reference',false],

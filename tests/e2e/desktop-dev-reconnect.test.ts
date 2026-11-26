@@ -52,7 +52,7 @@ async function setup(memoryKey=false){
     };
   });
   const address=server.httpServer!.address() as {port:number};await page.goto(`http://127.0.0.1:${address.port}`);
-  await page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'会话中心',exact:true}).waitFor();
   const f={page,store,a,b,trace,errors,get service(){return service;},
     hold:(command:string,eventId?:string)=>{hold={command,...(eventId?{eventId}:{})};entered=false;},
     held:()=>entered,release:()=>{release?.();release=undefined;},

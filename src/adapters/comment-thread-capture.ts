@@ -8,6 +8,53 @@ export interface CommentThreadInput {mapping:ObservationMapping;event:InboundEve
 export function captureCommentThread(input:CommentThreadInput):CommentThreadWindow {
   const {mapping:m,event:e}=input,s=m.selectors;
   const dom={
+    securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
+      if(value)return;
+      const matches=[];
+      for(const selector of selectors.slice(0,8))for(const node of Array.from(document.querySelectorAll(selector)).slice(0,12-matches.length)){
+        const r=node.getBoundingClientRect();matches.push({selector:selector.slice(0,2000),tag:node.tagName.slice(0,24),id:node.id.slice(0,160),
+          left:r.left,top:r.top,right:r.right,bottom:r.bottom,visible:dom.securityVisible(node)});
+      }
+      const frames=Array.from(document.querySelectorAll('iframe')).slice(0,8).map(node=>{const r=node.getBoundingClientRect();
+        return{src:(node.getAttribute('src')??'').slice(0,2048),title:node.title.slice(0,160),left:r.left,top:r.top,right:r.right,bottom:r.bottom};});
+      const signal={version:1,state:'SUSPECT',kind,href:location.href.slice(0,2048),origin:location.origin.slice(0,256),title:document.title.slice(0,160),
+        documentStartedAt:performance.timeOrigin,observedAt:Date.now(),scope:'TARGET',target:{workId:e.videoId??undefined},matches,frames};
+      throw Error('OBSERVATION_SECURITY_SUSPECT INBORA_SECURITY_SIGNAL:'+JSON.stringify(signal));
+    },
+    securityVisible(element:Element):boolean {
+      for(const node of [element,...element.querySelectorAll('*')]){
+        if(!node.isConnected)continue;
+        let shown=true;
+        for(let current:Element|null=node;current;current=current.parentElement){
+          const style=getComputedStyle(current);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
+        }
+        if(!shown)continue;
+        const candidates:{rect:DOMRect;parent:Element|null}[]=/^(?:IFRAME|IMG|CANVAS|VIDEO|AUDIO|INPUT|BUTTON|SELECT|TEXTAREA|SVG|OBJECT|EMBED)$/u.test(node.tagName)?Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement})):[];
+        for(const child of node.childNodes){
+          if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
+          const range=document.createRange();range.selectNodeContents(child);
+          for(const rect of range.getClientRects())candidates.push({rect,parent:node});
+        }
+        for(const {rect,parent} of candidates){
+          let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(innerWidth,rect.right),bottom=Math.min(innerHeight,rect.bottom);
+          if(!(right>left&&bottom>top))continue;
+          for(let current=parent;current;current=current.parentElement){
+            const style=getComputedStyle(current);
+            if(style.display==='contents')continue;
+            const clipX=['hidden','clip','auto','scroll','overlay'].includes(style.overflowX);
+            const clipY=['hidden','clip','auto','scroll','overlay'].includes(style.overflowY);
+            if(!clipX&&!clipY)continue;
+            const box=current.getBoundingClientRect();
+            if(clipX){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+            if(clipY){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+            if(!(right>left&&bottom>top))break;
+          }
+          if(right>left&&bottom>top)return true;
+        }
+      }
+      return false;
+    },
     check(value:unknown,code:string):void {if(!value)throw Error(code);},
     data(object:unknown,key:string):unknown {
       if(!object||typeof object!=='object')return undefined;
@@ -27,14 +74,34 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
       return true;
     },
     owned(root:Element,selector:string,visible=true):Element[]{return Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root&&(!visible||dom.visible(n)));},
+    commentIconIssue(node:Element):number {
+      const shapes=Array.from(node.querySelectorAll('*')),box=node.getBoundingClientRect();let issue=0;
+      if(node.textContent!=='')issue|=1;
+      if(shapes.length<1||shapes.length>8)issue|=2;
+      if(box.width<1||box.height<1||box.width>32||box.height>32)issue|=4;
+      if(!shapes.every(shape=>shape.namespaceURI===node.namespaceURI&&['g','path'].includes(shape.tagName)))issue|=8;
+      if(!shapes.some(shape=>shape.tagName==='path'))issue|=16;
+      for(const shape of [node,...shapes].slice(0,10))for(const attr of shape.attributes){
+        // An XML namespace identifies SVG; it is not an external resource reference.
+        if(attr.name==='xmlns'&&attr.value==='http://www.w3.org/2000/svg')continue;
+        if(/^on/i.test(attr.name))issue|=32;
+        if(/(?:^|:)(?:href|src)$/.test(attr.name))issue|=64;
+        if(['aria-label','aria-labelledby'].includes(attr.name))issue|=128;
+        if(attr.name==='role'&&!['none','presentation'].includes(attr.value))issue|=256;
+        if(/url\s*\(|(?:https?|data|javascript):/i.test(attr.value))issue|=512;
+      }
+      return issue;
+    },
     text(body:Element,row:Element):string|null {
       let count=0,length=0,images=0;
       const walk={read(node:Node):string|null {
         if(++count>200)return null;
         if(node.nodeType===Node.TEXT_NODE){length+=(node.nodeValue??'').length;return length<=10_000?node.nodeValue??'':null;}
-        if(!(node instanceof Element)||node.closest(s.commentRows)!==row||node.closest('[data-e2e="im-dialog"]')||
-          !['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S','A','IMG'].includes(node.tagName))return null;
+        if(!(node instanceof Element)||node.closest(s.commentRows)!==row||node.closest('[data-e2e="im-dialog"]'))return null;
+        const icon=node.namespaceURI==='http://www.w3.org/2000/svg'&&node.tagName==='svg';
+        if(!icon&&!['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S','A','IMG'].includes(node.tagName))return null;
         const style=getComputedStyle(node);if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return '';
+        if(icon)return dom.commentIconIssue(node)===0?'':null;
         if(node.tagName==='BR'){length++;return length<=10_000?'\n':null;}
         if(node.tagName==='IMG'){
           const alt=node.getAttribute('alt'),src=node.getAttribute('src');
@@ -61,9 +128,10 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
       }
     },
     root():Element {
-      dom.check(location.origin===m.origin&&m.works.some(w=>w.id===e.videoId&&w.url.split('?')[0]===location.href.split('?')[0]),'OBSERVATION_WORK_CHANGED');
-      dom.check(!/验证码|安全验证|访问受限/.test(document.title),'OBSERVATION_SECURITY_TITLE');
-      dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_SECURITY_COMPONENT');
+      dom.check(location.origin===m.origin,'OBSERVATION_UNEXPECTED_ORIGIN');
+      dom.check(m.works.some(w=>w.id===e.videoId&&w.url.split('?')[0]===location.href.split('?')[0]),'OBSERVATION_WORK_CHANGED');
+      dom.securityCheck(!/验证码|安全验证|访问受限/.test(document.title),[m.securityBlockers],'TITLE');
+      dom.securityCheck(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.securityVisible),[m.securityBlockers]);
       const own=Array.from(document.querySelectorAll(s.selfAvatar));dom.check(own.length===1,'OBSERVATION_ACCOUNT_CHANGED');
       const identity=dom.props(own[0]!,s.selfFiberDepth);dom.check(dom.data(identity,'uid')===m.self.uid&&dom.data(identity,'secUid')===m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
       const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);dom.check(lists.length===1,'OBSERVATION_DOM_NOT_UNIQUE');
@@ -74,7 +142,7 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
       const user=dom.data(native,'user'),authors=dom.owned(root!,s.commentAuthor),bodies=dom.owned(root!,s.commentText),tips=dom.owned(root!,s.commentTooltip,false);
       const href=authors.length===1?new URL(authors[0]!.getAttribute('href')??'',location.origin):null;
       const at=dom.data(native,'createTime'),millis=typeof at==='number'?at*1000:NaN;
-      dom.check(Number.isFinite(millis)&&millis>=Date.UTC(2000,0,1)&&millis<=Date.now(),'OBSERVATION_COMMENT_THREAD_CHANGED');const time=new Date(millis).toISOString();
+      dom.check(Number.isFinite(millis)&&millis>=Date.UTC(2000,0,1)&&millis<=Date.now()+2000,'OBSERVATION_COMMENT_THREAD_CHANGED');const time=new Date(millis).toISOString();
       dom.check(e.channel==='COMMENT_NOTIFICATION'&&e.kind==='COMMENT'&&dom.data(native,'cid')===e.commentId&&dom.data(props,'level')===1&&dom.data(native,'replyId')==='0'&&
         dom.data(dom.data(props,'awemeInfo'),'awemeId')===e.videoId&&dom.data(dom.data(props,'userInfo'),'uid')===m.self.uid&&
         dom.data(user,'uid')===e.actorId&&href?.origin===m.origin&&!href.username&&!href.password&&href.pathname===`/user/${String(dom.data(user,'secUid'))}`&&
@@ -90,9 +158,10 @@ export function captureCommentThread(input:CommentThreadInput):CommentThreadWind
   if(input.action==='open'&&buttons[0]){
     dom.empty();const button=buttons[0];dom.check(button instanceof HTMLElement,'OBSERVATION_COMMENT_EXPAND_NOT_INTERACTABLE');
     button.scrollIntoView({block:'center'});
-    const gate={handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root()===root&&button.isConnected&&dom.buttons(root)[0]===button,
-      'OBSERVATION_COMMENT_THREAD_CHANGED');dom.empty();}catch{event.preventDefault();event.stopImmediatePropagation();}}};
+    const gate={securityFailure:null as string|null,handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root()===root&&button.isConnected&&dom.buttons(root)[0]===button,
+      'OBSERVATION_COMMENT_THREAD_CHANGED');dom.empty();}catch(error){if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;event.preventDefault();event.stopImmediatePropagation();}}};
     button.addEventListener('click',gate.handle,true);try{(button as HTMLElement).click();expanded=true;}finally{button.removeEventListener('click',gate.handle,true);}
+    if(gate.securityFailure)throw Error(gate.securityFailure);
   }
   const current=dom.root(),native=dom.data(dom.props(current,s.commentFiberDepth),'commentInfo'),total=dom.data(native,'replyTotal');
   dom.check(typeof total==='number'&&Number.isSafeInteger(total)&&total>=0,'OBSERVATION_COMMENT_THREAD_METADATA_NOT_READY');

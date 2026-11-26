@@ -1,8 +1,9 @@
 import Database from "better-sqlite3";
 import { copyFile, mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-import { digest, requireSafe } from "../core/contracts.js";
+import { requireSafe } from "../core/contracts.js";
 import type { EventStore } from "./store.js";
+import { migrationInventory } from "./migration-inventory.js";
 
 const sql = `
 CREATE TABLE operator_sessions (id TEXT PRIMARY KEY, token_digest TEXT UNIQUE NOT NULL,
@@ -32,19 +33,6 @@ CREATE TABLE ai_suggestions (id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFEREN
   created_at INTEGER NOT NULL, dismissed INTEGER NOT NULL DEFAULT 0);
 PRAGMA user_version = 3;`;
 
-function inventory(db: Database.Database): string {
-  const tables = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    .all() as { name: string }[];
-  return digest(
-    tables.map(({ name }) => [
-      name,
-      db
-        .prepare(`SELECT * FROM "${name.replaceAll('"', '""')}" ORDER BY rowid`)
-        .all(),
-    ]),
-  );
-}
 function upgrade(db: Database.Database): void {
   db.transaction(() => db.exec(sql)).immediate();
 }
@@ -54,12 +42,13 @@ export async function migrateClient(
   store: EventStore,
   backupFile: string,
 ): Promise<boolean> {
-  if (store.db.pragma("user_version", { simple: true }) === 3) return false;
+  const version = store.db.pragma("user_version", { simple: true });
+  if (version === 3 || version === 4) return false;
   requireSafe(
-    store.db.pragma("user_version", { simple: true }) === 2,
+    version === 2,
     "DATABASE_SCHEMA_UNSUPPORTED",
   );
-  const before = inventory(store.db);
+  const before = migrationInventory(store.db);
   await mkdir(dirname(backupFile), { recursive: true });
   await store.db.backup(backupFile);
   const trialFile = `${backupFile}.trial`;
@@ -69,7 +58,7 @@ export async function migrateClient(
     try {
       requireSafe(
         restored.pragma("quick_check", { simple: true }) === "ok" &&
-          inventory(restored) === before,
+          migrationInventory(restored) === before,
         "MIGRATION_BACKUP_RESTORE_FAILED",
       );
     } finally {
@@ -87,7 +76,7 @@ export async function migrateClient(
       trial.close();
     }
     requireSafe(
-      inventory(store.db) === before,
+      migrationInventory(store.db) === before,
       "DATABASE_CHANGED_DURING_MIGRATION",
     );
     upgrade(store.db);

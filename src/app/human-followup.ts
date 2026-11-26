@@ -2,8 +2,9 @@ import {randomUUID} from 'node:crypto';
 import {digest,requireSafe,validText,isStrong,targetKey,validManualMediaProof,type Draft,type TargetSnapshot,type SendProof} from '../core/contracts.js';
 import {SendCoordinator} from '../core/send-coordinator.js';
 import type {EventStore} from '../storage/store.js';
+import {assertSecurityChannelClear} from '../storage/security-holds.js';
 import type {WorkbenchAuthority} from './authority.js';
-import type {BrowserService} from './browser-service.js';
+import type {PlatformConnector} from '../platform/platform-connector.js';
 import type {z} from 'zod';
 import type {humanReplySchema} from './contracts.js';
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
@@ -15,9 +16,10 @@ interface Turn {command_id:string;event_id:string;target_key:string;operator_id:
   status:string;approval:string|null;intent_id:string|null;attempt_started_at:string|null;reason:string|null;proof_ref:string|null;
   verified_at:string|null;native_id_digest:string|null;created_at:number}
 interface NextDraft {event_id:string;id:string;text:string;version:number;operator_id:string;saved_at:number}
+export type FollowupConnector = Pick<PlatformConnector,'accountId'|'loginRecovery'|'adapter'|'actor'|'identity'|'refreshIdentity'>;
 
 export class HumanFollowups {
-  constructor(readonly store:EventStore,readonly authority:WorkbenchAuthority,readonly browser:BrowserService,
+  constructor(readonly store:EventStore,readonly authority:WorkbenchAuthority,readonly browser:FollowupConnector,
     readonly closing:()=>boolean,readonly emit:()=>void,readonly errorCode:(e:unknown)=>string){}
   present(){return !!this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='human_reply_turns'").get();}
   originalConfirmed(eventId:string):boolean {
@@ -26,7 +28,10 @@ export class HumanFollowups {
     const intent=this.store.db.prepare('SELECT status FROM send_intents WHERE event_id=?').get(eventId) as {status:string}|undefined;
     return !!intent&&(latest?latest.verified===1:intent.status==='CONFIRMED');
   }
-  turn(id:string):Turn|undefined{return this.present()?this.store.db.prepare('SELECT * FROM human_reply_turns WHERE command_id=?').get(id) as Turn|undefined:undefined;}
+  turn(id:string):Turn|undefined{
+    return this.present()?this.store.db.prepare(`SELECT t.* FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
+      WHERE t.command_id=? AND e.account_id=?`).get(id,this.store.accountId) as Turn|undefined:undefined;
+  }
   latest(eventId:string){return this.present()?this.store.db.prepare('SELECT * FROM human_reply_turns WHERE event_id=? ORDER BY rowid DESC LIMIT 1').get(eventId) as Turn|undefined:undefined;}
   currentDraft(eventId:string){return this.store.db.prepare('SELECT * FROM human_reply_drafts WHERE event_id=?').get(eventId) as NextDraft|undefined;}
   private hasOriginal(eventId:string,operatorId:string|null):boolean{
@@ -35,10 +40,12 @@ export class HumanFollowups {
   }
   view(eventId:string){
     if(!this.present())return null;
-    const row=this.currentDraft(eventId),turn=this.latest(eventId),confirmed=this.originalConfirmed(eventId),key=targetKey(this.store.event(eventId).payload);
-    const blocked=!!this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE target_key=? AND status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1").get(key);
-    const frozen=this.store.sendFrozen(eventId),paused=(this.store.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(key) as {paused:number}|undefined)?.paused;
-    const event=this.store.event(eventId),operator=this.authority.ownership(event).operator_id;
+    const event=this.store.event(eventId),key=targetKey(event.payload),operator=this.authority.ownership(event).operator_id;
+    const row=this.currentDraft(eventId),turn=this.latest(eventId),confirmed=this.originalConfirmed(eventId);
+    const blocked=!!this.store.db.prepare(`SELECT 1 FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
+      WHERE t.target_key=? AND e.account_id=? AND e.channel=? AND t.status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1`)
+      .get(key,this.store.accountId,event.payload.channel);
+    const frozen=this.store.sendFrozen(eventId),paused=this.store.targetPaused(key);
     return {eligible:confirmed&&!blocked&&!frozen&&!paused,queueReady:this.hasOriginal(eventId,operator)&&!humanQueueFrozen(this.store,event,operator)&&!paused&&!this.authority.paused(),
       reason:!confirmed?'FOLLOWUP_REQUIRES_CONFIRMED_REPLY':blocked?'FOLLOWUP_REPLY_UNRESOLVED':frozen?'TARGET_FROZEN':paused?'TARGET_PAUSED':null,
       draft:row?{id:row.id,eventId,text:row.text,version:row.version,model:'human',status:'DRAFT' as const,approval:null,origin:'HUMAN_TYPED'}:null,
@@ -46,6 +53,7 @@ export class HumanFollowups {
   }
   private editable(token:string,eventId:string,generation:number){
     requireSafe(this.present(),'FOLLOWUP_NOT_READY');
+    this.authority.requireGuiControl(token,'EDIT');
     const event=this.store.event(eventId),op=this.authority.requireOwner(token,event,generation);
     requireSafe(this.authority.mode()!=='OBSERVE','OBSERVE_READ_ONLY');
     requireSafe(this.hasOriginal(eventId,op.id),'FOLLOWUP_REQUIRES_CONFIRMED_REPLY');
@@ -53,6 +61,7 @@ export class HumanFollowups {
     return event;
   }
   save(token:string,eventId:string,generation:number,expectedVersion:number,text:string,suggestionId:string|null){
+    this.authority.requireGuiControl(token,'EDIT');
     requireSafe(suggestionId===null,'FOLLOWUP_HUMAN_TEXT_REQUIRED');text=text.replace(/\r\n?/gu,'\n');if(text)validText(text);
     this.store.db.transaction(()=>{
       this.editable(token,eventId,generation);const old=this.currentDraft(eventId);
@@ -64,7 +73,7 @@ export class HumanFollowups {
     }).immediate();return this.view(eventId)!.draft!;
   }
   queue(token:string,id:string,input:Input):boolean {
-    const op=this.authority.operator(token,'SEND'),prior=this.turn(id);
+    const op=this.authority.requireGuiControl(token,'SEND'),prior=this.turn(id);
     if(prior){requireSafe(prior.operator_id===op.id&&prior.input_digest===digest(input),'COMMAND_PARAMETERS_CONFLICT');return false;}
     requireSafe(!this.store.db.prepare('SELECT command_id FROM manual_send_commands WHERE command_id=?').get(id),'COMMAND_PARAMETERS_CONFLICT');
     return this.store.db.transaction(()=>{
@@ -86,18 +95,21 @@ export class HumanFollowups {
   guard(token:string,id:string,approved=false,preparing=true):void {
     requireSafe(!this.closing(),'CLIENT_CLOSING');requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
     const turn=this.turn(id);requireSafe(turn,'COMMAND_NOT_FOUND');const input=JSON.parse(turn.params) as Input,event=this.store.event(turn.event_id);
+    assertSecurityChannelClear(this.store,event.payload.channel);
     requireSafe(['PREPARING',...(approved?['APPROVED']:[])].includes(turn.status),'COMMAND_NOT_QUEUED');
-    const op=this.authority.operator(token,'SEND');this.authority.operator(token,'APPROVE');
+    const op=this.authority.requireGuiControl(token,'SEND');this.authority.operator(token,'APPROVE');
     requireSafe(op.id===turn.operator_id,'OPERATOR_PERMISSION_DENIED');this.authority.requireOwner(token,event,input.generation);
     this.authority.requireSelection(token,event.id,input.selectionId);
     requireSafe(!this.authority.paused(),'ACCOUNT_PAUSED');
     requireSafe(['MANUAL','AI_ASSISTED','LIMITED_AUTO'].includes(this.authority.mode()),'MODE_DRAFT_ONLY');
     requireSafe(this.hasOriginal(event.id,op.id),'FOLLOWUP_REQUIRES_CONFIRMED_REPLY');
     requireSafe(!humanQueueFrozen(this.store,event,op.id),'TARGET_FROZEN');
-    requireSafe(!(this.store.db.prepare('SELECT paused FROM pauses WHERE target_key=?').get(turn.target_key) as {paused:number}|undefined)?.paused,'TARGET_PAUSED');
+    this.store.assertTargetUnpaused(turn.target_key);
     if(preparing){
-      requireSafe(!this.store.db.prepare(`SELECT command_id FROM human_reply_turns WHERE target_key=? AND rowid<(SELECT rowid FROM human_reply_turns WHERE command_id=?)
-        AND status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1`).get(turn.target_key,id),'COMMAND_ALREADY_QUEUED');
+      requireSafe(!this.store.db.prepare(`SELECT 1 FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
+        WHERE t.target_key=? AND e.account_id=? AND e.channel=? AND t.rowid<(SELECT rowid FROM human_reply_turns WHERE command_id=?)
+        AND t.status IN ('PREPARING','APPROVED','INTENT_RECORDED') LIMIT 1`)
+        .get(turn.target_key,this.store.accountId,event.payload.channel,id),'COMMAND_ALREADY_QUEUED');
       requireSafe(!this.store.db.prepare("SELECT command_id FROM manual_send_commands WHERE event_id=? AND status IN ('PREPARING','QUEUED','PREFLIGHT','SENDING') LIMIT 1").get(event.id),'COMMAND_ALREADY_QUEUED');
     }
     requireDistinctHumanText(this.store,event.id,turn.text,id);
@@ -111,18 +123,22 @@ export class HumanFollowups {
   }
   recover(){
     if(!this.present())return;
-    this.store.db.transaction(()=>{
-      this.store.db.prepare("UPDATE human_reply_turns SET status='FAILED_BEFORE_CLICK',reason='RESTART_NO_REPLAY' WHERE status IN ('PREPARING','APPROVED')").run();
-      this.store.db.prepare(`UPDATE human_reply_drafts SET text=(SELECT t.text FROM human_reply_turns t WHERE t.event_id=human_reply_drafts.event_id
+    const {db,accountId}=this.store;
+    db.transaction(()=>{
+      db.prepare(`UPDATE human_reply_turns SET status='FAILED_BEFORE_CLICK',reason='RESTART_NO_REPLAY'
+        WHERE status IN ('PREPARING','APPROVED') AND event_id IN (SELECT id FROM inbound_events WHERE account_id=?)`).run(accountId);
+      db.prepare(`UPDATE human_reply_drafts SET text=(SELECT t.text FROM human_reply_turns t WHERE t.event_id=human_reply_drafts.event_id
         AND t.status='FAILED_BEFORE_CLICK' AND t.reason='RESTART_NO_REPLAY' AND human_reply_drafts.version=t.version+1 ORDER BY t.rowid DESC LIMIT 1),
-        version=version+1 WHERE text='' AND EXISTS(SELECT 1 FROM human_reply_turns t WHERE t.event_id=human_reply_drafts.event_id
-        AND t.status='FAILED_BEFORE_CLICK' AND t.reason='RESTART_NO_REPLAY' AND human_reply_drafts.version=t.version+1)`).run();
-      const unresolved=this.store.db.prepare("SELECT command_id FROM human_reply_turns WHERE status='INTENT_RECORDED'").all() as {command_id:string}[];
+        version=version+1 WHERE text='' AND event_id IN (SELECT id FROM inbound_events WHERE account_id=?)
+        AND EXISTS(SELECT 1 FROM human_reply_turns t WHERE t.event_id=human_reply_drafts.event_id
+        AND t.status='FAILED_BEFORE_CLICK' AND t.reason='RESTART_NO_REPLAY' AND human_reply_drafts.version=t.version+1)`).run(accountId);
+      const unresolved=db.prepare(`SELECT command_id FROM human_reply_turns WHERE status='INTENT_RECORDED'
+        AND event_id IN (SELECT id FROM inbound_events WHERE account_id=?)`).all(accountId) as {command_id:string}[];
       for(const row of unresolved)this.receipt(row.command_id,'UNCERTAIN','RESTART_WITH_UNFINISHED_INTENT');
     }).immediate();
   }
   async prepare(token:string,id:string){
-    let dispose=()=>{};
+    let dispose:()=>void|Promise<void>=()=>{};
     try{
       const pending=this.turn(id);requireSafe(pending,'COMMAND_NOT_FOUND');const params=JSON.parse(pending.params) as QueuedInput,event=this.store.event(pending.event_id);
       if(params.queueContext){
@@ -136,33 +152,43 @@ export class HumanFollowups {
       const handle=await this.browser.adapter(event.payload,this.store,undefined,{manualMedia:!isStrong(event.payload)});dispose=handle.dispose;
       await this.browser.refreshIdentity(event.payload.channel);
       await this.browser.actor.run(async()=>{
-        this.guard(token,id);const before=digest(this.browser.identity(event.payload.channel));
-        const capabilities=digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel));
+        this.guard(token,id);
+        const channel=event.payload.channel,priorIdentity=this.browser.identity(channel),before=digest(priorIdentity);
+        const capabilities=digest(this.authority.capabilitySnapshot(channel,priorIdentity));
         const snapshot=await handle.adapter.inspect(event.payload),identity=await this.browser.refreshIdentity(event.payload.channel);
         this.guard(token,id);requireSafe(identity&&digest(identity)===before,'CAPABILITY_CHANGED_DURING_CHECK');
-        const own=(this.store.db.prepare('SELECT own_id FROM accounts WHERE id=?').get(event.payload.accountId) as {own_id:string}).own_id;
-        requireSafe(snapshot.ownId===own&&identity.identityDigest===digest(own)&&snapshot.accountId===event.payload.accountId&&
+        const own=this.store.accountOwnId(this.browser.accountId);
+        requireSafe(own&&snapshot.ownId===own&&identity.identityDigest===digest(own)&&snapshot.accountId===event.payload.accountId&&
           snapshot.eventBinding===event.binding&&snapshot.targetKey===row.target_key&&snapshot.composerKey===row.target_key,'TARGET_CHANGED');
         if(!isStrong(event.payload))requireSafe(validManualMediaProof(event.payload,snapshot),'HUMAN_MEDIA_APPROVAL_REQUIRED');
-        requireSafe(capabilities===digest(this.store.db.prepare('SELECT * FROM channel_capabilities WHERE channel=?').all(event.payload.channel)),'CAPABILITY_CHANGED_DURING_CHECK');
-        this.authority.attest(event.payload.channel,'SEND_AVAILABLE',identity,`readonly-contract:${digest(snapshot)}`);
+        requireSafe(capabilities===digest(this.authority.capabilitySnapshot(channel,identity)),'CAPABILITY_CHANGED_DURING_CHECK');
+        this.authority.attest(event.payload.channel,'SEND_AVAILABLE',identity,`readonly-contract:${digest([snapshot,identity])}`);
         this.store.db.prepare("UPDATE human_reply_turns SET status='APPROVED',approval=? WHERE command_id=? AND status='PREPARING'")
           .run(JSON.stringify({version:row.version,textDigest:digest(row.text),snapshot}),id);
       });
       const ledger=this.ledger(id);
-      await new SendCoordinator(ledger,this.browser.actor).send(id,handle.adapter,true,{check:()=>this.guard(token,id,true),committed:()=>{},manualMedia:()=>{
+      await new SendCoordinator(ledger,this.browser.actor,this.browser.accountId).send(id,handle.adapter,true,{check:()=>this.guard(token,id,true),committed:()=>{},beforeSubmit:()=>{
+        requireSafe(!this.closing(),'CLIENT_CLOSING');
+        if(event.payload.channel==='COMMENT_NOTIFICATION'){
+          this.store.assertTargetUnpaused(targetKey(event.payload));
+          requireSafe(this.authority.ownership(event).generation===params.generation,'OWNERSHIP_CHANGED');
+          requireSafe(!this.authority.paused(),'ACCOUNT_PAUSED');
+        }
+      },manualMedia:()=>{
         requireSafe(humanReplyEligibility(this.store,event).eligible,'HUMAN_MEDIA_APPROVAL_REQUIRED');
       }});
     }catch(error){
-      const row=this.turn(id);if(row&&!row.intent_id)this.store.db.transaction(()=>{
-        this.store.db.prepare("UPDATE human_reply_turns SET status='FAILED_BEFORE_CLICK',reason=? WHERE command_id=?").run(this.errorCode(error),id);
-        this.store.db.prepare("UPDATE human_reply_drafts SET text=?,version=version+1,saved_at=? WHERE event_id=? AND text='' AND version=?")
+      const row=this.turn(id);
+      if(row&&!row.intent_id&&['PREPARING','APPROVED'].includes(row.status))this.store.db.transaction(()=>{
+        const updated=this.store.db.prepare("UPDATE human_reply_turns SET status='FAILED_BEFORE_CLICK',reason=?,approval=NULL WHERE command_id=? AND intent_id IS NULL AND status IN ('PREPARING','APPROVED')").run(this.errorCode(error),id);
+        if(updated.changes===1)this.store.db.prepare("UPDATE human_reply_drafts SET text=?,version=version+1,saved_at=? WHERE event_id=? AND text='' AND version=?")
           .run(row.text,this.authority.now(),row.event_id,row.version+1);
       }).immediate();
-    }finally{dispose();this.emit();}
+    }finally{await dispose();this.emit();}
   }
   private ledger(id:string){
     return {
+      accountId:this.store.accountId,db:this.store.db,
       draft:(_draftId:string):Draft=>{
         const r=this.turn(id)!;return {id,eventId:r.event_id,text:r.text,version:r.version,model:'human',status:r.status==='APPROVED'?'APPROVED':'DRAFT',
           approval:r.approval?JSON.parse(r.approval):null};
@@ -174,15 +200,22 @@ export class HumanFollowups {
       invalidateApproval:(_draftId:string)=>{this.store.db.prepare("UPDATE human_reply_turns SET status='FAILED_BEFORE_CLICK',approval=NULL WHERE command_id=? AND intent_id IS NULL").run(id);},
       recordIntent:(_draftId:string,snapshot:TargetSnapshot,real:boolean,authority?:{check():void;committed(id:string):void;manualMedia?():void})=>this.store.db.transaction(()=>{
         requireSafe(authority,'CLIENT_AUTHORITY_REQUIRED');authority.check();const row=this.turn(id)!;
+        assertSecurityChannelClear(this.store,this.store.event(row.event_id).payload.channel);
         const approval=row.approval?JSON.parse(row.approval) as Draft['approval']:null;
         requireSafe(row.status==='APPROVED'&&!row.intent_id&&approval&&approval.version===row.version&&approval.textDigest===digest(row.text)&&
           digest(approval.snapshot)===digest(snapshot),'APPROVAL_INVALID');
         if(!isStrong(this.store.event(row.event_id).payload)){requireSafe(authority.manualMedia&&validManualMediaProof(this.store.event(row.event_id).payload,snapshot),'HUMAN_MEDIA_APPROVAL_REQUIRED');authority.manualMedia();}
         if(real)this.store.consumeBudget('SEND');const intent=randomUUID();
         this.store.db.prepare("UPDATE human_reply_turns SET status='INTENT_RECORDED',intent_id=?,attempt_started_at=? WHERE command_id=?")
-          .run(intent,new Date().toISOString(),id);this.store.audit('HUMAN_FOLLOWUP_CLICK_INTENT',id);authority.committed(intent);return intent;
+          .run(intent,new Date(this.authority.now()).toISOString(),id);this.store.audit('HUMAN_FOLLOWUP_CLICK_INTENT',id);authority.committed(intent);return intent;
       }).immediate(),
       intentBoundary:(_intentId:string)=>{const r=this.turn(id);requireSafe(r?.attempt_started_at,'INTENT_NOT_FOUND');return r.attempt_started_at;},
+      assertIntentDispatch:(intentId:string,draft:Draft,snapshot:TargetSnapshot)=>{
+        const row=this.turn(id);
+        requireSafe(row?.intent_id===intentId&&row.status==='INTENT_RECORDED'&&row.event_id===draft.eventId&&
+          row.target_key===snapshot.targetKey&&row.version===draft.version&&row.text===draft.text&&
+          !!row.approval&&digest(JSON.parse(row.approval))===digest(draft.approval),'INTENT_BINDING_CHANGED');
+      },
       receipt:(_intentId:string,result:'CONFIRMED'|'UNCERTAIN',ref:string,proof?:SendProof)=>this.receipt(id,result,ref,proof),
     };
   }
@@ -190,7 +223,7 @@ export class HumanFollowups {
     this.store.db.transaction(()=>{
       const row=this.turn(id);requireSafe(row?.intent_id&&['INTENT_RECORDED','UNCERTAIN'].includes(row.status),'INTENT_NOT_REVIEWABLE');
       this.store.db.prepare('UPDATE human_reply_turns SET status=?,proof_ref=?,verified_at=?,native_id_digest=?,reason=? WHERE command_id=?')
-        .run(result,ref,new Date().toISOString(),proof?.id?digest(proof.id):null,result==='UNCERTAIN'?ref:null,id);
+        .run(result,ref,new Date(this.authority.now()).toISOString(),proof?.id?digest(proof.id):null,result==='UNCERTAIN'?ref:null,id);
       if(proof?.submission||proof?.clockSkew)this.store.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?)')
         .run(randomUUID(),new Date().toISOString(),'HUMAN_FOLLOWUP_PROOF',id,JSON.stringify({
           submission:proof.submission,clockSkew:proof.clockSkew?{...proof.clockSkew,refreshedId:undefined}:undefined,

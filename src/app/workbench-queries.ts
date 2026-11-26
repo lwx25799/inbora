@@ -1,17 +1,19 @@
-import { isStrong, targetKey, type Channel } from '../core/contracts.js';
+import { Blocked, DEFAULT_ACCOUNT_ID, isStrong, targetKey, type Channel } from '../core/contracts.js';
 import type { EventStore } from '../storage/store.js';
 import type { AutomationStore } from '../storage/automation-store.js';
 import type { WorkbenchAuthority } from './authority.js';
-import type { BrowserService } from './browser-service.js';
+import type { PlatformConnector } from '../platform/platform-connector.js';
 import type { AiSettings, InboxSync, ClientCommand } from './contracts.js';
 import type { CollectionScheduler } from './collection-scheduler.js';
 import {InboxQueries,inboxGroupKey} from './inbox-queries.js';
 import {InboxProjection,type ReplyStatus} from './inbox-projection.js';
 import {humanReplyEligibility} from './manual-reply-eligibility.js';
-import {HumanFollowups} from './human-followup.js';
+import {HumanFollowups,type FollowupConnector} from './human-followup.js';
 import {readCommentThreadContext,commentThreadPage,commentThreadGroupKey} from '../storage/comment-thread-context.js';
 import {hasSuggestionAuthorization,suggestionEligibility,type SuggestionState} from './suggestion-eligibility.js';
 import {readVerificationView} from './verification-view.js';
+import {securityRuntime} from './security-runtime.js';
+import {readSecurityHold} from '../storage/security-holds.js';
 
 interface ViewState {
   settings: AiSettings;
@@ -19,6 +21,8 @@ interface ViewState {
   keyStored: boolean;
   keyStorageError: string | null;
   modelAuthorized: boolean;
+  modelRoute?: SuggestionState['modelRoute'];
+  modelUnavailable?: string|null;
   modelBusy: boolean;
   automation: AutomationStore | null;
   collector: ReturnType<CollectionScheduler['status']> | undefined;
@@ -28,7 +32,8 @@ interface ViewState {
 
 /** Read-only product views; raw intents, receipts and freezes remain authoritative. */
 export class WorkbenchQueries {
-  constructor(readonly store: EventStore, readonly authority: WorkbenchAuthority, readonly browser: BrowserService) {}
+  constructor(readonly store: EventStore, readonly authority: WorkbenchAuthority,
+    readonly browser: FollowupConnector & Pick<PlatformConnector, 'root' | 'status'>) {}
   replyStatus(eventId:string,_status:string):ReplyStatus {
     const event=this.store.event(eventId);
     return new InboxProjection(this.store,event.payload.channel,{key:targetKey(event.payload),accountId:event.payload.accountId,
@@ -52,13 +57,7 @@ export class WorkbenchQueries {
       this.store.db
         .prepare("SELECT id,status FROM send_intents WHERE event_id=?")
         .get(eventId) ?? null;
-    const paused = Boolean(
-      (
-        this.store.db
-          .prepare("SELECT paused FROM pauses WHERE target_key=?")
-          .get(targetKey(e.payload)) as { paused: number } | undefined
-      )?.paused,
-    );
+    const paused = this.store.targetPaused(targetKey(e.payload));
     const frozen = this.store.sendFrozen(e.id);
     return {
       event: e,
@@ -99,6 +98,11 @@ export class WorkbenchQueries {
 
   status(token: string, state: ViewState) {
     const { automation } = state;
+    const grant = (kind: 'MODEL'|'AUTO_REPLY') => {
+      try { return automation?.active(kind) ?? null; }
+      catch (error) { if (error instanceof Blocked && error.code === 'GRANT_CORRUPT') return null; throw error; }
+    };
+    const policy = grant('AUTO_REPLY');
     const op = this.authority.operator(token);
     const configuredMode=this.authority.mode();
     const needsSendCapability=['MANUAL','AI_ASSISTED'].includes(configuredMode);
@@ -106,16 +110,19 @@ export class WorkbenchQueries {
       this.authority.capability(channel,this.browser.identity(channel)).state==='SEND_AVAILABLE')||
       (this.store.db.prepare(`SELECT t.event_id,d.id,d.version,d.text,e.channel FROM controlled_trials t
         JOIN reply_drafts d ON d.event_id=t.event_id JOIN inbound_events e ON e.id=t.event_id
-        WHERE t.used=0 AND t.expires_at>? AND t.draft_id=d.id AND t.draft_version=d.version`).all(this.authority.now()) as
+        WHERE e.account_id=? AND t.used=0 AND t.expires_at>? AND t.draft_id=d.id AND t.draft_version=d.version`)
+        .all(this.store.accountId,this.authority.now()) as
         {event_id:string;id:string;version:number;text:string;channel:Channel}[]).some(row=>
           this.authority.trialAvailable(row.event_id,row.id,row.version,row.text,this.browser.identity(row.channel)));
     const effectiveMode=['MANUAL','AI_ASSISTED'].includes(configuredMode)&&!anySendAvailable?'DRAFT_ONLY':configuredMode;
-    const account = this.store.db
-      .prepare("SELECT own_id FROM accounts WHERE id=?")
-      .get("account_001") as { own_id: string } | undefined;
+    const ownId = this.store.accountOwnId(this.authority.accountId);
     return {
       runtime: this.browser.root,
-      account: account ? { id: "account_001", identity: account.own_id } : null,
+      securityRuntime:securityRuntime(null),
+      securityHolds:(['COMMENT_NOTIFICATION','DIRECT_MESSAGE'] as const).flatMap(channel=>{
+        const hold=readSecurityHold(this.store,channel);return hold?[hold]:[];
+      }),
+      account: ownId ? { id: this.authority.accountId, identity: ownId } : null,
       operator: {
         id: op.id,
         permissions: op.permissions,
@@ -125,11 +132,10 @@ export class WorkbenchQueries {
       configuredMode,
       paused: this.authority.paused(),
       browser: this.browser.status(),
-      lastSync: this.store.db
-        .prepare(
-          "SELECT channel,MAX(observed_at) AS at FROM observations GROUP BY channel",
-        )
-        .all(),
+      lastSync: this.store.schemaVersion() >= 4
+        ? this.store.db.prepare("SELECT channel,MAX(observed_at) AS at FROM account_observations WHERE account_id=? GROUP BY channel")
+          .all(this.store.accountId)
+        : this.store.db.prepare("SELECT channel,MAX(observed_at) AS at FROM observations GROUP BY channel").all(),
       capabilities: (
         ["COMMENT_NOTIFICATION", "DIRECT_MESSAGE"] as Channel[]
       ).map((channel) => ({
@@ -149,19 +155,24 @@ export class WorkbenchQueries {
       keyStored:state.keyStored,keyStorageError:state.keyStorageError,
       modelAuthorized: hasSuggestionAuthorization(automation,state),
       automation:automation?{
-        ...automation.state(),modelGrant:automation.active('MODEL'),replyPolicy:automation.active('AUTO_REPLY'),
+        ...automation.state(),modelGrant:grant('MODEL'),replyPolicy:policy,
         collector:state.collector,inboxRevision:state.inboxRevision,
-        pendingWorks:this.store.db.prepare("SELECT count(*) AS count FROM discovered_works WHERE state='REVIEW'").get(),
+        pendingWorks:this.store.accountId===DEFAULT_ACCOUNT_ID
+          ? this.store.db.prepare("SELECT count(*) AS count FROM discovered_works WHERE state='REVIEW'").get()
+          : { count: 0 },
         unresolvedSends:this.store.db.prepare(`SELECT e.channel,count(*) AS count FROM send_intents i
-          JOIN inbound_events e ON e.id=i.event_id WHERE i.status IN ('INTENT_RECORDED','UNCERTAIN')
-          AND COALESCE((SELECT v.verified FROM verification_results v WHERE v.intent_id=i.id ORDER BY v.rowid DESC LIMIT 1),0)<>1 GROUP BY e.channel`).all(),
-        autoStopReason:configuredMode==='LIMITED_AUTO'&&automation.active('AUTO_REPLY')?(!state.keyPresent?'MODEL_KEY_REQUIRED':!automation.allowance(automation.active('AUTO_REPLY')!.version,'SEND')?'SEND_GRANT_EXHAUSTED':
-          !automation.allowance(automation.active('AUTO_REPLY')!.version,'MODEL')?'MODEL_GRANT_EXHAUSTED':this.authority.paused()?'ACCOUNT_PAUSED':null):null,
+          JOIN inbound_events e ON e.id=i.event_id WHERE e.account_id=? AND i.status IN ('INTENT_RECORDED','UNCERTAIN')
+          AND COALESCE((SELECT v.verified FROM verification_results v WHERE v.intent_id=i.id ORDER BY v.rowid DESC LIMIT 1),0)<>1
+          GROUP BY e.channel`).all(this.store.accountId),
+        autoStopReason:configuredMode==='LIMITED_AUTO'?(state.modelUnavailable??(policy?
+          !state.keyPresent?'MODEL_KEY_REQUIRED':!automation.allowance(policy.version,'SEND')?'SEND_GRANT_EXHAUSTED':
+          !automation.allowance(policy.version,'MODEL')?'MODEL_GRANT_EXHAUSTED':this.authority.paused()?'ACCOUNT_PAUSED':null:
+          'AUTO_POLICY_REQUIRED')):null,
       }:null,
       modelBusy: state.modelBusy,
       sync:structuredClone(state.sync),
       go: "UNVERIFIED",
-      schema: 3,
+      schema: this.store.db.pragma('user_version', { simple: true }) as number,
     };
   }
 

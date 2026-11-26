@@ -18,7 +18,7 @@ export class AssistantReads {
     const at=Date.parse(time??'');
     if(!Number.isFinite(at)||at<=grant.scope.collection.startedAt||at>this.service.authority.now())return false;
     const store=this.service.store;
-    if(store.db.prepare('SELECT id FROM inbound_events WHERE id=?').get(eventId)){
+    if(store.db.prepare('SELECT id FROM inbound_events WHERE id=? AND account_id=?').get(eventId,this.service.accountId)){
       const event=store.event(eventId);
       return this.sameThread(anchor.payload,event.payload)&&this.service.authority.assistant.inScope(grant,event);
     }

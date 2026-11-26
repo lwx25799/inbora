@@ -1,19 +1,24 @@
 import {expect,test,vi} from 'vitest';
 import {EventEmitter} from 'node:events';
 import {join} from 'node:path';
+import {rm} from 'node:fs/promises';
+import {EventStore} from '../../src/storage/store.js';
 import {BrowserService} from '../../src/app/browser-service.js';
 import type {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
 import {digest,type ReplyAdapter,type SendProof} from '../../src/core/contracts.js';
 import {migrateClient} from '../../src/storage/client-migration.js';
-import {approved,database,privateTemp,snapshot} from '../helpers.js';
+import {approved,privateTemp,snapshot} from '../helpers.js';
 
 test.each([false,true])('read-only existing verification exposes only the exact proof native digest when complete (%s)',async complete=>{
-  const store=database(),root=privateTemp('verify-existing-result-'),draft=store.draft(approved(store)),event=store.event(draft.eventId);
+  const root=privateTemp('verify-existing-result-'),store=new EventStore(join(root,'poc.sqlite'),true);
+  const draft=store.draft(approved(store)),event=store.event(draft.eventId);
   const intent=store.recordIntent(draft.id,snapshot(event.payload),false);store.receipt(intent,'UNCERTAIN','synthetic-unknown');
   await migrateClient(store,join(root,'client.sqlite'));
   const before={events:store.events(),intents:store.db.prepare('SELECT * FROM send_intents').all(),
     receipts:store.db.prepare('SELECT * FROM delivery_receipts').all(),budgets:store.db.prepare('SELECT * FROM budgets').all()};
-  const owner={context:new EventEmitter(),actor:{run:async(action:()=>unknown)=>action()},version:()=> '123.0.0.0'} as unknown as BrowserProfileOwner;
+  const page=()=>({url:()=> 'https://www.douyin.com/'});
+  const owner={context:new EventEmitter(),notification:page(),dm:page(),actor:{run:async(action:()=>unknown)=>action()},
+    close:async()=>{},version:()=> '123.0.0.0'} as unknown as BrowserProfileOwner;
   const browser=BrowserService.adopt(root,owner,'headless'),proof:SendProof={id:'synthetic-exact-native-id',ownId:'own-1',
     targetKey:'dm:conversation-1',text:draft.text,pending:false,sentAt:new Date().toISOString()};
   const inspect=vi.fn(async()=>snapshot(event.payload)),readback=vi.fn(async()=>complete?proof:null),dispose=vi.fn();
@@ -28,5 +33,5 @@ test.each([false,true])('read-only existing verification exposes only the exact 
     expect(adapter.prepare).not.toHaveBeenCalled();expect(adapter.clickOnce).not.toHaveBeenCalled();expect(dispose).toHaveBeenCalledOnce();
     expect(store.events()).toEqual(before.events);expect(store.db.prepare('SELECT * FROM send_intents').all()).toEqual(before.intents);
     expect(store.db.prepare('SELECT * FROM delivery_receipts').all()).toEqual(before.receipts);expect(store.db.prepare('SELECT * FROM budgets').all()).toEqual(before.budgets);
-  }finally{mocked.mockRestore();store.close();}
+  }finally{mocked.mockRestore();await browser.close();store.close();await rm(root,{recursive:true,force:true});}
 });

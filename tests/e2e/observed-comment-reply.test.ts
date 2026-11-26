@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test,vi} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -13,7 +14,7 @@ async function setup(){
   const server=await fixtureServer(),owner=await BrowserProfileOwner.launch(join(privateTemp(),'profile'),true),store=database();
   await mountCommentReply(owner,server.origin);await reloadableCommentReply(owner.notification,server.origin);
   const mapping=commentReplyMapping(server.origin),adapter=new ObservedCommentReply(owner.notification,mapping,250);
-  const batch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,evidenceId:'fixture-root-snapshot'});
+  const batch=await owner.notification.evaluate(captureObserved,{mapping:mapping.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'fixture-root-snapshot'});
   store.observe('COMMENT_NOTIFICATION','work:10',[],'100','fixture');store.observe('COMMENT_NOTIFICATION','work:10',batch.events,'100','fixture');
   const event=store.events()[0]!,draft=store.saveDraft(event.id,'approved root reply','mock');
   return{owner,store,server,mapping,adapter,event,draft,close:async()=>{store.close();await owner.close();await server.close();}};
@@ -43,10 +44,10 @@ test.each(['valid','wrong-parent','wrong-text','pending','missing','duplicate'])
   }finally{await f.close();}
 });
 
-test('visible native SMS challenge blocks inspection before input or intent',async()=>{
+test('a visible native SMS-shaped candidate blocks inspection before input or intent',async()=>{
   const f=await setup();try{
     await f.owner.notification.evaluate(()=>{const node=document.createElement('div');node.className='uc-ui-verify-new_header-title';node.textContent='接收短信验证码';document.body.append(node);});
-    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('COMMENT_REPLY_PAGE_BLOCKED');
+    await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow('OBSERVATION_SECURITY_SUSPECT');
     expect(f.store.stats().budgets).toMatchObject([{used:0},{used:0}]);
   }finally{await f.close();}
 });
@@ -211,7 +212,7 @@ test('root discovery excludes the fields of an already expanded direct child',as
   const f=await setup();try{
     f.store.approve(f.draft.id,await f.adapter.inspect(f.event.payload),f.draft.version,f.draft.text);
     expect(await new SendCoordinator(f.store,f.owner.actor).send(f.draft.id,f.adapter,false)).toBe('CONFIRMED');
-    const batch=await f.owner.notification.evaluate(captureObserved,{mapping:f.mapping.observation,channel:'comments' as const,index:0,evidenceId:'expanded-fixture'});
+    const batch=await f.owner.notification.evaluate(captureObserved,{mapping:f.mapping.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'expanded-fixture'});
     expect(batch.events).toHaveLength(1);expect(batch.events[0]).toMatchObject({commentId:'11',text:'root fixture input'});
   }finally{await f.close();}
 });
@@ -219,7 +220,7 @@ test('root discovery excludes the fields of an already expanded direct child',as
 test('one hidden stale comment list cannot block the unique active list or lend fields',async()=>{
   const f=await setup();try{
     await f.owner.notification.locator('#comment-list').evaluate(list=>{const clone=list.cloneNode(true) as HTMLElement;clone.style.display='none';document.body.append(clone);});
-    const batch=await f.owner.notification.evaluate(captureObserved,{mapping:f.mapping.observation,channel:'comments' as const,index:0,evidenceId:'hidden-list'});
+    const batch=await f.owner.notification.evaluate(captureObserved,{mapping:f.mapping.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'hidden-list'});
     expect(batch.events).toHaveLength(1);expect(await f.adapter.inspect(f.event.payload)).toHaveProperty('ownId','100');
     await f.owner.notification.locator('#comment-list').last().evaluate(n=>(n as HTMLElement).style.display='');
     await expect(f.adapter.inspect(f.event.payload)).rejects.toThrow();
@@ -239,7 +240,7 @@ test('a hover-only child menu does not hide an otherwise fully verified visible 
 test('a transparent root menu does not block discovery of its visible original comment',async()=>{
   const f=await setup();try{
     await f.owner.notification.locator('#tooltip_11').evaluate(n=>{const wrapper=document.createElement('div');wrapper.style.opacity='0';n.replaceWith(wrapper);wrapper.append(n);});
-    const batch=await f.owner.notification.evaluate(captureObserved,{mapping:f.mapping.observation,channel:'comments' as const,index:0,evidenceId:'root-hover-menu'});
+    const batch=await f.owner.notification.evaluate(captureObserved,{mapping:f.mapping.observation,channel:'comments' as const,index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'root-hover-menu'});
     expect(batch.events).toHaveLength(1);expect(batch.events[0]).toHaveProperty('commentId','11');
   }finally{await f.close();}
 });

@@ -89,3 +89,16 @@ test.each(['NAVIGATION','WORK','EVENT','DISPOSE'] as const)('late inline body is
     expect(f.observer.snapshot(event)).toEqual([]);
   }finally{f.close();}
 });
+
+test('clock calibration accepts local clock up to 2000ms behind server while rejecting larger negative skew',async()=>{
+  const f=fixture();try{
+    const slightlyAhead=Math.ceil(Date.now()/1000)*1000+1000;
+    f.respond(f.request(),{status_code:0,extra:{now:slightlyAhead},comments:[{cid:'11'}]},'',{date:new Date(slightlyAhead).toUTCString()});await settle();
+    expect(f.observer.clockLag()).not.toBeNull();
+    expect(f.observer.clockLag()!).toBeLessThan(0);
+    expect(f.observer.clockLag()!).toBeGreaterThanOrEqual(-2000);
+    const farAhead=Math.ceil(Date.now()/1000)*1000+3000;
+    f.respond(f.request(),{status_code:0,extra:{now:farAhead},comments:[{cid:'11'}]},'',{date:new Date(farAhead).toUTCString()});await settle();
+    expect(f.observer.clockLag()).toBeNull();
+  }finally{f.close();}
+});

@@ -1,38 +1,49 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  accountSummarySchema, DEFAULT_ACCOUNT_ID, DOUYIN_PLATFORM_ID, MOCK_PLATFORM_ID,
+  type AccountId, type AccountSummary, type AccountsCommand,
+} from "../../src/contracts/account.js";
+import { isMutatingClientCommand, requiredScopeForCommand, type ProtocolScope } from "../../src/contracts/protocol-v2.js";
+import type { BrowserStatus } from "../../src/contracts/browser-resources.js";
 import type {
   ClientCommand,
   SendParams,
   AiSettings,
   InboxSync,
   BrowserDraftChoice,
-} from "../../src/app/contracts.js";
+  ModelProviderStatusFields,
+} from "../../src/contracts/client.js";
 import type {
   Draft,
   StoredEvent,
   InboundEvent,
-} from "../../src/core/contracts.js";
-import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../src/app/automation-contracts.js';
-import type { TimelineItem } from '../../src/app/inbox-queries.js';
-import type {LocalAssistantState} from '../../src/app/local-assistant-contracts.js';
-export type { TimelineItem };
+} from "../../src/contracts/events.js";
+import type { CollectionSettings, Grant, ModelGrant, ReplyPolicy } from '../../src/contracts/automation.js';
+import type { CommentThreadPage, ReplyStatus, TimelineItem } from '../../src/contracts/inbox.js';
+import type {LocalAssistantState} from '../../src/contracts/local-assistant.js';
+import type {SecurityRuntime} from '../../src/contracts/diagnostics.js';
+import {extractErrorCode} from './error-messages.js';
+import {
+  MODEL_PAGE_LIMIT, modelCatalogPageSchema, publicModelStateSchema,
+  type ModelPresetId, type ModelProtocol, type PublicModelConnection, type PublicModelState,
+} from '../../src/contracts/model-providers.js';
+export type { ReplyStatus, TimelineItem };
+export type { AccountSummary, AccountsCommand, ProtocolScope };
+export { DOUYIN_PLATFORM_ID, MOCK_PLATFORM_ID };
 
 export type { SendParams, AiSettings, BrowserDraftChoice };
-export type ReplyStatus='WAITING'|'REPLIED'|'NOT_REQUIRED'|'MANUAL_ONLY';
-export interface Status {
+export interface Status extends ModelProviderStatusFields {
   localAssistant?:LocalAssistantState;
   localAssistantConnection?:{ready:boolean;instanceId:string|null;transport:'stdio';tools:16};
+  securityRuntime?:SecurityRuntime;
+  securityHolds?:{channel:'DIRECT_MESSAGE'|'COMMENT_NOTIFICATION';reason:string;incidentId:string;revision:string;heldAt:number;mode:'headed'|'headless'}[];
   runtime: string;
-  account: { id: string; identity: string } | null;
+  account: { id: AccountId; identity: string } | null;
   operator: { id: string; permissions: string[]; expiresAt: number };
   mode: "OBSERVE" | "DRAFT_ONLY" | "MANUAL" | "AI_ASSISTED" | "LIMITED_AUTO";
   configuredMode: Status["mode"];
   paused: boolean;
-  browser: {
-    state: string;
-    mode: "headed" | "headless";
-    loginRecovery?:boolean;
-    version: string | null;
-  };
+  browser: BrowserStatus;
   lastSync: { channel: string; at: string }[];
   capabilities: {
     channel: string;
@@ -93,7 +104,7 @@ export interface Thread {
   timeline?:{items:TimelineItem[];pageSize:number;hasMore:boolean;before:string|null;projectionRevision?:string};
   replyStatus: ReplyStatus;
   conversationReplyStatus?: ReplyStatus;
-  commentContext?: ReturnType<typeof import('../../src/storage/comment-thread-context.js').commentThreadPage>;
+  commentContext?: CommentThreadPage;
   controlledTrial: boolean;
   workUrl: string | null;
   event: StoredEvent;
@@ -136,20 +147,222 @@ export interface Review {
   target: InboundEvent;
   account: string;
 }
-export function request<T>(
-  body:
-    | ClientCommand
-    | {
-        command: "connect";
-        runtime: string;
-        initialize: boolean;
-        consent: true;
-      }
-    | { command: "disconnect" },
-): Promise<T> {
-  return invoke<T>("client_request", { body });
+export type BusinessPrompts = Pick<AiSettings, 'persona' | 'business' | 'rules'>;
+
+export async function saveBusinessPrompts(status: Status, settings: BusinessPrompts): Promise<Status> {
+  if (status.modelProvidersSupported !== true) throw new Error('BUSINESS_PROMPTS_BACKEND_UPGRADE_REQUIRED');
+  return request<Status>({command:'configureAi', settings});
 }
-export function desktopInfo(): Promise<{ runtime: string; version: string; rememberedRuntime?: string|null }> {
+
+export function runtimeSession(status: Status) {
+  return JSON.stringify([status.runtime, status.operator.id, status.securityRuntime?.instanceId]);
+}
+
+export async function readModelCatalog(connection: PublicModelConnection) {
+  if (!connection.modelsTruncated) return connection.models;
+  const models: PublicModelConnection['models'] = [];
+  const ids = new Set<string>();
+  let offset: number | null = 0;
+  while (offset !== null) {
+    const page = modelCatalogPageSchema.parse(await request<unknown>({command:'modelProviders', action:'list',
+      connectionId:connection.id, offset, limit:MODEL_PAGE_LIMIT}));
+    if (page.connectionId !== connection.id || page.version !== connection.version || page.offset !== offset
+      || page.totalModelCount !== connection.totalModelCount) throw new Error('MODEL_CONNECTION_CONFLICT');
+    for (const model of page.models) {
+      if (ids.has(model.modelId)) throw new Error('MODEL_PROVIDER_STATUS_UNCONFIRMED');
+      ids.add(model.modelId);
+      models.push(model);
+    }
+    const next = models.length < page.totalModelCount ? models.length : null;
+    if (models.length > page.totalModelCount || page.nextOffset !== next || (next !== null && next <= offset)) {
+      throw new Error('MODEL_PROVIDER_STATUS_UNCONFIRMED');
+    }
+    offset = next;
+  }
+  return models;
+}
+
+async function readConnectionPages(state: PublicModelState): Promise<PublicModelState> {
+  const connections = [...state.connections];
+  const ids = new Set(connections.map(connection => connection.id));
+  let offset = state.nextConnectionOffset;
+  while (offset != null) {
+    const page = publicModelStateSchema.parse(await request<unknown>({command:'modelProviders', action:'list', offset,
+      ...(state.listRevision === undefined ? {} : {expectedListRevision:state.listRevision})}));
+    if (page.listRevision !== state.listRevision || page.selection.selectionRevision !== state.selection.selectionRevision
+      || page.totalConnectionCount !== state.totalConnectionCount
+      || offset !== connections.length || page.connections.some(connection => ids.has(connection.id))) {
+      throw new Error('MODEL_CONNECTION_CONFLICT');
+    }
+    for (const connection of page.connections) ids.add(connection.id);
+    connections.push(...page.connections);
+    if (!page.connections.length || (page.nextConnectionOffset == null && connections.length !== state.totalConnectionCount)) {
+      throw new Error('MODEL_PROVIDER_STATUS_UNCONFIRMED');
+    }
+    offset = page.nextConnectionOffset;
+  }
+  return {...state, connections, nextConnectionOffset:null};
+}
+
+export async function readModelConnections(first: Status) {
+  let status = first;
+  for (let attempt = 0; ; attempt++) {
+    if (!status.modelProviders || status.modelProvidersAvailable !== true || runtimeSession(status) !== runtimeSession(first)) {
+      throw new Error('MODEL_PROVIDER_STATUS_UNCONFIRMED');
+    }
+    try {
+      return {status, state:await readConnectionPages(status.modelProviders)};
+    } catch (error) {
+      if (attempt >= 2 || extractErrorCode(error) !== 'MODEL_CONNECTION_CONFLICT') throw error;
+      status = await request<Status>({command:'getStatus'});
+    }
+  }
+}
+
+type DesktopCommand = ClientCommand
+  | { command: "connect"; runtime: string; initialize: boolean; consent: true }
+  | { command: "disconnect" };
+
+interface AccountRouting {
+  session: string;
+  accountRef: AccountId;
+  active: Set<AccountId> | null;
+  loading: Promise<AccountSummary[]> | null;
+}
+let accountRouting: AccountRouting | null = null;
+
+function observeRoutingStatus(status: Status): void {
+  if (!(status?.schema >= 4)) {
+    accountRouting = null;
+    return;
+  }
+  const session = runtimeSession(status);
+  const accountRef = status.account?.id ?? DEFAULT_ACCOUNT_ID;
+  if (accountRouting?.session === session) accountRouting.accountRef = accountRef;
+  else accountRouting = { session, accountRef, active: null, loading: null };
+}
+
+function writeV2<T>(routing: AccountRouting, body: ClientCommand, kind: ProtocolScope['kind']): Promise<T> {
+  const scope: ProtocolScope = kind === 'GLOBAL' ? { kind } : {
+    kind, accountRef: 'accountRef' in body ? body.accountRef : routing.accountRef,
+  };
+  const commandId = ('commandId' in body ? body.commandId : undefined) ?? crypto.randomUUID();
+  return requestV2<T>(scope, body, commandId);
+}
+
+export async function request<T>(body: DesktopCommand): Promise<T> {
+  if (body.command === 'emergencyStop') return invoke<T>("client_request", { body });
+  const routing = accountRouting;
+  if (body.command === 'connect' || body.command === 'disconnect' || body.command === 'getStatus') {
+    try {
+      const result = await invoke<T>("client_request", { body });
+      if (body.command === 'disconnect') accountRouting = null;
+      else if (body.command === 'connect' || accountRouting === routing) observeRoutingStatus(result as Status);
+      return result;
+    } catch (error) {
+      if (accountRouting === routing && extractErrorCode(error) === 'CONNECT_RUNTIME_FIRST') accountRouting = null;
+      throw error;
+    }
+  }
+
+  const kind = routing && isMutatingClientCommand(body) ? requiredScopeForCommand(body) : null;
+  if (!routing || !kind) return invoke<T>("client_request", { body });
+  if (!routing.active) {
+    // A schema4 connection can already have multiple accounts before Settings is opened.
+    await listAccountsV2().catch(() => {});
+    if (routing !== accountRouting) throw new Error('CONNECT_RUNTIME_FIRST');
+  }
+  if (routing.active && routing.active.size > 1) return writeV2<T>(routing, body, kind);
+  try {
+    return await invoke<T>("client_request", { body });
+  } catch (error) {
+    // This rejection happens before dispatch, so a scoped request cannot replay a write.
+    if (routing !== accountRouting || extractErrorCode(error) !== 'PROTOCOL_V2_ACCOUNT_SCOPE_REQUIRED') throw error;
+    routing.active = null;
+    return writeV2<T>(routing, body, kind);
+  }
+}
+
+export function requestV2<T>(
+  scope: ProtocolScope,
+  body: DesktopCommand,
+  commandId?: string,
+): Promise<T> {
+  return invoke<T>("client_request_v2", { scope, body, ...(commandId ? { commandId } : {}) });
+}
+
+export const platformNames: Record<string, string> = {
+  [DOUYIN_PLATFORM_ID]: '抖音',
+  [MOCK_PLATFORM_ID]: '合成验证平台 (Mock)',
+};
+
+export async function listAccountsV2(status?: Status): Promise<AccountSummary[]> {
+  if (status) observeRoutingStatus(status);
+  const routing = accountRouting;
+  if (routing?.loading) return routing.loading;
+  const loading = requestV2<{ accounts: unknown }>({ kind: 'GLOBAL' }, { command: 'accounts', action: 'listAccounts' })
+    .then(result => accountSummarySchema.array().parse(result.accounts));
+  if (routing) routing.loading = loading;
+  try {
+    const accounts = await loading;
+    if (routing?.loading === loading) {
+      routing.active = new Set(accounts.filter(account => account.status === 'ACTIVE').map(account => account.accountRef));
+    }
+    return accounts;
+  } finally {
+    if (routing?.loading === loading) routing.loading = null;
+  }
+}
+
+export interface MockRegistration {
+  commandId: string;
+  displayLabel: string;
+}
+
+export function mockRegistrationAccountRef(commandId: string): AccountId {
+  return `account_${commandId}`;
+}
+
+export function accountRegistrationUnconfirmed(error: unknown): boolean {
+  return ['', 'COMMAND_IN_PROGRESS', 'IPC_RESPONSE_UNKNOWN_READ_STATUS', 'SIDECAR_CLOSED',
+    'SIDECAR_RESPONSE_TOO_LARGE', 'DEV_BACKEND_RESTARTING_READ_STATUS',
+    'DEV_BACKEND_UNAVAILABLE_RESTART_REQUIRED', 'OPERATION_FAILED_PRIVATE_DIAGNOSTICS',
+  ].includes(extractErrorCode(error));
+}
+
+async function changeAccount(scope: ProtocolScope, body: Extract<AccountsCommand, { commandId: string }>): Promise<AccountSummary> {
+  const routing = accountRouting;
+  try {
+    const account = await requestV2<AccountSummary>(scope, body, body.commandId);
+    if (routing) {
+      routing.loading = null; // A list started before the write can describe the old account set.
+      if (body.action === 'disconnectAccount') routing.active?.delete(account.accountRef);
+      else if (account.status === 'ACTIVE') routing.active?.add(account.accountRef);
+    }
+    return account;
+  } catch (error) {
+    if (routing && accountRegistrationUnconfirmed(error)) {
+      routing.active = null;
+      routing.loading = null;
+    }
+    throw error;
+  }
+}
+
+export function registerMockAccountV2({ commandId, displayLabel }: MockRegistration): Promise<AccountSummary> {
+  return changeAccount({ kind: 'GLOBAL' }, {
+    command: 'accounts', action: 'registerAccount', commandId, accountId: mockRegistrationAccountRef(commandId),
+    platform: MOCK_PLATFORM_ID, connector: MOCK_PLATFORM_ID, displayLabel,
+  });
+}
+
+export function disconnectAccountV2(accountRef: AccountSummary['accountRef']): Promise<AccountSummary> {
+  return changeAccount({ kind: 'ACCOUNT', accountRef }, {
+    command: 'accounts', action: 'disconnectAccount', commandId: crypto.randomUUID(), accountRef, confirmed: true,
+  });
+}
+
+export function desktopInfo(): Promise<{ runtime: string; version: string; rememberedRuntime?: string|null; features?:{replyKnowledge?:boolean} }> {
   return invoke("desktop_info");
 }
 export async function restoreDesktop() {
@@ -178,112 +391,15 @@ export async function restoreDesktop() {
 export function closeDesktop(): Promise<void> {
   return invoke("desktop_exit");
 }
-export const reasons: Record<string, string> = {
-  MCP_DRAFT_VERSION_CHANGED:'助手已保存新版本，你的未保存内容已保留，暂不自动覆盖。核对后继续编辑即可按当前版本保存。',
-  ASSISTANT_PERMISSION_REQUIRED:'助手暂不可执行此操作，请核对连接状态和当前账号。',
-  ASSISTANT_SCOPE_CHANGED:'账号或收取范围已变化，请核对应用当前的后台收取范围。',
-  ASSISTANT_LIMIT_BELOW_USED:'助手累计额度不能低于已用次数，历史消耗保留',
-  ASSISTANT_SEND_PERMISSIONS_REQUIRED:'文字发送需要正文读取、草稿及日常控制权限和可用发送额度',
-  BROWSER_DRAFT_NOT_RECOVERABLE:'当前没有可安全清理的已保存自动回复稿，网页输入已保留',
-  BROWSER_DRAFT_NOT_MATCHED:'网页输入与已保存的自动回复稿不一致，未清理',
-  BROWSER_DRAFT_CHANGED:'应用回复稿或会话已变化，未清理，请重新检查',
-  NATIVE_REPLY_SAVED_DRAFT_MISMATCH:'网页输入与已保存的自动回复稿不一致，未清理',
-  NATIVE_REPLY_SAVED_DRAFT_CHANGED:'网页输入或会话已变化，未清理，请重新检查',
-  NATIVE_REPLY_SAVED_DRAFT_NOT_CLEARED:'未能确认网页输入已清空，应用回复稿保留，未发送或重试',
-  POLICY_TARGETS_REQUIRED:'请为每个已选通道选择作品或会话范围，已保存策略和额度保持不变',
-  LOGIN_RECOVERY_IN_PROGRESS:'正在等待本人登录或处理验证码，完成后自动恢复无头运行',
-  BROWSER_HAS_HUMAN_INPUT:'专属网页中还有未提交输入，已保留，请处理后再切换浏览器',
-  PREPARING:'正在后台准备与核验',
-  AUTO_POLICY_REQUIRED:'请先设置并启用准确的自动回复策略',
-  POLICY_NO_LONGER_AUTHORIZED:'自动回复策略已撤销、暂停或范围变化',
-  MODEL_GRANT_EXHAUSTED:'持续模型授权额度已用尽',
-  SEND_GRANT_EXHAUSTED:'持续发送授权额度已用尽',
-  MODEL_OUTSIDE_GRANT:'当前通道或模型超出已启用授权',
-  OWN_WORKS_METADATA_NOT_READY:'本人作品列表尚未取得可核验字段，已保留进度',
-  DM_LIST_READ_FAILED:'私信会话列表读取未完成，后台保留进度并退避重试',
-  DM_THREAD_READ_FAILED:'当前私信会话读取未完成，已暂缓此会话并继续其它会话',
-  OBSERVATION_DM_CHAT_NOT_READY:'已尝试选择原生会话行，但聊天层未打开；已保留此会话并让出其它会话',
-  OBSERVATION_COMMENT_TEXT_DOM_NOT_READY:'评论行已出现，正文组件仍未就绪；已保留进度',
-  OBSERVATION_COMMENT_TOOLTIP_DOM_NOT_READY:'评论行已出现，原生编号组件仍未就绪；已保留进度',
-  OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_READY:'账号头像组件尚未就绪，身份核验未完成',
-  OBSERVATION_ACCOUNT_AVATAR_DOM_NOT_UNIQUE:'账号头像组件不唯一，身份核验已停止',
-  OBSERVATION_COMMENT_LIST_DOM_NOT_READY:'当前作品评论列表尚未就绪，已保留进度',
-  OBSERVATION_COMMENT_LIST_DOM_NOT_UNIQUE:'当前作品评论列表不唯一，已停止本次读取',
-  OBSERVATION_COMMENT_ROOTS_DOM_NOT_READY:'评论列表可见，但没有可核验的一级评论或明确空态',
-  OBSERVATION_COMMENT_TEXT_DOM_NOT_UNIQUE:'评论正文组件不唯一，已停止当前作品读取',
-  OBSERVATION_COMMENT_TOOLTIP_DOM_NOT_UNIQUE:'评论原生编号组件不唯一，已停止当前作品读取',
-  COMMENT_TEXT_UNVERIFIED:'评论正文尚未完整核验，已保留待核对；完成核验前不会调用模型或发送',
-  COMMENT_PARENT_UNVERIFIED:'评论所属层级尚未完整核验，消息已保留；后台完成核验前不会自动回复',
-  COMMENT_ROOT_CONTEXT_REQUIRED:'一级根评论尚未完整收取，后台补齐后再生成回复',
-  COMMENT_THREAD_CONTEXT_UNVERIFIED:'评论对话中的上下文尚未完整核验，后台正在补齐',
-  DM_CONTENT_UNVERIFIED:'内容仅供人工查看，AI不会自动处理',
-  HUMAN_MEDIA_TEXT_REQUIRED:'请直接输入人工回复，此消息不能使用已有的非人工草稿',
-  HUMAN_MEDIA_APPROVAL_REQUIRED:'本次人工回复的后台核验已失效，草稿已保留',
-  TARGET_NEEDS_REVIEW:'消息的准确目标或原生身份仍待核验，暂不能发送',
-  OBSERVATION_DM_CONTENT_DOM_NOT_READY:'私信正文正在加载，后台已保留收取进度',
-  DM_ADVANCE_READ_FAILED:'私信列表翻页未完成，已保留已收取记录和会话进度',
-  OBSERVATION_EXISTING_HUMAN_INPUT:'网页保留了未发送输入，后台已保留草稿并停止本次切换',
-  DPAPI_RESTORE_FAILED:'当前 Windows 用户无法解密已保存的 Key，请重新配置',
-  INBOX_SYNC_IN_PROGRESS: "收件箱正在同步，请等待当前读取完成。",
-  OBSERVATION_DOM_NOT_READY: "页面尚未就绪，请稍后再次同步。",
-  OBSERVATION_PAGE_BLOCKED: "页面安全检查未通过；可重新检查，若仍有登录或验证提示再处理。",
-  OBSERVATION_UNEXPECTED_ORIGIN:'当前页面来源与已授权网站不一致，请返回正常抖音页面后检查恢复。',
-  OBSERVATION_SECURITY_TITLE:'页面出现验证码、安全验证或访问受限提示，请本人处理后检查恢复。',
-  OBSERVATION_SECURITY_COMPONENT:'页面出现安全验证组件，请本人处理后检查恢复。',
-  EMERGENCY_RECOVERY_HEADLESS_REQUIRED:'请先返回无头运行，再检查并恢复调度。',
-  EMERGENCY_RECOVERY_CHANGED:'检查期间发生了新的急停，请查看最新原因后重新检查。',
-  EMERGENCY_RECOVERY_CANCELLED:'恢复检查已取消，急停状态保留。',
-  EMERGENCY_RECOVERY_TIMEOUT:'恢复检查超时，急停状态保留，请稍后重试。',
-  OBSERVATION_ACCOUNT_CHANGED: "浏览器账号与绑定账号不一致，已停止同步。",
-  PLATFORM_STOP: "平台要求停止，已结束本次同步。",
-  CHALLENGE_REQUIRED: "请在专属浏览器完成平台验证后再同步。",
-  LOGIN_REQUIRED: "请先在专属浏览器登录。",
-  ACCOUNT_NOT_VERIFIED: "当前账号身份未通过核验，已停止同步。",
-  ACCOUNT_CHANGED: "当前账号与收件箱绑定账号不一致，已停止同步。",
-  BROWSER_CLOSED: "专属浏览器已关闭，本次同步已停止。",
-  RUNTIME_NOT_FOUND: "没有找到现有运行资料，请核对目录路径；首次使用请明确初始化新目录。",
-  CAPABILITY_UNVERIFIED: "请先打开专属浏览器并同步此通道",
-  CAPABILITY_EXPIRED_OR_CHANGED: "通道证据已过期或环境已变化",
-  CAPABILITY_READ_ONLY: "读取已核验，发送尚未核验",
-  CAPABILITY_SEND_UNVERIFIED: "尚无已确认发送证据；受控测试资格按准确任务单独生效",
-  CAPABILITY_BLOCKED: "最近一次同步或核验未通过，请查看操作审计并重新同步",
-  CHANNEL_NOT_SENDABLE: "此通道当前禁止发送",
-  MODE_DRAFT_ONLY: "当前模式仅允许保存草稿",
-  ACCOUNT_PAUSED: "账号已暂停",
-  TARGET_PAUSED: "此目标已暂停",
-  TARGET_FROZEN: "此前回复尚未确认送达；可以编辑草稿，发送暂不可用",
-  FOLLOWUP_REQUIRES_CONFIRMED_REPLY: '上一条回复尚未确认送达，可先输入新内容',
-  FOLLOWUP_REPLY_UNRESOLVED: '上一条回复尚未处理完成，可先输入新内容',
-  FOLLOWUP_HUMAN_TEXT_REQUIRED: '请直接输入本次人工回复',
-  FOLLOWUP_NOT_READY: '人工回复记录正在准备，请稍后继续',
-  LEASE_EXPIRED_OR_CHANGED: "接管已过期或代际已变化，请重新接管",
-  DRAFT_VERSION_CONFLICT: "草稿版本已变化，请重新读取并核对",
-  CONTEXT_VERSION_CONFLICT: "上下文已变化，请重新核对",
-  TARGET_SELECTION_CHANGED: "所选目标已变化，原确认失效",
-  OPERATOR_PERMISSION_DENIED: "当前操作员没有此权限",
-  OPERATOR_EXPIRED: "操作员会话已过期，请重新连接",
-  REAL_MODEL_AUTHORIZATION_REQUIRED: "请先配置 Key 并明确授权模型调用",
-  MODEL_KEY_REQUIRED: "请先输入本次 Key",
-  SENSITIVE_MANUAL_HANDLING: "检测到敏感内容，保留人工处理",
-  MODEL_FAILED_NO_RETRY: "模型请求失败，未自动重试，可继续人工编辑",
-  OWNER_LOCKED_OR_PORT_UNAVAILABLE:
-    "运行目录正被其他内核占用，或本机锁端口不可用",
-  DATABASE_MISSING_USE_INIT:
-    "目录中没有数据库，请选择已有目录或明确初始化新目录",
-  CONFIRMATION_EXPIRED: "确认已超过 60 秒，请重新检查目标和全文",
-  COMMENT_REPLY_REFRESH_NOT_READY: "原评论刷新后尚未就绪，草稿已保留",
-  COMMENT_REPLY_LIST_NOT_UNIQUE: "出现多个可见评论列表，无法确定回复位置，未继续发送",
-  COMMENT_REPLY_ROOT_NOT_FOUND: "本轮未找到这条评论，回复已保存，尚未发送",
-  COMMENT_REPLY_ROOT_NOT_UNIQUE: "无法唯一定位原评论，回复已保存，尚未发送",
-  COMMENT_REPLY_LOCATE_TIMEOUT: "本轮定位评论耗时较长，回复已保存，尚未发送",
-  COMMENT_REPLY_CANCELLED: "发送准备已停止，已有回复保留",
-  OBSERVATION_COMMENT_RESTORE_LIMIT: "本轮较后面的评论尚未收完，后台已保留进度",
-  OBSERVATION_COMMENT_RENDER_NOT_READY: "网页评论尚未完成显示，后台已保留收取进度",
+export { errorMessages as reasons, explain } from './error-messages.js';
+export const modelPresetNames: Record<ModelPresetId, string> = {
+  deepseek:'DeepSeek', openai:'OpenAI', anthropic:'Claude', gemini:'Gemini', qwen:'通义千问',
+  doubao:'豆包', siliconflow:'硅基流动', openrouter:'OpenRouter', custom:'自定义',
 };
-export function explain(error: unknown): string {
-  const text = typeof error === "string" ? error : String(error);
-  return reasons[text] ?? text;
-}
+export const modelProtocolNames: Record<ModelProtocol, string> = {
+  OPENAI_CHAT:'OpenAI Chat Completions', OPENAI_RESPONSES:'OpenAI Responses',
+  ANTHROPIC_MESSAGES:'Anthropic Messages', GEMINI_GENERATE_CONTENT:'Gemini GenerateContent',
+};
 export const capabilityNames: Record<string, string> = {
   READ_OK: "已验证读取",
   SEND_REVIEW_ONLY: "发送待验证",

@@ -1,4 +1,4 @@
-import {digest,eventBinding,isStrong,requireSafe,targetKey,type StoredEvent} from '../core/contracts.js';
+import {DEFAULT_ACCOUNT_ID,digest,eventBinding,isStrong,requireSafe,targetKey,type StoredEvent} from '../core/contracts.js';
 import {localAssistantScopeSchema,localAssistantStoredScopeSchema,type LocalAssistantGrant,
   type LocalAssistantPermission,type LocalAssistantScope,type LocalAssistantState} from '../app/local-assistant-contracts.js';
 import {AutomationStore} from './automation-store.js';
@@ -12,10 +12,26 @@ export class LocalAssistantStore {
     requireSafe(state.collection,'ASSISTANT_COLLECTION_REQUIRED');
     return {ownId:state.collection.ownId,startedAt:state.startedAt,comments:state.collection.comments,inbox:state.collection.inbox};
   }
+  private grantFilter(){
+    return this.store.schemaVersion()>=4
+      ? {sql:'AND COALESCE((SELECT b.account_id FROM account_grant_bindings b WHERE b.grant_version=automation_grants.version),?)=?',
+        args:[DEFAULT_ACCOUNT_ID,this.store.accountId]}
+      : {sql:'',args:[]};
+  }
+  private lastGrant(activeOnly=false){
+    const {sql,args}=this.grantFilter();
+    return this.store.db.prepare(`SELECT version,scope_json,scope_digest,created_at,revoked_at FROM automation_grants
+      WHERE kind='LOCAL_ASSISTANT' ${activeOnly?'AND revoked_at IS NULL':''} ${sql} ORDER BY version DESC LIMIT 1`)
+      .get(...args) as {version:number;scope_json:string;scope_digest:string;created_at:number;revoked_at:number|null}|undefined;
+  }
   hasGrantHistory():boolean{
     if(!this.available())return false;
-    return !!this.store.db.prepare("SELECT version FROM automation_grants WHERE kind='LOCAL_ASSISTANT' LIMIT 1").get()||
-      !!this.store.db.prepare("SELECT id FROM audit_events WHERE event_type='LOCAL_ASSISTANT_REVOKED' AND entity_id='LOCAL_ASSISTANT' LIMIT 1").get();
+    if(this.lastGrant())return true;
+    const {db,accountId}=this.store;
+    const scope=this.store.schemaVersion()>=4
+      ? 'AND COALESCE((SELECT account_id FROM account_audit_links WHERE audit_id=a.id),?)=?' : '';
+    return !!db.prepare(`SELECT 1 FROM audit_events a WHERE a.event_type='LOCAL_ASSISTANT_REVOKED'
+      AND a.entity_id='LOCAL_ASSISTANT' ${scope} LIMIT 1`).get(...(scope?[DEFAULT_ACCOUNT_ID,accountId]:[]));
   }
   connectedScope():LocalAssistantScope{
     const current=this.collection();new AutomationStore(this.store,this.now).requireAccount(current.ownId);
@@ -35,44 +51,53 @@ export class LocalAssistantStore {
     requireSafe(parsed.expiresAt===null||parsed.expiresAt>this.now(),'ASSISTANT_GRANT_EXPIRED');
     const collectedWorkIds=(this.store.db.prepare(`SELECT DISTINCT substr(e.scope,6) id FROM inbound_events e
       JOIN collection_targets t ON t.target_key=e.target_key WHERE e.channel='COMMENT_NOTIFICATION'
-      AND e.scope LIKE 'work:%' AND t.own_id=? ORDER BY id`).all(parsed.ownId) as {id:string}[]).map(row=>row.id);
+      AND e.scope LIKE 'work:%' AND t.own_id=? AND e.account_id=? ORDER BY id`).all(parsed.ownId,this.store.accountId) as {id:string}[]).map(row=>row.id);
     const workIds=[...new Set([...trustedMappedWorkIds,...collectedWorkIds])].sort();
     const scope=localAssistantStoredScopeSchema.parse({...parsed,
       collection:{startedAt:current.startedAt,comments:current.comments,inbox:current.inbox,workIds}});
     return this.store.db.transaction(()=>{
       // Carry consumed reservations even across expiry/revocation; an ordinary regrant cannot erase spend.
-      const previous=this.store.db.prepare("SELECT version FROM automation_grants WHERE kind='LOCAL_ASSISTANT' ORDER BY version DESC LIMIT 1")
-        .get() as {version:number}|undefined;
+      const previous=this.lastGrant();
       const used=this.usage(previous?.version);
       requireSafe((scope.modelLimit===null||scope.modelLimit>=used.MODEL)&&
         (scope.sendLimit===null||scope.sendLimit>=used.SEND),'ASSISTANT_LIMIT_BELOW_USED');
       this.revoke();
+      const createdAt = this.now();
       const row=this.store.db.prepare('INSERT INTO automation_grants(kind,scope_json,scope_digest,created_at) VALUES(?,?,?,?)')
-        .run('LOCAL_ASSISTANT',JSON.stringify(scope),digest(scope),this.now());
+        .run('LOCAL_ASSISTANT',JSON.stringify(scope),digest(scope),createdAt);
       const version=Number(row.lastInsertRowid);
+      if(this.store.schemaVersion()>=4)this.store.db.prepare('INSERT INTO account_grant_bindings VALUES(?,?)')
+        .run(version,this.store.accountId);
       if(previous)this.store.db.prepare('INSERT INTO grant_reservations SELECT ?,kind,job_key,reserved_at FROM grant_reservations WHERE grant_version=?')
         .run(version,previous.version);
       this.store.audit('LOCAL_ASSISTANT_GRANTED',String(version));
-      return {version,kind:'LOCAL_ASSISTANT' as const,scope,createdAt:this.now()};
+      return {version,kind:'LOCAL_ASSISTANT' as const,scope,createdAt};
     }).immediate();
   }
   revoke():void{
-    this.store.db.transaction(()=>{
-      this.store.db.prepare("UPDATE automation_grants SET revoked_at=? WHERE kind='LOCAL_ASSISTANT' AND revoked_at IS NULL").run(this.now());
+    const {db,accountId}=this.store;
+    db.transaction(()=>{
+      const {sql,args}=this.grantFilter();
+      db.prepare(`UPDATE automation_grants SET revoked_at=? WHERE kind='LOCAL_ASSISTANT' AND revoked_at IS NULL ${sql}`)
+        .run(this.now(),...args);
       if(this.available()){
-        this.store.db.prepare(`UPDATE manual_send_commands SET status='FAILED_BEFORE_CLICK',reason='ASSISTANT_GRANT_REVOKED'
+        db.prepare(`UPDATE manual_send_commands SET status='FAILED_BEFORE_CLICK',reason='ASSISTANT_GRANT_REVOKED'
           WHERE intent_id IS NULL AND status IN ('PREPARING','PREVIEW','QUEUED','PREFLIGHT')
-          AND command_id IN(SELECT command_id FROM assistant_commands)`).run();
-        this.store.db.prepare(`UPDATE thread_ownership SET operator_id=NULL,generation=generation+1,lease_expires_at=0
-          WHERE operator_id IN(SELECT operator_id FROM assistant_sessions)`).run();
+          AND command_id IN(SELECT command_id FROM assistant_commands)
+          AND event_id IN(SELECT e.id FROM inbound_events e WHERE e.account_id=?)`).run(accountId);
+        db.prepare(`UPDATE thread_ownership SET operator_id=NULL,generation=generation+1,lease_expires_at=0
+          WHERE account_id=? AND operator_id IN(SELECT operator_id FROM assistant_sessions)`).run(accountId);
+        // Keep the assistant binding so an expired token can never be interpreted as a desktop token.
+        if(this.store.schemaVersion()>=4)db.prepare(`UPDATE operator_sessions SET expires_at=0 WHERE id IN(
+          SELECT s.operator_id FROM assistant_sessions s JOIN account_operator_sessions a ON a.operator_id=s.operator_id
+          WHERE a.account_id=?)`).run(accountId);
       }
       this.store.audit('LOCAL_ASSISTANT_REVOKED','LOCAL_ASSISTANT');
     }).immediate();
   }
   active():LocalAssistantGrant|null{
     if(!this.available())return null;
-    const row=this.store.db.prepare("SELECT version,scope_json,scope_digest,created_at FROM automation_grants WHERE kind='LOCAL_ASSISTANT' AND revoked_at IS NULL ORDER BY version DESC LIMIT 1")
-      .get() as {version:number;scope_json:string;scope_digest:string;created_at:number}|undefined;
+    const row=this.lastGrant(true);
     if(!row)return null;
     const scope=localAssistantStoredScopeSchema.parse(JSON.parse(row.scope_json));
     requireSafe(digest(scope)===row.scope_digest,'ASSISTANT_GRANT_CORRUPT');
@@ -81,12 +106,15 @@ export class LocalAssistantStore {
   }
   usage(version?:number):{MODEL:number;SEND:number}{
     const result={MODEL:0,SEND:0};if(version===undefined)return result;
-    const rows=this.store.db.prepare('SELECT kind,count(*) used FROM grant_reservations WHERE grant_version=? GROUP BY kind').all(version) as {kind:string;used:number}[];
+    const {sql,args}=this.grantFilter();
+    const rows=this.store.db.prepare(`SELECT r.kind,count(*) used FROM grant_reservations r
+      JOIN automation_grants ON automation_grants.version=r.grant_version
+      WHERE r.grant_version=? AND automation_grants.kind='LOCAL_ASSISTANT' ${sql} GROUP BY r.kind`)
+      .all(version,...args) as {kind:string;used:number}[];
     for(const row of rows)if(row.kind==='MODEL'||row.kind==='SEND')result[row.kind]=row.used;return result;
   }
   state():LocalAssistantState{
-    const grant=this.active(),last=this.available()?this.store.db.prepare("SELECT version,revoked_at FROM automation_grants WHERE kind='LOCAL_ASSISTANT' ORDER BY version DESC LIMIT 1")
-      .get() as {version:number;revoked_at:number|null}|undefined:undefined;
+    const grant=this.active(),last=this.available()?this.lastGrant():undefined;
     const used=this.usage(grant?.version??last?.version);
     let reason:string|null=grant?null:'ASSISTANT_PERMISSION_REQUIRED';
     if(grant){try{this.requireScope(grant);}catch{reason='ASSISTANT_SCOPE_CHANGED';}}
@@ -137,7 +165,7 @@ export class LocalAssistantStore {
   }
   inScope(grant:LocalAssistantGrant,event:StoredEvent):boolean{
     const e=event.payload,time=Date.parse(e.occurredAt??'');
-    if(!(e.accountId==='account_001'&&grant.scope.channels.includes(e.channel)&&e.direction==='INCOMING'&&
+    if(!(e.accountId===this.store.accountId&&grant.scope.channels.includes(e.channel)&&e.direction==='INCOMING'&&
       e.actorId!==grant.scope.ownId&&Number.isFinite(time)&&time>grant.scope.collection.startedAt&&time<=this.now()&&event.status!=='BASELINE'))return false;
     const row=this.store.db.prepare('SELECT scope,binding FROM inbound_events WHERE id=?').get(event.id) as {scope:string;binding:string}|undefined;
     if(!row||row.binding!==event.binding||eventBinding(e)!==event.binding)return false;
@@ -157,11 +185,16 @@ export class LocalAssistantStore {
   available():boolean{return !!this.store.db.prepare("SELECT name FROM sqlite_master WHERE name='assistant_sessions'").get();}
   bindSession(operatorId:string,version:number):void{
     const grant=this.active();requireSafe(grant?.version===version,'ASSISTANT_PERMISSION_REQUIRED');this.requireScope(grant);
+    if(this.store.schemaVersion()>=4)requireSafe(this.store.db.prepare('SELECT 1 FROM account_operator_sessions WHERE operator_id=? AND account_id=?')
+      .get(operatorId,this.store.accountId),'ASSISTANT_PERMISSION_REQUIRED');
     this.store.db.prepare('INSERT INTO assistant_sessions VALUES(?,?)').run(operatorId,version);
   }
   session(operatorId:string):number|null{
     if(!this.available())return null;
-    return (this.store.db.prepare('SELECT grant_version FROM assistant_sessions WHERE operator_id=?').get(operatorId) as {grant_version:number}|undefined)?.grant_version??null;
+    const scoped=this.store.schemaVersion()>=4;
+    const filter=scoped?'AND operator_id IN (SELECT operator_id FROM account_operator_sessions WHERE account_id=?)':'';
+    return (this.store.db.prepare(`SELECT grant_version FROM assistant_sessions WHERE operator_id=? ${filter}`)
+      .get(operatorId,...(scoped?[this.store.accountId]:[])) as {grant_version:number}|undefined)?.grant_version??null;
   }
   bindCommand(operatorId:string,commandId:string):void{
     const version=this.session(operatorId);if(version===null)return;

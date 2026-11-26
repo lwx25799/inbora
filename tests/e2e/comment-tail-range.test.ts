@@ -1,3 +1,4 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {expect,test} from 'vitest';
 import {join} from 'node:path';
 import {BrowserProfileOwner} from '../../src/browser/profile-owner.js';
@@ -37,10 +38,10 @@ async function fixture(terminal?:boolean){
 test('comment scrolling ends at the exact list rather than unrelated later page content',async()=>{
   const f=await fixture();
   try{
-    const scroll:Parameters<typeof captureObserved>[0]={mapping:f.mapping,channel:'commentScroll',index:0,evidenceId:'synthetic-tail-range',commentOffset:1784};
+    const scroll:Parameters<typeof captureObserved>[0]={mapping:f.mapping,channel:'commentScroll',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-tail-range',commentOffset:1784};
     const result=await f.page.evaluate(captureObserved,scroll);
     expect(result.scroll).toMatchObject({top:1118,height:2874,viewport:664,atEnd:true});
-    const read:Parameters<typeof captureObserved>[0]={mapping:f.mapping,channel:'comments',index:0,evidenceId:'synthetic-tail-roots',allCommentAuthors:true};
+    const read:Parameters<typeof captureObserved>[0]={mapping:f.mapping,channel:'comments',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-tail-roots',allCommentAuthors:true};
     const batch=await f.page.evaluate(captureObserved,read);
     expect(batch.events.some(event=>event.commentId==='1004')).toBe(true);
   }finally{await f.close();}

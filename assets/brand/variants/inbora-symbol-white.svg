@@ -1,0 +1,8 @@
+<svg fill="#ffffff" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title"><title>inbora logo</title>
+  <title id="title">inbora logo symbol</title>
+  <g id="symbol" fill="#ffffff">
+    <path d="M68 24 H78 A8 8 0 0 1 86 32 V52 A8 8 0 0 1 78 60 H72 A12 12 0 0 0 60 72 V184 A12 12 0 0 0 72 196 H184 A12 12 0 0 0 196 184 V72 A12 12 0 0 0 184 60 H178 A8 8 0 0 1 170 52 V32 A8 8 0 0 1 178 24 H188 A44 44 0 0 1 232 68 V188 A44 44 0 0 1 188 232 H68 A44 44 0 0 1 24 188 V68 A44 44 0 0 1 68 24 Z"/>
+    <rect x="109" y="24" width="38" height="36" rx="10"/>
+    <rect x="109" y="84" width="38" height="88" rx="10"/>
+  </g>
+</svg>

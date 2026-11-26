@@ -1,6 +1,9 @@
 import Database from 'better-sqlite3';
+import {randomUUID} from 'node:crypto';
 import {expect,test} from 'vitest';
 import {readDiagnostics} from '../../src/app/diagnostics.js';
+import {diagnosticsSchema} from '../../src/mcp/tool-contracts.js';
+import {initializeModelProviderSchema} from '../../src/storage/model-provider-store.js';
 
 test('diagnostics aggregate known usage and nearest-rank latency without inventing dates or costs',()=>{
   const db=new Database(':memory:');
@@ -49,5 +52,76 @@ test('diagnostics report only current blocked states and redacted collection pro
     expect(result.collection.works).toEqual({included:1,historical:1,review:1});
     expect(result.collection.conversations).toEqual({total:2,neverRead:1});
     expect(JSON.stringify(result)).not.toMatch(/private|body|STALE_ERROR/u);
+  }finally{db.close();}
+});
+
+test('diagnostics bound model groups while keeping full counts and usage',()=>{
+  const db=new Database(':memory:');
+  try{
+    db.exec(`CREATE TABLE model_calls(id TEXT,model TEXT,status TEXT,input_tokens INTEGER,output_tokens INTEGER,elapsed_ms INTEGER);
+      WITH RECURSIVE samples(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM samples WHERE n<6500)
+      INSERT INTO model_calls SELECT n,printf('fixture-%0248d',n),'SUCCEEDED',2,3,n FROM samples;
+      INSERT INTO model_calls VALUES('duplicate',printf('fixture-%0248d',6500),'SUCCEEDED',2,3,6501);`);
+    const result=readDiagnostics({db});
+    expect(result).toMatchObject({modelBreakdownTotal:6500,modelBreakdownTruncated:true});
+    expect(result.model.total).toMatchObject({requests:6501,inputTokens:13002,outputTokens:19503,p95ElapsedMs:6176});
+    expect(result.model.groups).toHaveLength(100);
+    expect(result.model.groups[0]).toMatchObject({requests:2,p95ElapsedMs:6501});
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(2_000_000);
+  }finally{db.close();}
+});
+
+test('provider grouping follows exact call revisions with slash IDs and leaves old history unattributed',()=>{
+  const db=new Database(':memory:');
+  try{
+    db.exec(`PRAGMA user_version=3; PRAGMA foreign_keys=ON;
+      CREATE TABLE model_calls(id TEXT PRIMARY KEY,model TEXT,status TEXT,input_tokens INTEGER,output_tokens INTEGER,elapsed_ms INTEGER);`);
+    const models=initializeModelProviderSchema(db);
+    const modelId='vendor/name:v2';
+    const insert=db.prepare("INSERT INTO model_calls VALUES(?,?,'SUCCEEDED',2,3,?)");
+    let connectionId:string|null=null,expectedVersion=0;
+    for(const [presetId,elapsed] of [['openrouter',50],['custom',20]] as const){
+      const saved=models.saveConnection({connectionId,expectedVersion,name:'Diagnostics fixture',presetId,
+        protocol:'OPENAI_CHAT',baseUrl:'https://example.com/v1',region:null,manualModels:[{modelId}]});
+      const credentialRevision=randomUUID();
+      const keyed=models.setCredential(saved.id,saved.version,{connectionId:saved.id,credentialRevision,storage:'MEMORY'});
+      const routeRevision=keyed.draftRevision;
+      const {selectionRevision}=models.apply({connectionId:saved.id,routeRevision,modelId,commandId:randomUUID(),
+        expectedSelectionRevision:models.getSelection().selectionRevision});
+      const route=models.getRevision(saved.id,routeRevision)!;
+      const callId=randomUUID();
+      insert.run(callId,modelId,elapsed);
+      models.recordCallRoute(callId,{connectionId:saved.id,routeRevision,selectionRevision,credentialRevision,
+        endpointDigest:route.endpointDigest,protocol:route.protocol,presetId,modelId,purpose:'REPLY_GENERATION',grantVersion:1});
+      connectionId=saved.id;
+      expectedVersion=keyed.version;
+    }
+    insert.run('legacy',modelId,30);
+    const {model:{groups},blockers}=diagnosticsSchema.parse(readDiagnostics({db}));
+    expect(blockers).toEqual([]);
+    expect(groups).toEqual(expect.arrayContaining([
+      expect.objectContaining({provider:'openrouter',model:'vendor/name:v2',requests:1,p95ElapsedMs:50}),
+      expect.objectContaining({provider:'custom',model:'vendor/name:v2',requests:1,p95ElapsedMs:20}),
+      expect.objectContaining({provider:'UNKNOWN',model:'vendor/name:v2',requests:1,p95ElapsedMs:30}),
+    ]));
+  }finally{db.close();}
+});
+
+test.each(['absent','partial'])('diagnostics retain the legacy ledger when the extension is %s',state=>{
+  const db=new Database(':memory:');
+  try{
+    db.exec(`PRAGMA user_version=3;
+      CREATE TABLE model_calls(id TEXT,model TEXT,status TEXT,input_tokens INTEGER,output_tokens INTEGER,elapsed_ms INTEGER);
+      INSERT INTO model_calls VALUES('legacy','legacy-model','SUCCEEDED',2,3,30);`);
+    if(state==='partial')db.exec(`CREATE TABLE m_call_routes(call_id TEXT);
+      CREATE TABLE m_connection_revisions(connection_id TEXT);`);
+    const schema=db.prepare('SELECT name,sql FROM sqlite_schema ORDER BY name');
+    const before=schema.all(),changes=db.prepare('SELECT total_changes()').pluck().get();
+    const result=diagnosticsSchema.parse(readDiagnostics({db}));
+    expect(result.model.total).toMatchObject({requests:1,inputTokens:2,outputTokens:3,p95ElapsedMs:30});
+    expect(result.model.groups).toEqual([expect.objectContaining({provider:'UNKNOWN',model:'legacy-model',requests:1})]);
+    expect(result.blockers).toContainEqual({source:'MODEL_PROVIDER',code:'MODEL_PROVIDER_SCHEMA_UNAVAILABLE',count:1});
+    expect(schema.all()).toEqual(before);
+    expect(db.prepare('SELECT total_changes()').pluck().get()).toBe(changes);
   }finally{db.close();}
 });

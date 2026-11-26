@@ -1,21 +1,25 @@
+import {reportSecurityFailure} from './security-signal.js';
 import {randomUUID} from 'node:crypto';
 import type {Page} from 'playwright';
 import type {ObservationMapping} from '../config/site-mapping.js';
+import {DEFAULT_ACCOUNT_ID,type AccountId} from '../contracts/account.js';
 import {eventSchema,requireSafe,type InboundEvent} from '../core/contracts.js';
 import {captureCommentThread} from './comment-thread-capture.js';
 import {recoverCommentOffset} from './comment-offset-recovery.js';
 import {waitForCommentRender} from './comment-render.js';
+import {claimFreshCommentDocument,markCommentDocumentRead} from './fresh-comment-document.js';
 import {captureObserved,type CaptureInput,type CaptureOptions,type ObservationBatch,type DiscoveredPeer,type CollectionReadDiagnostic} from './observed-capture.js';
 export {captureObserved} from './observed-capture.js';
 export type {CaptureInput,CaptureOptions,DiscoveredPeer,CollectionReadDiagnostic,ObservationBatch} from './observed-capture.js';
 
 /** AccountActor owns the entire call, including opening and switching the permitted chat. */
 export class ObservedReader {
-  constructor(readonly page: Page, readonly mapping: ObservationMapping,private readonly collectionOrigin?:number,private readonly signal?:AbortSignal) {}
+  constructor(readonly page: Page, readonly mapping: ObservationMapping,private readonly collectionOrigin?:number,private readonly signal?:AbortSignal,
+    readonly accountId:AccountId=DEFAULT_ACCOUNT_ID) {}
   private async capture(channel: CaptureInput['channel'], index: number, selection: CaptureOptions = {}): Promise<ObservationBatch> {
     requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
     try {
-      const result = await this.page.evaluate(captureObserved,{mapping:this.mapping,channel,index,evidenceId:randomUUID(),...selection});
+      const result = await this.page.evaluate(captureObserved,{mapping:this.mapping,channel,index,accountId:this.accountId,evidenceId:randomUUID(),...selection}).catch(error=>reportSecurityFailure(this.page,error));
       requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
       return {...result,events:result.events.map(e=>eventSchema.parse(e))};
     } catch(error) {
@@ -127,7 +131,7 @@ export class ObservedReader {
   async commentThread(event:InboundEvent,offset=0):Promise<ObservationBatch> {
     const evaluate=async(action:'open'|'position'|'inspect')=>{
       requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');
-      try{const value=await this.page.evaluate(captureCommentThread,{mapping:this.mapping,event,action,offset});
+      try{const value=await this.page.evaluate(captureCommentThread,{mapping:this.mapping,event,action,offset}).catch(error=>reportSecurityFailure(this.page,error));
         requireSafe(!this.signal?.aborted,'OBSERVATION_CANCELLED');return value;
       }catch(error){const code=error instanceof Error?error.message.match(/(?:OBSERVATION|RENDERED)_[A-Z_]+/)?.[0]:null;
         if(code)requireSafe(false,code);throw error;}
@@ -142,32 +146,95 @@ export class ObservedReader {
     await this.capture('commentScroll',index);await waitForCommentRender(this.page,this.signal);
     const batch=await this.capture('commentScroll',index,{commentStay:true});requireSafe(batch.scroll,'OBSERVATION_COMMENT_SCROLL_UNAVAILABLE');return batch.scroll;
   }
-  async comments(index: number, allCommentAuthors=false, offset=0,collection?:{holdScroll:boolean;stay:boolean;onRestoreWindow?:(batch:ObservationBatch)=>Promise<void>}): Promise<ObservationBatch> {
+  async comments(index: number, allCommentAuthors=false, offset=0,collection?:{holdScroll:boolean;stay:boolean;freshWithinMs?:number;onRestoreWindow?:(batch:ObservationBatch)=>Promise<void>}): Promise<ObservationBatch&{freshDocumentReused?:true}> {
     const work = this.mapping.works[index]; requireSafe(work,'OBSERVATION_WORK_REQUIRED');
-    if(allCommentAuthors){if(offset===0&&!collection?.stay||this.page.url().split('?')[0]!==work.url)await this.navigate(work.url);}
-    else await this.page.goto(work.url,{waitUntil:'domcontentloaded'});
+    let freshDocumentReused=false;
+    if(allCommentAuthors){
+      if(offset===0&&!collection?.stay||this.page.url().split('?')[0]!==work.url){
+        if(collection?.freshWithinMs!==undefined)
+          freshDocumentReused=await claimFreshCommentDocument(this.page,work.url,collection.freshWithinMs);
+        if(!freshDocumentReused)await this.navigate(work.url);
+      }
+    }
+    else if(this.page.url()==='about:blank'){
+      const empty=await this.page.evaluate(()=>{
+        const visible={check(node:Element):boolean{
+          if(!node.isConnected||!node.getClientRects().length)return false;
+          for(let n:Element|null=node;n;n=n.parentElement){
+            const style=getComputedStyle(n);
+            if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return false;
+          }
+          return true;
+        }};
+        for(const editor of Array.from(document.querySelectorAll('[contenteditable="true"],textarea,input'))){
+          if(!visible.check(editor)||editor instanceof HTMLInputElement&&!['text','search','email','url','tel','password'].includes(editor.type))continue;
+          const text=editor instanceof HTMLInputElement||editor instanceof HTMLTextAreaElement?editor.value:editor.textContent??'';
+          if(editor.querySelector('img,video,audio,iframe,object,input,[data-slate-void="true"],[data-attachment]'))return false;
+          const marker=editor.matches('[data-slate-editor="true"][data-zone-container="*"]')&&editor.children.length===1&&
+            editor.firstElementChild?.matches('div.ace-line[data-node="true"]')&&editor.firstElementChild.children.length===1&&
+            editor.firstElementChild.firstElementChild?.matches('span[data-enter="true"][data-string="true"][data-leaf="true"]')&&text==='\u200B';
+          if(text.length!==0&&!marker)return false;
+          if(!Array.from(editor.querySelectorAll('*')).every(node=>['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S'].includes(node.tagName)))return false;
+        }
+        return true;
+      });
+      requireSafe(empty,'OBSERVATION_EXISTING_HUMAN_INPUT');
+      await this.page.goto(work.url,{waitUntil:'domcontentloaded'});
+    }
+    else await this.navigate(work.url);
     await this.guard();
-    if (!await this.page.evaluate(selector=>Array.from(document.querySelectorAll(selector)).some(n=>n.getClientRects().length),this.mapping.selectors.commentList))
+    await this.capture('commentDocument',index);
+    await markCommentDocumentRead(this.page);
+    if (!await this.page.evaluate(selector=>{
+      const visible={check(node:Element):boolean{
+        if(!node.isConnected||!node.getClientRects().length)return false;
+        for(let n:Element|null=node;n;n=n.parentElement){
+          const style=getComputedStyle(n);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return false;
+        }
+        return true;
+      }};
+      return Array.from(document.querySelectorAll(selector)).some(visible.check);
+    },this.mapping.selectors.commentList))
       await this.page.locator(this.mapping.selectors.commentEntry).click();
-    await this.page.waitForFunction(selector=>Array.from(document.querySelectorAll(selector)).filter(n=>n.getClientRects().length).length===1,
-      this.mapping.selectors.commentList);
+    await this.page.waitForFunction(selector=>{
+      const visible={check(node:Element):boolean{
+        if(!node.isConnected||!node.getClientRects().length)return false;
+        for(let n:Element|null=node;n;n=n.parentElement){
+          const style=getComputedStyle(n);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return false;
+        }
+        return true;
+      }};
+      return Array.from(document.querySelectorAll(selector)).filter(visible.check).length===1;
+    },this.mapping.selectors.commentList);
     if(allCommentAuthors)await this.capture('commentReveal',index,{commentOffset:offset});
     try {
-      await this.page.waitForFunction(({rows,empty})=>{
-        const visible={check(node:Element):boolean{const r=node.getBoundingClientRect(),style=getComputedStyle(node);
-          return r.width>0&&r.height>0&&style.display!=='none'&&style.visibility!=='hidden';}};
-        return Array.from(document.querySelectorAll(rows)).some(visible.check)||
-          Boolean(empty&&Array.from(document.querySelectorAll(empty)).some(visible.check));
-      },{rows:this.mapping.selectors.commentRows,empty:this.mapping.selectors.commentEmpty},{timeout:15000});
+      await this.page.waitForFunction(({list,rows,empty})=>{
+        const visible={check(node:Element,requireBox=true):boolean{
+          if(!node.isConnected||!node.getClientRects().length)return false;
+          if(requireBox){const r=node.getBoundingClientRect();if(!(r.width>0&&r.height>0))return false;}
+          for(let n:Element|null=node;n;n=n.parentElement){
+            const style=getComputedStyle(n);
+            if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0)return false;
+          }
+          return true;
+        }};
+        const lists=Array.from(document.querySelectorAll(list)).filter(node=>visible.check(node,false));
+        if(lists.length!==1)return false;
+        const container=lists[0]!;
+        return Array.from(container.querySelectorAll(rows)).some(node=>visible.check(node))||
+          Boolean(empty&&Array.from(container.querySelectorAll(empty)).some(node=>visible.check(node)));
+      },{list:this.mapping.selectors.commentList,rows:this.mapping.selectors.commentRows,empty:this.mapping.selectors.commentEmpty},{timeout:15000});
     }catch{requireSafe(false,'OBSERVATION_COMMENTS_NOT_READY');}
     const read=()=>this.ready('comments',index,{allCommentAuthors});
     const batch=allCommentAuthors&&offset>0?await recoverCommentOffset(this.page,offset,
       top=>this.capture('commentScroll',index,top===undefined?{commentStay:true}:{commentOffset:top}),
       read,collection?.onRestoreWindow,this.signal):await read();
     if(allCommentAuthors) {
-      const input:CaptureInput={mapping:this.mapping,channel:'commentScroll',index,evidenceId:randomUUID(),...(collection?{commentStay:collection.holdScroll}:{})};
-      const next=await this.page.evaluate(captureObserved,input);if(next.scroll)batch.scroll=next.scroll;
+      const input:CaptureInput={mapping:this.mapping,channel:'commentScroll',index,accountId:this.accountId,evidenceId:randomUUID(),...(collection?{commentStay:collection.holdScroll}:{})};
+      const next=await this.page.evaluate(captureObserved,input).catch(error=>reportSecurityFailure(this.page,error));if(next.scroll)batch.scroll=next.scroll;
     }
-    return batch;
+    return freshDocumentReused?{...batch,freshDocumentReused:true}:batch;
   }
 }

@@ -56,7 +56,7 @@ const automaticConnect={command:'connect',runtime:fixedRuntime,initialize:false,
 test('native remembered runtime connects automatically with empty WebView storage and never initializes',async()=>{
   const f=await setup();try{
     await expect.poll(()=>connections(f.calls),{timeout:2500}).toEqual([automaticConnect]);
-    await f.page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
+    await f.page.getByRole('heading',{name:'会话中心',exact:true}).waitFor();
     expect(await f.page.evaluate(()=>localStorage.getItem('inbora-runtime'))).toBe(fixedRuntime);
     expect(f.calls.map(call=>call.command)).not.toContain('sendHumanReply');expect(f.errors).toEqual([]);
   }finally{await f.close();}
@@ -65,7 +65,7 @@ test('native remembered runtime connects automatically with empty WebView storag
 test('native remembered runtime takes priority over an older WebView remembered directory',async()=>{
   const f=await setup({previous:oldRuntime});try{
     await expect.poll(()=>connections(f.calls),{timeout:2500}).toEqual([automaticConnect]);
-    await f.page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
+    await f.page.getByRole('heading',{name:'会话中心',exact:true}).waitFor();
     expect(await f.page.evaluate(()=>localStorage.getItem('inbora-runtime'))).toBe(fixedRuntime);
     expect(f.errors).toEqual([]);
   }finally{await f.close();}
@@ -73,8 +73,8 @@ test('native remembered runtime takes priority over an older WebView remembered 
 
 test('an existing authoritative connection wins over late native defaults without another connect',async()=>{
   const f=await setup({previous:oldRuntime,connected:true});try{
-    await f.page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();
-    await f.page.getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await f.page.getByRole('heading',{name:'会话中心',exact:true}).waitFor();
+    await f.page.getByRole('button',{name:'系统设置',exact:true}).click();
     await expect.poll(()=>f.page.locator('.settings code').allTextContents(),{timeout:2500}).toContain(activeRuntime);
     await new Promise(resolve=>setTimeout(resolve,120));
     expect(await f.page.locator('.settings code').allTextContents()).toContain(activeRuntime);
@@ -97,7 +97,7 @@ test('automatic connection failure retains the exact authorized directory and sh
 test('a release without native remembered runtime retains the previously connected WebView directory',async()=>{
   const f=await setup({previous:oldRuntime,remembered:null});try{
     await expect.poll(()=>connections(f.calls),{timeout:2500}).toEqual([{...automaticConnect,runtime:oldRuntime}]);
-    await f.page.getByRole('heading',{name:'收件箱',exact:true}).waitFor();expect(f.errors).toEqual([]);
+    await f.page.getByRole('heading',{name:'会话中心',exact:true}).waitFor();expect(f.errors).toEqual([]);
   }finally{await f.close();}
 });
 
@@ -110,7 +110,7 @@ test('a fresh release keeps its default directory for explicit first connection 
 
 test('native startup waits for a source backend that is not ready before attempting its one automatic connection',async()=>{
   const f=await setup({readyDelay:700});try{
-    await f.page.getByRole('heading',{name:'收件箱',exact:true}).waitFor({timeout:3000});
+    await f.page.getByRole('heading',{name:'会话中心',exact:true}).waitFor({timeout:3000});
     expect(f.calls.filter(call=>call.command==='getStatus').length).toBeGreaterThan(1);
     expect(connections(f.calls)).toEqual([automaticConnect]);
     expect(f.calls.slice(0,f.calls.findIndex(call=>call.command==='connect')).every(call=>call.command==='getStatus')).toBe(true);

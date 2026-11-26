@@ -72,7 +72,7 @@ test('explicit visible viewing covers exact current, historical and own media wi
     release({opened:true,located:true});await new Promise(resolve=>setTimeout(resolve,100));
     expect(await page.getByText('已在浏览器打开会话',{exact:true}).count()).toBe(0);expect(await editor.inputValue()).toBe('B的独立人工草稿');
     await page.getByRole('log').getByRole('button',{name:'查看这条消息',exact:true}).click();await expect.poll(()=>calls.filter(row=>row.command==='openTarget').length).toBe(6);
-    await page.getByRole('navigation',{name:'主导航'}).getByRole('button',{name:'AI 与设置',exact:true}).click();
+    await page.getByRole('navigation',{name:'主导航'}).getByRole('button',{name:'系统设置',exact:true}).click();
     release({opened:true,located:true});await new Promise(resolve=>setTimeout(resolve,100));
     expect(await page.getByText('已在浏览器打开会话',{exact:true}).count()).toBe(0);
     expect(calls.filter(row=>row.command==='selectTarget')).toHaveLength(selections+1);

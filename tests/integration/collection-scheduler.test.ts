@@ -5,6 +5,7 @@ import { AutomationStore } from "../../src/storage/automation-store.js";
 import { migrateAutomation } from "../../src/storage/automation-migration.js";
 import { migrateClient } from "../../src/storage/client-migration.js";
 import { Blocked } from "../../src/core/contracts.js";
+import {holdSecurityChannel} from '../../src/storage/security-holds.js';
 import { database, privateTemp } from "../helpers.js";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -55,6 +56,59 @@ test("ordinary source failure backs off only that channel; global stop survives 
   f.data.stop(false); await f.scheduler.tick(); expect(calls).toHaveLength(3);
 });
 
+test("a verification component blocks only the affected collection channel", async () => {
+  const calls: CollectionSource[] = [], f = await setup(async source => {
+    calls.push(source);
+    if (source === "works") throw new Blocked("OBSERVATION_SECURITY_COMPONENT");
+  });
+  await f.scheduler.tick();
+  expect(calls).toEqual(["works"]);
+  expect(f.data.state().emergencyStopped).toBe(false);
+  expect(f.scheduler.status().channels).toEqual(expect.arrayContaining([
+    expect.objectContaining({source: "works", last_error: "OBSERVATION_SECURITY_COMPONENT", failures: 1}),
+  ]));
+  await f.scheduler.tick();
+  expect(calls).toEqual(["works", "dm"]);
+  expect(f.data.state().emergencyStopped).toBe(false);
+});
+
+test.each([
+  {source:'works',persisted:true,interval:30_000},
+  {source:'dm',persisted:true,interval:15_000},
+  {source:'works',persisted:false,interval:30_000},
+  {source:'dm',persisted:false,interval:15_000},
+] as const)('the first $source candidate uses normal cadence only with a persisted hold ($persisted)',async({source,persisted,interval})=>{
+  const f=await setup(async current=>{
+    if(persisted)holdSecurityChannel(f.store,current==='works'?'COMMENT_NOTIFICATION':'DIRECT_MESSAGE',
+      {incidentId:'synthetic-incident',reason:'OBSERVATION_SECURITY_SUSPECT',mode:'headless'},f.data.now());
+    throw new Blocked('OBSERVATION_SECURITY_SUSPECT');
+  });
+  const before=f.data.now(),lastSuccess=before-120_000;
+  f.store.db.prepare('UPDATE collection_progress SET failures=6,last_success=?,last_error=? WHERE source=?')
+    .run(lastSuccess,'OBSERVATION_DOM_NOT_READY',source);
+  await expect(f.scheduler.runNow(source)).rejects.toThrow('OBSERVATION_SECURITY_SUSPECT');
+  expect(f.store.db.prepare('SELECT next_at,last_success,last_error,failures FROM collection_progress WHERE source=?').get(source))
+    .toEqual({next_at:before+(persisted?interval:600_000),last_success:lastSuccess,last_error:'OBSERVATION_SECURITY_SUSPECT',failures:7});
+  expect(f.data.state().emergencyStopped).toBe(false);
+});
+
+test.each([null,'DIRECT_MESSAGE','COMMENT_NOTIFICATION'] as const)('an old candidate delay is shortened only for its persisted channel hold (%s)',async heldChannel=>{
+  const calls:CollectionSource[]=[],f=await setup(async source=>{calls.push(source);if(source==='works')throw new Blocked('SECURITY_CHANNEL_HELD');});
+  const before=f.data.now(),lastSuccess=before-120_000,persisted=heldChannel==='COMMENT_NOTIFICATION';
+  if(heldChannel)holdSecurityChannel(f.store,heldChannel,
+    {incidentId:'synthetic-old-incident',reason:'OBSERVATION_SECURITY_SUSPECT',mode:'headless'},before);
+  f.store.db.prepare("UPDATE collection_progress SET next_at=?,last_success=?,last_error='OBSERVATION_SECURITY_SUSPECT',failures=6 WHERE source='works'")
+    .run(before+600_000,lastSuccess);
+  await f.scheduler.tick();
+  expect(f.store.db.prepare("SELECT next_at,last_success,last_error,failures FROM collection_progress WHERE source='works'").get())
+    .toEqual({next_at:before+(persisted?30_000:600_000),last_success:lastSuccess,last_error:'OBSERVATION_SECURITY_SUSPECT',failures:6});
+  expect(calls.filter(source=>source==='works')).toEqual([]);
+  f.advance(29_999);await f.scheduler.tick();expect(calls.filter(source=>source==='works')).toEqual([]);
+  f.advance(1);await f.scheduler.tick();expect(calls.filter(source=>source==='works')).toEqual(persisted?['works']:[]);
+  expect(f.store.db.prepare("SELECT last_success FROM collection_progress WHERE source='works'").get()).toEqual({last_success:lastSuccess});
+  expect(f.data.state().emergencyStopped).toBe(false);
+});
+
 test('ordinary browser closure retains collection error and retries instead of globally stopping',async()=>{
   let calls=0;const f=await setup(async()=>{if(++calls===1)throw new Blocked('BROWSER_CLOSED');});
   await f.scheduler.tick();
@@ -67,7 +121,7 @@ test.each([false,true])('only a persisted per-object deferral avoids whole-chann
   const f=await setup(async()=>{throw deferred?new DeferredObjectRead('OBSERVATION_DOM_NOT_READY'):new Blocked('OBSERVATION_DOM_NOT_READY');});
   const before=f.data.now();await f.scheduler.tick();
   expect(f.store.db.prepare("SELECT next_at,last_success,last_error,failures FROM collection_progress WHERE source='works'").get())
-    .toEqual({next_at:before+(deferred?30_000:60_000),last_success:null,last_error:'OBSERVATION_DOM_NOT_READY',failures:1});
+    .toEqual({next_at:before+(deferred?30_000:60_000),last_success:null,last_error:'OBSERVATION_DOM_NOT_READY',failures:deferred?0:1});
   expect(f.data.state().emergencyStopped).toBe(false);
 });
 test("identity/platform validation blocks subsequent collection and records a safe enumerated cause", async () => {

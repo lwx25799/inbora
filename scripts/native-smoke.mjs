@@ -170,7 +170,7 @@ try {
   await editor.fill(draftText);
   await waitFor(async()=>{const thread=await rpc(run.page,{command:'getThread',eventId});return thread.ownership.isMine&&thread.draft?.text===draftText;},'INLINE_DRAFT_NOT_AUTOSAVED');
   await composer.getByText('修改已保存',{exact:true}).waitFor();result.automaticInlineComposer=true;
-  assert.deepEqual(await run.page.getByRole('combobox',{name:'任务状态'}).locator('option').allTextContents(),['等待回复','已回复']);
+  assert.deepEqual(await run.page.getByRole('combobox',{name:'任务状态'}).locator('option').allTextContents(),['未读','等待回复','需人工查看','已回复','全部消息']);
   assert.equal(await run.page.getByRole('button',{name:'全局急停',exact:true}).count(),0);
   assert.equal(await run.page.getByRole('button',{name:'只读核验',exact:true}).count(),0);
   const nativeCommands=await run.page.evaluate(async()=>{

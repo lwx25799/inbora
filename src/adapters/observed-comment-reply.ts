@@ -1,7 +1,9 @@
+import {reportSecurityFailure} from './security-signal.js';
 import {randomUUID} from 'node:crypto';
 import type {Page} from 'playwright';
 import type {CommentReplyMapping} from '../config/site-mapping.js';
-import {digest,eventBinding,isStrong,requireSafe,targetKey,validText,
+import {DEFAULT_ACCOUNT_ID,type AccountId} from '../contracts/account.js';
+import {digest,dmClockToleranceMs,eventBinding,isStrong,proofTimeValid,requireSafe,targetKey,validText,
   type InboundEvent,type ReplyAdapter,type SendProof,type TargetSnapshot} from '../core/contracts.js';
 import {ObservedReader} from './observed-reader.js';
 import {CommentResponses,type NativeCommentReply} from './comment-responses.js';
@@ -22,6 +24,53 @@ export function captureCommentReply(input:Input):Frame{
   type InputGate={token:string;used:boolean;blocked:boolean;editor:HTMLElement;remove:()=>void};
   const host=window as unknown as {__inboraCommentGate?:Gate;__inboraCommentInputGate?:InputGate};
   const dom={
+    securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
+      if(value)return;
+      const matches=[];
+      for(const selector of selectors.slice(0,8))for(const node of Array.from(document.querySelectorAll(selector)).slice(0,12-matches.length)){
+        const r=node.getBoundingClientRect();matches.push({selector:selector.slice(0,2000),tag:node.tagName.slice(0,24),id:node.id.slice(0,160),
+          left:r.left,top:r.top,right:r.right,bottom:r.bottom,visible:dom.securityVisible(node)});
+      }
+      const frames=Array.from(document.querySelectorAll('iframe')).slice(0,8).map(node=>{const r=node.getBoundingClientRect();
+        return{src:(node.getAttribute('src')??'').slice(0,2048),title:node.title.slice(0,160),left:r.left,top:r.top,right:r.right,bottom:r.bottom};});
+      const signal={version:1,state:'SUSPECT',kind,href:location.href.slice(0,2048),origin:location.origin.slice(0,256),title:document.title.slice(0,160),
+        documentStartedAt:performance.timeOrigin,observedAt:Date.now(),scope:'TARGET',target:{workId:e.videoId??undefined},matches,frames};
+      throw Error('OBSERVATION_SECURITY_SUSPECT INBORA_SECURITY_SIGNAL:'+JSON.stringify(signal));
+    },
+    securityVisible(element:Element):boolean {
+      for(const node of [element,...element.querySelectorAll('*')]){
+        if(!node.isConnected)continue;
+        let shown=true;
+        for(let current:Element|null=node;current;current=current.parentElement){
+          const style=getComputedStyle(current);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
+        }
+        if(!shown)continue;
+        const candidates:{rect:DOMRect;parent:Element|null}[]=/^(?:IFRAME|IMG|CANVAS|VIDEO|AUDIO|INPUT|BUTTON|SELECT|TEXTAREA|SVG|OBJECT|EMBED)$/u.test(node.tagName)?Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement})):[];
+        for(const child of node.childNodes){
+          if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
+          const range=document.createRange();range.selectNodeContents(child);
+          for(const rect of range.getClientRects())candidates.push({rect,parent:node});
+        }
+        for(const {rect,parent} of candidates){
+          let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(innerWidth,rect.right),bottom=Math.min(innerHeight,rect.bottom);
+          if(!(right>left&&bottom>top))continue;
+          for(let current=parent;current;current=current.parentElement){
+            const style=getComputedStyle(current);
+            if(style.display==='contents')continue;
+            const clipX=['hidden','clip','auto','scroll','overlay'].includes(style.overflowX);
+            const clipY=['hidden','clip','auto','scroll','overlay'].includes(style.overflowY);
+            if(!clipX&&!clipY)continue;
+            const box=current.getBoundingClientRect();
+            if(clipX){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+            if(clipY){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+            if(!(right>left&&bottom>top))break;
+          }
+          if(right>left&&bottom>top)return true;
+        }
+      }
+      return false;
+    },
     check(ok:unknown,code='COMMENT_REPLY_GUARD_BLOCKED'):void{if(!ok)throw Error(code);},
     // Same reviewed MIT dataField adaptation as observed-reader; see UPSTREAM/third_party.
     data(object:unknown,key:string):unknown{
@@ -49,7 +98,7 @@ export function captureCommentReply(input:Input):Frame{
     },
     time(value:unknown):string|null{
       const at=typeof value==='number'?value*1000:NaN;
-      return Number.isFinite(at)&&at>=Date.UTC(2000,0,1)&&at<=Date.now()?new Date(at).toISOString():null;
+      return Number.isFinite(at)&&at>=Date.UTC(2000,0,1)&&at<=Date.now()+2000?new Date(at).toISOString():null;
     },
     owned(root:Element,selector:string):Element[]{
       return Array.from(root.querySelectorAll(selector)).filter(n=>n.closest(s.commentRows)===root);
@@ -110,9 +159,11 @@ export function captureCommentReply(input:Input):Frame{
       const work=o.works.find(w=>w.id===e.videoId),peer=[...o.peers,...o.commentAuthors??[]].find(p=>p.uid===e.actorId);
       const nested=e.kind==='REPLY',rootId=nested?e.rootCommentId:e.commentId;
       dom.check(work&&peer&&e.channel==='COMMENT_NOTIFICATION'&&(e.kind==='COMMENT'||nested&&rootId&&rootId!==e.commentId&&e.replyToCommentId===e.commentId)&&e.direction==='INCOMING','COMMENT_REPLY_SCOPE_REQUIRED');
-      dom.check(location.origin===o.origin&&location.href.split('?')[0]===work!.url.split('?')[0]&&
-        !/验证码|安全验证|访问受限/.test(document.title)&&!Array.from(document.querySelectorAll(m.blockers)).some(dom.visible),'COMMENT_REPLY_PAGE_BLOCKED');
-      dom.check(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.visible),'COMMENT_REPLY_PAGE_BLOCKED');
+      dom.check(location.origin===o.origin,'OBSERVATION_UNEXPECTED_ORIGIN');
+      dom.check(location.href.split('?')[0]===work!.url.split('?')[0],'COMMENT_REPLY_SCOPE_REQUIRED');
+      dom.securityCheck(!/验证码|安全验证|访问受限/.test(document.title),[o.securityBlockers],'TITLE');
+      dom.securityCheck(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.securityVisible),[o.securityBlockers]);
+      dom.check(!Array.from(document.querySelectorAll(m.blockers)).some(dom.securityVisible),'COMMENT_REPLY_INTERACTION_BLOCKED');
       const own=dom.props(dom.one(document,s.selfAvatar),s.selfFiberDepth);
       dom.check(dom.data(own,'uid')===o.self.uid&&dom.data(own,'secUid')===o.self.secUid,'COMMENT_REPLY_ACCOUNT_CHANGED');
       const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);
@@ -290,7 +341,9 @@ export function captureCommentReply(input:Input):Frame{
   if(input.action==='locateRoot'){
     const work=o.works.find(w=>w.id===e.videoId),rootId=e.kind==='REPLY'?e.rootCommentId:e.commentId;
     dom.check(work&&location.origin===o.origin&&location.href.split('?')[0]===work.url.split('?')[0],'COMMENT_REPLY_SCOPE_REQUIRED');
-    dom.check(!/验证码|安全验证|访问受限/.test(document.title)&&![m.blockers,o.securityBlockers].some(selector=>Array.from(document.querySelectorAll(selector)).some(dom.visible)),'COMMENT_REPLY_PAGE_BLOCKED');
+    dom.securityCheck(!/验证码|安全验证|访问受限/.test(document.title),[o.securityBlockers],'TITLE');
+    dom.securityCheck(!Array.from(document.querySelectorAll(o.securityBlockers)).some(dom.securityVisible),[o.securityBlockers]);
+    dom.check(!Array.from(document.querySelectorAll(m.blockers)).some(dom.securityVisible),'COMMENT_REPLY_INTERACTION_BLOCKED');
     const own=dom.props(dom.one(document,s.selfAvatar),s.selfFiberDepth);
     dom.check(dom.data(own,'uid')===o.self.uid&&dom.data(own,'secUid')===o.self.secUid,'COMMENT_REPLY_ACCOUNT_CHANGED');
     const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);dom.check(lists.length===1,'COMMENT_REPLY_LIST_NOT_UNIQUE');
@@ -306,7 +359,13 @@ export function captureCommentReply(input:Input):Frame{
       for(const editor of document.querySelectorAll('[contenteditable="true"],textarea,input')){
         if(!dom.visible(editor)||editor instanceof HTMLInputElement&&!['text','search','email','url','tel','password'].includes(editor.type))continue;
         const value=editor instanceof HTMLInputElement||editor instanceof HTMLTextAreaElement?editor.value:editor.textContent??'';
-        dom.check(value===''&&!editor.querySelector('img,video,audio,iframe,object,[data-slate-void="true"],[data-attachment]'),'COMMENT_REPLY_EXISTING_DRAFT');
+        dom.check(!editor.querySelector('img,video,audio,iframe,object,input,[data-slate-void="true"],[data-attachment]'),'COMMENT_REPLY_EXISTING_DRAFT');
+        const marker=editor.matches('[data-slate-editor="true"][data-zone-container="*"]')&&
+          editor.children.length===1&&editor.firstElementChild?.matches('div.ace-line[data-node="true"]')&&
+          editor.firstElementChild.children.length===1&&editor.firstElementChild.firstElementChild?.matches('span[data-enter="true"][data-string="true"][data-leaf="true"]')&&value==='\u200B';
+        dom.check(value.length===0||marker,'COMMENT_REPLY_EXISTING_DRAFT');
+        dom.check(Array.from(editor.querySelectorAll('*')).every(node=>['DIV','P','SPAN','BR','B','I','EM','STRONG','U','S'].includes(node.tagName)),
+          'COMMENT_REPLY_EXISTING_DRAFT');
       }
       state.root.scrollIntoView({block:'center',behavior:'instant'});dom.check(dom.root().root===state.root,'COMMENT_REPLY_ORIGINAL_CHANGED');
     }
@@ -319,10 +378,11 @@ export function captureCommentReply(input:Input):Frame{
     dom.check(buttons.length<=1,'COMMENT_REPLY_EXPAND_NOT_UNIQUE');
     const button=buttons[0];
     if(button){
-      const gate={handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root().thread===state.thread&&button.isConnected);}
-        catch{event.preventDefault();event.stopImmediatePropagation();}}};
+      const gate={securityFailure:null as string|null,handle(event:Event):void{try{dom.check(event.currentTarget===button&&dom.root().thread===state.thread&&button.isConnected);}
+        catch(error){if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;event.preventDefault();event.stopImmediatePropagation();}}};
       button.addEventListener('click',gate.handle,true);
       try{dom.check(button instanceof HTMLElement);(button as HTMLElement).click();}finally{button.removeEventListener('click',gate.handle,true);}
+      if(gate.securityFailure)throw Error(gate.securityFailure);
     }
     return dom.frame({...state,editorText:'',shape:''});
   }
@@ -342,9 +402,10 @@ export function captureCommentReply(input:Input):Frame{
           if(editors[0])dom.check(dom.editorText(editors[0])==='','COMMENT_REPLY_EXISTING_DRAFT');}
       }
       const action=dom.one(state.root,m.replyAction);dom.check(action.textContent==='回复','COMMENT_REPLY_ACTION_CHANGED');
-      const gate={handle(event:Event):void{if(event.currentTarget!==action)return;try{dom.check(dom.root().root===state.root&&action.isConnected);}
-        catch{event.preventDefault();event.stopImmediatePropagation();}}};
+      const gate={securityFailure:null as string|null,handle(event:Event):void{if(event.currentTarget!==action)return;try{dom.check(dom.root().root===state.root&&action.isConnected);}
+        catch(error){if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;event.preventDefault();event.stopImmediatePropagation();}}};
       action.addEventListener('click',gate.handle,true);try{action instanceof HTMLElement&&action.click();}finally{action.removeEventListener('click',gate.handle,true);}
+      if(gate.securityFailure)throw Error(gate.securityFailure);
     }
     return dom.frame({...state,editorText:'',shape:''});
   }
@@ -360,7 +421,7 @@ export function captureCommentReply(input:Input):Frame{
     const textEvent=new InputEvent('textInput',{data:input.text!,inputType:'insertText',bubbles:true,cancelable:true,composed:true});
     // Controlled-editor event only: never allow browser default insertion into a newly focused frame.
     textEvent.preventDefault();
-    const gate={token:input.token!,used:false,blocked:false,editor,
+    const gate={token:input.token!,used:false,blocked:false,securityFailure:null as string|null,editor,
       handle(event:Event):void{
         try{
           const selected=getSelection();
@@ -369,13 +430,14 @@ export function captureCommentReply(input:Input):Frame{
           checkInput.validate();dom.check(selected?.rangeCount===1&&editor.contains(selected.anchorNode)&&editor.contains(selected.focusNode)&&
             selected.toString()===prior.editorText,'COMMENT_REPLY_SELECTION_CHANGED');
           if(event.currentTarget===editor)gate.used=true;
-        }catch{gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}
+        }catch(error){if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}
       },
       remove():void{window.removeEventListener('textInput',gate.handle,true);editor.removeEventListener('textInput',gate.handle,true);},
     };
     window.addEventListener('textInput',gate.handle,true);editor.addEventListener('textInput',gate.handle,true);host.__inboraCommentInputGate=gate;
     checkInput.validate();
     try{editor.dispatchEvent(textEvent);}finally{gate.remove();}
+    if(gate.securityFailure)throw Error(gate.securityFailure);
     dom.check(gate.used&&!gate.blocked,'COMMENT_REPLY_INPUT_NOT_WITNESSED');
     return dom.frame(state);
   }
@@ -390,20 +452,24 @@ export function captureCommentReply(input:Input):Frame{
   }
   if(input.action==='arm'){
     dom.check(input.token&&input.text===state.editorText&&input.shape===state.shape,'COMMENT_REPLY_PREPARED_CHANGED');
-    host.__inboraCommentGate?.remove();const editor=state.editor,button=state.button,root=state.root,shape=state.shape,context=JSON.stringify(state.context);
-    const gate={token:input.token!,enabled:false,used:false,blocked:false,attempted:false,
+    const previous=host.__inboraCommentGate,editor=state.editor,button=state.button,root=state.root,shape=state.shape,context=JSON.stringify(state.context);
+    const gate={token:input.token!,enabled:false,used:false,blocked:false,attempted:false,securityFailure:null as string|null,
       validate():void{const now=dom.capture();dom.check(dom.visible(button),'COMMENT_REPLY_SEND_NOT_READY');dom.check(now.root===root&&now.editor===editor&&now.button===button&&now.shape===shape&&
         now.editorText===input.text&&JSON.stringify(now.context)===context&&!button.closest('[disabled],[aria-disabled="true"],.disabled')&&
         getComputedStyle(button).pointerEvents!=='none');},
       handle(event:Event):void{if(!event.composedPath().includes(button))return;
         try{dom.check(gate.enabled&&!gate.used&&!gate.blocked);gate.validate();if(event.currentTarget===button)gate.used=true;}
-        catch{gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}},
+        catch(error){if(error instanceof Error&&error.message.startsWith('OBSERVATION_SECURITY_SUSPECT'))gate.securityFailure=error.message;gate.blocked=true;event.preventDefault();event.stopImmediatePropagation();}},
       submit():boolean{dom.check(!gate.attempted&&!gate.blocked);gate.attempted=true;gate.validate();
         button.removeEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);gate.enabled=true;
-        try{button.click();}finally{gate.enabled=false;gate.remove();}return gate.used&&!gate.blocked;},
+        try{button.click();}finally{gate.enabled=false;gate.remove();}if(gate.securityFailure)throw Error(gate.securityFailure);return gate.used&&!gate.blocked;},
       remove():void{window.removeEventListener('click',gate.handle,true);button.removeEventListener('click',gate.handle,true);},
     };
-    gate.validate();window.addEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);host.__inboraCommentGate=gate;
+    gate.validate();
+    try{
+      window.addEventListener('click',gate.handle,true);button.addEventListener('click',gate.handle,true);
+    }catch(error){gate.remove();throw error;}
+    host.__inboraCommentGate=gate;previous?.remove();
   }
   return dom.frame(state);
 }
@@ -416,26 +482,38 @@ export class ObservedCommentReply implements ReplyAdapter{
   private pendingEvent:InboundEvent|null=null;
   private readingBack=false;
   constructor(readonly page:Page,readonly mapping:CommentReplyMapping,private readonly timeoutMs=5000,
-    private readonly options:{signal?:AbortSignal;readonlySignal?:AbortSignal;onQualification?:(report:CommentQualification)=>void;onReadbackDiagnostic?:(report:CommentReadbackDiagnostic)=>void}={}){this.responses=new CommentResponses(page,mapping);
+    private readonly options:{accountId?:AccountId;signal?:AbortSignal;readonlySignal?:AbortSignal;onQualification?:(report:CommentQualification)=>void;onReadbackDiagnostic?:(report:CommentReadbackDiagnostic)=>void}={}){this.responses=new CommentResponses(page,mapping);
     this.submission=mapping.submissionReceipts?new SubmissionResponse(page,mapping.observation):null;}
-  dispose():void{this.responses.dispose();this.submission?.dispose();}
+  private get accountId(){return this.options.accountId??DEFAULT_ACCOUNT_ID;}
+  async dispose():Promise<void>{this.responses.dispose();this.submission?.dispose();await this.cancelPreparation();}
+  async cancelPreparation():Promise<void>{
+    const token=this.token;this.token=null;
+    if(token)await this.removeGate(token);
+  }
+  private async removeGate(token:string):Promise<void>{
+    await this.page.evaluate(token=>{
+      const host=window as unknown as {__inboraCommentGate?:Gate},gate=host.__inboraCommentGate;
+      if(gate?.token===token){gate.remove();delete host.__inboraCommentGate;}
+    },token).catch(()=>{});
+  }
   private report(report:Omit<CommentReadbackDiagnostic,'responses'|'submissionEnabled'>):void {
     try{this.options.onReadbackDiagnostic?.({...report,submissionEnabled:!!this.submission,responses:this.responses.diagnostics()});}catch{/* Diagnostics cannot change a receipt. */}
   }
   private async frame(event:InboundEvent,action:Input['action']='snapshot',text:string|null=null,token:string|null=null,
     before:Input['before']=null,shape:string|null=null):Promise<Frame>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     const signal=this.readingBack?this.options.readonlySignal:this.options.signal;
     requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');
-    try{const value=await this.page.evaluate(captureCommentReply,{mapping:this.mapping,event,action,text,token,before,shape,receipts:this.responses.snapshot(event)});
+    try{const value=await this.page.evaluate(captureCommentReply,{mapping:this.mapping,event,action,text,token,before,shape,receipts:this.responses.snapshot(event)}).catch(error=>reportSecurityFailure(this.page,error));
       requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');return value;}
-    catch(error){const code=error instanceof Error?error.message.match(/COMMENT_REPLY_[A-Z_]+/)?.[0]:null;if(code)requireSafe(false,code);throw error;}
+    catch(error){const code=error instanceof Error?error.message.match(/(?:COMMENT_REPLY|OBSERVATION)_[A-Z_]+/)?.[0]:null;if(code)requireSafe(false,code);throw error;}
   }
   private snapshot(event:InboundEvent,state:Frame):TargetSnapshot{return{accountId:event.accountId,ownId:this.mapping.observation.self.uid,
     targetKey:targetKey(event),eventBinding:eventBinding(event),composerKey:targetKey(event),contextDigest:digest(state.context),mappingDigest:digest(this.mapping)};}
   private async locateRoot(event:InboundEvent,index:number):Promise<void>{
     const requested=this.readingBack?this.options.readonlySignal:this.options.signal;
     const deadline=Date.now()+30_000,timeout=AbortSignal.timeout(30_000),signal=requested?AbortSignal.any([requested,timeout]):timeout;
-    const reader=new ObservedReader(this.page,this.mapping.observation,undefined,signal);
+    const reader=new ObservedReader(this.page,this.mapping.observation,undefined,signal,this.accountId);
     const check=()=>{requireSafe(!requested?.aborted,'COMMENT_REPLY_CANCELLED');requireSafe(!signal.aborted&&Date.now()<deadline,'COMMENT_REPLY_LOCATE_TIMEOUT');};
     const found=async()=>{check();const count=(await this.frame(event,'locateRoot')).rootCount;check();return count===1;};
     check();
@@ -453,11 +531,12 @@ export class ObservedCommentReply implements ReplyAdapter{
     }
   }
   async inspect(event:InboundEvent):Promise<TargetSnapshot>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     this.readingBack=false;
     let stage:CommentQualification['stage']='EXPAND',verified=false,code:string|null=null;
     try{
     this.responses.watch(event);
-    this.token=null;const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);
+    await this.cancelPreparation();const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);
     requireSafe(isStrong(event)&&index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
     await this.locateRoot(event,index);
     await this.frame(event,'expand');
@@ -512,30 +591,46 @@ export class ObservedCommentReply implements ReplyAdapter{
     return this.responses.clockLag()!==null;
   }
   async verifyPrepared(event:InboundEvent,text:string):Promise<TargetSnapshot>{
-    requireSafe(this.prepared?.binding===eventBinding(event)&&this.prepared.text===text,'COMMENT_REPLY_NOT_PREPARED');
-    if(!this.submission&&this.mapping.observation.environment!=='fixture'){
-      requireSafe(await this.waitForClock(),'COMMENT_REPLY_CLOCK_UNVERIFIED');
+    const previous=this.token,token=randomUUID();
+    try{
+      requireSafe(this.prepared?.binding===eventBinding(event)&&this.prepared.text===text,'COMMENT_REPLY_NOT_PREPARED');
+      if(!this.submission&&this.mapping.observation.environment!=='fixture'){
+        requireSafe(await this.waitForClock(),'COMMENT_REPLY_CLOCK_UNVERIFIED');
+      }
+      const deadline=Date.now()+5000;
+      for(;;){
+        requireSafe(this.token===previous,'COMMENT_REPLY_CANCELLED');
+        let state:Frame;
+        try{state=await this.frame(event,'arm',text,token,null,this.prepared.shape);}catch(error){
+          if(!(error instanceof Error)||!error.message.includes('COMMENT_REPLY_SEND_NOT_READY')||Date.now()>=deadline)throw error;
+          await new Promise(resolve=>setTimeout(resolve,50));continue;
+        }
+        requireSafe(this.token===previous,'COMMENT_REPLY_CANCELLED');
+        this.token=token;
+        return this.snapshot(event,state);
+      }
+    }catch(error){
+      if(this.token===previous||this.token===token)this.token=null;
+      await this.removeGate(token);
+      if(previous)await this.removeGate(previous);
+      throw error;
     }
-    const token=randomUUID(),deadline=Date.now()+5000;let state:Frame;
-    for(;;)try{state=await this.frame(event,'arm',text,token,null,this.prepared.shape);break;}catch(error){
-      if(!(error instanceof Error)||!error.message.includes('COMMENT_REPLY_SEND_NOT_READY')||Date.now()>=deadline)throw error;
-      await new Promise(resolve=>setTimeout(resolve,50));
-    }
-    this.token=token;return this.snapshot(event,state);
   }
   async baseline(event:InboundEvent):Promise<string[]>{return(await this.frame(event)).ids;}
   async verifyExisting(event:InboundEvent,text:string,notBefore:string):Promise<SendProof|null>{
+    requireSafe(event.accountId===this.accountId,'ACCOUNT_CHANGED');
     this.readingBack=true;
     requireSafe(!this.options.readonlySignal?.aborted,'COMMENT_REPLY_CANCELLED');
     requireSafe(isStrong(event)&&Number.isFinite(Date.parse(notBefore)),'COMMENT_REPLY_SCOPE_REQUIRED');
     const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
     this.responses.watch(event);
-    await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal).comments(index);
+    await new ObservedReader(this.page,this.mapping.observation,undefined,this.options.readonlySignal,this.accountId).comments(index,false,0,{holdScroll:true,stay:false});
     await this.locateRoot(event,index);
     await this.frame(event,'expand');
     return this.poll(event,text,[],notBefore,undefined,'VERIFY_EXISTING');
   }
-  async clickOnce(notBefore?:string):Promise<void>{const token=this.token;this.token=null;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
+  async clickOnce(notBefore?:string,check?:()=>void,permitExpiresAt?:number):Promise<void>{const token=this.token;requireSafe(token,'COMMENT_REPLY_NOT_PREPARED');
+    try{
     if(this.submission){requireSafe(notBefore&&this.pendingEvent&&this.prepared,'COMMENT_REPLY_INTENT_REQUIRED');
       this.submission.arm(this.pendingEvent,this.prepared.text,notBefore);
     }else{
@@ -545,9 +640,22 @@ export class ObservedCommentReply implements ReplyAdapter{
     while(Date.now()<=deadline){requireSafe(deadline-Date.now()<=7000,'COMMENT_REPLY_CLOCK_UNVERIFIED');
       await new Promise(resolve=>setTimeout(resolve,Math.max(1,deadline-Date.now()+1)));}
     }
-    const accepted=await this.page.evaluate(token=>{const gate=(window as unknown as {__inboraCommentGate?:Gate}).__inboraCommentGate;
-      if(!gate||gate.token!==token)throw Error('COMMENT_REPLY_NOT_PREPARED');try{return gate.submit();}finally{gate.remove();}},token);
+    requireSafe(!this.options.signal?.aborted,'COMMENT_REPLY_CANCELLED');check?.();
+    const accepted=await this.page.evaluate(({token,permitExpiresAt})=>{
+      const host=window as unknown as {__inboraCommentGate?:Gate},gate=host.__inboraCommentGate;
+      if(!gate||gate.token!==token)throw Error('COMMENT_REPLY_NOT_PREPARED');
+      try{
+        if(permitExpiresAt!==undefined&&Date.now()>=permitExpiresAt)throw new Error('WORKER_SEND_PERMIT_EXPIRED');
+        return gate.submit();
+      }finally{gate.remove();if(host.__inboraCommentGate===gate)delete host.__inboraCommentGate;}
+    },{token,permitExpiresAt}).catch(error=>{
+      if(error instanceof Error&&/^(?:page\.evaluate: )?(?:Error: )?WORKER_SEND_PERMIT_EXPIRED(?:\r?\n|$)/u.test(error.message))
+        requireSafe(false,'WORKER_SEND_PERMIT_EXPIRED');
+      return reportSecurityFailure(this.page,error);
+    });
     requireSafe(accepted,'COMMENT_REPLY_CLICK_BLOCKED');
+    }catch(error){await this.removeGate(token);throw error;}
+    finally{if(this.token===token)this.token=null;}
   }
   async readback(event:InboundEvent,text:string,before:string[],notBefore:string):Promise<SendProof|null>{
     this.readingBack=true;
@@ -575,7 +683,7 @@ export class ObservedCommentReply implements ReplyAdapter{
   private async refreshComments(event:InboundEvent):Promise<void>{
     try{
       const signal=this.readingBack?this.options.readonlySignal:this.options.signal;
-      requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');await new ObservedReader(this.page,this.mapping.observation,undefined,signal).guard();
+      requireSafe(!signal?.aborted,'COMMENT_REPLY_CANCELLED');await new ObservedReader(this.page,this.mapping.observation,undefined,signal,this.accountId).guard();
       const index=this.mapping.observation.works.findIndex(w=>w.id===event.videoId);requireSafe(index>=0,'COMMENT_REPLY_SCOPE_REQUIRED');
       const s=this.mapping.observation.selectors,list=this.page.locator(s.commentList).filter({visible:true});
       if(!await list.count())await this.page.locator(s.commentEntry).click();
@@ -594,16 +702,17 @@ export class ObservedCommentReply implements ReplyAdapter{
   }
   private async poll(event:InboundEvent,text:string,before:string[],notBefore:string,ackId?:string,stage:'POLL'|'VERIFY_EXISTING'='POLL'):Promise<SendProof|null>{
     const deadline=Date.now()+this.timeoutMs;let previous:string|null=null,dom:CommentProofCounts|undefined;
+    const hasBaseline=stage!=='VERIFY_EXISTING',start=Date.parse(notBefore),strictStart=hasBaseline?start:start+dmClockToleranceMs;
     const poll={snapshots:0,rawProofs:0,newProofs:0,sameText:0,afterBoundary:0,notFuture:0,ackMatches:0,eligibleProofs:0,stableSnapshots:0};
     try{
       do{const frame=await this.frame(event,'proofs');dom=frame.readbackCounts;poll.snapshots++;poll.rawProofs=frame.proofs.length;
         const fresh=frame.proofs.filter(p=>!before.includes(p.id)),same=fresh.filter(p=>p.text===text);
-        poll.newProofs=fresh.length;poll.sameText=same.length;poll.afterBoundary=same.filter(p=>Date.parse(p.sentAt)>Date.parse(notBefore)).length;
-        poll.notFuture=same.filter(p=>Date.parse(p.sentAt)<=Date.now()).length;poll.ackMatches=ackId?same.filter(p=>p.id===ackId).length:0;
-        const matches=same.filter(p=>(ackId?p.id===ackId:Date.parse(p.sentAt)>Date.parse(notBefore))&&Date.parse(p.sentAt)<=Date.now());
+        poll.newProofs=fresh.length;poll.sameText=same.length;poll.afterBoundary=same.filter(p=>Date.parse(p.sentAt)>strictStart).length;
+        poll.notFuture=same.filter(p=>Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs).length;poll.ackMatches=ackId?same.filter(p=>p.id===ackId).length:0;
+        const matches=same.filter(p=>(ackId?p.id===ackId:Date.parse(p.sentAt)>strictStart)&&Date.parse(p.sentAt)<=Date.now()+dmClockToleranceMs);
         poll.eligibleProofs=matches.length;requireSafe(matches.length<=1,'COMMENT_REPLY_PROOF_AMBIGUOUS');const proof=matches[0];
         poll.stableSnapshots=proof?(digest(proof)===previous?2:1):0;
-        if(proof&&poll.stableSnapshots===2){this.report({stage,reason:'VERIFIED',...(dom?{dom}:{}),poll});return proof;}
+        if(proof&&poll.stableSnapshots===2&&(ackId||proofTimeValid(proof,notBefore,hasBaseline))){this.report({stage,reason:'VERIFIED',...(dom?{dom}:{}),poll});return proof;}
         previous=proof?digest(proof):null;await new Promise(resolve=>setTimeout(resolve,75));
       }while(Date.now()<deadline);
       this.report({stage,reason:!poll.rawProofs?'EMPTY':!poll.eligibleProofs?'FILTERED':'UNSTABLE',...(dom?{dom}:{}),poll});return null;

@@ -1,15 +1,16 @@
 import { afterEach, expect, test } from 'vitest';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
 import { copyFile, readFile, access, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { z } from 'zod';
 import { privateTemp } from '../helpers.js';
 import { startAssistantControl } from '../../src/mcp/control-server.js';
 import { AssistantBridgeClient } from '../../src/mcp/bridge-client.js';
 import {
-  readAssistantDiscovery, discoveryFilename, publishAssistantDiscovery, type AssistantDiscovery,
+  canonicalAssistantRoot, readAssistantDiscovery, readAssistantDiscoverySnapshot, statAssistantDiscovery,
+  discoveryFilename, publishAssistantDiscovery, type AssistantDiscovery,
 } from '../../src/mcp/discovery.js';
 import { assistantRoute, type AssistantToolRegistry } from '../../src/mcp/bridge-contracts.js';
 
@@ -206,4 +207,191 @@ test('closing cancels an incomplete unaccepted HTTP body without dispatching or 
     } finally { clearTimeout(watchdog); }
     expect(calls).toBe(0);
   } finally { req.destroy(); }
+});
+
+test('bridge caches decrypted discovery by file stamp and refreshes once on stale ECONNREFUSED or 401 without replaying accepted writes', async () => {
+  const { root, control } = await start();
+  let reads = 0;
+  let stats = 0;
+  const client = new AssistantBridgeClient(root, {
+    tools,
+    statDiscovery: async dir => { stats++; return statAssistantDiscovery(dir); },
+    readDiscovery: async dir => { reads++; return readAssistantDiscoverySnapshot(dir); },
+  });
+  expect(await client.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(await client.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(await client.call('inbora_get_status', {})).toEqual({ connected: true });
+  // Only the first call decrypts DPAPI; subsequent calls with unchanged mtimeMs+size hit memory cache.
+  expect(reads).toBe(1);
+  expect(stats).toBe(2);
+
+  // Rotate backend instance and simulate coarse Windows mtime collision by freezing stat stamp to the old values.
+  const staleStamp = await statAssistantDiscovery(root);
+  await control.close();
+  const replacement = await startAssistantControl({ root, tools, dispatch: async () => ({ connected: true }) });
+  running.push(replacement);
+  let phase = 0;
+  const rotatedClient = new AssistantBridgeClient(root, {
+    tools,
+    statDiscovery: async () => staleStamp,
+    readDiscovery: async dir => {
+      phase++;
+      const fresh = await readAssistantDiscoverySnapshot(dir);
+      return { stamp: staleStamp, descriptor: fresh.descriptor };
+    },
+  });
+  expect(await rotatedClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(phase).toBe(1);
+  // Swap running server while keeping stat stamp frozen so cache returns old port (ECONNREFUSED) -> clears cache and retries once.
+  await replacement.close();
+  const third = await startAssistantControl({ root, tools, dispatch: async () => ({ connected: true }) });
+  running.push(third);
+  expect(await rotatedClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(phase).toBe(2);
+
+  // Also test cached HTTP 401 -> clears cache, rereads fresh secret on same port, and succeeds on the single retry.
+  const thirdSnapshot = await readAssistantDiscoverySnapshot(root);
+  let authPhase = 0;
+  const authServer = await start(async () => ({ connected: true }));
+  const authClient = new AssistantBridgeClient(authServer.root, {
+    tools,
+    statDiscovery: async () => staleStamp,
+    readDiscovery: async dir => {
+      authPhase++;
+      const fresh = await readAssistantDiscoverySnapshot(dir);
+      return { stamp: staleStamp, descriptor: fresh.descriptor };
+    },
+  });
+  expect(await authClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(authPhase).toBe(1);
+  // Simulate cached descriptor secret mismatch (401) while stat stamp stays unchanged.
+  (authClient as unknown as { cached: { descriptor: AssistantDiscovery; stamp: typeof staleStamp } }).cached.descriptor = {
+    ...authServer.descriptor,
+    secret: '0'.repeat(64),
+  };
+  expect(await authClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(authPhase).toBe(2);
+  expect(thirdSnapshot.descriptor.instanceId).toBe(third.instanceId);
+  expect(await client.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(reads).toBe(2);
+});
+
+test('cached bridge never replays write tools on timeout or mid-flight disconnect even when discovery rotates', async () => {
+  // Part A: Cached discovery hit + write tool timeout must not refresh or send a second write attempt.
+  let releaseWrite!: () => void;
+  const writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+  let primaryWrites = 0;
+  let primaryFinished = false;
+  const primary = await start(async (_session, tool, args) => {
+    if (tool === 'inbora_get_status') return { connected: true };
+    primaryWrites++;
+    await writeGate;
+    primaryFinished = true;
+    return { operationId: (args as { operationId: string }).operationId, accepted: true };
+  });
+  let rotatedWrites = 0;
+  const rotated = await start(async (_session, tool, args) => {
+    if (tool === 'inbora_get_status') return { connected: true };
+    rotatedWrites++;
+    return { operationId: (args as { operationId: string }).operationId, accepted: true };
+  });
+  const primarySnapshot = await readAssistantDiscoverySnapshot(primary.root);
+  const rotatedSnapshot = await readAssistantDiscoverySnapshot(rotated.root);
+
+  let timeoutReads = 0;
+  let timeoutStats = 0;
+  const timeoutClient = new AssistantBridgeClient(primary.root, {
+    tools,
+    timeoutMs: 35,
+    statDiscovery: async () => { timeoutStats++; return primarySnapshot.stamp; },
+    readDiscovery: async () => {
+      timeoutReads++;
+      return timeoutReads === 1 ? primarySnapshot : rotatedSnapshot;
+    },
+  });
+  expect(await timeoutClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(timeoutReads).toBe(1);
+  expect(timeoutStats).toBe(0);
+
+  await expect(timeoutClient.call('inbora_mark_all_read', { operationId: randomUUID() }))
+    .rejects.toThrow('ASSISTANT_REQUEST_TIMEOUT_QUERY_OPERATION');
+  expect(timeoutStats).toBe(1);
+  expect(timeoutReads).toBe(1);
+  expect(primaryWrites).toBe(1);
+  expect(rotatedWrites).toBe(0);
+  releaseWrite();
+  await primary.control.close();
+  expect(primaryFinished).toBe(true);
+  expect(primaryWrites).toBe(1);
+
+  // Part B: Cached discovery hit + write tool mid-flight disconnect must not replay against a rotated instance.
+  const disconnectRoot = temporary('mcp-cached-disconnect-');
+  const canonicalRoot = await canonicalAssistantRoot(disconnectRoot);
+  const instanceId = randomUUID();
+  const secret = randomBytes(32).toString('hex');
+  let disconnectWrites = 0;
+  const rawServer = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { tool: string };
+      if (payload.tool === 'inbora_get_status') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', Connection: 'close' });
+        res.end(JSON.stringify({ ok: true, instanceId, result: { connected: true } }));
+        return;
+      }
+      disconnectWrites++;
+      req.socket.destroy();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    rawServer.once('error', reject);
+    rawServer.listen(0, '127.0.0.1', () => {
+      rawServer.removeListener('error', reject);
+      resolve();
+    });
+  });
+  const addr = rawServer.address();
+  expect(addr && typeof addr !== 'string').toBe(true);
+  const unpublish = await publishAssistantDiscovery({
+    version: 1,
+    runtime: canonicalRoot,
+    instanceId,
+    pid: process.pid,
+    port: (addr as { port: number }).port,
+    secret,
+  });
+  running.push({
+    close: async () => {
+      await unpublish();
+      await new Promise<void>(resolve => rawServer.close(() => resolve()));
+    },
+  });
+  const disconnectSnapshot = await readAssistantDiscoverySnapshot(disconnectRoot);
+
+  let disconnectReads = 0;
+  let disconnectStats = 0;
+  const disconnectClient = new AssistantBridgeClient(disconnectRoot, {
+    tools,
+    statDiscovery: async () => { disconnectStats++; return disconnectSnapshot.stamp; },
+    readDiscovery: async () => {
+      disconnectReads++;
+      return disconnectReads === 1 ? disconnectSnapshot : rotatedSnapshot;
+    },
+  });
+  expect(await disconnectClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(disconnectReads).toBe(1);
+  expect(disconnectStats).toBe(0);
+
+  await expect(disconnectClient.call('inbora_mark_all_read', { operationId: randomUUID() }))
+    .rejects.toThrow('ASSISTANT_CONNECTION_LOST_QUERY_OPERATION');
+  expect(disconnectStats).toBe(1);
+  expect(disconnectReads).toBe(1);
+  expect(disconnectWrites).toBe(1);
+  expect(rotatedWrites).toBe(0);
+
+  // Cache was invalidated on connection loss, so a subsequent explicit call refreshes discovery cleanly.
+  expect(await disconnectClient.call('inbora_get_status', {})).toEqual({ connected: true });
+  expect(disconnectReads).toBe(2);
+  expect(rotatedWrites).toBe(0);
 });

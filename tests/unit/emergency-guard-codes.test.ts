@@ -1,17 +1,21 @@
+import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {afterEach,expect,test,vi} from 'vitest';
 import {captureObserved,type CaptureInput} from '../../src/adapters/observed-capture.js';
 import {captureCommentThread,type CommentThreadInput} from '../../src/adapters/comment-thread-capture.js';
-import {platformStopCodes} from '../../src/core/emergency-stop.js';
+import {parseSecuritySignal} from '../../src/adapters/security-signal.js';
+import {platformStopCodes,shouldStopGlobally} from '../../src/core/emergency-stop.js';
 
 afterEach(()=>vi.unstubAllGlobals());
 function setup(title='',visibleBlocker=false,origin='https://www.douyin.com'){
-  const blocker={isConnected:true,parentElement:null,getClientRects:()=>[{}]};
+  const blocker={tagName:'IFRAME',id:'synthetic-security',isConnected:true,parentElement:null,childNodes:[],querySelectorAll:()=>[],
+    getBoundingClientRect:()=>({left:0,top:0,right:320,bottom:180}),getClientRects:()=>[{left:0,top:0,right:320,bottom:180,width:320,height:180}]};
+  vi.stubGlobal('innerWidth',1280);vi.stubGlobal('innerHeight',720);vi.stubGlobal('performance',{timeOrigin:1000});
   vi.stubGlobal('location',{origin,href:origin+'/video/work'});
   vi.stubGlobal('document',{title,querySelectorAll:(selector:string)=>selector==='.security'&&visibleBlocker?[blocker]:[]});
   vi.stubGlobal('getComputedStyle',()=>({visibility:'visible',display:'block',opacity:'1'}));
   const mapping={origin:'https://www.douyin.com',securityBlockers:'.security',works:[{id:'work',url:'https://www.douyin.com/video/work'}],
     selectors:{selfAvatar:'.self'}} as CaptureInput['mapping'];
-  const observed=()=>captureObserved({mapping,channel:'identity',index:0,evidenceId:'synthetic-only'});
+  const observed=()=>captureObserved({mapping,channel:'identity',index:0,accountId:DEFAULT_ACCOUNT_ID,evidenceId:'synthetic-only'});
   const thread=()=>captureCommentThread({mapping,event:{videoId:'work'},action:'inspect',offset:0} as CommentThreadInput);
   return {observed,thread};
 }
@@ -24,13 +28,17 @@ test('unexpected origin has its own fixed stop reason, independent of the page t
 
 test.each(['验证码','安全验证','访问受限'])('the %s safety title is distinguished on normal reading and comment-thread checks',title=>{
   const {observed,thread}=setup(title,true);
-  expect(observed).toThrow('OBSERVATION_SECURITY_TITLE');expect(thread).toThrow('OBSERVATION_SECURITY_TITLE');
+  expect(observed).toThrow('OBSERVATION_SECURITY_SUSPECT');expect(thread).toThrow('OBSERVATION_SECURITY_SUSPECT');
+  try{observed();}catch(error){expect(parseSecuritySignal(error)).toMatchObject({kind:'TITLE',title});}
+  expect(shouldStopGlobally('OBSERVATION_SECURITY_SUSPECT')).toBe(false);
   expect(platformStopCodes).toContain('OBSERVATION_SECURITY_TITLE');
 });
 
 test('a visible mapped safety component is distinguished from title and origin failures',()=>{
   const {observed,thread}=setup('',true);
-  expect(observed).toThrow('OBSERVATION_SECURITY_COMPONENT');expect(thread).toThrow('OBSERVATION_SECURITY_COMPONENT');
+  expect(observed).toThrow('OBSERVATION_SECURITY_SUSPECT');expect(thread).toThrow('OBSERVATION_SECURITY_SUSPECT');
+  try{thread();}catch(error){expect(parseSecuritySignal(error)).toMatchObject({kind:'COMPONENT',state:'SUSPECT'});}
+  expect(shouldStopGlobally('OBSERVATION_SECURITY_SUSPECT')).toBe(false);
   expect(platformStopCodes).toContain('OBSERVATION_SECURITY_COMPONENT');
 });
 

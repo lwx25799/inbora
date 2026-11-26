@@ -1,10 +1,11 @@
 import type { ObservationMapping } from '../config/site-mapping.js';
+import type { AccountId } from '../contracts/account.js';
 import type {InboundEvent} from '../core/contracts.js';
 import type {CommentThreadWindow} from './comment-thread-capture.js';
 
 export interface DiscoveredPeer { uid: string | null; secUid: string; conversationId: string; title: string;activity?:string }
-export interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'diagnostic' | 'dmScroll'; index: number;
-  evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; commentStay?:boolean;
+export interface CaptureInput { mapping: ObservationMapping; channel: 'identity' | 'dm' | 'comments' | 'row' | 'locate' | 'conversations' | 'navigate' | 'back' | 'commentScroll' | 'commentReveal' | 'commentDocument' | 'diagnostic' | 'dmScroll'; index: number;
+  accountId: AccountId; evidenceId: string; rowIndex?: number; select?: boolean; scroll?: 'start' | 'next'; peer?: DiscoveredPeer; allCommentAuthors?: boolean; navigationUrl?: string; commentOffset?:number; commentStay?:boolean;
   commentRootId?:string;commentChildOffset?:number;conversationOffset?:number; diagnosticSource?:'dm'|'comments'; dmWindow?:boolean; dmTop?:number; collectionPartial?:boolean }
 export type CaptureOptions = Pick<CaptureInput,'rowIndex'|'select'|'scroll'|'peer'|'allCommentAuthors'|'diagnosticSource'|'dmWindow'|'dmTop'|'conversationOffset'|'collectionPartial'|'navigationUrl'|'commentRootId'|'commentChildOffset'|'commentOffset'|'commentStay'>;
 interface CommentScrollShape {depth:number;tag:string;overflowY:string;clientHeight:number;scrollHeight:number;scrollTop:number;visible:boolean;containsList:boolean}
@@ -46,8 +47,65 @@ export interface ObservationBatch { events: InboundEvent[]; evidenceId: string; 
 
 /** Fixed paths in the currently rendered, authorized components; never calls website functions or getters. */
 export function captureObserved(input: CaptureInput): ObservationBatch {
-  const { mapping: m, channel, index, evidenceId } = input; const s = m.selectors;
+  const { mapping: m, channel, index, accountId, evidenceId } = input; const s = m.selectors;
   const dom = {
+    securityCheck(value:unknown,selectors:string[],kind:'TITLE'|'COMPONENT'='COMPONENT'):void {
+      if(value)return;
+      const matches=[];
+      for(const selector of selectors.slice(0,8))for(const node of Array.from(document.querySelectorAll(selector)).slice(0,12-matches.length)){
+        const r=node.getBoundingClientRect();matches.push({selector:selector.slice(0,2000),tag:node.tagName.slice(0,24),id:node.id.slice(0,160),
+          left:r.left,top:r.top,right:r.right,bottom:r.bottom,visible:dom.securityVisible(node)});
+      }
+      const frames=Array.from(document.querySelectorAll('iframe')).slice(0,8).map(node=>{const r=node.getBoundingClientRect();
+        return{src:(node.getAttribute('src')??'').slice(0,2048),title:node.title.slice(0,160),left:r.left,top:r.top,right:r.right,bottom:r.bottom};});
+      let target:{workId?:string|undefined;conversationId?:string|undefined}|undefined;
+      if(channel==='comments'||channel.startsWith('comment'))target={workId:m.works[index]?.id};
+      else if(channel==='dm'||input.peer?.conversationId)target={conversationId:(input.peer??m.peers[index])?.conversationId};
+      else try{
+        const work=m.works.find(work=>work.url.split('?')[0]===location.href.split('?')[0]);
+        if(work)target={workId:work.id};
+        else{const chats=Array.from(document.querySelectorAll(s.chat)).filter(dom.visible);
+          if(chats.length===1){const headers=Array.from(chats[0]!.querySelectorAll(s.chatHeader)).filter(dom.visible);
+            if(headers.length===1)target={conversationId:dom.conversationId(dom.data(dom.childProps(headers[0]!),'conversation'))};}}
+      }catch{/* An unavailable calibrated header proves only account-page scope. */}
+      const signal={version:1,state:'SUSPECT',kind,href:location.href.slice(0,2048),origin:location.origin.slice(0,256),title:document.title.slice(0,160),
+        documentStartedAt:performance.timeOrigin,observedAt:Date.now(),scope:target&&(target.workId||target.conversationId)?'TARGET':'ACCOUNT_PAGE',...(target?{target}:{}),matches,frames};
+      throw Error('OBSERVATION_SECURITY_SUSPECT INBORA_SECURITY_SIGNAL:'+JSON.stringify(signal));
+    },
+    securityVisible(element:Element):boolean {
+      for(const node of [element,...element.querySelectorAll('*')]){
+        if(!node.isConnected)continue;
+        let shown=true;
+        for(let current:Element|null=node;current;current=current.parentElement){
+          const style=getComputedStyle(current);
+          if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||Number(style.opacity)===0){shown=false;break;}
+        }
+        if(!shown)continue;
+        const candidates:{rect:DOMRect;parent:Element|null}[]=/^(?:IFRAME|IMG|CANVAS|VIDEO|AUDIO|INPUT|BUTTON|SELECT|TEXTAREA|SVG|OBJECT|EMBED)$/u.test(node.tagName)?Array.from(node.getClientRects(),rect=>({rect,parent:node.parentElement})):[];
+        for(const child of node.childNodes){
+          if(child.nodeType!==Node.TEXT_NODE||!child.nodeValue?.trim())continue;
+          const range=document.createRange();range.selectNodeContents(child);
+          for(const rect of range.getClientRects())candidates.push({rect,parent:node});
+        }
+        for(const {rect,parent} of candidates){
+          let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(innerWidth,rect.right),bottom=Math.min(innerHeight,rect.bottom);
+          if(!(right>left&&bottom>top))continue;
+          for(let current=parent;current;current=current.parentElement){
+            const style=getComputedStyle(current);
+            if(style.display==='contents')continue;
+            const clipX=['hidden','clip','auto','scroll','overlay'].includes(style.overflowX);
+            const clipY=['hidden','clip','auto','scroll','overlay'].includes(style.overflowY);
+            if(!clipX&&!clipY)continue;
+            const box=current.getBoundingClientRect();
+            if(clipX){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+            if(clipY){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+            if(!(right>left&&bottom>top))break;
+          }
+          if(right>left&&bottom>top)return true;
+        }
+      }
+      return false;
+    },
     check(value: unknown, code: string): void { if (!value) throw new Error(code); },
     // Adapted from LockyBee chat-browser.mjs dataField; MIT notice in third_party/.
     // Reject unsupported descriptors explicitly instead of returning an absent value.
@@ -230,7 +288,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       let time = NaN;
       if (seconds && typeof value === 'number' && Number.isFinite(value)) time = value * 1000;
       else if (!seconds) { try { time = Date.prototype.getTime.call(value); } catch { /* no date evidence */ } }
-      return Number.isFinite(time) && time >= Date.UTC(2000,0,1) && time <= Date.now() ? new Date(time).toISOString() : null;
+      return Number.isFinite(time) && time >= Date.UTC(2000,0,1) && time <= Date.now() + 2000 ? new Date(time).toISOString() : null;
     },
     dmFrame(chat:Element,clipRows:boolean,window:boolean):{rows:Element[];scroller:Element|undefined;viewport:ObservationBatch['dmViewport']} {
       const mounted=Array.from(chat.querySelectorAll(s.messages)),candidates=new Set<Element>();
@@ -266,8 +324,8 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
     },
   };
   dom.check(location.origin===m.origin,'OBSERVATION_UNEXPECTED_ORIGIN');
-  dom.check(!/验证码|安全验证|访问受限/.test(document.title),'OBSERVATION_SECURITY_TITLE');
-  dom.check(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.visible),'OBSERVATION_SECURITY_COMPONENT');
+  dom.securityCheck(!/验证码|安全验证|访问受限/.test(document.title),[m.securityBlockers],'TITLE');
+  dom.securityCheck(!Array.from(document.querySelectorAll(m.securityBlockers)).some(dom.securityVisible),[m.securityBlockers]);
   const avatar = dom.one(document,s.selfAvatar,'OBSERVATION_ACCOUNT_AVATAR'), own = dom.fiberProps(avatar,s.selfFiberDepth);
   dom.check(dom.data(own,'uid') === m.self.uid && dom.data(own,'secUid') === m.self.secUid,'OBSERVATION_ACCOUNT_CHANGED');
   const events: InboundEvent[] = [],commentThreads:NonNullable<ObservationBatch['commentThreads']>=[]; let unsupported = 0, loaded = 0,incomplete=false;
@@ -473,6 +531,11 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       hit!.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}));}
     return {events,evidenceId,unsupported,loaded};
   }
+  if(channel==='commentDocument') {
+    const work=m.works[index];dom.check(work&&location.href.split('?')[0]===work.url.split('?')[0],'OBSERVATION_WORK_CHANGED');
+    dom.emptyEditors();
+    return {events,evidenceId,unsupported,loaded};
+  }
   if(channel==='commentReveal') {
     const work=m.works[index];dom.check(work&&location.href.split('?')[0]===work.url.split('?')[0],'OBSERVATION_WORK_CHANGED');
     const lists=Array.from(document.querySelectorAll(s.commentList)).filter(dom.visible);
@@ -634,7 +697,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
         const parsed=dom.data(message,'_parsedContent');
         dom.check(text===dom.data(parsed,'text'),'OBSERVATION_MESSAGE_TEXT_CONFLICT');
       }
-      events.push({ accountId:'account_001',channel:'DIRECT_MESSAGE',platformEventId:dom.id(dom.data(message,'serverId')),
+      events.push({ accountId,channel:'DIRECT_MESSAGE',platformEventId:dom.id(dom.data(message,'serverId')),
         actorId:sender as string,actorName:fromMe ? null : peer!.title,text,occurredAt:dom.time(dom.data(message,'createdAt'),false),
         videoId:null,commentId:null,conversationId:peer!.conversationId,direction:fromMe?'OUTGOING':'INCOMING',kind:'DM',
         evidenceId,discovery:'DIRECT_MESSAGE',...(contentType?{contentType,observationIssue:'DM_CONTENT_UNVERIFIED' as const}:{}) });
@@ -696,7 +759,7 @@ export function captureObserved(input: CaptureInput): ObservationBatch {
       if(parent&&parentVerified&&verified)relationRows.push({native:comment,id:id!,root:rootId!,own:nativeUid===m.self.uid});
       if(!verified||!parentVerified)unsupported++;
       bindings.push({targetKey:`comment:${work!.id}:${id}`,uid:peer.uid,secUid:peer.secUid,title:peer.title,conversationId:null});
-      events.push({ accountId:'account_001',channel:'COMMENT_NOTIFICATION',platformEventId:id,actorId:peer.uid,
+      events.push({ accountId,channel:'COMMENT_NOTIFICATION',platformEventId:id,actorId:peer.uid,
         actorName:peer.title,text,occurredAt:dom.time(dom.data(comment,'createTime'),true),occurredAtPrecisionMs:1000,videoId:work!.id,commentId:id,
         conversationId:null,direction:'INCOMING',kind:parent?'REPLY':'COMMENT',evidenceId,discovery:'ALLOWED_WORK',
         ...(parent&&parentVerified?{rootCommentId:rootId!,replyToCommentId:id!}:{}),

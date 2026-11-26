@@ -1,28 +1,16 @@
 import {digest,requireSafe,targetKey,type StoredEvent} from '../core/contracts.js';
 import type {EventStore} from '../storage/store.js';
 import type {ClientCommand} from './contracts.js';
-import {MessagePreviewStore,type MessagePreviewAttachment} from '../storage/message-previews.js';
+import {MessagePreviewStore} from '../storage/message-previews.js';
 import {ChatMessageStore} from '../storage/chat-messages.js';
 import {inboxReadBoundary,scopedReadEventIds} from './inbox-read-state.js';
-import {MessageShareStore,type MessageShare} from '../storage/message-shares.js';
+import {MessageShareStore} from '../storage/message-shares.js';
 import {InboxProjection,inboxGroupKey,type ReplyStatus} from './inbox-projection.js';
 import {readInboxPreviews,inboxPreviewKey} from './inbox-preview.js';
 export {inboxGroupKey} from './inbox-projection.js';
+import type {TimelineItem} from '../contracts/inbox.js';
+export type {TimelineItem} from '../contracts/inbox.js';
 
-export interface TimelineItem {
-  id:string;
-  eventId:string;
-  direction:'INCOMING'|'OUTGOING';
-  text:string;
-  displayText?:string;
-  occurredAt:string|null;
-  historical:boolean;
-  origin:'OBSERVED'|'CONFIRMED';
-  contentType?:StoredEvent['payload']['contentType'];
-  observationIssue?:StoredEvent['payload']['observationIssue'];
-  attachments:MessagePreviewAttachment[];
-  share?:MessageShare;
-}
 interface TimelineCursor {group:string;at:number;order:string}
 interface MessageRow {id:string;event_id:string;text:string;occurred_at:string|null;at:number;historical:number}
 const pageSize=30;
@@ -65,7 +53,7 @@ export class InboxQueries {
           c.status==='UNCERTAIN'?row.members.some(e=>e.status==='UNCERTAIN'||e.status==='INTENT_RECORDED'):true)
       .sort((a,b)=>(Date.parse(b.latestMessage?.occurredAt??'')||time(b.latest))-(Date.parse(a.latestMessage?.occurredAt??'')||time(a.latest))||
         (projection.order.get(b.latest.id)??0)-(projection.order.get(a.latest.id)??0));
-    const own=projection.own.get('account_001'),previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
+    const own=projection.own.get(this.store.accountId),previews=new MessagePreviewStore(this.root),shares=new MessageShareStore(this.root);
     return {total:rows.length,unreadTotal,page:c.page,pageSize:20,items:rows.slice(c.page*20,c.page*20+20).map(row=>{
       const message=row.latestMessage;
       const payload=message?message.payload:row.latest.payload;

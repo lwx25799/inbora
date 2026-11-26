@@ -1,4 +1,4 @@
-import {expect,test} from 'vitest';
+import {expect,test,vi} from 'vitest';
 import {existsSync,readFileSync,readdirSync,utimesSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {digest} from '../../src/core/contracts.js';
@@ -31,4 +31,29 @@ test('a tampered thumbnail fails its opaque content binding and cannot return re
   cache.save(event,'own-1',[{label:null,png}]);const id=cache.list(event,'own-1')[0]!.previewId!;
   writeFileSync(join(root,'evidence','message-previews',id+'.png'),Buffer.concat([png,Buffer.from('replacement')]));
   expect(()=>cache.read(event,'own-1',id)).toThrow('MESSAGE_PREVIEW_UNAVAILABLE');
+});
+
+test('save prunes once, removes orphan thumbnail PNGs, and caches runtime.json retention by mtimeMs',()=>{
+  const root=privateTemp('preview-orphan-cache-'),runtimeFile=join(root,'runtime.json');
+  writeFileSync(runtimeFile,JSON.stringify({version:1,modelGrant:null,evidenceRetentionDays:14}));
+  const cache=new MessagePreviewStore(root),event=candidate({contentType:'IMAGE',observationIssue:'DM_CONTENT_UNVERIFIED'});
+  cache.save(event,'own-1',[{label:null,png}]);
+  const folder=join(root,'evidence','message-previews'),keptId=cache.list(event,'own-1')[0]!.previewId!;
+  const orphanId=digest(['orphan-preview-png']),orphanFile=join(folder,orphanId+'.png'),unrelated=join(folder,'keep.txt');
+  writeFileSync(orphanFile,png);writeFileSync(unrelated,'keep');
+  const pruneSpy=vi.spyOn(cache as unknown as {prune:(directory:string)=>void},'prune');
+  cache.save(event,'own-1',[{label:null,png}]);
+  expect(pruneSpy).toHaveBeenCalledTimes(1);
+  expect(existsSync(orphanFile)).toBe(false);
+  expect(existsSync(join(folder,keptId+'.png'))).toBe(true);
+  expect(readFileSync(unrelated,'utf8')).toBe('keep');
+  // Update runtime.json retention to 1 day and backdate the manifest by 2 days to verify mtimeMs invalidation.
+  const manifestFile=readdirSync(folder).find(name=>name.endsWith('.json'))!;
+  const twoDaysAgo=new Date(Date.now()-2*86_400_000);
+  utimesSync(join(folder,manifestFile),twoDaysAgo,twoDaysAgo);
+  expect(cache.list(event,'own-1')).toHaveLength(1);
+  writeFileSync(runtimeFile,JSON.stringify({version:1,modelGrant:null,evidenceRetentionDays:1}));
+  const bumped=new Date(Date.now()+2000);utimesSync(runtimeFile,bumped,bumped);
+  expect(cache.list(event,'own-1')).toEqual([]);
+  pruneSpy.mockRestore();
 });

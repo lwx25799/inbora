@@ -18,12 +18,12 @@ desktop/src-tauri/gen/
 AGENTS.md
 AGENTS.override.md
 /Inbora_*.md
-/desktop/DESIGN.md
 /tests/manual/
 /docs/*
+!/docs/ARCHITECTURE-DECISIONS.md
 !/docs/AUTOMATION-OPERATIONS.md
+!/docs/CORE-PROTOCOL-AND-SCHEMA4.md
+!/docs/KNOWLEDGE-PERSONA.zh-CN.md
 !/docs/MODEL-CONTRACT.md
-!/docs/UPSTREAM-REUSE-DIAGNOSTICS.md
+!/docs/STAGE-HANDOFF.md
 /宣传片/
-
-

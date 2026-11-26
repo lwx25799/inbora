@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp,writeFile} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {fixtureServer} from '../tests/fixtures/site.ts';
@@ -10,8 +10,10 @@ const {BrowserProfileOwner}=await import(moduleUrl('browser/profile-owner.js'));
 const {ObservedReader}=await import(moduleUrl('adapters/observed-reader.js'));
 const {ObservedDmReply}=await import(moduleUrl('adapters/observed-dm-reply.js'));
 const parent=resolve('.local/dm-clock-context-smoke');await mkdir(parent,{recursive:true});
-const root=await mkdtemp(join(parent,'run-')),server=await fixtureServer();
+const root=await mkdtemp(join(parent,'run-'));
+let server;
 try{
+  server=await fixtureServer();
   for(const mode of ['EXTRA','MISSING','DEFERRED']){
     const owner=await BrowserProfileOwner.launch(join(root,mode,'profile'),true);let adapter;
     try{
@@ -65,4 +67,4 @@ try{
   const result={scope:'SYNTHETIC_ONLY',source,cases:3,assertions:29,extraOlderWindow:true,freshMissingRowRead:true,partialRefreshKeepsExactNativeContext:true,normalRefreshSameId:true,maximumWindowReads:2,restoredOffset:true,
     bodyFreeDiagnostics:true,clicks:0,modelCalls:0,productionDatabase:false};
   await writeFile(resolve('.local',source?'dm-clock-context-source-smoke.json':'dm-clock-context-built-smoke.json'),JSON.stringify(result,null,2));process.stdout.write(JSON.stringify(result)+'\n');
-}finally{await server.close();}
+}finally{await server?.close();assert.ok(root.startsWith(`${parent}\\`)||root.startsWith(`${parent}/`));await rm(root,{recursive:true,force:true});}
