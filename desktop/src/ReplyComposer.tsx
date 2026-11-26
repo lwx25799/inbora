@@ -160,7 +160,7 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
             <span
               className={
                 charCount > 500
-                  ? 'font-semibold text-destructive'
+                  ? 'font-semibold text-destructive-foreground'
                   : charCount > 450
                     ? 'font-medium text-warning-foreground'
                     : undefined

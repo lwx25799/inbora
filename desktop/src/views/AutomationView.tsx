@@ -55,6 +55,7 @@ export function AutomationView({
     promptError,
     promptNotice,
     canSavePrompts,
+    devRecoveryRestoring,
     updatePromptField,
     savePrompts,
   } = promptsState;
@@ -227,7 +228,7 @@ export function AutomationView({
         <div className="flex justify-end pt-1">
           <button
             className={btnPrimaryCls}
-            disabled={promptBusy || !canSavePrompts}
+            disabled={promptBusy || !canSavePrompts || devRecoveryRestoring}
             onClick={savePrompts}
           >
             保存业务提示词

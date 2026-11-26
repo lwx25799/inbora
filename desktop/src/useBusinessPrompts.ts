@@ -16,6 +16,7 @@ export interface BusinessPromptsController {
   promptError: string;
   promptNotice: string;
   canSavePrompts: boolean;
+  devRecoveryRestoring: boolean;
   updatePromptField: (field: keyof BusinessPrompts, value: string) => void;
   savePrompts: () => Promise<void>;
 }
@@ -27,10 +28,12 @@ export interface BusinessPromptsController {
 export function useBusinessPrompts({
   status,
   devRecoveryGeneration,
+  devRecoveryRestoring,
   updatePrompts,
 }: {
   status: Status | null;
   devRecoveryGeneration: number;
+  devRecoveryRestoring: boolean;
   updatePrompts: (session: string, prompts: BusinessPrompts) => void;
 }): BusinessPromptsController {
   const sessionKey = status ? JSON.stringify([runtimeSession(status), devRecoveryGeneration]) : "";
@@ -87,7 +90,7 @@ export function useBusinessPrompts({
   }
 
   async function savePrompts(): Promise<void> {
-    if (!status || savingPrompts.current || !canSavePrompts) return;
+    if (!status || devRecoveryRestoring || savingPrompts.current || !canSavePrompts) return;
     const expectedSessionKey = sessionKey;
     const expectedSession = runtimeSession(status);
     const snapshotStatus = status;
@@ -126,6 +129,7 @@ export function useBusinessPrompts({
     promptError,
     promptNotice,
     canSavePrompts,
+    devRecoveryRestoring,
     updatePromptField,
     savePrompts,
   };

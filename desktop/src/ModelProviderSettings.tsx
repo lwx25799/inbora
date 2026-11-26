@@ -30,7 +30,7 @@ export function ModelProviderSettings({
 }: {
   status: Status;
   update: UpdateProviders;
-  onDirectoryStateChange?: (state: PublicModelState) => void;
+  onDirectoryStateChange?: (state: PublicModelState, error?: string) => void;
 }) {
   if (status.modelProvidersAvailable !== true || !status.modelProviders) {
     return (
@@ -77,7 +77,7 @@ function AvailableProviders({
   status: Status;
   state: PublicModelState;
   update: UpdateProviders;
-  onDirectoryStateChange?: (state: PublicModelState) => void;
+  onDirectoryStateChange?: (state: PublicModelState, error?: string) => void;
 }) {
   const [editing, setEditing] = useState<{ id: string | null; session: number } | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -166,8 +166,8 @@ function AvailableProviders({
     };
   }, []);
   useEffect(() => {
-    onDirectoryStateChange?.(state);
-  }, [state, onDirectoryStateChange]);
+    onDirectoryStateChange?.(state, loaded?.error);
+  }, [state, loaded?.error, onDirectoryStateChange]);
   useEffect(() => {
     void readStatus().catch(() => {});
   }, []);

@@ -26,21 +26,27 @@ export function ModelsPageView({
   const [directoryState, setDirectoryState] = useState<PublicModelState | undefined>(
     status.modelProviders,
   );
+  const [directoryError, setDirectoryError] = useState<string | undefined>(undefined);
   useEffect(() => {
-    if (!status.modelProviders) setDirectoryState(undefined);
-    else if (status.modelProviders.nextConnectionOffset == null) {
+    if (!status.modelProviders) {
+      setDirectoryState(undefined);
+      setDirectoryError(undefined);
+    } else if (status.modelProviders.nextConnectionOffset == null) {
       setDirectoryState(status.modelProviders);
+      setDirectoryError(undefined);
     }
   }, [status.modelProviders]);
-  const handleDirectoryStateChange = useCallback((next: PublicModelState) => {
+  const handleDirectoryStateChange = useCallback((next: PublicModelState, error?: string) => {
     setDirectoryState(next);
+    setDirectoryError(error);
   }, []);
 
   const providerState = directoryState ?? status.modelProviders;
   const connections = providerState?.connections ?? [];
   const totalConnections = providerState?.totalConnectionCount ?? connections.length;
-  const loadingMoreConnections =
+  const hasMoreConnections =
     providerState?.nextConnectionOffset != null && totalConnections > connections.length;
+  const loadingMoreConnections = hasMoreConnections && !directoryError;
   const selection = providerState?.selection;
   const activeConn =
     selection && selection.connectionId !== null
@@ -135,12 +141,20 @@ export function ModelsPageView({
           </div>
           <div className="mt-2 flex items-baseline gap-2.5">
             <span className="font-heading text-2xl font-semibold text-foreground tabular-nums">
-              {loadingMoreConnections ? `${configuredCount}+ / ${totalConnections}` : `${configuredCount} / ${totalConnections}`}
+              {hasMoreConnections ? `${configuredCount}+ / ${totalConnections}` : `${configuredCount} / ${totalConnections}`}
             </span>
-            <span className="text-xs text-muted-foreground tabular-nums">
-              {loadingMoreConnections
-                ? `已载入 ${connections.length}/${totalConnections}，正在读取其余连接…`
-                : `${dpapiCount} 个长期加密 · ${memoryCount} 个临时内存`}
+            <span
+              className={`text-xs tabular-nums ${
+                hasMoreConnections && directoryError
+                  ? 'font-medium text-destructive-foreground'
+                  : 'text-muted-foreground'
+              }`}
+            >
+              {hasMoreConnections && directoryError
+                ? '其余连接读取失败，请见下方重试'
+                : loadingMoreConnections
+                  ? `已载入 ${connections.length}/${totalConnections}，正在读取其余连接…`
+                  : `${dpapiCount} 个长期加密 · ${memoryCount} 个临时内存`}
             </span>
           </div>
           <p className="mt-1 text-xs text-muted-foreground">

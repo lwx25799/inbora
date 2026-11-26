@@ -105,6 +105,7 @@ export function App() {
   const promptsState = useBusinessPrompts({
     status,
     devRecoveryGeneration: workspace.devRecovery.generation,
+    devRecoveryRestoring: workspace.devRecovery.restoring,
     updatePrompts,
   });
 
