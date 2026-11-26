@@ -124,6 +124,12 @@ test.each<Delivery>(['new-model', 'new-session', 'same-batch'])('App reconciles 
     await page.evaluate(() => (window as unknown as {fixture:Fixture}).fixture.release());
     await advancedModel.waitFor();
     if (delivery === 'same-batch') await page.getByText('已应用模型切换。', {exact:true}).waitFor();
+    if (delivery === 'new-model') {
+      await button('自动化规则').click();
+      await button('编辑业务提示词').click();
+      await page.getByText('业务提示词已保存', {exact:true}).waitFor();
+      await page.keyboard.press('Escape');
+    }
     // A new AutomationView mount initializes from App state. The fixture holds fresh reads for this assertion.
     await button('会话中心').click();
     await button('自动化规则').click();
@@ -131,3 +137,80 @@ test.each<Delivery>(['new-model', 'new-session', 'same-batch'])('App reconciles 
     expect(await persona.inputValue()).toBe(delivery === 'new-session' ? '新会话人设' : '已保存人设');
   } finally { await page.close(); }
 }, 15_000);
+
+test.each(['succeed', 'fail'] as const)(
+  'in-flight business prompt edits and save feedback survive switching pages (%s)',
+  async outcome => {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(3500);
+    try {
+      await page.addInitScript(({initial, outcome}) => {
+        const status = structuredClone(initial);
+        let finishPrompt: (() => void) | undefined;
+        let promptPending = false;
+        const target = window as unknown as {
+          promptFixture: { pending: () => boolean; release: () => void };
+          __TAURI_INTERNALS__: unknown;
+          __TAURI_EVENT_PLUGIN_INTERNALS__: unknown;
+        };
+        target.promptFixture = {
+          pending: () => promptPending,
+          release: () => { finishPrompt?.(); },
+        };
+        target.__TAURI_INTERNALS__ = {
+          transformCallback: () => 1,
+          invoke: (name: string, args: {body:{command:string; settings?:BusinessPrompts}}) => {
+            if (name === 'desktop_info') return {runtime:status.runtime, version:'synthetic'};
+            if (name === 'plugin:event|listen') return 1;
+            if (name === 'plugin:event|unlisten') return;
+            switch (args.body.command) {
+              case 'getStatus': return structuredClone(status);
+              case 'getInbox': return {items:[], total:0, page:0, pageSize:20};
+              case 'configureAi':
+                promptPending = true;
+                return new Promise((resolve, reject) => {
+                  finishPrompt = () => {
+                    promptPending = false;
+                    if (outcome === 'fail') {
+                      reject(new Error('AI_CONFIG_WRITE_FAILED'));
+                      return;
+                    }
+                    status.settings = {...status.settings, ...args.body.settings};
+                    resolve(structuredClone(status));
+                  };
+                });
+              default: throw new Error('UNEXPECTED_FIXTURE_COMMAND');
+            }
+          },
+        };
+        target.__TAURI_EVENT_PLUGIN_INTERNALS__ = {unregisterListener: () => {}};
+      }, {initial, outcome});
+      await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}`);
+      const button = (name: string) => page.getByRole('button', {name, exact:true});
+      const persona = page.getByRole('textbox', {name:'账号人设', exact:true});
+      await button('自动化规则').click();
+      await button('编辑业务提示词').click();
+      await persona.fill('提交中的人设A');
+      await button('保存业务提示词').click();
+      await expect.poll(() =>
+        page.evaluate(() => (window as unknown as {promptFixture:{pending:()=>boolean}}).promptFixture.pending()),
+      ).toBe(true);
+      await persona.fill('保存期间继续输入的未保存人设B');
+      await page.keyboard.press('Escape');
+      await button('多模型配置').click();
+      await page.getByRole('heading', {name:'当前模型', exact:true}).waitFor();
+      await page.evaluate(() =>
+        (window as unknown as {promptFixture:{release:()=>void}}).promptFixture.release(),
+      );
+      await button('自动化规则').click();
+      await button('编辑业务提示词').click();
+      expect(await persona.inputValue()).toBe('保存期间继续输入的未保存人设B');
+      if (outcome === 'succeed') {
+        await page.getByText('业务提示词已保存', {exact:true}).waitFor();
+      } else {
+        await page.getByRole('dialog', {name:'业务提示词'}).getByRole('alert').waitFor();
+      }
+    } finally { await page.close(); }
+  },
+  15_000,
+);

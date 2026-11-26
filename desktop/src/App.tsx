@@ -10,11 +10,12 @@ import { AutomationView } from "./views/AutomationView";
 import { KnowledgePageView } from "./views/KnowledgePageView";
 import { ModelsPageView } from "./views/ModelsPageView";
 import { OverviewView } from "./views/OverviewView";
-import { RuntimeView } from "./views/RuntimeView";
+import { RuntimeView, type RuntimeTabId } from "./views/RuntimeView";
 import { SystemSettingsView } from "./views/SystemSettingsView";
 import { cn } from "./lib/utils";
 import { businessPrompts, samePrompts } from "./settings-form-sync";
 import { canContinueReply } from "./reply-editor-draft";
+import { useBusinessPrompts } from "./useBusinessPrompts";
 import { useReplyWorkspace } from "./useReplyWorkspace";
 import { useWorkbenchRefresh, type AuditRow } from "./useWorkbenchRefresh";
 import {
@@ -65,6 +66,14 @@ export function App() {
   );
   const [pageNumber, setPageNumber] = useState(0);
   const [inbox, setInbox] = useState<Inbox>({ items: [], total: 0, page: 0, pageSize: 20 });
+  const [inboxSummary, setInboxSummary] = useState<Inbox>({
+    items: [],
+    total: 0,
+    page: 0,
+    pageSize: 20,
+  });
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [runtimeTab, setRuntimeTab] = useState<RuntimeTabId>("diagnostics");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -85,6 +94,20 @@ export function App() {
     setNotice,
   });
 
+  function updatePrompts(session: string, prompts: BusinessPrompts) {
+    setStatus((current) =>
+      current && workspace.devRecovery.isCurrent() && runtimeSession(current) === session
+        ? { ...current, settings: { ...current.settings, ...prompts } }
+        : current,
+    );
+  }
+
+  const promptsState = useBusinessPrompts({
+    status,
+    devRecoveryGeneration: workspace.devRecovery.generation,
+    updatePrompts,
+  });
+
   useWorkbenchRefresh({
     connected,
     status,
@@ -93,12 +116,15 @@ export function App() {
     filter,
     pageNumber,
     page,
+    runtimeTab,
     auditPage,
     notice,
     sendStatus: workspace.send?.status,
     readThread: (alive) => workspace.refreshThread(undefined, alive),
     setStatus,
     setInbox,
+    setInboxSummary,
+    setUnreadCount,
     setAudit,
     setError,
   });
@@ -237,14 +263,6 @@ export function App() {
     });
   }
 
-  function updatePrompts(session: string, prompts: BusinessPrompts) {
-    setStatus((current) =>
-      current && workspace.devRecovery.isCurrent() && runtimeSession(current) === session
-        ? { ...current, settings: { ...current.settings, ...prompts } }
-        : current,
-    );
-  }
-
   if (!status) {
     return (
       <ConnectScreen
@@ -277,7 +295,7 @@ export function App() {
 
   const block = workspace.sendDisabled();
   const readOnly = workspace.devRecovery.restoring || status.mode === "OBSERVE";
-  const pendingCount = inbox.unreadTotal ?? inbox.items.filter((item) => item.unread).length;
+  const pendingCount = unreadCount;
   const syncFailed = status.sync.results.some((result) => result.state === "FAILED");
   const sessionKey = JSON.stringify([runtimeSession(status), workspace.devRecovery.generation]);
 
@@ -423,7 +441,7 @@ export function App() {
             {page === "overview" && (
               <OverviewView
                 status={status}
-                inbox={inbox}
+                inbox={inboxSummary}
                 busy={busy}
                 pendingAutoReply={pendingAutoReply}
                 onNavigate={(next) => {
@@ -455,7 +473,7 @@ export function App() {
                 notice={notice}
                 act={act}
                 update={setStatus}
-                updatePrompts={updatePrompts}
+                promptsState={promptsState}
                 toggleAuto={toggleAuto}
                 pendingAutoReply={pendingAutoReply}
               />
@@ -476,6 +494,8 @@ export function App() {
                 audit={audit}
                 auditPage={auditPage}
                 setAuditPage={setAuditPage}
+                tab={runtimeTab}
+                onTabChange={setRuntimeTab}
               />
             )}
             {page === "settings" && (

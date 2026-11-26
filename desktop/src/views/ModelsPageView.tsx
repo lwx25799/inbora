@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from 'react';
 import type * as React from 'react';
 import {
   ActivityIcon,
@@ -7,6 +8,7 @@ import {
   ShieldAlertIcon,
   ShieldCheckIcon,
 } from 'lucide-react';
+import type { PublicModelState } from '../../../src/contracts/model-providers.js';
 import { ModelProviderSettings } from '@/ModelProviderSettings';
 import { PageHeader } from '@/components/PageHeader';
 import { Badge } from '@/components/ui/badge';
@@ -21,8 +23,24 @@ export function ModelsPageView({
   status,
   updateProviders,
 }: ModelsPageViewProps): React.ReactElement {
-  const providerState = status.modelProviders;
+  const [directoryState, setDirectoryState] = useState<PublicModelState | undefined>(
+    status.modelProviders,
+  );
+  useEffect(() => {
+    if (!status.modelProviders) setDirectoryState(undefined);
+    else if (status.modelProviders.nextConnectionOffset == null) {
+      setDirectoryState(status.modelProviders);
+    }
+  }, [status.modelProviders]);
+  const handleDirectoryStateChange = useCallback((next: PublicModelState) => {
+    setDirectoryState(next);
+  }, []);
+
+  const providerState = directoryState ?? status.modelProviders;
   const connections = providerState?.connections ?? [];
+  const totalConnections = providerState?.totalConnectionCount ?? connections.length;
+  const loadingMoreConnections =
+    providerState?.nextConnectionOffset != null && totalConnections > connections.length;
   const selection = providerState?.selection;
   const activeConn =
     selection && selection.connectionId !== null
@@ -117,10 +135,12 @@ export function ModelsPageView({
           </div>
           <div className="mt-2 flex items-baseline gap-2.5">
             <span className="font-heading text-2xl font-semibold text-foreground tabular-nums">
-              {configuredCount} / {connections.length}
+              {loadingMoreConnections ? `${configuredCount}+ / ${totalConnections}` : `${configuredCount} / ${totalConnections}`}
             </span>
             <span className="text-xs text-muted-foreground tabular-nums">
-              {dpapiCount} 个长期加密 · {memoryCount} 个临时内存
+              {loadingMoreConnections
+                ? `已载入 ${connections.length}/${totalConnections}，正在读取其余连接…`
+                : `${dpapiCount} 个长期加密 · ${memoryCount} 个临时内存`}
             </span>
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -130,7 +150,11 @@ export function ModelsPageView({
       </div>
 
       {/* Row 2: Full Interactive Model Provider Settings */}
-      <ModelProviderSettings status={status} update={updateProviders} />
+      <ModelProviderSettings
+        status={status}
+        update={updateProviders}
+        onDirectoryStateChange={handleDirectoryStateChange}
+      />
 
       {/* Row 3: Static Safety Guardrail Summary */}
       <div className="grid grid-cols-1 gap-3.5 md:grid-cols-3">

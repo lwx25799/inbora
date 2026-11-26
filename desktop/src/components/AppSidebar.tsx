@@ -171,6 +171,15 @@ export function AppSidebar({
 }: AppSidebarProps): React.ReactElement {
   const collapsedRef = React.useRef(collapsed);
   collapsedRef.current = collapsed;
+  const collapseBtnRef = React.useRef<HTMLButtonElement | null>(null);
+  const expandBtnRef = React.useRef<HTMLButtonElement | null>(null);
+  const restoreToggleFocus = React.useRef(false);
+
+  React.useEffect(() => {
+    if (!restoreToggleFocus.current) return;
+    restoreToggleFocus.current = false;
+    (collapsed ? expandBtnRef.current : collapseBtnRef.current)?.focus();
+  }, [collapsed]);
 
   React.useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -255,11 +264,15 @@ export function AppSidebar({
         </button>
         {!collapsed && (
           <Button
+            ref={collapseBtnRef}
             variant="ghost"
             size="icon-xs"
             aria-label="收起侧栏"
             title="收起侧栏 (Ctrl+B)"
-            onClick={() => onSetCollapsed(true)}
+            onClick={() => {
+              restoreToggleFocus.current = true;
+              onSetCollapsed(true);
+            }}
           >
             <PanelLeftIcon aria-hidden="true" />
           </Button>
@@ -444,11 +457,15 @@ export function AppSidebar({
               onChange={onToggleAutoReply}
             />
             <Button
+              ref={expandBtnRef}
               variant="ghost"
               size="icon-xs"
               aria-label="展开侧栏"
               title="展开侧栏 (Ctrl+B)"
-              onClick={() => onSetCollapsed(false)}
+              onClick={() => {
+                restoreToggleFocus.current = true;
+                onSetCollapsed(false);
+              }}
             >
               <PanelLeftIcon aria-hidden="true" />
             </Button>

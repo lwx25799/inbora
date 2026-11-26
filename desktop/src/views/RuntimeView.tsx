@@ -26,11 +26,15 @@ import { capabilityNames, reasons, type Status } from '@/api';
 import { browserState, time } from '@/presentation';
 import type { AuditRow } from '@/useWorkbenchRefresh';
 
+export type RuntimeTabId = 'diagnostics' | 'security' | 'audit';
+
 export interface RuntimeViewProps {
   status: Status;
   audit: AuditRow[];
   auditPage: number;
   setAuditPage: Dispatch<SetStateAction<number>>;
+  tab?: RuntimeTabId;
+  onTabChange?: (tab: RuntimeTabId) => void;
 }
 
 function auditBadgeVariant(eventType: string): 'error' | 'warning' | 'success' | 'secondary' {
@@ -52,8 +56,15 @@ export function RuntimeView({
   audit,
   auditPage,
   setAuditPage,
+  tab: controlledTab,
+  onTabChange,
 }: RuntimeViewProps): React.ReactElement {
-  const [tab, setTab] = useState<'diagnostics' | 'security' | 'audit'>('diagnostics');
+  const [internalTab, setInternalTab] = useState<RuntimeTabId>('diagnostics');
+  const tab = controlledTab ?? internalTab;
+  const setTab = (next: RuntimeTabId) => {
+    setInternalTab(next);
+    onTabChange?.(next);
+  };
   const holds = status.securityHolds ?? [];
   const unresolvedSends = status.automation?.unresolvedSends ?? [];
 

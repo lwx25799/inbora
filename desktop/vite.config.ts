@@ -45,5 +45,8 @@ export default defineConfig({
     outDir: '../.local/desktop-web',
     emptyOutDir: true,
     target: 'es2022',
+    assetsInlineLimit(filePath) {
+      return /\.(?:woff2?|ttf|otf)$/iu.test(filePath) ? false : undefined;
+    },
   },
 });

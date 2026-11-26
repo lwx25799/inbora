@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { explain, request, type Inbox, type Status } from "./api";
 import type { DesktopPageId } from "./components/AppSidebar";
 import { ReadRefresh, refreshTargets } from "./read-refresh";
+import type { RuntimeTabId } from "./views/RuntimeView";
 
 export interface AuditRow {
   time: string;
@@ -21,20 +22,25 @@ interface RefreshView {
   filter: "ALL" | "UNREAD" | "PENDING" | "MANUAL_ONLY" | "CONFIRMED";
   pageNumber: number;
   page: RefreshPage;
+  runtimeTab?: RuntimeTabId;
   auditPage: number;
   notice: string;
   sendStatus: string | undefined;
   readThread: (alive: () => boolean) => Promise<unknown>;
   setStatus: Dispatch<SetStateAction<Status | null>>;
   setInbox: Dispatch<SetStateAction<Inbox>>;
+  setInboxSummary?: Dispatch<SetStateAction<Inbox>>;
+  setUnreadCount?: Dispatch<SetStateAction<number>>;
   setAudit: Dispatch<SetStateAction<AuditRow[]>>;
   setError: (error: string) => void;
 }
 
 const allReads = ["status", "inbox", "thread", "audit"] as const;
 const inboxKey = (view: RefreshView) => [view.channel, view.filter, view.pageNumber].join("|");
-const isAuditPage = (page: RefreshPage) => page === "runtime" || page === "audit";
-const isInboxPage = (page: RefreshPage) => page === "inbox" || page === "overview";
+const isAuditVisible = (view: RefreshView) =>
+  view.page === "audit" || (view.page === "runtime" && (view.runtimeTab ?? "audit") === "audit");
+const unreadFrom = (data: Inbox) =>
+  data.unreadTotal ?? data.items.filter((item) => item.unread).length;
 
 /** Read-only refreshes share one queue per type; selection and human text stay owned by App. */
 export function useWorkbenchRefresh(view: RefreshView): void {
@@ -58,16 +64,46 @@ export function useWorkbenchRefresh(view: RefreshView): void {
         },
         inbox: async (current) => {
           const currentView = latest.current;
-          if (!isInboxPage(currentView.page)) return;
-          const key = inboxKey(currentView);
-          const inbox = await request<Inbox>({
+          if (currentView.page === "inbox") {
+            const key = inboxKey(currentView);
+            const inbox = await request<Inbox>({
+              command: "getInbox",
+              channel: currentView.channel,
+              status: currentView.filter,
+              page: currentView.pageNumber,
+            });
+            if (!alive() || !current()) return;
+            if (key === inboxKey(latest.current)) {
+              latest.current.setInbox(inbox);
+            }
+            if (currentView.channel === "ALL") {
+              latest.current.setUnreadCount?.(unreadFrom(inbox));
+              if (currentView.filter === "ALL" && currentView.pageNumber === 0) {
+                latest.current.setInboxSummary?.(inbox);
+              }
+            } else {
+              const summary = await request<Inbox>({
+                command: "getInbox",
+                channel: "ALL",
+                status: "ALL",
+                page: 0,
+              });
+              if (alive() && current()) {
+                latest.current.setInboxSummary?.(summary);
+                latest.current.setUnreadCount?.(unreadFrom(summary));
+              }
+            }
+            return;
+          }
+          const summary = await request<Inbox>({
             command: "getInbox",
-            channel: currentView.channel,
-            status: currentView.filter,
-            page: currentView.pageNumber,
+            channel: "ALL",
+            status: "ALL",
+            page: 0,
           });
-          if (alive() && current() && key === inboxKey(latest.current)) {
-            latest.current.setInbox(inbox);
+          if (alive() && current()) {
+            latest.current.setInboxSummary?.(summary);
+            latest.current.setUnreadCount?.(unreadFrom(summary));
           }
         },
         thread: async (current) => {
@@ -75,7 +111,7 @@ export function useWorkbenchRefresh(view: RefreshView): void {
         },
         audit: async (current) => {
           const currentView = latest.current;
-          if (!isAuditPage(currentView.page)) return;
+          if (!isAuditVisible(currentView)) return;
           const result = await request<{ items: AuditRow[] }>({
             command: "getAudit",
             page: currentView.auditPage,
@@ -83,7 +119,7 @@ export function useWorkbenchRefresh(view: RefreshView): void {
           if (
             alive() &&
             current() &&
-            isAuditPage(latest.current.page) &&
+            isAuditVisible(latest.current) &&
             latest.current.auditPage === currentView.auditPage
           ) {
             latest.current.setAudit(result.items);
@@ -130,7 +166,7 @@ export function useWorkbenchRefresh(view: RefreshView): void {
 
   const status = view.status;
   useEffect(() => {
-    if (view.connected && isInboxPage(view.page)) queue.current?.schedule(["inbox"], 0);
+    if (view.connected) queue.current?.schedule(["inbox"], 0);
   }, [
     view.connected,
     view.page,
@@ -157,6 +193,6 @@ export function useWorkbenchRefresh(view: RefreshView): void {
     status?.automation?.inboxRevision,
   ]);
   useEffect(() => {
-    if (view.connected && isAuditPage(view.page)) queue.current?.schedule(["audit"], 0);
-  }, [view.connected, view.page, view.auditPage, view.notice]);
+    if (view.connected && isAuditVisible(view)) queue.current?.schedule(["audit"], 0);
+  }, [view.connected, view.page, view.runtimeTab, view.auditPage, view.notice]);
 }

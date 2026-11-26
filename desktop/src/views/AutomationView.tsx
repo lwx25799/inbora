@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import type * as React from 'react';
 import { FileTextIcon, SlidersHorizontalIcon, SparklesIcon } from 'lucide-react';
 import { AutomationSettings } from '@/AutomationSettings';
@@ -14,17 +14,9 @@ import {
   CardFrameHeader,
   CardFrameTitle,
 } from '@/components/ui/card';
-import {
-  reasons,
-  request,
-  runtimeSession,
-  saveBusinessPrompts,
-  type BusinessPrompts,
-  type Status,
-} from '@/api';
-import { explainSafe } from '@/error-messages';
+import { reasons, request, type Status } from '@/api';
 import { modes } from '@/presentation';
-import { businessPrompts, samePrompts } from '@/settings-form-sync';
+import type { BusinessPromptsController } from '@/useBusinessPrompts';
 
 export interface AutomationViewProps {
   status: Status;
@@ -33,7 +25,7 @@ export interface AutomationViewProps {
   notice?: string;
   act: (label: string, fn: () => Promise<void>) => Promise<void>;
   update: (status: Status) => void;
-  updatePrompts: (session: string, prompts: BusinessPrompts) => void;
+  promptsState: BusinessPromptsController;
   toggleAuto: (enabled: boolean) => Promise<void>;
   pendingAutoReply: boolean | null;
 }
@@ -52,67 +44,20 @@ export function AutomationView({
   notice = '',
   act,
   update,
-  updatePrompts,
+  promptsState,
   toggleAuto,
   pendingAutoReply,
 }: AutomationViewProps): React.ReactElement {
-  const [prompts, setPrompts] = useState(() => businessPrompts(status.settings));
-  const syncedPrompts = useRef(prompts);
-  const latestPrompts = useRef(prompts);
-  latestPrompts.current = prompts;
-  const promptsKey = JSON.stringify(businessPrompts(status.settings));
-
-  useEffect(() => {
-    if (samePrompts(latestPrompts.current, syncedPrompts.current)) {
-      const next = businessPrompts(status.settings);
-      syncedPrompts.current = next;
-      latestPrompts.current = next;
-      setPrompts(next);
-    }
-  }, [promptsKey]);
-
   const [promptsOpen, setPromptsOpen] = useState(false);
-  const [promptBusy, setPromptBusy] = useState(false);
-  const [promptError, setPromptError] = useState('');
-  const [promptNotice, setPromptNotice] = useState('');
-  const savingPrompts = useRef(false);
-  const active = useRef(false);
-  const session = runtimeSession(status);
-  const canSavePrompts = status.modelProvidersSupported === true;
-
-  useEffect(() => {
-    active.current = true;
-    return () => {
-      active.current = false;
-    };
-  }, []);
-
-  async function savePrompts() {
-    if (savingPrompts.current || !canSavePrompts) return;
-    savingPrompts.current = true;
-    setPromptBusy(true);
-    setPromptError('');
-    setPromptNotice('');
-    const submitted = latestPrompts.current;
-    try {
-      const next = await saveBusinessPrompts(status, submitted);
-      if (runtimeSession(next) !== session) return;
-      const saved = businessPrompts(next.settings);
-      updatePrompts(session, saved);
-      if (!active.current) return;
-      syncedPrompts.current = saved;
-      if (samePrompts(latestPrompts.current, submitted)) {
-        latestPrompts.current = saved;
-        setPrompts(saved);
-      }
-      setPromptNotice('业务提示词已保存');
-    } catch (cause) {
-      if (active.current) setPromptError(explainSafe(cause, '业务提示词保存失败。'));
-    } finally {
-      savingPrompts.current = false;
-      if (active.current) setPromptBusy(false);
-    }
-  }
+  const {
+    prompts,
+    promptBusy,
+    promptError,
+    promptNotice,
+    canSavePrompts,
+    updatePromptField,
+    savePrompts,
+  } = promptsState;
 
   const autoOn =
     status.configuredMode === 'LIMITED_AUTO' && Boolean(status.automation?.replyPolicy);
@@ -270,9 +215,7 @@ export function AutomationView({
               className={textareaCls}
               value={prompts[field]}
               maxLength={field === 'persona' ? 2000 : 4000}
-              onChange={e =>
-                setPrompts(current => ({ ...current, [field]: e.target.value }))
-              }
+              onChange={e => updatePromptField(field, e.target.value)}
             />
           </label>
         ))}

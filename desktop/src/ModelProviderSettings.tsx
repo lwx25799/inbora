@@ -26,9 +26,11 @@ const btnDangerCls =
 export function ModelProviderSettings({
   status,
   update,
+  onDirectoryStateChange,
 }: {
   status: Status;
   update: UpdateProviders;
+  onDirectoryStateChange?: (state: PublicModelState) => void;
 }) {
   if (status.modelProvidersAvailable !== true || !status.modelProviders) {
     return (
@@ -61,6 +63,7 @@ export function ModelProviderSettings({
       status={status}
       state={status.modelProviders}
       update={update}
+      onDirectoryStateChange={onDirectoryStateChange}
     />
   );
 }
@@ -69,10 +72,12 @@ function AvailableProviders({
   status,
   state: inline,
   update,
+  onDirectoryStateChange,
 }: {
   status: Status;
   state: PublicModelState;
   update: UpdateProviders;
+  onDirectoryStateChange?: (state: PublicModelState) => void;
 }) {
   const [editing, setEditing] = useState<{ id: string | null; session: number } | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -160,6 +165,9 @@ function AvailableProviders({
       mounted.current = false;
     };
   }, []);
+  useEffect(() => {
+    onDirectoryStateChange?.(state);
+  }, [state, onDirectoryStateChange]);
   useEffect(() => {
     void readStatus().catch(() => {});
   }, []);
