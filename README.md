@@ -51,13 +51,14 @@ CLI 默认数据目录为 `%LOCALAPPDATA%\inbora`，开发调试可通过 `--run
 | 文档 | 用途 |
 |---|---|
 | [架构决策与演进路线](docs/ARCHITECTURE-DECISIONS.md) | 唯一权威架构裁决（ADR-001 ~ ADR-006：修订版路线 A+、6 阶段路线与现状、分域规则、硬安全红线、三轮审查纪律与阶段 5 视觉/交互基线） |
+| [核心契约与 schema4 规范](docs/CORE-PROTOCOL-AND-SCHEMA4.md) | 阶段 1/3 已合入底层契约：`PlatformConnector`、鉴权协议 v2、单库 `schema4` 迁移、独立 Browser Worker 与 Rust Win32 能力桥 |
+| [阶段交接与实机待验总表](docs/STAGE-HANDOFF.md) | 全 6 阶段基线提交、离线/合成覆盖、待本人实机补验项与阶段 4 新会话接棒指引 |
 | [品牌标识与阶段 5 前端视觉规范](assets/brand/BRAND-AND-UI-SPEC.md) | Harbor Frame 品牌套件、暖白纸感/深松青令牌、离线可变字体、用户优先准则、头像采集边界、9 页逐页功能与契约对照及迁移清单 |
-| [阶段 5 前端交互基线说明](ui-preview/README.md) | `ui-preview/` 本地预览命令、目录结构与演示边界（上游许可另见 [UPSTREAM-COSS-UI.md](ui-preview/UPSTREAM-COSS-UI.md)） |
-| [多模型提供商 V1.0 路由契约](docs/MODEL-CONTRACT.md) | 现行阶段 2 多模型单一全局路由（`m_selection`）、四协议与 9 供应商验证矩阵（文末保留旧 schema2 CLI 历史留档） |
-| [0.3.x 操作与恢复说明](docs/AUTOMATION-OPERATIONS.md) | 当前过渡版桌面端操作指引：原无头页内安全验证、本机 MCP 16 工具接入、开发重载与异常恢复 |
+| [阶段 5 前端交互基线说明](ui-preview/README.md) | `ui-preview/` 本地预览命令、目录结构与演示边界 |
+| [多模型提供商 V1.0 路由契约](docs/MODEL-CONTRACT.md) | 现行阶段 2 多模型单一全局路由（`m_selection`）、四协议与 9 供应商验证矩阵 |
+| [0.3.x 操作与恢复手册](docs/AUTOMATION-OPERATIONS.md) | 当前过渡版桌面端操作指引：日常值守、多模型与单库多账号入口、原无头页内安全验证、本机 MCP 16 工具与备份恢复 |
 | [知识与回复人格](docs/KNOWLEDGE-PERSONA.zh-CN.md) | 本地知识库导入、聊天样本采纳、人格学习、试聊对比及数据调用边界 |
-| [第三方来源与许可台账](UPSTREAM.md) | 依赖版本、开源实现核对记录与复用约束 |
-| [诊断复用许可说明](docs/UPSTREAM-REUSE-DIAGNOSTICS.md) | 统计聚合与有界证据维护模块的来源与 MIT 许可声明 |
+| [第三方来源与许可台账](UPSTREAM.md) | 全仓依赖版本、固定上游源码核对记录与许可证归档索引 |
 
 ## 历史记录与已清理资产说明
 

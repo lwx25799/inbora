@@ -160,10 +160,11 @@
 ## 受追踪现行文档导航
 
 - [项目总览与开发入口](../README.md)
+- [核心契约、协议 v2、单库 `schema4` 与进程隔离规范](CORE-PROTOCOL-AND-SCHEMA4.md)
+- [阶段推进状态、交接单与实机待验总表](STAGE-HANDOFF.md)
 - [品牌标识与阶段 5 前端视觉规范](../assets/brand/BRAND-AND-UI-SPEC.md)
 - [阶段 5 前端交互基线说明](../ui-preview/README.md)
 - [多模型提供商 V1.0 路由契约](MODEL-CONTRACT.md)
-- [0.3.x 运行操作与恢复说明](AUTOMATION-OPERATIONS.md)
+- [0.3.x 过渡版操作与恢复手册](AUTOMATION-OPERATIONS.md)
 - [知识库与回复人格说明](KNOWLEDGE-PERSONA.zh-CN.md)
-- [诊断与维护上游复用许可说明](UPSTREAM-REUSE-DIAGNOSTICS.md)
 - [第三方开源来源与许可台账](../UPSTREAM.md)

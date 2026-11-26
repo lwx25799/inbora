@@ -4,7 +4,7 @@
 
 - 完整品牌、色彩、字体、用户体验边界与阶段 5 迁移规范见 [BRAND-AND-UI-SPEC.md](../assets/brand/BRAND-AND-UI-SPEC.md)。
 - 7 张 2x 高清参考图见 `../assets/brand/screenshots/`。
-- 上游组件与字体许可明细见 [UPSTREAM-COSS-UI.md](./UPSTREAM-COSS-UI.md) 与根目录 [UPSTREAM.md](../UPSTREAM.md)。
+- 上游组件与离线字体许可明细见根目录 [UPSTREAM.md](../UPSTREAM.md)（`cosscom/ui` MIT 许可原文存档于 `../third_party/coss-ui-MIT.txt`）。
 
 ## 本地预览
 
