@@ -3,11 +3,12 @@
  * Enforces Inbora safety invariants:
  * - Single AccountActor queue for observe, send, and read-only verification.
  * - Credentials held inside private closures; never persisted to SQLite, audits, errors, or status.
- * - Single-submission SendCoordinator contract with zero post-intent resend.
- * - Read-only /kf/sync_msg origin=5 bounded verification without advancing observe cursors.
+ * - Single-submission SendCoordinator contract with pre-write beforeSend guard and zero post-intent resend.
+ * - Honest verifyExisting/capabilities.readback: WeChat KF /kf/sync_msg does not return API-sent messages.
  */
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { inspect } from 'node:util';
 import { AccountActor } from '../../browser/account-actor.js';
 import { accountIdSchema, DEFAULT_ACCOUNT_ID, type AccountId } from '../../contracts/account.js';
 import type { BrowserMode, BrowserResourceIdentity, BrowserStatus } from '../../contracts/browser-resources.js';
@@ -26,6 +27,7 @@ import {
 import { recordEvidence } from '../../observability/evidence.js';
 import type { AutomationStore } from '../../storage/automation-store.js';
 import type { EventStore } from '../../storage/store.js';
+import { createOfficialApiTransportStatus } from '../official-api-base.js';
 import type {
   AdapterHandle,
   AdapterOptions,
@@ -44,7 +46,6 @@ import {
   WeChatKfApiClient,
   assertWeChatKfTextLength,
   deriveWeChatKfMsgId,
-  matchWeChatKfOutgoingProof,
   normalizeWeChatKfInboundMessage,
 } from './api.js';
 import {
@@ -68,17 +69,17 @@ import {
 } from './webhook.js';
 
 const DEFAULT_MAX_SYNC_PAGES = 20;
-const DEFAULT_MAX_VERIFY_PAGES = 10;
 const DEFAULT_SYNC_PAGE_LIMIT = 200;
 const MAX_SENT_HISTORY_PER_PEER = 256;
-const MAX_CHECKPOINTS = 256;
 
 export const wechatKfCapabilities: WeChatKfCapabilities = Object.freeze({
   channels: Object.freeze(['DIRECT_MESSAGE'] as const),
   loginRecovery: false,
   manualSecurityRecovery: false,
   preview: false,
-  readback: true,
+  // WeChat KF /kf/sync_msg explicitly excludes messages sent via /kf/send_msg.
+  // Synchronous send confirmation still works via adapter.readback() on the /kf/send_msg response.
+  readback: false,
   transport: 'official_api',
 });
 
@@ -99,6 +100,23 @@ function isLocalEvidenceRoot(root: string): boolean {
   return !/^[a-z][a-z0-9+.-]*:\/\//iu.test(root);
 }
 
+function parseFirstRunAt(value: number | string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = typeof value === 'number' ? value : Date.parse(value);
+  requireSafe(Number.isSafeInteger(parsed) && parsed > 0, 'OBSERVATION_BOUNDARY_INVALID');
+  return parsed;
+}
+
+interface ObserveInternalResult {
+  readonly newEventIds: string[];
+  readonly truncated: boolean;
+}
+
+interface SendFailAuditRecord {
+  readonly entityId: string;
+  readonly detail: Record<string, unknown>;
+}
+
 export class WeChatKfPlatformConnector implements PlatformConnector {
   readonly root: string;
   readonly platformId = WECHAT_KF_PLATFORM_ID;
@@ -111,8 +129,8 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
 
   readonly #readCredentials: WeChatKfCredentialProvider;
   readonly #cursorStore: WeChatKfCursorStore;
+  readonly #firstRunAtMs: number | undefined;
   readonly #maxSyncPages: number;
-  readonly #maxVerifyPages: number;
   readonly #syncPageLimit: number;
   readonly #now: () => number;
 
@@ -124,7 +142,6 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
   private lastErrorCode: string | null = null;
   private readonly sentMsgIdsByPeer = new Map<string, string[]>();
   private readonly dispatchedIntents = new Set<string>();
-  private readonly sendCheckpoints = new Map<string, string | null>();
   private webhookProcessor: WeChatKfWebhookProcessor | undefined;
 
   onManualRecoveryClosed = () => {};
@@ -137,8 +154,8 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
     const credProvider = options.credentials;
     this.#readCredentials = typeof credProvider === 'function' ? credProvider : () => credProvider;
     this.#cursorStore = options.cursorStore ?? new MemoryWeChatKfCursorStore();
+    this.#firstRunAtMs = parseFirstRunAt(options.firstRunAt);
     this.#maxSyncPages = Math.max(1, options.maxSyncPages ?? DEFAULT_MAX_SYNC_PAGES);
-    this.#maxVerifyPages = Math.max(1, options.maxVerifyPages ?? DEFAULT_MAX_VERIFY_PAGES);
     this.#syncPageLimit = Math.max(1, Math.min(1000, options.syncPageLimit ?? DEFAULT_SYNC_PAGE_LIMIT));
     this.#now = options.now ?? (() => Date.now());
 
@@ -160,15 +177,14 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
   }
 
   transportStatus(): WeChatKfTransportStatus {
-    return {
-      transport: 'official_api',
+    return createOfficialApiTransportStatus({
       state: this.opened ? this.transportState : 'DISCONNECTED',
       endpointDigest: this.apiClient.endpointDigest,
       protocol: 'wechat_kf_http',
       lastHeartbeatAt: null,
       lastSyncAt: this.lastSyncAt,
       errorCode: this.lastErrorCode,
-    };
+    });
   }
 
   resourceIdentity(): BrowserResourceIdentity {
@@ -241,7 +257,7 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
     return handleWebhookVerify(query, this.readWebhookCredentials());
   }
 
-  /** Process WeChat KF POST callback XML with Token idempotency and trigger incremental sync. */
+  /** Process WeChat KF POST callback XML with Token idempotency; never caches per-request store or signal. */
   async handleWebhookEvent(
     query: WeChatKfWebhookQuery | URLSearchParams,
     body: string | Buffer | AsyncIterable<Buffer | Uint8Array | string>,
@@ -252,14 +268,17 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
       credentials: () => this.readWebhookCredentials(),
       expectedOpenKfId: this.openKfId,
       now: this.#now,
-      onEvent: async webhookEvent => {
-        await this.observeWithSyncToken(store, webhookEvent.token, signal);
+    });
+    return this.webhookProcessor.handlePost(query, body, {
+      signal,
+      onEvent: async (webhookEvent, activeSignal) => {
+        const result = await this.observeWithSyncToken(store, webhookEvent.token, activeSignal);
+        return { truncated: result.truncated };
       },
     });
-    return this.webhookProcessor.handlePost(query, body);
   }
 
-  observe(store: EventStore, source: ObservationSource, signal?: AbortSignal): Promise<ObservationResult> {
+  async observe(store: EventStore, source: ObservationSource, signal?: AbortSignal): Promise<ObservationResult> {
     if (source !== 'dm') {
       return this.actor.run(async () => {
         signal?.throwIfAborted();
@@ -268,19 +287,23 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
         return { newEventIds: [] };
       });
     }
-    return this.observeWithSyncToken(store, undefined, signal);
+    const { newEventIds } = await this.observeWithSyncToken(store, undefined, signal);
+    return { newEventIds };
   }
 
   async collect(data: AutomationStore, source: CollectionSource, signal: AbortSignal): Promise<void> {
     if (source !== 'dm') return;
-    await this.observe(data.store, source, signal);
+    const state = data.state();
+    requireSafe(!signal.aborted && !state.emergencyStopped, 'COLLECTION_CANCELLED');
+    await this.observeWithSyncToken(data.store, undefined, signal, state.startedAt);
   }
 
   private observeWithSyncToken(
     store: EventStore,
     syncToken?: string,
     signal?: AbortSignal,
-  ): Promise<ObservationResult> {
+    overrideFirstRunAt?: number,
+  ): Promise<ObserveInternalResult> {
     return this.actor.run(async () => {
       signal?.throwIfAborted();
       requireSafe(this.opened, 'BROWSER_CLOSED');
@@ -289,7 +312,9 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
       const initialCursor = await this.#cursorStore.load(this.accountId, this.openKfId);
       let cursor = initialCursor ?? undefined;
       const normalizedEvents: InboundEvent[] = [];
+      const sendFailAudits: SendFailAuditRecord[] = [];
       let nextCursorToPersist: string | undefined;
+      let truncated = false;
 
       try {
         for (let page = 0; page < this.#maxSyncPages; page++) {
@@ -303,6 +328,11 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
 
           for (const msg of res.msg_list ?? []) {
             this.trackObservedOutgoing(msg);
+            const failAudit = this.extractSendFailAudit(msg);
+            if (failAudit) {
+              sendFailAudits.push(failAudit);
+              continue;
+            }
             const event = normalizeWeChatKfInboundMessage(msg, this.accountId, this.openKfId);
             if (event) normalizedEvents.push(event);
           }
@@ -312,6 +342,7 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
             nextCursorToPersist = res.next_cursor;
           }
           if (res.has_more !== 1 || !res.next_cursor) break;
+          if (page === this.#maxSyncPages - 1) truncated = true;
         }
       } catch (error) {
         this.recordTransportFailure(error);
@@ -320,14 +351,14 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
 
       const observedMs = this.#now();
       const observedAt = new Date(observedMs).toISOString();
+      const configuredStart = overrideFirstRunAt ?? this.#firstRunAtMs;
+      const firstBoundary = configuredStart !== undefined
+        ? Math.max(1, Math.min(Math.trunc(configuredStart), observedMs))
+        : undefined;
+
       const newEventIds: string[] = [];
       const byConversation = Map.groupBy(normalizedEvents, event => event.conversationId!);
       for (const [conversationId, events] of byConversation) {
-        const earliest = events.reduce((first, item) => {
-          const parsed = Date.parse(item.occurredAt ?? '');
-          return Number.isFinite(parsed) ? Math.min(first, parsed) : first;
-        }, observedMs);
-        const firstBoundary = Math.max(1, Math.min(earliest, observedMs) - 1000);
         newEventIds.push(...store.observe(
           'DIRECT_MESSAGE',
           conversationId,
@@ -339,6 +370,10 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
         ));
       }
 
+      for (const failAudit of sendFailAudits) {
+        store.audit('WECHAT_KF_MSG_SEND_FAIL', failAudit.entityId, failAudit.detail, observedAt);
+      }
+
       if (nextCursorToPersist !== undefined) {
         await this.#cursorStore.save(this.accountId, this.openKfId, nextCursorToPersist);
       }
@@ -346,7 +381,7 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
       this.lastSyncAt = this.#now();
       this.transportState = 'CONNECTED';
       this.lastErrorCode = null;
-      return { newEventIds };
+      return { newEventIds, truncated };
     });
   }
 
@@ -421,56 +456,67 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
       },
       clickOnce: async (notBefore, check, permitExpiresAt) => {
         requireSafe(check && !options?.readonlySignal && notBefore, 'NATIVE_REPLY_NOT_PREPARED');
-        if (permitExpiresAt !== undefined) {
-          requireSafe(this.#now() <= permitExpiresAt, 'NATIVE_REPLY_ACK_REVOKED');
-        }
-        check();
-        const draft = currentDraft();
-        requireSafe(draft?.approval && draft.text === preparedText, 'NATIVE_REPLY_NOT_PREPARED');
+        const expectedText = preparedText;
+        requireSafe(typeof expectedText === 'string', 'NATIVE_REPLY_NOT_PREPARED');
+
         const intentId = store.db
           .prepare('SELECT id FROM send_intents WHERE event_id=? AND attempt_started_at=?')
           .pluck()
           .get(eventId, notBefore);
         requireSafe(typeof intentId === 'string' && !this.dispatchedIntents.has(intentId), 'INTENT_BINDING_CHANGED');
-        store.assertIntentDispatch(intentId, draft, snapshot(event));
-        assertWeChatKfTextLength(draft.text);
 
-        // Lock single-submission before network dispatch so this intent can never fire twice.
+        const recheckBeforeSend = (): void => {
+          signal?.throwIfAborted();
+          requireSafe(this.opened && !disposed && epoch === this.epoch, 'BROWSER_CLOSED');
+          if (permitExpiresAt !== undefined) {
+            requireSafe(this.#now() <= permitExpiresAt, 'NATIVE_REPLY_ACK_REVOKED');
+          }
+          check();
+          const latestDraft = currentDraft();
+          requireSafe(latestDraft?.approval && latestDraft.text === expectedText, 'NATIVE_REPLY_NOT_PREPARED');
+          store.assertIntentDispatch(intentId, latestDraft, snapshot(event));
+          assertWeChatKfTextLength(latestDraft.text);
+        };
+
+        // Initial synchronous verification before acquiring access_token or resolving DNS.
+        recheckBeforeSend();
         this.dispatchedIntents.add(intentId);
         preparedText = undefined;
-        try {
-          const priorCursor = await this.#cursorStore.load(this.accountId, this.openKfId);
-          this.recordSendCheckpoint(intentId, priorCursor);
-        } catch {
-          // Best-effort checkpoint; verification falls back to bounded sync scan.
-        }
 
         const kfMsgId = deriveWeChatKfMsgId(intentId);
         const boundaryMs = Date.parse(notBefore);
-        const beforeMs = Math.max(boundaryMs, this.#now());
-        const requestAt = new Date(beforeMs).toISOString();
+        let beforeSendPassed = false;
+        let requestAt = new Date(Math.max(boundaryMs, this.#now())).toISOString();
 
         try {
           const res = await this.apiClient.sendTextMessage({
             touser: peerId,
             openKfid: this.openKfId,
-            content: draft.text,
+            content: expectedText,
             msgid: kfMsgId,
-          }, { signal });
-          const afterMs = Math.max(beforeMs, this.#now());
+          }, {
+            signal,
+            // Final synchronous check right after token/DNS and immediately before writing the HTTPS request.
+            beforeSend: () => {
+              recheckBeforeSend();
+              requestAt = new Date(Math.max(boundaryMs, this.#now())).toISOString();
+              beforeSendPassed = true;
+            },
+          });
+          const afterMs = Math.max(Date.parse(requestAt), this.#now());
           const responseAt = new Date(afterMs).toISOString();
           const proof: SendProof = {
             id: res.msgid,
             ownId: this.openKfId,
             targetKey: key,
-            text: draft.text,
+            text: expectedText,
             pending: false,
             sentAt: responseAt,
             submission: {
               boundary: notBefore,
               requestAt,
               responseAt,
-              requestDigest: digest([intentId, kfMsgId, key, digest(draft.text)]),
+              requestDigest: digest([intentId, kfMsgId, key, digest(expectedText)]),
               responseDigest: digest([res.msgid, this.openKfId, responseAt]),
             },
           };
@@ -479,6 +525,10 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
           this.transportState = 'CONNECTED';
           this.lastErrorCode = null;
         } catch (error) {
+          // If revoked/closed/paused before any HTTP bytes were sent, propagate the bounded guard code.
+          if (!beforeSendPassed && error instanceof Blocked && !(error instanceof WeChatKfError)) {
+            throw error;
+          }
           // Post-intent network/timeout/API outcome is uncertain: NEVER resend; let readback return null -> UNCERTAIN.
           const code = this.recordTransportFailure(error);
           store.audit('WECHAT_KF_SEND_UNCERTAIN', intentId, { code });
@@ -499,19 +549,10 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
         }
         return structuredClone(proof);
       },
-      verifyExisting: async (current, text, notBefore, contextDigest) => {
+      // WeChat KF /kf/sync_msg does not return messages sent via /kf/send_msg; never fabricate proof from origin=5.
+      verifyExisting: async current => {
         snapshot(current);
-        const intentRow = store.db
-          .prepare('SELECT id FROM send_intents WHERE event_id=? AND attempt_started_at=?')
-          .get(eventId, notBefore) as { id: string } | undefined;
-        return this.verifyExistingReadOnly(
-          current,
-          text,
-          notBefore,
-          contextDigest,
-          intentRow?.id,
-          options?.readonlySignal ?? signal,
-        );
+        return null;
       },
       cancelPreparation: async () => { preparedText = undefined; },
     };
@@ -526,6 +567,10 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
     };
   }
 
+  /**
+   * Honest read-only reconciliation: WeChat KF /kf/sync_msg does not expose API-sent messages,
+   * so this never calls /kf/send_msg and never fabricates confirmation from human origin=5 replies.
+   */
   async verifyExisting(
     store: EventStore,
     eventId: string,
@@ -538,34 +583,16 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
     const intentRow = store.db.prepare('SELECT id FROM send_intents WHERE event_id=?').get(eventId) as { id: string } | undefined;
     requireSafe(draftRow && intentRow, 'INTENT_REQUIRED');
 
-    const handle = await this.adapter(event.payload, store, undefined, {
-      ...(options.signal ? { readonlySignal: options.signal } : {}),
-    });
-    try {
-      const proof = await this.actor.run(async () => {
-        requireSafe(!options.signal?.aborted, 'COLLECTION_CANCELLED');
-        const current = store.draft(draftRow.id);
-        const boundary = store.intentBoundary(intentRow.id);
-        return this.verifyExistingReadOnly(
-          event.payload,
-          current.text,
-          boundary,
-          current.approval?.snapshot.contextDigest,
-          intentRow.id,
-          options.signal,
-        );
-      }, options.background ? 'background' : 'interactive');
+    await this.actor.run(async () => {
+      requireSafe(!options.signal?.aborted, 'COLLECTION_CANCELLED');
+      requireSafe(this.opened, 'BROWSER_CLOSED');
+      this.assertStore(store);
+      requireSafe(event.payload.accountId === this.accountId, 'ACCOUNT_CHANGED');
+    }, options.background ? 'background' : 'interactive');
 
-      requireSafe(!options.signal?.aborted, 'VERIFICATION_CANCELLED');
-      const evidenceId = await this.writeVerificationEvidence(eventId, proof);
-      return {
-        verified: !!proof,
-        evidenceId,
-        ...(proof ? { nativeIdDigest: digest(proof.id) } : {}),
-      };
-    } finally {
-      await handle.dispose();
-    }
+    requireSafe(!options.signal?.aborted, 'VERIFICATION_CANCELLED');
+    const evidenceId = await this.writeVerificationEvidence(eventId);
+    return { verified: false, evidenceId };
   }
 
   async verifyExistingFollowup(
@@ -580,37 +607,23 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
       .get();
     requireSafe(hasTurns, 'INTENT_REQUIRED');
     const turn = store.db
-      .prepare(`SELECT t.event_id, t.text, t.intent_id, t.attempt_started_at, t.approval, t.status
+      .prepare(`SELECT t.event_id, t.intent_id, t.attempt_started_at, t.status
         FROM human_reply_turns t JOIN inbound_events e ON e.id=t.event_id
         WHERE t.command_id=? AND e.account_id=?`)
       .get(commandId, this.accountId) as {
-        event_id: string; text: string; intent_id: string | null;
-        attempt_started_at: string | null; approval: string | null; status: string;
+        event_id: string; intent_id: string | null; attempt_started_at: string | null; status: string;
       } | undefined;
     requireSafe(turn && turn.intent_id && turn.attempt_started_at && turn.status === 'UNCERTAIN', 'INTENT_REQUIRED');
-    const event = store.event(turn.event_id);
-    const parsedApproval = turn.approval ? (JSON.parse(turn.approval) as { snapshot?: TargetSnapshot }) : undefined;
 
-    const proof = await this.actor.run(async () => {
+    await this.actor.run(async () => {
       requireSafe(!options.signal?.aborted, 'COLLECTION_CANCELLED');
       requireSafe(this.opened, 'BROWSER_CLOSED');
-      return this.verifyExistingReadOnly(
-        event.payload,
-        turn.text,
-        turn.attempt_started_at!,
-        parsedApproval?.snapshot?.contextDigest,
-        turn.intent_id!,
-        options.signal,
-      );
+      this.assertStore(store);
     }, options.background ? 'background' : 'interactive');
 
     requireSafe(!options.signal?.aborted, 'VERIFICATION_CANCELLED');
-    const evidenceId = await this.writeVerificationEvidence(turn.event_id, proof);
-    return {
-      verified: !!proof,
-      evidenceId,
-      ...(proof ? { proofDigest: digest(proof), nativeIdDigest: digest(proof.id) } : {}),
-    };
+    const evidenceId = await this.writeVerificationEvidence(turn.event_id);
+    return { verified: false, evidenceId };
   }
 
   toJSON(): Record<string, unknown> {
@@ -622,52 +635,11 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
     };
   }
 
-  /** Read-only /kf/sync_msg bounded scan for origin=5 messages; never advances observe cursor and never resends. */
-  private async verifyExistingReadOnly(
-    event: InboundEvent,
-    text: string,
-    notBefore: string,
-    contextDigest: string | undefined,
-    intentId: string | undefined,
-    signal?: AbortSignal,
-  ): Promise<SendProof | null> {
-    const startCursor = intentId ? (this.sendCheckpoints.get(intentId) ?? undefined) : undefined;
-    const scanFrom = async (initialCursor: string | undefined): Promise<SendProof | null> => {
-      let cursor = initialCursor;
-      const collected: WeChatKfMessage[] = [];
-      for (let page = 0; page < this.#maxVerifyPages; page++) {
-        signal?.throwIfAborted();
-        const res = await this.apiClient.syncMessages({
-          cursor,
-          open_kfid: this.openKfId,
-          limit: this.#syncPageLimit,
-        }, { signal });
-        for (const msg of res.msg_list ?? []) {
-          if (msg.origin === 5) collected.push(msg);
-        }
-        if (res.has_more !== 1 || !res.next_cursor || res.next_cursor === cursor) break;
-        cursor = res.next_cursor;
-      }
-      return matchWeChatKfOutgoingProof(collected, {
-        openKfId: this.openKfId,
-        event,
-        text,
-        notBefore,
-        nowMs: this.#now(),
-        contextDigest,
-        expectedMsgId: intentId ? deriveWeChatKfMsgId(intentId) : undefined,
-      });
-    };
-
-    const primary = await scanFrom(startCursor);
-    if (primary || startCursor !== undefined) return primary;
-
-    const storedCursor = await this.#cursorStore.load(this.accountId, this.openKfId);
-    if (!storedCursor) return null;
-    return scanFrom(storedCursor);
+  [inspect.custom](): Record<string, unknown> {
+    return this.toJSON();
   }
 
-  private async writeVerificationEvidence(eventId: string, proof: SendProof | null): Promise<string> {
+  private async writeVerificationEvidence(eventId: string): Promise<string> {
     if (!isLocalEvidenceRoot(this.root)) return randomUUID();
     return recordEvidence(join(this.root, 'evidence'), {
       caseId: 'D05',
@@ -675,11 +647,30 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
       mode: 'headless',
       taskId: eventId,
       action: 'OBSERVE',
-      result: proof ? 'PASS' : 'BLOCKED',
+      result: 'BLOCKED',
       source: 'AUTOMATED_REAL',
-      diagnostics: ['CLIENT_READ_ONLY_RECHECK', 'WECHAT_KF_SYNC_MSG_RECHECK', 'ORIGINAL_RECEIPTS_RETAINED'],
-      proofDigest: proof ? digest(proof) : null,
+      diagnostics: ['CLIENT_READ_ONLY_RECHECK', 'WECHAT_KF_API_HISTORY_UNAVAILABLE', 'ORIGINAL_RECEIPTS_RETAINED'],
+      proofDigest: null,
     });
+  }
+
+  private extractSendFailAudit(msg: WeChatKfMessage): SendFailAuditRecord | null {
+    if (msg.origin !== 4 || msg.msgtype !== 'event' || msg.event?.event_type !== 'msg_send_fail') return null;
+    const scopeKfId = msg.open_kfid ?? msg.event.open_kfid;
+    if (scopeKfId && scopeKfId !== this.openKfId) return null;
+    const entityId = digest([this.accountId, this.openKfId, msg.msgid || msg.event.fail_msgid || 'unknown']);
+    const detail: Record<string, unknown> = {};
+    if (typeof msg.event.fail_msgid === 'string' && msg.event.fail_msgid.trim()) {
+      detail.failMsgIdDigest = digest(msg.event.fail_msgid);
+    }
+    if (typeof msg.event.fail_type === 'number' && Number.isSafeInteger(msg.event.fail_type)) {
+      detail.failType = msg.event.fail_type;
+    }
+    const peer = msg.external_userid ?? msg.event.external_userid;
+    if (typeof peer === 'string' && peer.trim()) {
+      detail.targetDigest = digest(peer);
+    }
+    return { entityId, detail };
   }
 
   private trackObservedOutgoing(msg: WeChatKfMessage): void {
@@ -696,15 +687,6 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
       if (list.length > MAX_SENT_HISTORY_PER_PEER) list.shift();
       this.sentMsgIdsByPeer.set(peerId, list);
     }
-  }
-
-  private recordSendCheckpoint(intentId: string, cursor: string | null): void {
-    while (this.sendCheckpoints.size >= MAX_CHECKPOINTS) {
-      const oldest = this.sendCheckpoints.keys().next().value;
-      if (oldest === undefined) break;
-      this.sendCheckpoints.delete(oldest);
-    }
-    this.sendCheckpoints.set(intentId, cursor);
   }
 
   private recordTransportFailure(error: unknown): string {
@@ -729,6 +711,16 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
   private assertStore(store: EventStore, bound = true): void {
     store.assertAccount(this.accountId);
     requireSafe(!this.store || this.store === store, 'WECHAT_KF_STORE_CHANGED');
+    if (store.schemaVersion() >= 4) {
+      const account = store.db
+        .prepare('SELECT platform, own_id FROM accounts WHERE id=?')
+        .get(this.accountId) as { platform: string; own_id: string } | undefined;
+      if (account) {
+        requireSafe(account.platform === this.platformId, 'WECHAT_KF_ACCOUNT_CHANGED');
+        requireSafe(account.own_id === this.openKfId || (!bound && account.own_id === ''), 'WECHAT_KF_ACCOUNT_CHANGED');
+        return;
+      }
+    }
     const ownId = store.accountOwnId(this.accountId);
     requireSafe(ownId === this.openKfId || (!bound && !ownId), 'WECHAT_KF_ACCOUNT_CHANGED');
   }

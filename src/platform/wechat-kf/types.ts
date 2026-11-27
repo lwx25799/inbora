@@ -1,9 +1,13 @@
 import type { LookupAddress } from 'node:dns';
-import type { AccountId } from '../../contracts/account.js';
+import { WECHAT_KF_PLATFORM_ID, type AccountId } from '../../contracts/account.js';
 import { Blocked } from '../../core/contracts.js';
-import type { PlatformCapabilities } from '../platform-connector.js';
+import type {
+  OfficialApiTransportState,
+  OfficialApiTransportStatus,
+  PlatformCapabilities,
+} from '../platform-connector.js';
 
-export const WECHAT_KF_PLATFORM_ID = 'wechat-kf' as const;
+export { WECHAT_KF_PLATFORM_ID };
 export const WECHAT_KF_DEFAULT_API_BASE = 'https://qyapi.weixin.qq.com/cgi-bin' as const;
 export const WECHAT_KF_TOKEN_URL = `${WECHAT_KF_DEFAULT_API_BASE}/gettoken` as const;
 export const WECHAT_KF_MAX_TEXT_BYTES = 2048 as const;
@@ -189,17 +193,8 @@ export interface WeChatKfCapabilities extends PlatformCapabilities {
   readonly transport: 'official_api';
 }
 
-export type WeChatKfTransportState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'DEGRADED' | 'ERROR';
-
-export interface WeChatKfTransportStatus {
-  readonly transport: 'official_api';
-  readonly state: WeChatKfTransportState;
-  readonly endpointDigest: string | null;
-  readonly protocol: 'wechat_kf_http';
-  readonly lastHeartbeatAt?: number | null;
-  readonly lastSyncAt?: number | null;
-  readonly errorCode?: string | null;
-}
+export type WeChatKfTransportState = OfficialApiTransportState;
+export type WeChatKfTransportStatus = OfficialApiTransportStatus;
 
 export interface WeChatKfConnectorOptions {
   readonly accountId?: AccountId | undefined;
@@ -211,8 +206,8 @@ export interface WeChatKfConnectorOptions {
   readonly lookup?: WeChatKfDnsLookup | undefined;
   readonly timeoutMs?: number | undefined;
   readonly cursorStore?: WeChatKfCursorStore | undefined;
+  readonly firstRunAt?: number | string | undefined;
   readonly maxSyncPages?: number | undefined;
-  readonly maxVerifyPages?: number | undefined;
   readonly syncPageLimit?: number | undefined;
   readonly now?: (() => number) | undefined;
 }

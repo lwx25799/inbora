@@ -78,7 +78,7 @@ export function pkcs7Pad(input: Buffer): Buffer {
 
 /** Validate and strip WeChat 32-byte block PKCS#7 padding, inspecting every padding byte. */
 export function pkcs7Unpad(input: Buffer): Buffer {
-  if (input.length === 0 || input.length % AES_BLOCK_BYTES !== 0) {
+  if (input.length < PKCS7_BLOCK_BYTES || input.length % PKCS7_BLOCK_BYTES !== 0) {
     throw new WeChatKfError('WECHAT_KF_INVALID_PADDING');
   }
   const pad = input[input.length - 1];
@@ -139,7 +139,7 @@ export function decrypt(
     throw new WeChatKfError('WECHAT_KF_INVALID_CIPHERTEXT');
   }
   const cipherBuf = Buffer.from(normalized, 'base64');
-  if (cipherBuf.length < PKCS7_BLOCK_BYTES || cipherBuf.length % AES_BLOCK_BYTES !== 0) {
+  if (cipherBuf.length < PKCS7_BLOCK_BYTES || cipherBuf.length % PKCS7_BLOCK_BYTES !== 0) {
     throw new WeChatKfError('WECHAT_KF_INVALID_CIPHERTEXT');
   }
 

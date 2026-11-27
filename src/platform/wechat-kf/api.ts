@@ -1,23 +1,18 @@
 /**
  * WeChat Customer Service (WeChat KF) official HTTP API client.
  * Security invariants:
- * - Public HTTPS (443) only, SSRF-checked, zero redirects.
+ * - Public HTTPS (443) only, SSRF-checked via official-api-base, zero redirects.
  * - syncMessages (/kf/sync_msg): read-only, retries at most once on TOKEN_EXPIRED_CODES.
  * - sendTextMessage (/kf/send_msg): strict UTF-8 <= 2048B precheck (no splitting),
  *   strictly ZERO retries on network timeout, 5xx, disconnect, or unknown errors,
- *   deterministic WECHAT_KF_SESSION_WINDOW_LIMIT on errcode 95026.
+ *   pre-write synchronous beforeSend guard, exact msgid echo verification,
+ *   and deterministic WECHAT_KF_SESSION_WINDOW_LIMIT on errcode 95026.
  */
 import { createHash } from 'node:crypto';
+import { inspect } from 'node:util';
 import type { AccountId } from '../../contracts/account.js';
 import { eventSchema } from '../../contracts/events.js';
-import {
-  digest,
-  dmClockToleranceMs,
-  proofTimeValid,
-  targetKey,
-  type InboundEvent,
-  type SendProof,
-} from '../../core/contracts.js';
+import { digest, type InboundEvent } from '../../core/contracts.js';
 import {
   WECHAT_KF_DEFAULT_API_BASE,
   WECHAT_KF_DEFAULT_TIMEOUT_MS,
@@ -46,8 +41,6 @@ const SYNC_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 const SEND_RESPONSE_MAX_BYTES = 64 * 1024;
 const WECHAT_MSGID_PATTERN = /^[A-Za-z0-9]{1,32}$/u;
 const MAX_EVENT_TEXT_CHARS = 10_000;
-const VERIFY_WINDOW_MS = 5 * 60 * 1000;
-const HASH64_PATTERN = /^[a-f0-9]{64}$/u;
 
 /** Deterministically derive a WeChat KF compliant msgid ([0-9a-f]{32}) from an Inbora intentId. */
 export function deriveWeChatKfMsgId(intentId: string): string {
@@ -128,81 +121,6 @@ export function normalizeWeChatKfInboundMessage(
   });
 }
 
-export interface MatchWeChatKfOutgoingOptions {
-  readonly openKfId: string;
-  readonly event: InboundEvent;
-  readonly text: string;
-  readonly notBefore: string;
-  readonly nowMs: number;
-  readonly contextDigest?: string | undefined;
-  readonly expectedMsgId?: string | undefined;
-}
-
-/** Match a unique origin=5 outgoing reply within a bounded window for read-only reconciliation. */
-export function matchWeChatKfOutgoingProof(
-  messages: readonly WeChatKfMessage[],
-  options: MatchWeChatKfOutgoingOptions,
-): SendProof | null {
-  const boundaryMs = Date.parse(options.notBefore);
-  if (!Number.isFinite(boundaryMs) || !options.event.conversationId) return null;
-  const minTimeMs = boundaryMs - dmClockToleranceMs;
-  const maxTimeMs = Math.min(options.nowMs + dmClockToleranceMs, boundaryMs + VERIFY_WINDOW_MS);
-
-  const candidates = messages.filter(msg => {
-    if (msg.origin !== 5) return false;
-    if (msg.open_kfid && msg.open_kfid !== options.openKfId) return false;
-    if (msg.external_userid !== options.event.conversationId) return false;
-    if (msg.msgtype !== 'text' || msg.text?.content !== options.text) return false;
-    if (typeof msg.msgid !== 'string' || !msg.msgid.trim()) return false;
-    if (!Number.isFinite(msg.send_time) || msg.send_time <= 0) return false;
-    const sendTimeMs = msg.send_time * 1000;
-    return sendTimeMs >= minTimeMs && sendTimeMs <= maxTimeMs;
-  });
-
-  if (candidates.length === 0) return null;
-  let matched: WeChatKfMessage | undefined;
-  if (options.expectedMsgId) {
-    const exact = candidates.filter(msg => msg.msgid === options.expectedMsgId);
-    if (exact.length === 1) matched = exact[0];
-    else if (exact.length > 1) return null;
-  }
-  if (!matched) {
-    if (candidates.length !== 1) return null;
-    matched = candidates[0]!;
-  }
-
-  const sendTimeMs = matched.send_time * 1000;
-  const sentAt = new Date(sendTimeMs).toISOString();
-  const key = targetKey(options.event);
-
-  const proof: SendProof = sendTimeMs <= boundaryMs &&
-      options.contextDigest && HASH64_PATTERN.test(options.contextDigest)
-    ? {
-      id: matched.msgid,
-      ownId: options.openKfId,
-      targetKey: key,
-      text: options.text,
-      pending: false,
-      sentAt,
-      clockSkew: {
-        boundary: options.notBefore,
-        baselineContextDigest: options.contextDigest,
-        remainingContextDigest: options.contextDigest,
-        refreshedId: matched.msgid,
-      },
-    }
-    : {
-      id: matched.msgid,
-      ownId: options.openKfId,
-      targetKey: key,
-      text: options.text,
-      pending: false,
-      sentAt,
-    };
-
-  return proofTimeValid(proof, options.notBefore) ? proof : null;
-}
-
 export interface WeChatKfApiClientOptions {
   readonly credentials: WeChatKfCredentials | WeChatKfCredentialProvider;
   readonly apiBaseUrl?: string | undefined;
@@ -260,8 +178,11 @@ export class WeChatKfApiClient {
 
   private credentials(): { corpId: string; appSecret: string } {
     const creds = this.#readCredentials();
-    if (!creds || typeof creds.corpId !== 'string' || !creds.corpId.trim() ||
-        typeof creds.appSecret !== 'string' || !creds.appSecret.trim()) {
+    if (
+      !creds ||
+      typeof creds.corpId !== 'string' || !creds.corpId.trim() ||
+      typeof creds.appSecret !== 'string' || !creds.appSecret.trim()
+    ) {
       throw new WeChatKfError('WECHAT_KF_CREDENTIAL_REQUIRED');
     }
     return { corpId: creds.corpId, appSecret: creds.appSecret };
@@ -346,11 +267,12 @@ export class WeChatKfApiClient {
   /**
    * Single-submission text send (/kf/send_msg).
    * Enforces UTF-8 <= 2048B precheck (never splits), NEVER retries on timeout/network/5xx/error,
-   * and maps errcode 95026 to deterministic WECHAT_KF_SESSION_WINDOW_LIMIT.
+   * runs optional synchronous beforeSend guard right before writing the HTTPS request,
+   * enforces exact msgid match when params.msgid is supplied, and maps errcode 95026 deterministically.
    */
   async sendTextMessage(
     params: SendTextMessageRequest,
-    options: { signal?: AbortSignal | undefined } = {},
+    options: { signal?: AbortSignal | undefined; beforeSend?: (() => void) | undefined } = {},
   ): Promise<SendTextMessageResponse> {
     if (!params.touser?.trim() || !params.openKfid?.trim()) {
       throw new WeChatKfError('WECHAT_KF_EVENT_TARGET_REQUIRED');
@@ -381,6 +303,7 @@ export class WeChatKfApiClient {
       fetchImpl: this.#fetchImpl,
       lookup: this.#lookup,
       signal: options.signal,
+      beforeSend: options.beforeSend,
     });
 
     if (typeof raw.errcode !== 'number') {
@@ -388,6 +311,9 @@ export class WeChatKfApiClient {
     }
     if (raw.errcode === 0) {
       if (typeof raw.msgid !== 'string' || !raw.msgid.trim()) {
+        throw new WeChatKfError('WECHAT_KF_RESPONSE_INVALID');
+      }
+      if (params.msgid !== undefined && raw.msgid !== params.msgid) {
         throw new WeChatKfError('WECHAT_KF_RESPONSE_INVALID');
       }
       return {
@@ -409,5 +335,9 @@ export class WeChatKfApiClient {
 
   toJSON(): Record<string, unknown> {
     return { endpointDigest: this.endpointDigest };
+  }
+
+  [inspect.custom](): Record<string, unknown> {
+    return this.toJSON();
   }
 }
