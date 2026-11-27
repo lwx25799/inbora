@@ -39,7 +39,7 @@ export function ModelActionFeedback({ feedback }: { feedback?: ModelFeedback }) 
 export function modelKeyStatus(revision: PublicRevision) {
   if (revision.unavailableReason === 'DPAPI_RESTORE_FAILED') return '恢复失败';
   if (!revision.keyPresent) return '未配置';
-  return revision.keyStored ? '本机 DPAPI 保存' : '内存保存';
+  return revision.keyStored ? '本机加密保存' : '内存保存';
 }
 
 export function modelOption(model: ModelCatalogEntry) {

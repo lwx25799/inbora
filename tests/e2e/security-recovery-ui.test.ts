@@ -58,7 +58,7 @@ test('the original-page dialog forwards bounded human gestures with fresh displa
     await held.getByRole('button',{name:'处理原验证页面',exact:true}).click();
     const dialog=page.getByRole('dialog',{name:'处理原验证页面'}),picture=dialog.getByAltText('原验证页面实时画面');
     await picture.waitFor();await expect.poll(()=>picture.evaluate(node=>(node as HTMLImageElement).complete)).toBe(true);
-    expect(await dialog.innerText()).toContain('原无头页面');
+    expect(await dialog.innerText()).toContain('原后台页面');
     const dialogBox=(await dialog.boundingBox())!,finishBox=(await dialog.getByRole('button',{name:'完成并核验',exact:true}).boundingBox())!;
     expect(dialogBox.y).toBeGreaterThanOrEqual(0);expect(dialogBox.y+dialogBox.height).toBeLessThanOrEqual(640);
     expect(finishBox.y+finishBox.height).toBeLessThanOrEqual(640);

@@ -313,8 +313,8 @@ test('EmergencyStopNotice renders a headed-mode banner and return-to-headless ac
       update: () => {},
     }),
   );
-  expect(html).toContain('当前处于有头窗口，后台收取与自动回复已暂停');
-  expect(html).toContain('>返回无头运行</button>');
+  expect(html).toContain('当前处于登录窗口，后台收取与自动回复已暂停');
+  expect(html).toContain('>返回后台静音运行</button>');
 
   const reserved = baseStatus({
     automation: {
@@ -353,7 +353,7 @@ test('Settings keeps collapsed fault recovery and diagnostics unmounted and upda
   );
   expect(html).not.toContain('网页未发送内容恢复');
   expect(html).not.toContain('正在读取本地诊断');
-  expect(html).toContain('原无头页面');
+  expect(html).toContain('原后台页面');
   expect(html).not.toContain('登录和验证码在正常可见浏览器中由本人处理');
 });
 

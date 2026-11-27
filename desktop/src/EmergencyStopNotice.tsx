@@ -107,7 +107,7 @@ export function EmergencyStopNotice({
   };
 
   const recoveryHelp =
-    '在客户端内处理当前无头验证页面。若原现场已丢失，点击处理会重新检查原授权地址：已正常则恢复对应通道，仍有验证则显示新的实时画面；原现场证据仍单独保留。';
+    '在客户端内处理当前后台验证页面。若原现场已丢失，点击处理会重新检查原授权地址：已正常则恢复对应通道，仍有验证则显示新的实时画面；原现场证据仍单独保留。';
 
   const originalButtons = holds.map((hold, index) => (
     <button
@@ -127,14 +127,14 @@ export function EmergencyStopNotice({
     notice = (
       <section
         className="emergency-stop-notice headed-mode-notice shrink-0 border-b border-warning/30 bg-warning/10 px-6 py-2 text-foreground max-[1050px]:px-4"
-        aria-label="有头浏览器运行提示"
+        aria-label="登录窗口运行提示"
         aria-live="polite"
       >
         <div className="headed-mode-bar flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <MonitorIcon aria-hidden="true" className="size-4 shrink-0 text-warning" />
             <strong className="text-xs font-semibold text-foreground">
-              当前处于有头窗口，后台收取与自动回复已暂停
+              当前处于登录窗口，后台收取与自动回复已暂停
             </strong>
           </div>
           <button
@@ -142,12 +142,12 @@ export function EmergencyStopNotice({
             className={primaryButtonClass}
             disabled={!!busy}
             onClick={() =>
-              void act('返回无头运行', async () =>
+              void act('返回后台静音运行', async () =>
                 update(await request<Status>({ command: 'browser', open: true, mode: 'headless' })),
               )
             }
           >
-            返回无头运行
+            返回后台静音运行
           </button>
         </div>
       </section>
@@ -198,7 +198,7 @@ export function EmergencyStopNotice({
               disabled={!!busy}
               onClick={() => void act('检查并恢复运行', resume)}
             >
-              返回无头并检查恢复
+              返回后台静音并检查恢复
             </button>
           ) : (
             <>
@@ -267,7 +267,7 @@ export function EmergencyStopNotice({
             disabled={!!busy || !!session}
             onClick={() => void act('检查并恢复运行', resume)}
           >
-            {recovery ? '返回无头并检查恢复' : '检查并恢复运行'}
+            {recovery ? '返回后台静音并检查恢复' : '检查并恢复运行'}
           </button>
           {!recovery && originalButtons}
           {!recovery && incident?.reason === 'LOGIN_REQUIRED' && (

@@ -302,7 +302,7 @@ test('显式确认后才按 ACCOUNT 作用域解绑 Mock 账号，并刷新为�
 
 test('schema3 显示只读说明且不发送账号请求', () => {
   const panel = mountPanel(status(3));
-  expect(panel.markup()).toContain('当前为单账号 schema3 模式');
+  expect(panel.markup()).toContain('当前为单账号运行模式');
   expect(panel.buttons('注册合成验证账号 (Mock)')).toHaveLength(0);
   expect(invokeMock).not.toHaveBeenCalled();
 });
@@ -310,7 +310,7 @@ test('schema3 显示只读说明且不发送账号请求', () => {
 test('列表读取失败时可手动刷新恢复', async () => {
   invokeMock.mockRejectedValueOnce('SCHEMA4_REQUIRED').mockResolvedValueOnce(accountList(mainAccount));
   const panel = mountPanel();
-  await vi.waitFor(() => expect(panel.markup()).toContain('当前数据库尚未升级至多账号结构（schema4）。'));
+  await vi.waitFor(() => expect(panel.markup()).toContain('当前本地数据尚未升级至多账号支持结构，请先完成升级。'));
   panel.click('刷新账号列表');
   await vi.waitFor(() => expect(panel.markup()).toContain('抖音主账号'));
   expect(panel.markup()).not.toContain('当前数据库尚未升级');

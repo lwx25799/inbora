@@ -355,7 +355,7 @@ export function SecurityRecoveryDialog({
           <p className="text-[13px] leading-relaxed text-foreground">
             {session.recreated
               ? '原现场已丢失，这是在原授权地址重新检查后出现的新验证。'
-              : '这是' + (session.channel === 'DIRECT_MESSAGE' ? '私信' : '评论') + '原无头页面的实时画面。'}
+              : '这是' + (session.channel === 'DIRECT_MESSAGE' ? '私信' : '评论') + '原后台页面的实时画面。'}
             请在画面内完成验证，可点击或拖动；处理期间后台浏览器操作暂停。
           </p>
           <p className="security-recovery-note text-xs text-muted-foreground">

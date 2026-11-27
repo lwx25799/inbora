@@ -60,7 +60,7 @@ export function AccountPlatformPanel({
     return (
       <div className={cardCls}>
         <h2 className={headingCls}>{title}</h2>
-        <p className={hintCls}>当前为单账号 schema3 模式</p>
+        <p className={hintCls}>当前为单账号运行模式</p>
       </div>
     );
   }

@@ -165,7 +165,7 @@ export function SystemSettingsView({
                 <Badge
                   variant="outline"
                   size="sm"
-                  title={`数据库结构版本 schema${status.schema}`}
+                  title={status.schema >= 4 ? '支持多账号独立存储结构' : '当前为单账号本地存储结构'}
                 >
                   {status.schema >= 4 ? '支持多账号独立存储' : '单账号本地存储'}
                 </Badge>
@@ -173,7 +173,7 @@ export function SystemSettingsView({
             </div>
 
             <p className="leading-relaxed text-muted-foreground">
-              网络为本机直连。日常采用无头运行，平台安全验证优先在客户端内直接操作原无头页面完成；仅遇重新登录等情况时可临时打开有头浏览器处理，所有网页自启动即静音。
+              网络为本机直连。日常采用后台静音运行，平台安全验证优先在客户端内直接操作原后台页面完成；仅遇重新登录等情况时可临时打开登录窗口处理，所有网页自启动即静音。
             </p>
 
             <Separator />

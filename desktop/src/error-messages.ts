@@ -27,7 +27,7 @@ export const errorMessages: Record<string, string> = {
   CLIENT_CLOSING: '运行目录正在断开，请连接完成后重新读取。',
 
   // Multi-account protocol & worker recovery
-  PROTOCOL_V2_ACCOUNT_SCOPE_REQUIRED: '多账号运行中，写操作需通过协议 v2 显式指定目标账号。',
+  PROTOCOL_V2_ACCOUNT_SCOPE_REQUIRED: '多账号运行中，写操作需显式指定目标账号。',
   PROTOCOL_SCOPE_MISMATCH: '请求作用域与命令类型不匹配，请重试。',
   INVALID_SCOPE: '账号作用域参数无效。',
   INVALID_COMMAND_ID: '请求命令标识无效。',
@@ -43,7 +43,7 @@ export const errorMessages: Record<string, string> = {
   ACCOUNT_OPERATION_IN_PROGRESS: '该账号有正在进行的操作或未确认发送，请稍候完成后再试。',
   PRIMARY_ACCOUNT_DISCONNECT_BLOCKED: '主账号不可解绑。',
   GRANT_VERSION_CONFLICT: '授权策略已发生更新，已刷新最新状态，请核对后再操作。',
-  SCHEMA4_REQUIRED: '当前数据库尚未升级至多账号结构（schema4）。',
+  SCHEMA4_REQUIRED: '当前本地数据尚未升级至多账号支持结构，请先完成升级。',
   WORKER_CRASH_NO_REPLAY: '浏览器子进程异常退出，为防止重复发送已禁止重放旧意图，请只读核验状态。',
 
   // Official API channels (WeCom AI Bot & WeChat KF)
@@ -79,7 +79,7 @@ export const errorMessages: Record<string, string> = {
 
   // Emergency stop, security holds & manual recovery
   EMERGENCY_STOPPED: '全局急停已生效。请在顶部提示或「系统设置 -> 故障处理」中检查并恢复运行。',
-  EMERGENCY_RECOVERY_HEADLESS_REQUIRED: '请先返回无头运行，再检查并恢复调度。',
+  EMERGENCY_RECOVERY_HEADLESS_REQUIRED: '请先返回后台静音运行，再检查并恢复调度。',
   EMERGENCY_RECOVERY_CHANGED: '检查期间发生了新的急停，请查看最新原因后重新检查。',
   EMERGENCY_RECOVERY_CANCELLED: '恢复检查已取消，急停状态保留。',
   EMERGENCY_RECOVERY_TIMEOUT: '恢复检查超时，急停状态保留，请稍后重试。',
@@ -87,9 +87,9 @@ export const errorMessages: Record<string, string> = {
   SECURITY_CHANNEL_HELD: '此通道安全状态待核验，后台正在检查原页面；已有草稿保留。',
   SECURITY_STATE_CHANGED: '通道安全状态已变化，请重新读取当前状态后继续。',
   SECURITY_VERIFICATION_CONFIRMED: '平台已明确要求安全验证，请在专属浏览器由本人完成后检查恢复。',
-  MANUAL_RECOVERY_IN_PROGRESS: '当前正在处理原无头验证页面，请完成或关闭验证窗口后再执行此操作。',
+  MANUAL_RECOVERY_IN_PROGRESS: '当前正在处理原后台验证页面，请完成或关闭验证窗口后再执行此操作。',
   MANUAL_RECOVERY_ALREADY_ACTIVE: '原验证页面已在另一个处理窗口中打开，请先关闭该窗口。',
-  MANUAL_RECOVERY_HEADLESS_REQUIRED: '仅无头运行模式下支持在客户端内处理原验证页面。',
+  MANUAL_RECOVERY_HEADLESS_REQUIRED: '仅后台静音运行模式下支持在客户端内处理原验证页面。',
   MANUAL_RECOVERY_INCIDENT_REQUIRED: '当前没有待处理的页面安全拦截现场。',
   MANUAL_RECOVERY_OPERATOR_CHANGED: '验证处理会话已失效或操作员已变化，请关闭后重新接管。',
   MANUAL_RECOVERY_SESSION_EXPIRED: '验证处理会话已超时结束，请重新点击“处理原验证页面”。',
@@ -104,12 +104,12 @@ export const errorMessages: Record<string, string> = {
   SECURITY_RECOVERY_TARGET_UNAVAILABLE: '原验证目标不可用，请关闭后重新检查。',
 
   // Browser & login recovery
-  LOGIN_RECOVERY_IN_PROGRESS: '正在等待本人登录或处理验证码，完成后自动恢复无头运行',
+  LOGIN_RECOVERY_IN_PROGRESS: '正在等待本人登录或处理验证码，完成后自动恢复后台静音运行',
   BROWSER_HAS_HUMAN_INPUT: '专属网页中还有未提交输入，已保留，请处理后再切换浏览器',
   BROWSER_CLOSED: '专属浏览器已关闭，本次同步已停止。',
   BROWSER_NOT_RUNNING: '专属浏览器尚未启动，请等待连接或重新打开。',
-  HEADED_ONLY_FOR_LOGIN: '日常运行须保持无头模式，仅登录或人工查看时可临时打开有头窗口。',
-  LOGIN_REQUIRES_HEADED: '重新登录需临时打开有头浏览器由本人完成。',
+  HEADED_ONLY_FOR_LOGIN: '日常运行须保持后台静音模式，仅登录或人工查看时可临时打开登录窗口。',
+  LOGIN_REQUIRES_HEADED: '重新登录需临时打开登录窗口由本人完成。',
   CLOSE_BROWSER_BEFORE_MODE_CHANGE: '切换浏览器模式前需先安全关闭当前浏览器实例。',
   CONFLICTING_BROWSER_MODE: '浏览器模式参数冲突，请重试。',
   BROWSER_DRAFT_NOT_RECOVERABLE: '当前没有可安全清理的已保存自动回复稿，网页输入已保留',
@@ -269,7 +269,7 @@ export const errorMessages: Record<string, string> = {
   OBSERVATION_EXISTING_HUMAN_INPUT: '网页保留了未发送输入，后台已保留草稿并停止本次切换',
   OBSERVATION_DOM_NOT_READY: '页面尚未就绪，请稍后再次同步。',
   OBSERVATION_PAGE_BLOCKED: '页面安全检查未通过；可重新检查，若仍有登录或验证提示再处理。',
-  OBSERVATION_UNEXPECTED_ORIGIN: '当前页面来源与已授权网站不一致，请返回正常抖音页面后检查恢复。',
+  OBSERVATION_UNEXPECTED_ORIGIN: '当前页面来源与已授权平台网站不一致，请返回已授权平台页面后检查恢复。',
   OBSERVATION_SECURITY_TITLE: '页面标题命中了安全提示，尚不能确认发生验证；后台将检查原页面。',
   OBSERVATION_SECURITY_COMPONENT: '页面命中了候选安全组件，尚不能确认验证生效；后台将检查原页面。',
   OBSERVATION_SECURITY_SUSPECT: '页面安全状态待核验，受影响通道暂缓收取、模型和发送。',
@@ -298,7 +298,7 @@ export const errorMessages: Record<string, string> = {
   AUTOMATION_NOT_READY: '自动化存储尚未就绪，请重新连接运行目录。',
   AUTOMATION_MIGRATION_REQUIRED: '自动化存储尚未升级，请重新连接由应用完成备份与升级。',
   DPAPI_RESTORE_FAILED: '当前 Windows 用户无法解密已保存的 Key，请重新配置',
-  DPAPI_WINDOWS_REQUIRED: '本机安全保存 Key 仅支持 Windows 当前用户 DPAPI。',
+  DPAPI_WINDOWS_REQUIRED: '本机安全保存 Key 仅支持当前 Windows 用户加密存储。',
   DPAPI_OPERATION_FAILED: 'Windows 本机加密保存 Key 失败，请重试或仅保留在内存。',
   DPAPI_FILE_INVALID: '本机加密 Key 文件格式无效或已损坏，请重新输入 Key。',
   MCP_DRAFT_VERSION_CHANGED: '助手已保存新版本，你的未保存内容已保留，暂不自动覆盖。核对后继续编辑即可按当前版本保存。',

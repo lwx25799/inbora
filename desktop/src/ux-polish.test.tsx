@@ -1,21 +1,26 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, test, vi } from 'vitest';
-import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
+import { DEFAULT_ACCOUNT_ID, WECHAT_KF_PLATFORM_ID, WECOM_AIBOT_PLATFORM_ID } from '../../src/contracts/account.js';
+import type { PublicModelConnection } from '../../src/contracts/model-providers.js';
 import type { Inbox, Status, Thread } from './api';
 import { errorMessages as reasons } from './error-messages';
 import { InboxList } from './InboxList';
 import { KnowledgeDocuments } from './KnowledgeDocuments';
 import { KnowledgeSamples } from './KnowledgeSamples';
 import { KnowledgeTrial } from './KnowledgeTrial';
+import { ModelConnectionEditor } from './ModelConnectionEditor';
+import { ModelSelector } from './ModelSelector';
 import { ReplyComposer } from './ReplyComposer';
 import { ReplyDetail } from './ReplyDetail';
+import { SecurityRecoveryDialog } from './SecurityRecoveryDialog';
 import { CommandPalette } from './components/CommandPalette';
 import { ConnectScreen } from './components/ConnectScreen';
-import { budgetKindLabel, compactTime, formatBudgetLimit, formatSyncLabel } from './presentation';
+import { browserState, budgetKindLabel, compactTime, formatBudgetLimit, formatSyncLabel } from './presentation';
 import { AccountsView } from './views/AccountsView';
 import { OverviewView } from './views/OverviewView';
 import { RuntimeView } from './views/RuntimeView';
+import { SystemSettingsView } from './views/SystemSettingsView';
 
 function baseStatus(overrides: Partial<Status> = {}): Status {
   return {
@@ -292,5 +297,217 @@ describe('UX polish invariants across the 8 usability principles', () => {
     expect(paletteHtml).toContain('多模型配置');
     expect(paletteHtml).toContain('同步收件箱');
     expect((paletteHtml.match(/<button /gu) ?? []).length).toBe(11);
+  });
+
+  test('daily UI copy hides headless/headed, schema3/schema4, DPAPI, and protocol v2 jargon and generalizes origin errors', () => {
+    const jargonPattern = /无头|有头|schema3|schema4|DPAPI|协议\s*v2/iu;
+    const stripTags = (html: string) => html.replace(/<[^>]+>/gu, ' ');
+
+    for (const [code, text] of Object.entries(reasons)) {
+      expect(text, code).not.toMatch(jargonPattern);
+    }
+    expect(reasons.OBSERVATION_UNEXPECTED_ORIGIN).toBe(
+      '当前页面来源与已授权平台网站不一致，请返回已授权平台页面后检查恢复。',
+    );
+    expect(reasons.OBSERVATION_UNEXPECTED_ORIGIN).not.toContain('抖音');
+
+    for (const state of ['MANUAL_VISIBLE', 'LOGIN_RECOVERY', 'CLOSED', 'OPEN_LAST_READ_VERIFIED']) {
+      expect(browserState(state), state).not.toMatch(jargonPattern);
+    }
+
+    const connection: PublicModelConnection = {
+      id: 'conn-1',
+      name: 'DeepSeek',
+      presetId: 'deepseek',
+      version: 1,
+      draftRevision: 1,
+      models: [{ modelId: 'deepseek-chat', displayName: 'DeepSeek Chat', source: 'MANUAL' }],
+      modelsFetchedAt: null,
+      modelsTruncated: false,
+      totalModelCount: 1,
+      draft: {
+        presetId: 'deepseek',
+        protocol: 'OPENAI_CHAT',
+        baseUrl: 'https://api.deepseek.com',
+        region: null,
+        routeRevision: 1,
+        keyPresent: true,
+        keyStored: true,
+        storage: 'DPAPI',
+        unavailableReason: null,
+        catalogResult: null,
+        testResult: null,
+      },
+      applied: {
+        presetId: 'deepseek',
+        protocol: 'OPENAI_CHAT',
+        baseUrl: 'https://api.deepseek.com',
+        region: null,
+        routeRevision: 1,
+        keyPresent: true,
+        keyStored: true,
+        storage: 'DPAPI',
+        unavailableReason: null,
+        catalogResult: null,
+        testResult: null,
+      },
+    };
+
+    const viewsHtml = [
+      renderToStaticMarkup(createElement(AccountsView, { status: baseStatus(), busy: '', act: async () => {}, update: () => {} })),
+      renderToStaticMarkup(
+        createElement(OverviewView, {
+          status: baseStatus(),
+          inbox: { total: 0, unreadTotal: 0, page: 0, pageSize: 20, items: [] },
+          busy: '',
+          pendingAutoReply: null,
+          onNavigate: () => {},
+          onSync: () => {},
+          onSelectEvent: () => {},
+          onToggleAuto: () => {},
+        }),
+      ),
+      renderToStaticMarkup(
+        createElement(RuntimeView, {
+          status: baseStatus({
+            securityHolds: [{
+              channel: 'COMMENT_NOTIFICATION',
+              reason: 'OBSERVATION_SECURITY_SUSPECT',
+              incidentId: 'inc-1',
+              revision: 'rev-1',
+              heldAt: 1794399998894,
+              mode: 'headless',
+            }],
+          }),
+          audit: [],
+          auditPage: 0,
+          setAuditPage: () => {},
+          tab: 'diagnostics',
+        }),
+      ),
+      renderToStaticMarkup(
+        createElement(RuntimeView, {
+          status: baseStatus(),
+          audit: [],
+          auditPage: 0,
+          setAuditPage: () => {},
+          tab: 'security',
+        }),
+      ),
+      renderToStaticMarkup(
+        createElement(SystemSettingsView, {
+          status: baseStatus({ schema: 3 }),
+          runtime: 'D:\\synthetic',
+          busy: '',
+          theme: 'light',
+          onToggleTheme: () => {},
+          act: async () => {},
+          update: () => {},
+          stop: () => {},
+          reconnect: async () => {},
+        }),
+      ),
+      renderToStaticMarkup(
+        createElement(SecurityRecoveryDialog, {
+          session: {
+            sessionId: 'sess-1',
+            channel: 'DIRECT_MESSAGE',
+            incidentId: 'inc-1',
+            recreated: false,
+          },
+          update: () => {},
+          onClosed: () => {},
+        }),
+      ),
+      renderToStaticMarkup(
+        createElement(ModelSelector, {
+          state: {
+            connections: [connection],
+            selection: {
+              connectionId: 'conn-1',
+              routeRevision: 1,
+              modelId: 'deepseek-chat',
+              modelDisplayName: 'DeepSeek Chat',
+              selectionRevision: 1,
+            },
+          },
+          budgetExhausted: false,
+          modelAuthorized: true,
+          change: async () => undefined,
+          refreshing: false,
+        }),
+      ),
+      renderToStaticMarkup(
+        createElement(ModelConnectionEditor, {
+          connection,
+          change: async () => undefined,
+          onCreated: () => {},
+          onClose: () => {},
+          budgetExhausted: false,
+          stopped: false,
+          hidden: false,
+          refreshing: false,
+          selectionRevision: 1,
+        }),
+      ),
+    ];
+
+    for (const html of viewsHtml) {
+      expect(stripTags(html)).not.toMatch(jargonPattern);
+      expect(html).not.toMatch(/title="[^"]*(schema3|schema4|DPAPI|无头|有头|协议\s*v2)/iu);
+    }
+  });
+
+  test('AccountsView adapts cards between browser channel and official API channels', () => {
+    const status = baseStatus();
+
+    const browserHtml = renderToStaticMarkup(
+      createElement(AccountsView, { status, busy: '', act: async () => {}, update: () => {} }),
+    );
+    expect(browserHtml).toContain('浏览器运行状态');
+    expect(browserHtml).toContain('后台静音 Edge');
+    expect(browserHtml).toContain('打开登录窗口');
+    expect(browserHtml).toContain('同步顶部通知（独立来源）');
+    expect(browserHtml).not.toContain('官方通道状态');
+
+    const wecomHtml = renderToStaticMarkup(
+      createElement(AccountsView, {
+        status: baseStatus({ account: { id: 'account_wecom', identity: 'bot-1' } }),
+        busy: '',
+        act: async () => {},
+        update: () => {},
+        activeAccount: {
+          accountRef: 'account_wecom',
+          displayLabel: '企微售前机器人',
+          platform: WECOM_AIBOT_PLATFORM_ID,
+        },
+      }),
+    );
+    expect(wecomHtml).toContain('官方通道状态');
+    expect(wecomHtml).toContain('免浏览器后台运行');
+    expect(wecomHtml).toContain('官方长连接');
+    expect(wecomHtml).toContain('官方通道能力与连接摘要');
+    expect(wecomHtml).not.toContain('浏览器运行窗口切换');
+    expect(wecomHtml).not.toContain('同步顶部通知（独立来源）');
+    expect(wecomHtml).not.toContain('打开登录窗口');
+
+    const wechatKfHtml = renderToStaticMarkup(
+      createElement(AccountsView, {
+        status: baseStatus({ account: { id: 'account_kf', identity: 'wkf-1' } }),
+        busy: '',
+        act: async () => {},
+        update: () => {},
+        activeAccount: {
+          accountRef: 'account_kf',
+          displayLabel: '微信官方客服',
+          platform: WECHAT_KF_PLATFORM_ID,
+        },
+      }),
+    );
+    expect(wechatKfHtml).toContain('官方通道状态');
+    expect(wechatKfHtml).toContain('免浏览器后台运行');
+    expect(wechatKfHtml).toContain('官方 API');
+    expect(wechatKfHtml).not.toContain('浏览器运行窗口切换');
+    expect(wechatKfHtml).not.toContain('同步顶部通知（独立来源）');
   });
 });

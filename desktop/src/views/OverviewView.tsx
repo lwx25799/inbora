@@ -156,7 +156,7 @@ export function OverviewView({
                     : modes[status.configuredMode]}
             </Badge>
             <Badge variant={browserConnected ? 'outline' : 'warning'} size="sm">
-              {status.browser.mode === 'headed' ? '有头窗口' : '无头后台'} ·{' '}
+              {status.browser.mode === 'headed' ? '登录窗口' : '后台静音'} ·{' '}
               {browserConnected ? '浏览器在线' : '等待连接'}
             </Badge>
             {holdsCount > 0 && (

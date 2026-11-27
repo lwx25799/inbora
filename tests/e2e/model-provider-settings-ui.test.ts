@@ -353,7 +353,7 @@ test('P16 saves a draft, manages Key and catalogs, tests once, applies and delet
     expect(calls[2]).toMatchObject({action: 'setKey', storage: 'MEMORY', key: 'synthetic-submitted', connectionId: added.id});
     await select(page, 'Key 存储方式').selectOption('DPAPI');
     await button(page, '保存 Key').click();
-    await text(page, 'openrouter.ai · 本机 DPAPI 保存').waitFor();
+    await text(page, 'openrouter.ai · 本机加密保存').waitFor();
     await expect.poll(() => key.inputValue()).toBe('');
     await text(page, 'Key 已保存。').waitFor();
     await control(page, 'Base URL').fill('https://alternate.example.com/api/v1');

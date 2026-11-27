@@ -35,20 +35,20 @@ test('settings keeps an explicit headed browser button and a headless return wit
     await page.getByRole('button',{name:'账号与通道',exact:true}).click();
     expect(calls.filter(body=>body.command==='browser'&&body.action==='inspectSavedDraftRecovery')).toEqual([]);
     expect(await page.getByRole('button',{name:'打开专属浏览器',exact:true}).count()).toBe(0);
-    await page.getByRole('button',{name:'打开有头浏览器',exact:true}).click();
+    await page.getByRole('button',{name:'打开登录窗口',exact:true}).click();
     await expect.poll(()=>native.manual).toBe(true);
-    await page.getByText('浏览器：有头浏览器已打开，返回无头运行后继续后台处理',{exact:true}).waitFor();
-    const headedNotice=page.getByRole('region',{name:'有头浏览器运行提示'});
-    await headedNotice.getByText('当前处于有头窗口，后台收取与自动回复已暂停',{exact:true}).waitFor();
-    expect(await page.getByRole('button',{name:'打开有头浏览器',exact:true}).count()).toBe(1);
-    expect(await page.getByRole('button',{name:'打开有头浏览器',exact:true}).isDisabled()).toBe(true);
+    await page.getByText('浏览器：登录窗口已打开，返回后台静音运行后继续后台处理',{exact:true}).waitFor();
+    const headedNotice=page.getByRole('region',{name:'登录窗口运行提示'});
+    await headedNotice.getByText('当前处于登录窗口，后台收取与自动回复已暂停',{exact:true}).waitFor();
+    expect(await page.getByRole('button',{name:'打开登录窗口',exact:true}).count()).toBe(1);
+    expect(await page.getByRole('button',{name:'打开登录窗口',exact:true}).isDisabled()).toBe(true);
     await page.screenshot({path:join(root,'headed-settings.png')});
     expect(calls.filter(body=>body.command==='browser')).toEqual([
       {command:'browser',open:true,mode:'headed',loginRecovery:true,manualVisible:true},
     ]);
-    await headedNotice.getByRole('button',{name:'返回无头运行',exact:true}).click();
+    await headedNotice.getByRole('button',{name:'返回后台静音运行',exact:true}).click();
     await expect.poll(()=>native.loginRecovery).toBe(false);
-    await expect.poll(()=>page.getByRole('button',{name:'打开有头浏览器',exact:true}).isEnabled()).toBe(true);
+    await expect.poll(()=>page.getByRole('button',{name:'打开登录窗口',exact:true}).isEnabled()).toBe(true);
     await page.getByRole('button',{name:'系统设置',exact:true}).click();
     await page.getByText('故障处理',{exact:true}).click();
     await expect.poll(()=>calls.filter(body=>body.command==='browser'&&body.action==='inspectSavedDraftRecovery').length).toBe(1);

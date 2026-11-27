@@ -132,7 +132,7 @@ export function RuntimeView({
                     {browserState(status.browser.state, status.automation?.emergencyStopped)}
                   </div>
                   <div className="mt-0.5 text-xs text-muted-foreground">
-                    {status.browser.mode === 'headed' ? '有头 Edge' : '无头 Edge'}{' '}
+                    {status.browser.mode === 'headed' ? '登录窗口 Edge' : '后台静音 Edge'}{' '}
                     {status.browser.version ?? ''}
                   </div>
                 </div>
@@ -159,9 +159,9 @@ export function RuntimeView({
                   </div>
                 </div>
                 <div className="px-5 py-4">
-                  <div className="text-xs text-muted-foreground">数据库架构</div>
-                  <div className="mt-1 font-mono text-lg font-semibold text-foreground tabular-nums">
-                    schema{status.schema}
+                  <div className="text-xs text-muted-foreground">本地存储结构</div>
+                  <div className="mt-1 text-sm font-semibold text-foreground">
+                    {status.schema >= 4 ? '多账号独立存储' : '单账号本地存储'}
                   </div>
                   <div className="mt-0.5 text-xs text-muted-foreground">
                     操作员权限：{status.operator.permissions.join(' / ') || '无'}
@@ -199,7 +199,7 @@ export function RuntimeView({
                               {hold.channel === 'DIRECT_MESSAGE' ? '私信通道' : '评论通道'} · 安全待核验
                             </span>
                             <Badge variant="warning" size="sm">
-                              {hold.mode === 'headed' ? '有头窗口' : '原无头页'}
+                              {hold.mode === 'headed' ? '登录窗口' : '原后台页'}
                             </Badge>
                           </div>
                           <p className="text-xs text-muted-foreground">
@@ -223,7 +223,7 @@ export function RuntimeView({
                     当前没有待处理的安全验证现场
                   </div>
                   <p className="mt-1 max-w-md text-xs text-muted-foreground">
-                    若平台触发可见安全验证，受影响通道将自动隔离，并可通过顶部横幅直接在原无头页完成人工核验。
+                    若平台触发可见安全验证，受影响通道将自动隔离，并可通过顶部横幅直接在原后台页面完成人工核验。
                   </p>
                 </div>
               )}

@@ -663,6 +663,7 @@ export function App() {
                 busy={busy}
                 act={act}
                 update={setStatus}
+                activeAccount={activeAccount}
                 activeAccountRef={activeAccount?.accountRef}
                 onSelectWorkbenchAccount={(account) => {
                   void selectWorkbenchAccount(account);

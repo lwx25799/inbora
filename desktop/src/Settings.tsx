@@ -278,14 +278,14 @@ export function Settings({
               </p>
             )}
             <p className={hintCls}>
-              日常默认无头运行。可临时打开有头浏览器查看页面或处理登录；打开期间后台收取与自动回复暂缓，完成后点击“返回无头运行”继续。
+              日常默认后台静音运行。可临时打开登录窗口查看页面或处理登录；打开期间后台收取与自动回复暂缓，完成后点击“返回后台静音运行”继续。
             </p>
             <div className="row flex flex-wrap items-center gap-2">
               <button
                 className={btnOutlineCls}
                 disabled={!!busy || status.browser.state === 'MANUAL_VISIBLE'}
                 onClick={() =>
-                  void act('打开有头浏览器', async () =>
+                  void act('打开登录窗口', async () =>
                     update(
                       await request<Status>({
                         command: 'browser',
@@ -298,21 +298,21 @@ export function Settings({
                   )
                 }
               >
-                打开有头浏览器
+                打开登录窗口
               </button>
               {(status.browser.loginRecovery || status.browser.mode === 'headed') && (
                 <button
                   className={btnPrimaryCls}
                   disabled={!!busy}
                   onClick={() =>
-                    void act('恢复无头运行', async () =>
+                    void act('恢复后台静音运行', async () =>
                       update(
                         await request<Status>({ command: 'browser', open: true, mode: 'headless' }),
                       ),
                     )
                   }
                 >
-                  返回无头运行
+                  返回后台静音运行
                 </button>
               )}
             </div>
@@ -377,7 +377,7 @@ export function Settings({
               </button>
             </div>
             <p className={hintCls}>
-              网络为本机直连。日常采用无头运行，平台安全验证优先在客户端内直接操作原无头页面完成；仅遇重新登录等情况时可临时打开有头浏览器处理，所有网页自启动即静音。
+              网络为本机直连。日常采用后台静音运行，平台安全验证优先在客户端内直接操作原后台页面完成；仅遇重新登录等情况时可临时打开登录窗口处理，所有网页自启动即静音。
             </p>
 
             <details className={`settings-disclosure ${disclosureCls}`}>

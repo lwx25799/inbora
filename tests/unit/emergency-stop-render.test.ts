@@ -15,7 +15,7 @@ const render=(value:ReturnType<typeof props>)=>renderToStaticMarkup(createElemen
 test('a fresh security incident explains its observed signal and offers direct recovery without assuming the current account is broken',()=>{
   const html=render(props('OBSERVATION_SECURITY_COMPONENT'));
   expect(html).toContain('候选安全组件');expect(html).toContain('缺少足以确认验证生效的现场证明');expect(html).toContain('触发来源：评论后台收取');
-  expect(html).toContain('在客户端内处理当前无头验证页面');expect(html).toContain('点击处理会重新检查原授权地址');
+  expect(html).toContain('在客户端内处理当前后台验证页面');expect(html).toContain('点击处理会重新检查原授权地址');
   expect(html).toContain('已正常则恢复对应通道，仍有验证则显示新的实时画面');expect(html).toContain('>检查并恢复运行</button>');
   expect(html).not.toContain('>处理登录或验证</button>');expect(html).not.toContain('旧版本未独立记录');
 });
@@ -31,7 +31,7 @@ test('unresolved candidates offer the original headless page without claiming a 
   expect(html).toContain('>检查并恢复运行</button>');expect(html).toContain('原现场证据仍单独保留');
   expect(html).not.toContain('已触发验证码');
   value.status.browser.mode='headed';value.status.browser.loginRecovery=true;value.busy='检查并恢复运行';
-  const headed=render(value);expect(headed).toContain('>返回无头并检查恢复</button>');
+  const headed=render(value);expect(headed).toContain('>返回后台静音并检查恢复</button>');
   expect(headed).toContain('disabled=""');expect(headed).not.toContain('>处理原验证页面</button>');
 });
 
@@ -56,6 +56,6 @@ test('running accounts have no emergency notice and visible recovery preserves t
   const value=props('OBSERVATION_SECURITY_COMPONENT');value.status.automation!.emergencyStopped=false;
   expect(render(value)).toBe('');value.status.automation!.emergencyStopped=true;
   value.status.browser.mode='headed';value.status.browser.loginRecovery=true;value.busy='检查并恢复运行';
-  const html=render(value);expect(html).toContain('>返回无头并检查恢复</button>');expect(html).toContain('disabled=""');
+  const html=render(value);expect(html).toContain('>返回后台静音并检查恢复</button>');expect(html).toContain('disabled=""');
   expect(html).not.toContain('>处理登录或验证</button>');
 });

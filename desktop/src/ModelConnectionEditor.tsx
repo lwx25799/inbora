@@ -550,7 +550,7 @@ export function ModelConnectionEditor({
                 Key 存储方式
                 <select className={inputCls} value={storage} onChange={event => setStorage(event.target.value as ModelKeyStorage)}>
                   <option value="MEMORY">仅保存在内存（退出后清除）</option>
-                  <option value="DPAPI">本机加密保存（DPAPI，重启保留）</option>
+                  <option value="DPAPI">本机加密保存（重启保留）</option>
                 </select>
               </label>
             </div>
