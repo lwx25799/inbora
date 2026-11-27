@@ -291,6 +291,8 @@ export const errorMessages: Record<string, string> = {
   COMMENT_THREAD_CONTEXT_UNVERIFIED: '评论对话中的上下文尚未完整核验，后台正在补齐',
   DM_CONTENT_UNVERIFIED: '内容仅供人工查看，AI不会自动处理',
   PLATFORM_STOP: '平台要求停止，已结束本次同步。',
+  PLATFORM_MAPPING_UNCALIBRATED: '该平台真实页面尚未完成安全校准，当前禁止发送；仅支持本地离线验证。',
+  WEB_CHANNEL_NOT_CALIBRATED: '该网页渠道尚未完成真实页面安全校准，当前仅支持本地离线验证，禁止发送。',
   CHALLENGE_REQUIRED: '请在专属浏览器完成平台验证后再同步。',
   LOGIN_REQUIRED: '请先在专属浏览器登录。',
   CAPABILITY_UNVERIFIED: '请先打开专属浏览器并同步此通道',

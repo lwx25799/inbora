@@ -4,12 +4,14 @@ import {
   accountRegistrationUnconfirmed,
   disconnectAccountV2,
   isOfficialApiPlatform,
+  isWebBrowserPlatform,
   listAccountsV2,
   mockRegistrationAccountRef,
   MOCK_PLATFORM_ID,
   platformNames,
   reactivateAccountV2,
   registerMockAccountV2,
+  requestV2,
   runtimeSession,
   type AccountSummary,
   type MockRegistration,
@@ -17,6 +19,8 @@ import {
 } from './api';
 import { explainSafe, extractErrorCode } from './error-messages';
 import { OfficialChannelCreator, OfficialChannelManagerPanel } from './OfficialChannelEditor';
+import { clearPendingWebRegistration, getPendingWebRegistration, WebChannelCreator } from './WebChannelCreator';
+import { resolveWebChannelPresentation, type WebAccountStatusSnapshot } from './web-channel-status';
 
 const title = '已接入账号';
 const defaultDisplayLabel = '合成验证账号';
@@ -92,14 +96,51 @@ function ConnectedAccounts({
   const [registration, setRegistration] = useState(pendingRegistrations.get(runtime) ?? null);
   const [confirmAccount, setConfirmAccount] = useState<string | null>(null);
   const [showOfficialCreator, setShowOfficialCreator] = useState(false);
+  const [showWebCreator, setShowWebCreator] = useState(false);
   const [expandedOfficialRef, setExpandedOfficialRef] = useState<string | null>(null);
+  const [webStatuses, setWebStatuses] = useState<
+    Record<string, { status: WebAccountStatusSnapshot | null; error: boolean }>
+  >({});
   const [pending, setPending] = useState<'list' | 'write' | null>('list');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const lifetime = useRef<{ busy: boolean } | null>(null);
   const latestStatus = useRef(status);
   latestStatus.current = status;
+  const latestAccounts = useRef<AccountSummary[] | null>(null);
+  latestAccounts.current = accounts;
+  const lifecycleKey = `${status.browser.state}:${status.browser.mode}:${Boolean(status.automation?.emergencyStopped)}`;
+  const prevLifecycleKey = useRef(lifecycleKey);
   const disabled = !!busy || pending !== null;
+
+  const fetchWebStatuses = useCallback(async (
+    list: AccountSummary[],
+    current: { busy: boolean },
+  ) => {
+    const webAccounts = list.filter(
+      account =>
+        (account.status === 'ACTIVE' || account.status === 'DISCONNECTED') &&
+        isWebBrowserPlatform(account.platform),
+    );
+    if (webAccounts.length === 0) {
+      if (lifetime.current === current) setWebStatuses({});
+      return;
+    }
+    const entries = await Promise.all(
+      webAccounts.map(async account => {
+        try {
+          const statusResult = await requestV2<WebAccountStatusSnapshot>(
+            { kind: 'ACCOUNT', accountRef: account.accountRef },
+            { command: 'accounts', action: 'getAccountStatus', accountRef: account.accountRef },
+          );
+          return [account.accountRef, { status: statusResult, error: false }] as const;
+        } catch {
+          return [account.accountRef, { status: null, error: true }] as const;
+        }
+      }),
+    );
+    if (lifetime.current === current) setWebStatuses(Object.fromEntries(entries));
+  }, []);
 
   const run = useCallback(async (mutation?: AccountMutation) => {
     const current = lifetime.current;
@@ -135,9 +176,21 @@ function ConnectedAccounts({
         setPending('list');
       }
       const unresolved = pendingRegistrations.get(runtime);
+      const unresolvedWeb = getPendingWebRegistration(runtime);
       const next = await listAccountsV2(latestStatus.current);
       if (lifetime.current === current) {
         setAccounts(next);
+        const committedWeb = unresolvedWeb
+          ? next.find(account => account.accountRef === unresolvedWeb.accountRef)
+          : undefined;
+        if (committedWeb) {
+          clearPendingWebRegistration(runtime);
+          setShowWebCreator(false);
+          if (!mutation) {
+            setNotice(`已确认账号「${committedWeb.displayLabel}」注册成功，新账号默认关闭自动回复。`);
+          }
+        }
+        void fetchWebStatuses(next, current);
         if (
           unresolved &&
           next.some(
@@ -187,6 +240,17 @@ function ConnectedAccounts({
     };
   }, [run]);
 
+  if (prevLifecycleKey.current !== lifecycleKey) {
+    prevLifecycleKey.current = lifecycleKey;
+    const current = lifetime.current;
+    const list = latestAccounts.current;
+    if (current && list) {
+      queueMicrotask(() => {
+        if (lifetime.current === current) void fetchWebStatuses(list, current);
+      });
+    }
+  }
+
   return (
     <div className={cardCls}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -196,9 +260,23 @@ function ConnectedAccounts({
             type="button"
             className={btnPrimaryCls}
             disabled={disabled}
-            onClick={() => setShowOfficialCreator(!showOfficialCreator)}
+            onClick={() => {
+              setShowOfficialCreator(!showOfficialCreator);
+              setShowWebCreator(false);
+            }}
           >
             {showOfficialCreator ? '收起官方接入' : '接入官方渠道'}
+          </button>
+          <button
+            type="button"
+            className={btnOutlineCls}
+            disabled={disabled}
+            onClick={() => {
+              setShowWebCreator(!showWebCreator);
+              setShowOfficialCreator(false);
+            }}
+          >
+            {showWebCreator ? '收起网页接入' : '添加小红书 / B 站账号'}
           </button>
           <button
             type="button"
@@ -220,6 +298,21 @@ function ConnectedAccounts({
             if (!current) return;
             setShowOfficialCreator(false);
             setExpandedOfficialRef(accountRef);
+            await run();
+            if (lifetime.current === current) setNotice(message);
+          }}
+        />
+      )}
+
+      {showWebCreator && (
+        <WebChannelCreator
+          runtime={runtime}
+          disabled={disabled}
+          onClose={() => setShowWebCreator(false)}
+          onRegistered={async (message) => {
+            const current = lifetime.current;
+            if (!current) return;
+            setShowWebCreator(false);
             await run();
             if (lifetime.current === current) setNotice(message);
           }}
@@ -260,6 +353,61 @@ function ConnectedAccounts({
               <dd className="flex flex-col gap-2">
                 <div className="flex flex-wrap items-center gap-2 [&>code]:rounded [&>code]:bg-muted [&>code]:px-1.5 [&>code]:py-0.5 [&>code]:font-mono [&>code]:text-[11px] [&>code]:text-foreground">
                   <code>{account.id}</code>
+                  {isWebBrowserPlatform(account.platform) && (() => {
+                    const platformName = Object.hasOwn(platformNames, account.platform)
+                      ? platformNames[account.platform]!
+                      : account.platform;
+                    const entry = webStatuses[account.accountRef];
+                    const webPres = account.status !== 'ACTIVE' && account.status !== 'DISCONNECTED'
+                      ? resolveWebChannelPresentation({
+                        emergencyStopped: Boolean(status.automation?.emergencyStopped),
+                        platformName,
+                        webStatus: {
+                          connected: false,
+                          connectorState: 'ERROR',
+                          calibrated: entry?.status?.calibrated,
+                        },
+                        statusReadError: false,
+                        accountStatus: account.status,
+                      })
+                      : resolveWebChannelPresentation({
+                        emergencyStopped: Boolean(status.automation?.emergencyStopped),
+                        platformName,
+                        webStatus: entry?.status ?? null,
+                        statusReadError: Boolean(entry?.error),
+                        accountStatus: account.status,
+                      });
+                    const toneCls = webPres.badgeVariant === 'success'
+                      ? 'bg-success/12 text-success-foreground'
+                      : webPres.badgeVariant === 'error'
+                        ? 'bg-destructive/12 text-destructive-foreground'
+                        : webPres.badgeVariant === 'warning'
+                          ? 'bg-warning/12 text-warning-foreground'
+                          : 'bg-muted text-muted-foreground';
+                    return (
+                      <>
+                        <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-[11px] font-medium text-foreground">
+                          {accountStatusNames[account.status]}
+                        </span>
+                        <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-medium ${toneCls}`}>
+                          {webPres.stateLabel}
+                        </span>
+                        {webPres.showUncalibratedAlert && webPres.stateLabel !== '未校准 · 禁发' && (
+                          <span className="inline-flex items-center rounded-md bg-warning/12 px-2 py-0.5 text-[11px] font-medium text-warning-foreground">
+                            未校准真实页 · 仅离线验证禁发
+                          </span>
+                        )}
+                        {webPres.showUnknownCalibration &&
+                          webPres.stateLabel !== '校准待核验' &&
+                          webPres.stateLabel !== '未连接 · 校准待核验' &&
+                          webPres.stateLabel !== '已关闭 · 校准待核验' && (
+                          <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                            校准状态未知
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
                 <p className={hintCls}>
                   {accountStatusNames[account.status]} · 自动回复：
@@ -315,7 +463,8 @@ function ConnectedAccounts({
                           {expandedOfficialRef === account.accountRef ? '收起接入管理' : '管理接入'}
                         </button>
                       )}
-                      {isOfficialApiPlatform(account.platform) && onSelectWorkbenchAccount && (
+                      {(isOfficialApiPlatform(account.platform) || isWebBrowserPlatform(account.platform)) &&
+                        onSelectWorkbenchAccount && (
                         <button
                           type="button"
                           className={activeAccountRef === account.accountRef ? btnPrimaryCls : btnOutlineCls}
@@ -340,22 +489,43 @@ function ConnectedAccounts({
                     </div>
                   )
                 )}
-                {account.status === 'DISCONNECTED' && isOfficialApiPlatform(account.platform) && (
+                {account.status === 'DISCONNECTED' &&
+                  (isOfficialApiPlatform(account.platform) || isWebBrowserPlatform(account.platform)) && (
                   <div className="row flex flex-wrap items-center gap-2 pt-0.5">
-                    <button
-                      type="button"
-                      className={btnOutlineCls}
-                      disabled={disabled}
-                      onClick={() =>
-                        void run({
-                          request: () => reactivateAccountV2(account.accountRef),
-                          success: '账号已重新启用，请点击“管理接入”重新保存凭据后连接。',
-                          failure: '重新启用账号失败，请刷新列表后重试。',
-                        })
-                      }
-                    >
-                      重新启用
-                    </button>
+                    {isWebBrowserPlatform(account.platform) &&
+                    webStatuses[account.accountRef]?.status?.connectorState === 'CLOSING' ? (
+                      <button
+                        type="button"
+                        className={btnOutlineCls}
+                        disabled={disabled}
+                        onClick={() =>
+                          void run({
+                            request: () => disconnectAccountV2(account.accountRef),
+                            success: '已完成关闭并清理该账号运行实例。',
+                            failure: '关闭尚未完成，请稍后重试关闭。',
+                          })
+                        }
+                      >
+                        重试关闭
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className={btnOutlineCls}
+                        disabled={disabled}
+                        onClick={() =>
+                          void run({
+                            request: () => reactivateAccountV2(account.accountRef),
+                            success: isOfficialApiPlatform(account.platform)
+                              ? '账号已重新启用，请点击“管理接入”重新保存凭据后连接。'
+                              : '账号已重新启用。',
+                            failure: '重新启用账号失败，请刷新列表后重试。',
+                          })
+                        }
+                      >
+                        重新启用
+                      </button>
+                    )}
                   </div>
                 )}
                 {account.status === 'ACTIVE' &&

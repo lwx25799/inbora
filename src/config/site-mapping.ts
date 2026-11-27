@@ -123,3 +123,5 @@ export function validateCommentReplyMapping(value:unknown,real:boolean):CommentR
   requireSafe(new Set(mapping.portalWorkIds).size===mapping.portalWorkIds.length&&mapping.portalWorkIds.every(id=>mapping.observation.works.some(w=>w.id===id)),
     'COMMENT_PORTAL_WORK_SCOPE_REQUIRED');return mapping;
 }
+
+export * from './web-platform-mapping.js';

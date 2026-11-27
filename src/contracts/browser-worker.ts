@@ -1,6 +1,19 @@
 import { z } from 'zod';
-import { accountIdSchema } from './account.js';
+import {
+  BILIBILI_PLATFORM_ID,
+  DOUYIN_PLATFORM_ID,
+  XIAOHONGSHU_PLATFORM_ID,
+  accountIdSchema,
+} from './account.js';
 import { channelSchema, eventSchema } from './events.js';
+
+export const WORKER_PLATFORM_IDS = [
+  DOUYIN_PLATFORM_ID,
+  XIAOHONGSHU_PLATFORM_ID,
+  BILIBILI_PLATFORM_ID,
+] as const;
+export const workerPlatformIdSchema = z.enum(WORKER_PLATFORM_IDS);
+export type WorkerPlatformId = z.infer<typeof workerPlatformIdSchema>;
 
 export const MAX_WORKER_FRAME_BYTES = 1_048_576;
 
@@ -48,6 +61,12 @@ export const WorkerCommandSchema = z.discriminatedUnion('action', [
     notBefore,
     text: z.string(),
     target: target.optional(),
+  }).strict(),
+  z.object({
+    action: z.literal('verifyExisting'),
+    target,
+    text: z.string(),
+    notBefore,
   }).strict(),
   z.object({ action: z.literal('cancelPreparation'), handleId: z.uuid().optional() }).strict(),
   z.object({ action: z.literal('disposeTarget'), handleId: z.uuid() }).strict(),

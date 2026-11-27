@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { isOfficialApiPlatform } from '../contracts/account.js';
+import { isOfficialApiPlatform, isWebBrowserPlatform } from '../contracts/account.js';
 import { Blocked, DEFAULT_ACCOUNT_ID, MOCK_PLATFORM_ID, digest, requireSafe } from '../core/contracts.js';
 import { commandSchema } from '../contracts/client.js';
 import { MAX_NATIVE_BRIDGE_BYTES } from '../contracts/native-bridge.js';
@@ -235,7 +235,8 @@ export async function routeSidecarEnvelope(envelope: SidecarEnvelope, context: R
           requireSafe(account.status === 'ACTIVE', account.status === 'DISCONNECTED' ? 'ACCOUNT_DISCONNECTED' : 'ACCOUNT_NOT_ACTIVE');
           const supportedSecondary =
             (account.platform === MOCK_PLATFORM_ID && account.connector === MOCK_PLATFORM_ID) ||
-            (isOfficialApiPlatform(account.platform) && account.connector === account.platform);
+            (isOfficialApiPlatform(account.platform) && account.connector === account.platform) ||
+            (isWebBrowserPlatform(account.platform) && account.connector === account.platform);
           requireSafe(supportedSecondary, 'ACCOUNT_COMMAND_NOT_SUPPORTED');
         }
       }

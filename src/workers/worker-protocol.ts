@@ -4,7 +4,7 @@ import type { Readable } from 'node:stream';
 import { z } from 'zod';
 import {
   MAX_WORKER_FRAME_BYTES, WorkerRequestEnvelopeSchema, WorkerResponseEnvelopeSchema,
-  type WorkerRequestEnvelope, type WorkerResponseEnvelope,
+  type WorkerPlatformId, type WorkerRequestEnvelope, type WorkerResponseEnvelope,
 } from '../contracts/browser-worker.js';
 import { Blocked, requireSafe } from '../core/contracts.js';
 import type { InboundEvent, SendProof } from '../contracts/events.js';
@@ -16,6 +16,7 @@ export interface WorkerHello {
   ownerEpoch: number;
   profileLocked: true;
   mode: WorkerMode;
+  platformId?: WorkerPlatformId;
 }
 export interface WorkerStatus extends WorkerHello {
   state: 'OPEN' | 'CLOSED';

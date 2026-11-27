@@ -1,12 +1,14 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
+import { win32 } from 'node:path';
 import {
   accountIdSchema, accountSummarySchema, accountsCommandSchema, DEFAULT_ACCOUNT_ID, DOUYIN_PLATFORM_ID,
-  isOfficialApiPlatform, legacyTargetAliasSchema, WECHAT_KF_PLATFORM_ID, WECOM_AIBOT_PLATFORM_ID,
+  isOfficialApiPlatform, isWebBrowserPlatform, legacyTargetAliasSchema, WECHAT_KF_PLATFORM_ID, WECOM_AIBOT_PLATFORM_ID,
   type AccountId, type AccountSummary, type AccountsCommand, type LegacyTargetAlias,
 } from '../contracts/account.js';
 import { Blocked, digest, requireSafe, type Channel } from '../core/contracts.js';
 import { douyinCapabilities } from '../platform/douyin-platform-connector.js';
+import { webPlatformCapabilities } from '../platform/web-platform-worker-connector.js';
 import { wechatKfCapabilities } from '../platform/wechat-kf/connector.js';
 import { wecomAibotCapabilities } from '../platform/wecom-aibot/connector.js';
 import { parseStoredModelGrant } from './model-grant-binding.js';
@@ -46,8 +48,61 @@ export function legacyTargetRef(accountId: AccountId, channel: Channel, legacyTa
   return `ref:${digest([accountId, channel, legacyTargetKey])}`;
 }
 
+const VIRTUAL_RUNTIME_ROOT = 'C:\\__inbora_root__';
+
+export function canonicalizeProfileRef(ref: string, runtimeRoot?: string): string {
+  const trimmed = ref.trim();
+  if (!trimmed) return '';
+  const normalized = win32.normalize(trimmed.replace(/\//gu, '\\'));
+  if (win32.isAbsolute(normalized)) {
+    return normalized.replace(/\\+$/u, '').toLowerCase();
+  }
+  const base = runtimeRoot
+    ? win32.normalize(runtimeRoot.replace(/\//gu, '\\'))
+    : VIRTUAL_RUNTIME_ROOT;
+  return win32.resolve(base, normalized).replace(/\\+$/u, '').toLowerCase();
+}
+
+export function resolveWebProfileDir(runtimeRoot: string, accountId: string, profileRef?: string | null): string {
+  const rootNorm = win32.normalize(runtimeRoot.replace(/\//gu, '\\'));
+  const raw = profileRef?.trim();
+  if (!raw || raw === accountId) {
+    return win32.resolve(rootNorm, 'profiles', accountId);
+  }
+  return win32.resolve(rootNorm, win32.normalize(raw.replace(/\//gu, '\\')));
+}
+
+export function canonicalResolvedProfilePath(
+  runtimeRoot: string | undefined,
+  accountId: string,
+  platform: string,
+  profileRef?: string | null,
+): string {
+  const base = runtimeRoot
+    ? win32.normalize(runtimeRoot.replace(/\//gu, '\\'))
+    : VIRTUAL_RUNTIME_ROOT;
+  const raw = profileRef?.trim();
+  if (isWebBrowserPlatform(platform)) {
+    const resolved = !raw || raw === accountId
+      ? win32.resolve(base, 'profiles', accountId)
+      : win32.resolve(base, win32.normalize(raw.replace(/\//gu, '\\')));
+    return resolved.replace(/\\+$/u, '').toLowerCase();
+  }
+  if (raw) {
+    return win32.resolve(base, win32.normalize(raw.replace(/\//gu, '\\'))).replace(/\\+$/u, '').toLowerCase();
+  }
+  if (accountId === DEFAULT_ACCOUNT_ID || platform === DOUYIN_PLATFORM_ID) {
+    return win32.resolve(base, 'profile').replace(/\\+$/u, '').toLowerCase();
+  }
+  return '';
+}
+
 export class AccountStore {
-  constructor(readonly db: Database.Database, private readonly now: () => number = Date.now) {
+  constructor(
+    readonly db: Database.Database,
+    private readonly now: () => number = Date.now,
+    private readonly runtimeRoot?: string,
+  ) {
     requireSafe(db.pragma('user_version', { simple: true }) === 4, 'SCHEMA4_REQUIRED');
   }
 
@@ -78,7 +133,9 @@ export class AccountStore {
         ? wecomAibotCapabilities
         : row.connector === WECHAT_KF_PLATFORM_ID
           ? wechatKfCapabilities
-          : noConnectorCapabilities;
+          : isWebBrowserPlatform(row.connector)
+            ? webPlatformCapabilities
+            : noConnectorCapabilities;
     const verifiedChannels = this.db.prepare(`SELECT DISTINCT channel FROM account_channel_capabilities
       WHERE account_id=? AND connector=? AND state IN ('READ_OK','SEND_REVIEW_ONLY','SEND_AVAILABLE') AND expires_at>?
       ORDER BY channel`).pluck().all(row.id, row.connector, this.now()) as Channel[];
@@ -114,7 +171,26 @@ export class AccountStore {
       const id = accountId ?? `account_${randomUUID()}`;
       requireSafe(!ownId || !this.db.prepare('SELECT 1 FROM accounts WHERE platform=? AND own_id=?').get(platform, ownId),
         'ACCOUNT_IDENTITY_CONFLICT');
-      requireSafe(id !== DEFAULT_ACCOUNT_ID && !this.db.prepare('SELECT 1 FROM accounts WHERE id=?').get(id), 'ACCOUNT_ID_CONFLICT');
+      const candidateProfile = canonicalResolvedProfilePath(this.runtimeRoot, id, platform, profileRef);
+      const existingRows = this.db.prepare('SELECT id, platform, profile_ref FROM accounts').all() as {
+        id: string;
+        platform: string;
+        profile_ref: string;
+      }[];
+      requireSafe(
+        id.toLowerCase() !== DEFAULT_ACCOUNT_ID.toLowerCase()
+        && !existingRows.some(row => row.id.toLowerCase() === id.toLowerCase()),
+        'ACCOUNT_ID_CONFLICT',
+      );
+      if (candidateProfile) {
+        requireSafe(
+          !existingRows.some(row => {
+            const existingProfile = canonicalResolvedProfilePath(this.runtimeRoot, row.id, row.platform, row.profile_ref);
+            return existingProfile !== '' && existingProfile === candidateProfile;
+          }),
+          'ACCOUNT_PROFILE_CONFLICT',
+        );
+      }
       this.db.prepare(`INSERT INTO accounts (id, own_id, platform, connector, display_label, profile_ref, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, ownId ?? '', platform, connector, displayLabel ?? '', profileRef ?? '', now, now);
       return id;
@@ -145,8 +221,11 @@ export class AccountStore {
     }, now => {
       const existing = this.getAccount(accountRef);
       requireSafe(existing, 'ACCOUNT_NOT_FOUND');
-      requireSafe(isOfficialApiPlatform(existing.platform) && existing.connector === existing.platform,
-        'ACCOUNT_COMMAND_NOT_SUPPORTED');
+      requireSafe(
+        (isOfficialApiPlatform(existing.platform) || isWebBrowserPlatform(existing.platform))
+        && existing.connector === existing.platform,
+        'ACCOUNT_COMMAND_NOT_SUPPORTED',
+      );
       requireSafe(existing.status === 'DISCONNECTED', 'ACCOUNT_ALREADY_ACTIVE');
       requireSafe(this.db.prepare("UPDATE accounts SET status='ACTIVE', updated_at=? WHERE id=? AND status='DISCONNECTED'")
         .run(now, accountRef).changes === 1, 'ACCOUNT_NOT_FOUND');

@@ -1,5 +1,8 @@
 import { EventEmitter } from 'node:events';
-import { isOfficialApiPlatform } from '../contracts/account.js';
+import { existsSync, readdirSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { hasCalibratedWebReplyMapping } from '../config/web-platform-mapping.js';
+import { isOfficialApiPlatform, isWebBrowserPlatform, type WebBrowserPlatformId } from '../contracts/account.js';
 import {
   Blocked, DEFAULT_ACCOUNT_ID, MOCK_PLATFORM_ID, digest, requireSafe,
   type AccountId, type AccountsCommand, type AccountSummary,
@@ -7,8 +10,10 @@ import {
 import { MockPlatformConnector, mockCapabilities } from '../platform/mock-platform-connector.js';
 import { PlatformConnectorRegistry } from '../platform/platform-connector-registry.js';
 import type { PlatformConnector } from '../platform/platform-connector.js';
-import { AccountStore } from '../storage/account-store.js';
+import { webPlatformCapabilities } from '../platform/web-platform-worker-connector.js';
+import { AccountStore, canonicalResolvedProfilePath, resolveWebProfileDir } from '../storage/account-store.js';
 import type { EventStore } from '../storage/store.js';
+import type { WorkerMode } from '../workers/worker-protocol.js';
 import type { WorkbenchAuthority } from './authority.js';
 import type { ClientCommand } from './contracts.js';
 import {
@@ -17,6 +22,7 @@ import {
 } from './isolated-douyin-connector.js';
 import { MockAccountRuntime, type SharedMockModels } from './mock-account-runtime.js';
 import { OfficialChannelManager, type OfficialChannelManagerOptions } from './official-channel-manager.js';
+import { WebAccountRuntime } from './web-account-runtime.js';
 
 export { createRuntimeConnector, createWorkerDispatchLedger, runtimeWorkerMode };
 
@@ -91,6 +97,12 @@ export class AccountController {
   private registry = new PlatformConnectorRegistry();
   private readonly temporary = new Map<AccountId, MockPlatformConnector>();
   private readonly mockRuntimes = new Map<AccountId, MockAccountRuntime>();
+  private readonly webRuntimes = new Map<AccountId, WebAccountRuntime>();
+  private readonly closingWebAccounts = new Set<AccountId>();
+  private readonly webTransitions = new Map<AccountId, Promise<unknown>>();
+  private readonly recoveringWebAccounts = new Set<AccountId>();
+  private webOptions: { workerMode?: WorkerMode; allowFixture?: boolean; entryScript?: string } = {};
+  private globalRecover?: (parentToken: string) => Promise<void>;
   private officialManager: OfficialChannelManager | null = null;
   private officialOptions: OfficialChannelManagerOptions = {};
 
@@ -103,6 +115,27 @@ export class AccountController {
   configureOfficialOptions(options: OfficialChannelManagerOptions): void {
     requireSafe(!this.officialManager, 'OFFICIAL_CHANNEL_ALREADY_INITIALIZED');
     this.officialOptions = options;
+  }
+
+  configureWebOptions(options: { workerMode?: WorkerMode; allowFixture?: boolean; entryScript?: string }): void {
+    requireSafe(this.webRuntimes.size === 0, 'WEB_RUNTIME_ALREADY_INITIALIZED');
+    this.webOptions = options;
+  }
+
+  configureGlobalRecovery(recover: (parentToken: string) => Promise<void>): void {
+    this.globalRecover = recover;
+  }
+
+  onGlobalEmergencyResumed(): void {
+    for (const [accountId, runtime] of this.webRuntimes) {
+      if (this.recoveringWebAccounts.has(accountId)) continue;
+      if (readAccountHolds({ accountId, db: this.events.db }).length > 0) continue;
+      runtime.onGlobalEmergencyResumed();
+    }
+  }
+
+  getWebRuntime(accountId: AccountId): WebAccountRuntime | undefined {
+    return this.webRuntimes.get(accountId);
   }
 
   private get official(): OfficialChannelManager {
@@ -122,13 +155,28 @@ export class AccountController {
 
   get storage(): AccountStore | null {
     if (this.schemaVersion !== 4) return null;
-    return this.accountStore ??= new AccountStore(this.events.db, this.now);
+    return this.accountStore ??= new AccountStore(this.events.db, this.now, dirname(this.events.db.name));
   }
 
   initialize(): void {
     const disconnectedOfficial: AccountId[] = [];
+    const runtimeRoot = dirname(this.events.db.name);
+    const seenProfiles = new Set<string>([
+      canonicalResolvedProfilePath(runtimeRoot, this.primary.accountId, this.primary.platformId, ''),
+    ]);
     for (const account of this.storage?.listAccounts() ?? []) {
       this.attachMock(account);
+      if (account.status === 'ACTIVE' && this.usesWebBrowser(account)) {
+        const profileCanon = canonicalResolvedProfilePath(runtimeRoot, account.id, account.platform, account.profileRef);
+        if (!profileCanon || !seenProfiles.has(profileCanon)) {
+          try {
+            this.attachWeb(account);
+            if (profileCanon) seenProfiles.add(profileCanon);
+          } catch {
+            /* Leave colliding or invalid secondary web runtime unavailable without aborting startup. */
+          }
+        }
+      }
       if (account.status === 'DISCONNECTED' && isOfficialApiPlatform(account.platform)) {
         disconnectedOfficial.push(account.id);
       }
@@ -145,7 +193,9 @@ export class AccountController {
   securityStatus(accountId: AccountId) {
     return {
       securityHolds: readAccountHolds({ accountId, db: this.events.db }),
-      manualRecovery: accountId === this.primary.accountId ? this.primary.manualRecoveryStatus() : null,
+      manualRecovery: accountId === this.primary.accountId
+        ? this.primary.manualRecoveryStatus()
+        : this.webRuntimes.get(accountId)?.connector.manualRecoveryStatus() ?? null,
     };
   }
 
@@ -156,6 +206,22 @@ export class AccountController {
     const operator = this.primaryAuthority.requireGuiControl(parentToken, 'READ');
     if (isOfficialApiPlatform(account.platform) && account.connector === account.platform) {
       return this.official.dispatch(account, operator, command, () => { this.primaryAuthority.operator(parentToken, 'READ'); });
+    }
+    if (this.usesWebBrowser(account)) {
+      requireSafe(!this.closingWebAccounts.has(accountId), 'ACCOUNT_OPERATION_IN_PROGRESS');
+      const runtime = this.webRuntimes.get(accountId);
+      requireSafe(runtime, 'ACCOUNT_COMMAND_NOT_SUPPORTED');
+      return runtime.dispatch(
+        operator,
+        command,
+        () => { this.primaryAuthority.operator(parentToken, 'READ'); },
+        this.globalRecover ? async () => {
+          this.recoveringWebAccounts.add(accountId);
+          try { await this.globalRecover!(parentToken); }
+          finally { this.recoveringWebAccounts.delete(accountId); }
+        } : undefined,
+        () => { this.primaryAuthority.requireGuiControl(parentToken, 'CONTROL'); },
+      );
     }
     const connector = this.getMockConnector(accountId);
     requireSafe(this.usesMock(account) && connector, 'ACCOUNT_COMMAND_NOT_SUPPORTED');
@@ -176,10 +242,12 @@ export class AccountController {
   abortWorkerSends(): void {
     if (this.primary instanceof IsolatedDouyinConnector) this.primary.abortInFlight();
     this.officialManager?.onEmergencyStop();
+    for (const runtime of this.webRuntimes.values()) runtime.abortInFlight();
   }
 
   recheckWorkerSend(): void {
     if (this.primary instanceof IsolatedDouyinConnector) this.primary.recheckInFlight();
+    for (const runtime of this.webRuntimes.values()) runtime.recheckInFlight();
   }
 
   validateProtocolWrite(command: AccountsCommand): void {
@@ -207,27 +275,66 @@ export class AccountController {
     if ('commandId' in command) command = { ...command, commandId: command.commandId.toLowerCase() };
     switch (command.action) {
       case 'registerAccount': {
+        const runtimeRoot = dirname(this.events.db.name);
+        if (isWebBrowserPlatform(command.platform) && !findProtocolCommand(storage, command.commandId)) {
+          const candidateId = command.accountId ?? `account_${command.commandId}`;
+          if (command.accountId) {
+            this.assertNoDirCollision(join(runtimeRoot, 'accounts'), command.accountId);
+          }
+          if (command.accountId || command.profileRef?.trim()) {
+            const profileDir = resolveWebProfileDir(runtimeRoot, candidateId, command.profileRef);
+            this.assertNoDirCollision(dirname(profileDir), basename(profileDir));
+            const primaryProfile = canonicalResolvedProfilePath(runtimeRoot, this.primary.accountId, this.primary.platformId, '');
+            const candidateCanon = canonicalResolvedProfilePath(runtimeRoot, candidateId, command.platform, command.profileRef);
+            requireSafe(candidateCanon !== primaryProfile, 'ACCOUNT_PROFILE_CONFLICT');
+          }
+        }
         const account = this.change(storage, command, (_fresh, commandId) => {
           requireSafe(command.ownId === undefined || command.ownId.trim(), 'ACCOUNT_REQUIRED');
           return storage.registerAccount({ ...command, commandId });
         }, 'ACCOUNT_REGISTERED');
         const current = storage.getAccount(account.id)!;
         this.attachMock(current);
+        this.attachWeb(current);
         // Registration replays describe the original registration, even after a later disconnect.
-        return this.usesMock(account) ? { ...account, capabilities: copyCapabilities(mockCapabilities) } : account;
+        return this.usesMock(account)
+          ? { ...account, capabilities: copyCapabilities(mockCapabilities) }
+          : this.usesWebBrowser(account)
+            ? { ...account, capabilities: copyCapabilities(webPlatformCapabilities) }
+            : account;
       }
       case 'getAccountStatus': {
         const account = storage.getAccount(command.accountRef);
         requireSafe(account, 'ACCOUNT_NOT_FOUND');
         const connector = this.connectorFor(account);
         const transport = connector?.transportStatus?.();
+        const pendingWebClose = this.usesWebBrowser(account)
+          && (this.closingWebAccounts.has(account.id) || (account.status === 'DISCONNECTED' && this.webRuntimes.has(account.id)));
         const connectorState = transport?.transport === 'official_api'
           ? transport.state
-          : connector?.status().state ?? (account.status === 'DISCONNECTED' ? 'DISCONNECTED' : 'UNAVAILABLE');
+          : this.usesWebBrowser(account)
+            ? (pendingWebClose
+              ? 'CLOSING'
+              : account.status === 'DISCONNECTED'
+                ? 'DISCONNECTED'
+                : connector
+                  ? connector.status().state
+                  : 'UNAVAILABLE')
+            : connector?.status().state ?? (account.status === 'DISCONNECTED' ? 'DISCONNECTED' : 'UNAVAILABLE');
         const connected = transport?.transport === 'official_api'
           ? transport.state === 'CONNECTED'
-          : connectorState !== 'ACCOUNT_CHANGED' && (connector?.resourceIdentity().open ?? false);
+          : this.usesWebBrowser(account)
+            ? !pendingWebClose && connectorState === 'OPEN' && (connector?.resourceIdentity().open ?? false)
+            : connectorState !== 'ACCOUNT_CHANGED' && (connector?.resourceIdentity().open ?? false);
+        const calibrated = this.usesWebBrowser(account)
+          ? await hasCalibratedWebReplyMapping(
+            join(this.primary.root, 'accounts', account.id),
+            account.platform as WebBrowserPlatformId,
+            this.webOptions.allowFixture !== undefined ? { allowFixture: this.webOptions.allowFixture } : undefined,
+          )
+          : undefined;
         return { ...this.withCapabilities(account, connector), connected, connectorState,
+          ...(calibrated !== undefined ? { calibrated } : {}),
           ...(transport?.transport === 'official_api' ? { transportStatus: transport } : {}) };
       }
       case 'getOfficialChannelConfig': {
@@ -251,45 +358,71 @@ export class AccountController {
         return this.official.disconnectTransport(account);
       }
       case 'disconnectAccount': {
-        requireSafe(command.confirmed === true, 'ACCOUNT_DISCONNECT_CONFIRMATION_REQUIRED');
-        const connector = this.temporary.get(command.accountRef);
-        const runtime = this.mockRuntimes.get(command.accountRef);
-        let wasFresh = false;
-        const account = this.change(storage, command, (fresh, commandId) => {
-          wasFresh = fresh;
-          if (fresh) {
-            requireSafe(command.accountRef !== DEFAULT_ACCOUNT_ID && command.accountRef !== this.primary.accountId,
-              'PRIMARY_ACCOUNT_DISCONNECT_BLOCKED');
-            requireSafe((!connector || connector.isIdle()) && (!runtime || runtime.isIdle())
-              && (!this.officialManager || this.officialManager.isIdle(command.accountRef))
-              && !this.hasInFlightIntent(command.accountRef), 'ACCOUNT_OPERATION_IN_PROGRESS');
+        return this.sequenceWebAccount(command.accountRef, async () => {
+          requireSafe(command.confirmed === true, 'ACCOUNT_DISCONNECT_CONFIRMATION_REQUIRED');
+          const connector = this.temporary.get(command.accountRef);
+          const runtime = this.mockRuntimes.get(command.accountRef);
+          const webRuntime = this.webRuntimes.get(command.accountRef);
+          const existing = storage.getAccount(command.accountRef);
+          let wasFresh = false;
+          const account = this.change(storage, command, (fresh, commandId) => {
+            wasFresh = fresh;
+            if (fresh) {
+              requireSafe(command.accountRef !== DEFAULT_ACCOUNT_ID && command.accountRef !== this.primary.accountId,
+                'PRIMARY_ACCOUNT_DISCONNECT_BLOCKED');
+              requireSafe((!connector || connector.isIdle()) && (!runtime || runtime.isIdle())
+                && (!webRuntime || webRuntime.isIdle() || existing?.status === 'DISCONNECTED')
+                && !this.closingWebAccounts.has(command.accountRef)
+                && (!this.officialManager || this.officialManager.isIdle(command.accountRef))
+                && !this.hasInFlightIntent(command.accountRef), 'ACCOUNT_OPERATION_IN_PROGRESS');
+            }
+            return storage.disconnectAccount({ ...command, commandId });
+          }, 'ACCOUNT_DISCONNECTED');
+          if (storage.getAccount(account.id)?.status === 'DISCONNECTED') {
+            if (wasFresh && connector) {
+              this.temporary.delete(account.id);
+              this.mockRuntimes.delete(account.id);
+              this.rebuildRegistry();
+              await (runtime?.close() ?? connector.close());
+            }
+            if (webRuntime) {
+              this.closingWebAccounts.add(account.id);
+              try {
+                await webRuntime.close();
+                this.webRuntimes.delete(account.id);
+                this.rebuildRegistry();
+              } finally {
+                this.closingWebAccounts.delete(account.id);
+              }
+            }
+            if (wasFresh && isOfficialApiPlatform(account.platform)) {
+              await this.official.onAccountDisconnected(account.id);
+            }
           }
-          return storage.disconnectAccount({ ...command, commandId });
-        }, 'ACCOUNT_DISCONNECTED');
-        if (wasFresh && storage.getAccount(account.id)?.status === 'DISCONNECTED') {
-          if (connector) {
-            this.temporary.delete(account.id);
-            this.mockRuntimes.delete(account.id);
-            this.rebuildRegistry();
-            await (runtime?.close() ?? connector.close());
-          }
-          if (isOfficialApiPlatform(account.platform)) {
-            await this.official.onAccountDisconnected(account.id);
-          }
-        }
-        return account;
+          return account;
+        });
       }
       case 'reactivateAccount': {
-        requireSafe(command.confirmed === true, 'ACCOUNT_DISCONNECT_CONFIRMATION_REQUIRED');
-        const replay = findProtocolCommand(storage, command.commandId);
-        if (!replay) {
+        return this.sequenceWebAccount(command.accountRef, async () => {
+          requireSafe(command.confirmed === true, 'ACCOUNT_DISCONNECT_CONFIRMATION_REQUIRED');
           const existing = storage.getAccount(command.accountRef);
-          if (existing && existing.status === 'DISCONNECTED' && isOfficialApiPlatform(existing.platform)) {
-            await this.official.purgeDisconnectedCredentials(existing.id);
+          requireSafe(
+            !this.closingWebAccounts.has(command.accountRef)
+            && !(existing?.status === 'DISCONNECTED' && this.webRuntimes.has(command.accountRef)),
+            'ACCOUNT_OPERATION_IN_PROGRESS',
+          );
+          const replay = findProtocolCommand(storage, command.commandId);
+          if (!replay) {
+            if (existing && existing.status === 'DISCONNECTED' && isOfficialApiPlatform(existing.platform)) {
+              await this.official.purgeDisconnectedCredentials(existing.id);
+            }
           }
-        }
-        return this.change(storage, command, (_fresh, commandId) =>
-          storage.reactivateAccount({ ...command, commandId }), 'ACCOUNT_REACTIVATED');
+          const reactivated = this.change(storage, command, (_fresh, commandId) =>
+            storage.reactivateAccount({ ...command, commandId }), 'ACCOUNT_REACTIVATED');
+          const current = storage.getAccount(reactivated.id);
+          if (current) this.attachWeb(current);
+          return current ? this.withCapabilities(current) : reactivated;
+        });
       }
     }
   }
@@ -326,6 +459,10 @@ export class AccountController {
     return account.platform === MOCK_PLATFORM_ID && account.connector === MOCK_PLATFORM_ID;
   }
 
+  private usesWebBrowser(account: AccountSummary): boolean {
+    return isWebBrowserPlatform(account.platform) && account.connector === account.platform;
+  }
+
   private attachMock(account: AccountSummary): void {
     if (account.status !== 'ACTIVE' || !this.usesMock(account) || account.id === this.primary.accountId ||
       this.temporary.has(account.id)) return;
@@ -334,11 +471,46 @@ export class AccountController {
     this.temporary.set(account.id, connector);
   }
 
+  private assertNoDirCollision(parentDir: string, name: string): void {
+    if (!existsSync(parentDir)) return;
+    const lower = name.toLowerCase();
+    const collision = readdirSync(parentDir).some(entry => entry.toLowerCase() === lower && entry !== name);
+    requireSafe(!collision, 'ACCOUNT_PROFILE_CONFLICT');
+  }
+
+  private sequenceWebAccount<T>(accountId: AccountId, operation: () => Promise<T>): Promise<T> {
+    const previous = this.webTransitions.get(accountId) ?? Promise.resolve();
+    const task = previous.catch(() => undefined).then(operation);
+    const tail = task.then(() => undefined, () => undefined);
+    this.webTransitions.set(accountId, tail);
+    void tail.finally(() => {
+      if (this.webTransitions.get(accountId) === tail) this.webTransitions.delete(accountId);
+    });
+    return task;
+  }
+
+  private attachWeb(account: AccountSummary): void {
+    if (account.status !== 'ACTIVE' || !this.usesWebBrowser(account) || account.id === this.primary.accountId ||
+      this.webRuntimes.has(account.id)) return;
+    const runtime = new WebAccountRuntime({
+      file: this.events.db.name,
+      account,
+      now: this.now,
+      sharedModels: this.sharedModels,
+      emit: event => this.updates.emit('update', account.id, { event }),
+      readAudit: auditPage,
+      ...this.webOptions,
+    });
+    this.registry.register(runtime.connector);
+    this.webRuntimes.set(account.id, runtime);
+  }
+
   private connectorFor(account: AccountSummary): PlatformConnector | undefined {
     if (account.status === 'DISCONNECTED') return;
     if (
       (account.id === this.primary.accountId && account.platform === this.primary.platformId)
       || this.temporary.has(account.id)
+      || this.webRuntimes.has(account.id)
       || this.officialManager?.getConnector(account.id)
     ) {
       return this.registry.resolve(account.platform, account.id);
@@ -353,15 +525,18 @@ export class AccountController {
     this.registry = new PlatformConnectorRegistry();
     this.registry.register(this.primary);
     for (const connector of this.temporary.values()) this.registry.register(connector);
+    for (const runtime of this.webRuntimes.values()) this.registry.register(runtime.connector);
     for (const connector of this.officialManager?.activeConnectors() ?? []) this.registry.register(connector);
   }
 
   async close(): Promise<void> {
     const closing = [...this.temporary].map(([id, connector]) => this.mockRuntimes.get(id)?.close() ?? connector.close());
+    const closingWeb = [...this.webRuntimes.values()].map(runtime => runtime.close());
     this.temporary.clear();
     this.mockRuntimes.clear();
+    this.webRuntimes.clear();
     const officialClose = this.officialManager?.close() ?? Promise.resolve();
     this.rebuildRegistry();
-    await Promise.all([...closing, officialClose]);
+    await Promise.all([...closing, ...closingWeb, officialClose]);
   }
 }

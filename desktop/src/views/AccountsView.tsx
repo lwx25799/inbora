@@ -24,6 +24,7 @@ import {
 import {
   capabilityNames,
   isOfficialApiPlatform,
+  isWebBrowserPlatform,
   platformNames,
   reasons,
   request,
@@ -35,12 +36,15 @@ import {
   type Status,
 } from '@/api';
 import { browserState, time } from '@/presentation';
+import { resolveWebChannelPresentation, type WebAccountStatusSnapshot } from '@/web-channel-status';
 
 export interface OfficialAccountStatusSnapshot {
   connected: boolean;
   connectorState?: string;
   transportStatus?: OfficialChannelPublicConfig['transportStatus'];
 }
+
+export type { WebAccountStatusSnapshot };
 
 export interface AccountsViewProps {
   status: Status;
@@ -51,6 +55,7 @@ export interface AccountsViewProps {
   activeAccountRef?: string | undefined;
   onSelectWorkbenchAccount?: ((account: AccountSummary | null) => void) | undefined;
   officialAccountStatus?: OfficialAccountStatusSnapshot | null | undefined;
+  webAccountStatus?: WebAccountStatusSnapshot | null | undefined;
 }
 
 const officialStateLabels: Record<string, string> = {
@@ -150,9 +155,11 @@ export function AccountsView({
   activeAccountRef,
   onSelectWorkbenchAccount,
   officialAccountStatus,
+  webAccountStatus,
 }: AccountsViewProps): React.ReactElement {
   const resolvedActiveRef = activeAccount?.accountRef ?? activeAccountRef;
   const isOfficialChannel = Boolean(activeAccount && isOfficialApiPlatform(activeAccount.platform));
+  const isWebChannel = Boolean(activeAccount && isWebBrowserPlatform(activeAccount.platform));
   const officialPlatformName = activeAccount
     ? (platformNames[activeAccount.platform] ?? activeAccount.platform)
     : '';
@@ -163,10 +170,15 @@ export function AccountsView({
   const [fetchedOfficialStatus, setFetchedOfficialStatus] =
     useState<OfficialAccountStatusSnapshot | null>(null);
   const [officialStatusError, setOfficialStatusError] = useState(false);
+  const [fetchedWebStatus, setFetchedWebStatus] =
+    useState<WebAccountStatusSnapshot | null>(null);
+  const [webStatusError, setWebStatusError] = useState(false);
 
   const officialAccountRef = isOfficialChannel ? activeAccount?.accountRef : undefined;
+  const webAccountRef = isWebChannel ? activeAccount?.accountRef : undefined;
   const emergencyStopped = Boolean(status.automation?.emergencyStopped);
   const statusFetchSeq = useRef(0);
+  const webStatusFetchSeq = useRef(0);
 
   useEffect(() => {
     if (!officialAccountRef || officialAccountStatus !== undefined) {
@@ -196,6 +208,34 @@ export function AccountsView({
     };
   }, [officialAccountRef, officialAccountStatus, status]);
 
+  useEffect(() => {
+    if (!webAccountRef || webAccountStatus !== undefined) {
+      webStatusFetchSeq.current += 1;
+      setFetchedWebStatus(null);
+      setWebStatusError(false);
+      return;
+    }
+    let active = true;
+    const seq = ++webStatusFetchSeq.current;
+    void requestV2<WebAccountStatusSnapshot>(
+      { kind: 'ACCOUNT', accountRef: webAccountRef },
+      { command: 'accounts', action: 'getAccountStatus', accountRef: webAccountRef },
+    )
+      .then(result => {
+        if (!active || webStatusFetchSeq.current !== seq) return;
+        setFetchedWebStatus(result);
+        setWebStatusError(false);
+      })
+      .catch(() => {
+        if (!active || webStatusFetchSeq.current !== seq) return;
+        setFetchedWebStatus(null);
+        setWebStatusError(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [webAccountRef, webAccountStatus, status]);
+
   const effectiveOfficialStatus =
     officialAccountStatus !== undefined ? officialAccountStatus : fetchedOfficialStatus;
   const officialPresentation = resolveOfficialTransportPresentation(
@@ -204,6 +244,14 @@ export function AccountsView({
     effectiveOfficialStatus,
     officialStatusError,
   );
+  const effectiveWebStatus =
+    webAccountStatus !== undefined ? webAccountStatus : fetchedWebStatus;
+  const webPresentation = resolveWebChannelPresentation({
+    emergencyStopped,
+    platformName: officialPlatformName,
+    webStatus: effectiveWebStatus,
+    statusReadError: webStatusError,
+  });
 
   return (
     <div className="mx-auto max-w-[1200px] space-y-5 px-6 py-5">
@@ -212,7 +260,9 @@ export function AccountsView({
         description={
           isOfficialChannel
             ? '管理当前官方渠道账号、通道收发能力与多账号工作台切换'
-            : '管理本地绑定账号、各通道收发能力、浏览器运行窗口以及顶部通知独立同步'
+            : isWebChannel
+              ? `管理当前${officialPlatformName}账号、通道收发能力与页面安全校准状态`
+              : '管理本地绑定账号、各通道收发能力、浏览器运行窗口以及顶部通知独立同步'
         }
       />
 
@@ -229,14 +279,14 @@ export function AccountsView({
             </Badge>
           </div>
           <div className="mt-2 font-heading text-base font-semibold text-foreground">
-            {isOfficialChannel && activeAccount
+            {(isOfficialChannel || isWebChannel) && activeAccount
               ? activeAccount.displayLabel
               : status.account
                 ? '已绑定本地账号'
                 : '尚未核验账号'}
           </div>
           <p className="mt-1 truncate text-xs text-muted-foreground">
-            {isOfficialChannel && activeAccount ? (
+            {(isOfficialChannel || isWebChannel) && activeAccount ? (
               <>
                 <span>{officialPlatformName}</span>
                 {status.account?.identity && (
@@ -277,6 +327,24 @@ export function AccountsView({
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
               {officialPresentation.summaryText}
+            </p>
+          </Card>
+        ) : isWebChannel ? (
+          <Card className="p-4">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5 font-medium">
+                <MonitorIcon className="size-3.5 text-primary" />
+                {officialPlatformName}通道状态
+              </span>
+              <Badge variant={webPresentation.badgeVariant} size="sm">
+                {webPresentation.stateLabel}
+              </Badge>
+            </div>
+            <div className="mt-2 text-[13.5px] font-semibold text-foreground">
+              {webPresentation.headline}
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {webPresentation.summaryText}
             </p>
           </Card>
         ) : (
@@ -325,6 +393,36 @@ export function AccountsView({
           </div>
         </Card>
       </div>
+
+      {isWebChannel && webPresentation.showStatusErrorAlert && (
+        <Alert variant="warning">
+          <ShieldAlertIcon />
+          <AlertTitle>暂未能读取{officialPlatformName}通道状态，请刷新后重试</AlertTitle>
+          <AlertDescription>
+            无法确认当前运行与页面校准状态，已暂停外发操作；请刷新列表或稍后重试。
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {isWebChannel && webPresentation.showUncalibratedAlert && (
+        <Alert variant="warning">
+          <ShieldAlertIcon />
+          <AlertTitle>{officialPlatformName}真实页面尚未完成安全校准，当前禁止发送</AlertTitle>
+          <AlertDescription>
+            未校准真实页 · 仅离线验证禁发。真实页面完成安全校准前已阻止所有自动与人工发送。
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {isWebChannel && webPresentation.showUnknownCalibration && (
+        <Alert variant="warning">
+          <ShieldAlertIcon />
+          <AlertTitle>{officialPlatformName}真实页面校准状态未知，当前禁止发送</AlertTitle>
+          <AlertDescription>
+            未确认真实页面是否完成安全校准，暂仅支持本地离线验证；请刷新通道状态后再试。
+          </AlertDescription>
+        </Alert>
+      )}
 
       {holds.length > 0 && (
         <Alert variant="warning">
@@ -411,6 +509,66 @@ export function AccountsView({
                   </div>
                   <p className="pt-1 leading-relaxed">
                     通道能力与模型密钥分别生效；如需调整凭据或连接状态，请在左侧「已接入账号」展开对应账号的「管理接入」。
+                  </p>
+                </div>
+              </Card>
+            </CardFrame>
+          ) : isWebChannel ? (
+            <CardFrame>
+              <CardFrameHeader>
+                <CardFrameTitle>{officialPlatformName}通道能力与安全校准</CardFrameTitle>
+                <CardFrameDescription>
+                  当前账号使用独立专属浏览器目录运行，各账号数据隔离
+                </CardFrameDescription>
+              </CardFrameHeader>
+              <Card className="space-y-4 p-5">
+                <dl className="divide-y divide-border/70 overflow-hidden rounded-xl border border-border/80 bg-background text-xs">
+                  {status.capabilities.length === 0 ? (
+                    <div className="px-4 py-3 text-muted-foreground">尚无通道能力记录。</div>
+                  ) : (
+                    status.capabilities.map(c => (
+                      <div
+                        key={c.channel}
+                        className="flex flex-wrap items-center justify-between gap-2 px-4 py-3"
+                      >
+                        <dt className="font-medium text-foreground">
+                          {c.channel === 'DIRECT_MESSAGE' ? '私信能力' : '评论能力'}
+                        </dt>
+                        <dd className="flex flex-wrap items-center gap-1.5 text-muted-foreground">
+                          <Badge
+                            variant={
+                              c.state === 'SEND_AVAILABLE'
+                                ? 'success'
+                                : c.state === 'BLOCKED'
+                                  ? 'error'
+                                  : 'secondary'
+                            }
+                            size="sm"
+                          >
+                            {capabilityNames[c.state] ?? c.state}
+                          </Badge>
+                          {c.reason && <span>{reasons[c.reason] ?? c.reason}</span>}
+                        </dd>
+                      </div>
+                    ))
+                  )}
+                </dl>
+
+                <div className="space-y-1.5 rounded-xl border border-border/75 bg-muted/35 px-4 py-3 text-xs text-muted-foreground">
+                  <div className="flex items-center justify-between gap-2">
+                    <span>所属平台</span>
+                    <span className="font-medium text-foreground">{officialPlatformName}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span>运行状态</span>
+                    <span className="font-medium text-foreground">{webPresentation.stateLabel}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span>真实页校准</span>
+                    <span className="font-medium text-foreground">{webPresentation.calibrationLabel}</span>
+                  </div>
+                  <p className="pt-1 leading-relaxed">
+                    通道能力与模型密钥分别生效；未完成真实页面安全校准前仅支持本地离线验证，禁止任何对外发送。
                   </p>
                 </div>
               </Card>

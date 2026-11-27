@@ -2,8 +2,15 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child
 import { randomUUID } from 'node:crypto';
 import { extname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { WorkerCommand, WorkerSendBinding, WorkerTarget } from '../contracts/browser-worker.js';
-import type { Channel, TargetSnapshot } from '../contracts/events.js';
+import { isWebBrowserPlatform } from '../contracts/account.js';
+import {
+  workerPlatformIdSchema,
+  type WorkerCommand,
+  type WorkerPlatformId,
+  type WorkerSendBinding,
+  type WorkerTarget,
+} from '../contracts/browser-worker.js';
+import type { Channel, SendProof, TargetSnapshot } from '../contracts/events.js';
 import { Blocked, requireSafe } from '../core/contracts.js';
 import {
   encodeWorkerPermitResult, encodeWorkerRequest, readWorkerOutput, workerTextDigest,
@@ -16,7 +23,7 @@ const exitTimeoutMs = 5_000;
 const unconfirmedTrees = new Set<string>();
 const startupErrors = new Set([
   'OWNER_LOCKED_OR_PORT_UNAVAILABLE', 'OWNER_PORT_RESERVED', 'WORKER_PROFILE_DIR_INVALID',
-  'WORKER_MODE_INVALID', 'WORKER_EPOCH_INVALID', 'WORKER_SESSION_INVALID', 'WORKER_START_FAILED',
+  'WORKER_MODE_INVALID', 'WORKER_PLATFORM_INVALID', 'WORKER_EPOCH_INVALID', 'WORKER_SESSION_INVALID', 'WORKER_START_FAILED',
 ]);
 const workerEnvironment = new Set([
   'PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE',
@@ -47,6 +54,9 @@ export interface WorkerDispatchLedger {
 
 export interface BrowserWorkerHostOptions {
   profileDir: string;
+  accountRoot?: string;
+  platformId?: WorkerPlatformId;
+  allowFixture?: boolean;
   mode?: WorkerMode;
   entryScript?: string;
   ledger?: WorkerDispatchLedger;
@@ -66,6 +76,9 @@ export interface ExecuteWorkerSend {
 export class BrowserWorkerHost {
   private readonly committedDispatchIntents = new Set<string>();
   private readonly profileDir: string;
+  private readonly accountRoot: string | undefined;
+  readonly platformId: WorkerPlatformId;
+  private readonly allowFixture: boolean;
   private readonly mode: WorkerMode;
   private readonly entryScript: string;
   private readonly ledger: WorkerDispatchLedger | undefined;
@@ -74,9 +87,12 @@ export class BrowserWorkerHost {
   private epoch = 0;
   private lifecycle = Promise.resolve();
 
-  constructor({ profileDir, mode = 'browser', entryScript, ledger, onPermitCheck }: BrowserWorkerHostOptions) {
+  constructor({ profileDir, accountRoot, platformId = 'douyin', allowFixture = false, mode = 'browser', entryScript, ledger, onPermitCheck }: BrowserWorkerHostOptions) {
     requireSafe(profileDir.length > 0, 'WORKER_PROFILE_DIR_INVALID');
     this.profileDir = resolve(profileDir);
+    this.accountRoot = accountRoot ? resolve(accountRoot) : undefined;
+    this.platformId = workerPlatformIdSchema.parse(platformId);
+    this.allowFixture = allowFixture;
     this.mode = mode;
     this.ledger = ledger;
     this.onPermitCheck = onPermitCheck;
@@ -147,6 +163,12 @@ export class BrowserWorkerHost {
   async executeSend(input: ExecuteWorkerSend): Promise<WorkerSendEvidence> {
     const { intentId, notBefore, text, targetDigest, nonce = randomUUID(), permitExpiresAt } = input;
     requireSafe(!this.committedDispatchIntents.has(intentId) && !this.ledger?.hasDispatched(intentId), 'WORKER_CRASH_NO_REPLAY');
+    const boundary = Date.parse(notBefore);
+    const now = Date.now();
+    // Wait out one Windows 15.6ms clock tick when notBefore is already <= caller clock so child Date.now() lag cannot reject a valid send.
+    if (Number.isFinite(boundary) && boundary <= now && now - boundary < 20) {
+      await new Promise(resolve => setTimeout(resolve, 20 - (now - boundary)));
+    }
     const worker = this.activeWorker();
     requireSafe(!worker.activeSends.has(nonce), 'WORKER_NONCE_REPLAYED');
     const binding = { intentId, nonce, sessionId: worker.sessionId, ownerEpoch: worker.ownerEpoch,
@@ -176,8 +198,20 @@ export class BrowserWorkerHost {
     }
   }
 
-  readback({ intentId, baseline, notBefore, text, target }: Omit<Extract<WorkerCommand, { action: 'readback' }>, 'action'>): Promise<WorkerReadback> {
-    return this.call({ action: 'readback', intentId, baseline, notBefore, text, target });
+  async readback({ intentId, baseline, notBefore, text, target }: Omit<Extract<WorkerCommand, { action: 'readback' }>, 'action'>): Promise<WorkerReadback> {
+    const result = await this.call<WorkerReadback>({ action: 'readback', intentId, baseline, notBefore, text, target });
+    if (result.verified) {
+      const proofAt = Date.parse(result.proof?.sentAt ?? result.evidence.executedAt);
+      const skewLimit = isWebBrowserPlatform(this.platformId) ? 50 : 20;
+      if (Number.isFinite(proofAt) && proofAt > Date.now() && proofAt - Date.now() <= skewLimit) {
+        await new Promise(resolve => setTimeout(resolve, proofAt - Date.now() + 1));
+      }
+    }
+    return result;
+  }
+
+  verifyExisting({ target, text, notBefore }: Omit<Extract<WorkerCommand, { action: 'verifyExisting' }>, 'action'>): Promise<{ verified: boolean; proof: SendProof | null }> {
+    return this.call({ action: 'verifyExisting', target, text, notBefore });
   }
 
   private serialize<T>(action: () => Promise<T>): Promise<T> {
@@ -211,6 +245,9 @@ export class BrowserWorkerHost {
         ...Object.fromEntries(Object.entries(process.env).filter(([key]) => workerEnvironment.has(key.toUpperCase()))),
         TSX_DISABLE_CACHE: '1',
         INBORA_WORKER_PROFILE_DIR: this.profileDir, INBORA_WORKER_MODE: this.mode,
+        INBORA_WORKER_PLATFORM: this.platformId,
+        ...(this.allowFixture && this.platformId !== 'douyin' ? { INBORA_WORKER_ALLOW_FIXTURE: '1' } : {}),
+        ...(this.accountRoot ? { INBORA_WORKER_ACCOUNT_ROOT: this.accountRoot } : {}),
         INBORA_WORKER_SESSION_ID: sessionId, INBORA_WORKER_EPOCH: String(ownerEpoch),
       },
     });
@@ -242,7 +279,9 @@ export class BrowserWorkerHost {
     try {
       const hello = await this.request(worker, { action: 'hello' }) as WorkerHello;
       requireSafe(hello && hello.pid === child.pid && hello.sessionId === sessionId && hello.ownerEpoch === ownerEpoch &&
-        hello.profileLocked === true && hello.mode === this.mode, 'WORKER_HANDSHAKE_INVALID');
+        hello.profileLocked === true && hello.mode === this.mode &&
+        (this.platformId === 'douyin' ? hello.platformId === undefined || hello.platformId === 'douyin' : hello.platformId === this.platformId),
+      'WORKER_HANDSHAKE_INVALID');
       worker.ready = true;
       return hello;
     } catch (error) {

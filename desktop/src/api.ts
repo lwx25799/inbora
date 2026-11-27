@@ -1,10 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
-  accountSummarySchema, DEFAULT_ACCOUNT_ID, DOUYIN_PLATFORM_ID, isOfficialApiPlatform, MOCK_PLATFORM_ID,
-  officialChannelPublicConfigSchema, WECHAT_KF_PLATFORM_ID, WECOM_AIBOT_PLATFORM_ID,
+  accountSummarySchema, BILIBILI_PLATFORM_ID, DEFAULT_ACCOUNT_ID, DOUYIN_PLATFORM_ID,
+  isOfficialApiPlatform, isWebBrowserPlatform, MOCK_PLATFORM_ID, officialChannelPublicConfigSchema,
+  WECHAT_KF_PLATFORM_ID, WECOM_AIBOT_PLATFORM_ID, XIAOHONGSHU_PLATFORM_ID,
   type AccountId, type AccountSummary, type AccountsCommand, type ChannelCredentialStorage,
   type ConfigureOfficialChannelCommand, type OfficialApiPlatformId, type OfficialChannelCredentialMode,
-  type OfficialChannelPublicConfig,
+  type OfficialChannelPublicConfig, type WebBrowserPlatformId,
 } from "../../src/contracts/account.js";
 import { isMutatingClientCommand, requiredScopeForCommand, type ProtocolScope } from "../../src/contracts/protocol-v2.js";
 import type { BrowserStatus } from "../../src/contracts/browser-resources.js";
@@ -34,8 +35,12 @@ export type { ReplyStatus, TimelineItem };
 export type {
   AccountSummary, AccountsCommand, ChannelCredentialStorage, ConfigureOfficialChannelCommand,
   OfficialApiPlatformId, OfficialChannelCredentialMode, OfficialChannelPublicConfig, ProtocolScope,
+  WebBrowserPlatformId,
 };
-export { DOUYIN_PLATFORM_ID, MOCK_PLATFORM_ID, WECHAT_KF_PLATFORM_ID, WECOM_AIBOT_PLATFORM_ID, isOfficialApiPlatform };
+export {
+  BILIBILI_PLATFORM_ID, DOUYIN_PLATFORM_ID, MOCK_PLATFORM_ID, WECHAT_KF_PLATFORM_ID,
+  WECOM_AIBOT_PLATFORM_ID, XIAOHONGSHU_PLATFORM_ID, isOfficialApiPlatform, isWebBrowserPlatform,
+};
 
 export type { SendParams, AiSettings, BrowserDraftChoice };
 export interface Status extends ModelProviderStatusFields {
@@ -356,6 +361,8 @@ export function requestV2<T>(
 
 export const platformNames: Record<string, string> = {
   [DOUYIN_PLATFORM_ID]: '抖音',
+  [XIAOHONGSHU_PLATFORM_ID]: '小红书',
+  [BILIBILI_PLATFORM_ID]: 'B 站',
   [WECOM_AIBOT_PLATFORM_ID]: '企业微信智能机器人',
   [WECHAT_KF_PLATFORM_ID]: '微信客服',
   [MOCK_PLATFORM_ID]: '合成验证平台 (Mock)',
@@ -440,6 +447,31 @@ export function registerOfficialAccountV2({
     connector: platform,
     ownId,
     displayLabel,
+  });
+}
+
+export interface WebAccountRegistration {
+  commandId: string;
+  platform: WebBrowserPlatformId;
+  displayLabel: string;
+  ownId?: string;
+}
+
+export function registerWebAccountV2({
+  commandId, platform, displayLabel, ownId,
+}: WebAccountRegistration): Promise<AccountSummary> {
+  const accountId = mockRegistrationAccountRef(commandId);
+  const trimmedOwnId = ownId?.trim();
+  return changeAccount({ kind: 'GLOBAL' }, {
+    command: 'accounts',
+    action: 'registerAccount',
+    commandId,
+    accountId,
+    platform,
+    connector: platform,
+    displayLabel,
+    ...(trimmedOwnId ? { ownId: trimmedOwnId } : {}),
+    profileRef: `profiles/${accountId}`,
   });
 }
 

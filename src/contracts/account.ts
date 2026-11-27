@@ -5,6 +5,14 @@ export const accountIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-
 export type AccountId = z.infer<typeof accountIdSchema>;
 
 export const DOUYIN_PLATFORM_ID = 'douyin';
+export const XIAOHONGSHU_PLATFORM_ID = 'xiaohongshu';
+export const BILIBILI_PLATFORM_ID = 'bilibili';
+export const WEB_BROWSER_PLATFORM_IDS = [XIAOHONGSHU_PLATFORM_ID, BILIBILI_PLATFORM_ID] as const;
+export type WebBrowserPlatformId = typeof WEB_BROWSER_PLATFORM_IDS[number];
+export const webBrowserPlatformIdSchema = z.enum(WEB_BROWSER_PLATFORM_IDS);
+export function isWebBrowserPlatform(platform: string): platform is WebBrowserPlatformId {
+  return platform === XIAOHONGSHU_PLATFORM_ID || platform === BILIBILI_PLATFORM_ID;
+}
 export const MOCK_PLATFORM_ID = 'mock-platform';
 export const WECOM_AIBOT_PLATFORM_ID = 'wecom-aibot';
 export const WECHAT_KF_PLATFORM_ID = 'wechat-kf';

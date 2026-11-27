@@ -7,12 +7,16 @@ import { ObservedCommentReply } from '../adapters/observed-comment-reply.js';
 import { ObservedDmReply } from '../adapters/observed-dm-reply.js';
 import { ObservedReader } from '../adapters/observed-reader.js';
 import { isSecurityFailure } from '../adapters/security-signal.js';
+import { WebPlatformReplyAdapter } from '../adapters/web-platform-adapter.js';
+import { WebPlatformReader } from '../adapters/web-platform-reader.js';
 import { installMediaPauseGuard } from '../browser/media-pause.js';
 import { OwnerLock } from '../browser/owner-lock.js';
 import { loadCommentReplyMapping, loadDmReplyMapping, loadMapping, loadObservationMapping } from '../config/runtime.js';
+import { loadWebPlatformObservationMapping, loadWebPlatformReplyMapping, requireCalibratedWebReplyMapping } from '../config/web-platform-mapping.js';
+import { isWebBrowserPlatform } from '../contracts/account.js';
 import { Blocked, DEFAULT_ACCOUNT_ID, digest, eventBinding, isEligible, requireSafe, targetKey } from '../core/contracts.js';
-import { WorkerRequestEnvelopeSchema, type WorkerCommand, type WorkerRequestEnvelope, type WorkerResponseEnvelope,
-  type WorkerSendBinding, type WorkerTarget } from '../contracts/browser-worker.js';
+import { WorkerRequestEnvelopeSchema, workerPlatformIdSchema, type WorkerCommand, type WorkerPlatformId,
+  type WorkerRequestEnvelope, type WorkerResponseEnvelope, type WorkerSendBinding, type WorkerTarget } from '../contracts/browser-worker.js';
 import type { Channel, SendProof, TargetSnapshot } from '../contracts/events.js';
 import {
   encodeWorkerPermitCheck, encodeWorkerResponse, readWorkerInput, workerTextDigest,
@@ -24,8 +28,8 @@ const consumedNonces = new Set<string>();
 const dispatchedIntents = new Set<string>();
 const permitCheckTimeoutMs = 1_000;
 const readOnlyMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
-type NativeAdapter = ObservedDmReply | ObservedCommentReply;
-type TargetHandle = { target: WorkerTarget; adapter?: NativeAdapter };
+type NativeAdapter = ObservedDmReply | ObservedCommentReply | WebPlatformReplyAdapter;
+type TargetHandle = { target: WorkerTarget; adapter?: NativeAdapter; mappingDigest?: string };
 type PreparedSend = { targetDigest: string; handle?: TargetHandle; text?: string };
 type DispatchedSend = { evidence: WorkerSendEvidence; textDigest: string; notBefore: string; handle?: TargetHandle };
 type SendWindow = {
@@ -38,23 +42,47 @@ type SendWindow = {
   failure?: WorkerPermitError;
 };
 
-function configuration(): { profileDir: string; mode: WorkerMode; sessionId: string; ownerEpoch: number } {
+function configuration(): {
+  profileDir: string;
+  accountRoot?: string;
+  platformId: WorkerPlatformId;
+  allowFixture: boolean;
+  mode: WorkerMode;
+  sessionId: string;
+  ownerEpoch: number;
+} {
   const profileDir = process.env.INBORA_WORKER_PROFILE_DIR;
+  const accountRoot = process.env.INBORA_WORKER_ACCOUNT_ROOT;
   const mode = process.env.INBORA_WORKER_MODE ?? 'browser';
   const epoch = process.env.INBORA_WORKER_EPOCH;
+  const allowFixture = process.env.INBORA_WORKER_ALLOW_FIXTURE === '1';
   requireSafe(profileDir && isAbsolute(profileDir), 'WORKER_PROFILE_DIR_INVALID');
+  if (accountRoot !== undefined) requireSafe(accountRoot.length > 0 && isAbsolute(accountRoot), 'WORKER_PROFILE_DIR_INVALID');
+  const parsedPlatform = workerPlatformIdSchema.safeParse(process.env.INBORA_WORKER_PLATFORM ?? 'douyin');
+  requireSafe(parsedPlatform.success, 'WORKER_PLATFORM_INVALID');
   requireSafe(mode === 'synthetic' || mode === 'browser', 'WORKER_MODE_INVALID');
   requireSafe(epoch && /^\d+$/u.test(epoch), 'WORKER_EPOCH_INVALID');
   const session = WorkerRequestEnvelopeSchema.shape.sessionId.safeParse(process.env.INBORA_WORKER_SESSION_ID);
   requireSafe(session.success, 'WORKER_SESSION_INVALID');
   const ownerEpoch = Number(epoch);
   requireSafe(Number.isSafeInteger(ownerEpoch), 'WORKER_EPOCH_INVALID');
-  return { profileDir, mode, sessionId: session.data, ownerEpoch };
+  return {
+    profileDir,
+    ...(accountRoot ? { accountRoot } : {}),
+    platformId: parsedPlatform.data,
+    allowFixture,
+    mode,
+    sessionId: session.data,
+    ownerEpoch,
+  };
 }
 
 class WorkerRuntime {
   private context: BrowserContext | undefined;
   private pages: Record<Channel, Page> | undefined;
+  private observePages: Partial<Record<Channel, Page>> = {};
+  private verifyPages: Partial<Record<Channel, Page>> = {};
+  private readonly knownPages = new WeakSet<Page>();
   private syntheticOpen: boolean;
   private prepared: PreparedSend | undefined;
   private handle: TargetHandle | undefined;
@@ -67,9 +95,19 @@ class WorkerRuntime {
   readonly hello: WorkerHello;
 
   constructor(private readonly profileDir: string, mode: WorkerMode, sessionId: string, ownerEpoch: number,
-    private readonly checkCorePermit: (binding: WorkerSendBinding) => Promise<WorkerPermitError | null>) {
+    private readonly checkCorePermit: (binding: WorkerSendBinding) => Promise<WorkerPermitError | null>,
+    private readonly platformId: WorkerPlatformId = 'douyin',
+    private readonly accountRoot?: string,
+    private readonly allowFixture = false) {
     this.syntheticOpen = mode === 'synthetic';
-    this.hello = { pid: process.pid, sessionId, ownerEpoch, profileLocked: true, mode };
+    this.hello = {
+      pid: process.pid,
+      sessionId,
+      ownerEpoch,
+      profileLocked: true,
+      mode,
+      ...(platformId === 'douyin' ? {} : { platformId }),
+    };
   }
 
   private status(): WorkerStatus {
@@ -78,7 +116,7 @@ class WorkerRuntime {
       ...(this.context ? { version: this.browserVersion(), pageCount: this.context.pages().length } : {}) };
   }
 
-  private get root(): string { return dirname(this.profileDir); }
+  private get root(): string { return this.accountRoot ?? dirname(this.profileDir); }
   private browserVersion(): string { return this.context?.browser()?.version() ?? 'unknown'; }
 
   private async open(): Promise<void> {
@@ -99,21 +137,27 @@ class WorkerRuntime {
       context.setDefaultNavigationTimeout(15_000);
       const notifications = context.pages()[0] ?? await context.newPage();
       const dm = await context.newPage();
+      this.knownPages.add(notifications);
+      this.knownPages.add(dm);
       for (const extra of context.pages()) if (extra !== notifications && extra !== dm) await extra.close();
       context.on('page', page => {
-        if (page === notifications || page === dm) return;
+        if (this.knownPages.has(page)) return;
         void page.opener().then(opener => {
           if (opener && !page.isClosed()) return page.close();
         }).catch(() => {});
       });
       this.context = context;
       this.pages = { COMMENT_NOTIFICATION: notifications, DIRECT_MESSAGE: dm };
+      this.observePages = {};
+      this.verifyPages = {};
       context.once('close', () => {
         if (this.context === context) {
           this.sendWindow?.settled.resolve();
           this.sendWindow = undefined;
           this.context = undefined;
           this.pages = undefined;
+          this.observePages = {};
+          this.verifyPages = {};
           this.prepared = undefined;
           this.handle = undefined;
           this.lastDispatch = undefined;
@@ -137,10 +181,45 @@ class WorkerRuntime {
 
   private requireOpen(): void { requireSafe(this.syntheticOpen || this.context, 'WORKER_BROWSER_CLOSED'); }
 
-  private async pageFor(channel: Channel, entry: string): Promise<Page> {
-    const page = this.pages?.[channel];
+  private async pageFor(channel: Channel, entry: string, purpose: 'observe' | 'reply' | 'verify' = 'reply'): Promise<Page> {
+    if (!isWebBrowserPlatform(this.platformId)) {
+      const page = this.pages?.[channel];
+      requireSafe(page && !page.isClosed(), 'WORKER_BROWSER_CLOSED');
+      if (page.url() === 'about:blank') {
+        await installMediaPauseGuard(page, entry, true);
+        await page.goto(entry, { waitUntil: 'domcontentloaded' });
+      }
+      return page;
+    }
+    requireSafe(this.context, 'WORKER_BROWSER_CLOSED');
+    const secondaryMap = purpose === 'observe' ? this.observePages : purpose === 'verify' ? this.verifyPages : null;
+    let page = secondaryMap ? secondaryMap[channel] : this.pages?.[channel];
+    if (secondaryMap && (!page || page.isClosed())) {
+      page = await this.context.newPage();
+      this.knownPages.add(page);
+      secondaryMap[channel] = page;
+    }
     requireSafe(page && !page.isClosed(), 'WORKER_BROWSER_CLOSED');
-    if (page.url() === 'about:blank') {
+    const current = page.url();
+    const targetUrl = new URL(entry);
+    const sameTarget = purpose !== 'verify'
+      && current !== 'about:blank'
+      && new URL(current).origin === targetUrl.origin
+      && current.split('#')[0] === entry.split('#')[0];
+    if (!sameTarget) {
+      if (current !== 'about:blank') {
+        const empty = await page.evaluate(() => {
+          for (const editor of Array.from(document.querySelectorAll('[contenteditable="true"],textarea,input'))) {
+            if (editor instanceof HTMLInputElement && !['text', 'search', 'email', 'url', 'tel', 'password'].includes(editor.type)) continue;
+            const text = editor instanceof HTMLInputElement || editor instanceof HTMLTextAreaElement
+              ? editor.value
+              : (editor.textContent ?? '').replace(/[\u200B\uFEFF]/gu, '');
+            if (text.length > 0) return false;
+          }
+          return true;
+        });
+        requireSafe(empty, 'OBSERVATION_EXISTING_HUMAN_INPUT');
+      }
       await installMediaPauseGuard(page, entry, true);
       await page.goto(entry, { waitUntil: 'domcontentloaded' });
     }
@@ -152,6 +231,13 @@ class WorkerRuntime {
     this.requireOpen();
     if (this.syntheticOpen) return source ? null : { events: [] };
     requireSafe(!this.prepared, 'WORKER_PREPARATION_IN_PROGRESS');
+    if (isWebBrowserPlatform(this.platformId)) {
+      requireSafe(source, 'WORKER_OBSERVATION_SOURCE_REQUIRED');
+      const mapping = await loadWebPlatformObservationMapping(this.root, this.platformId, { allowFixture: this.allowFixture });
+      requireSafe(mapping, 'OBSERVATION_MAPPING_REQUIRED');
+      const page = await this.pageFor(source === 'dm' ? 'DIRECT_MESSAGE' : 'COMMENT_NOTIFICATION', mapping.entryUrl, 'observe');
+      return new WebPlatformReader(page, mapping, accountId).observe(source, index);
+    }
     if (source === 'notifications') {
       if (index > 0) return null;
       const mapping = await loadMapping(this.root);
@@ -174,7 +260,20 @@ class WorkerRuntime {
 
   private async identity(channel: Channel, ownId?: string): Promise<WorkerIdentity | null> {
     this.requireOpen();
-    if (this.syntheticOpen) return ownId ? { ownId, mappingDigest: digest('synthetic'), browserVersion: 'mock' } : null;
+    if (this.syntheticOpen) {
+      const seed = this.platformId === 'douyin' ? 'synthetic' : ['synthetic', this.platformId];
+      return ownId ? { ownId, mappingDigest: digest(seed), browserVersion: 'mock' } : null;
+    }
+    if (isWebBrowserPlatform(this.platformId)) {
+      const mapping = await loadWebPlatformReplyMapping(this.root, this.platformId, { allowFixture: this.allowFixture }).catch(() => null);
+      if (!mapping) return null;
+      requireSafe(!ownId || ownId === mapping.selfId, 'ACCOUNT_CHANGED');
+      const channelConfig = channel === 'DIRECT_MESSAGE' ? mapping.selectors.dm : mapping.selectors.comment;
+      if (!channelConfig) return null;
+      const page = await this.pageFor(channel, mapping.entryUrl, 'reply');
+      await new WebPlatformReplyAdapter(page, mapping, DEFAULT_ACCOUNT_ID).guard();
+      return { ownId: mapping.selfId, mappingDigest: digest(mapping), browserVersion: this.browserVersion() };
+    }
     const mapping = channel === 'DIRECT_MESSAGE' ? await loadDmReplyMapping(this.root) : await loadCommentReplyMapping(this.root);
     if (!mapping) return null;
     requireSafe(!ownId || ownId === mapping.observation.self.uid, 'ACCOUNT_CHANGED');
@@ -193,7 +292,15 @@ class WorkerRuntime {
     if (!this.handle) {
       const handle: TargetHandle = { target };
       if (!this.syntheticOpen) {
-        if (event.channel === 'DIRECT_MESSAGE') {
+        if (isWebBrowserPlatform(this.platformId)) {
+          const mapping = await requireCalibratedWebReplyMapping(this.root, this.platformId, { allowFixture: this.allowFixture });
+          requireSafe(mapping.selfId === ownId, 'ACCOUNT_CHANGED');
+          const channelConfig = event.channel === 'DIRECT_MESSAGE' ? mapping.selectors.dm : mapping.selectors.comment;
+          requireSafe(channelConfig, 'PLATFORM_MAPPING_UNCALIBRATED');
+          const page = await this.pageFor(event.channel, mapping.entryUrl, 'reply');
+          handle.adapter = new WebPlatformReplyAdapter(page, mapping, event.accountId);
+          handle.mappingDigest = digest(mapping);
+        } else if (event.channel === 'DIRECT_MESSAGE') {
           const mapping = await loadDmReplyMapping(this.root);
           requireSafe(mapping?.observation.self.uid === ownId, 'NATIVE_REPLY_MAPPING_REQUIRED');
           const page = await this.pageFor(event.channel, mapping.observation.entryUrl);
@@ -219,14 +326,21 @@ class WorkerRuntime {
   private async snapshot({ target: { event, ownId }, adapter }: TargetHandle): Promise<TargetSnapshot> {
     if (adapter) return adapter.inspect(event);
     const key = targetKey(event), binding = eventBinding(event);
+    const seed = this.platformId === 'douyin' ? 'synthetic' : ['synthetic', this.platformId];
     return { accountId: event.accountId, ownId, targetKey: key, eventBinding: binding,
-      contextDigest: digest([event.accountId, ownId, key, binding]), composerKey: key, mappingDigest: digest('synthetic') };
+      contextDigest: digest([event.accountId, ownId, key, binding]), composerKey: key, mappingDigest: digest(seed) };
   }
 
   private async prepare(targetDigest?: string, target?: WorkerTarget, text?: string): Promise<{ prepared: true }> {
     this.requireOpen();
     requireSafe(targetDigest, 'WORKER_TARGET_DIGEST_REQUIRED');
     requireSafe(!this.prepared, 'WORKER_PREPARATION_IN_PROGRESS');
+    if (!this.syntheticOpen && isWebBrowserPlatform(this.platformId)) {
+      const latest = await requireCalibratedWebReplyMapping(this.root, this.platformId, { allowFixture: this.allowFixture });
+      if (target && this.handle?.mappingDigest) {
+        requireSafe(digest(latest) === this.handle.mappingDigest, 'TARGET_CHANGED_REAPPROVE');
+      }
+    }
     if (target) {
       const handle = this.requireTarget(target);
       requireSafe(text !== undefined, 'WORKER_TEXT_DIGEST_MISMATCH');
@@ -338,12 +452,28 @@ class WorkerRuntime {
     requireSafe(!this.revokedPages.has(adapter.page), 'EMERGENCY_STOPPED');
     const window: SendWindow = { context, page: adapter.page, binding, settled: Promise.withResolvers<void>(),
       routes: new Set(), closed: false };
+    let mayHaveClicked = false;
+    const savedPrepared = this.prepared;
     try {
+      if (isWebBrowserPlatform(this.platformId)) {
+        const preClickDenial = await this.checkCorePermit(binding);
+        await setImmediate();
+        this.checkSend(binding);
+        if (preClickDenial) throw new Blocked(preClickDenial);
+      }
       await adapter.clickOnce(binding.notBefore, () => {
         this.checkSend(binding);
+        mayHaveClicked = true;
         this.sendWindow = window;
         this.prepared = undefined;
       }, deadline).catch(error => {
+        if ((error as { preClick?: boolean }).preClick === true) {
+          mayHaveClicked = false;
+          if (this.sendWindow === window) this.sendWindow = undefined;
+          if (!this.prepared && savedPrepared) this.prepared = savedPrepared;
+          this.checkSend(binding);
+          throw error;
+        }
         this.checkSend(binding);
         if (this.sendWindow === window) this.checkWindow(window);
         throw error;
@@ -362,7 +492,7 @@ class WorkerRuntime {
         this.checkWindow(window);
       } finally { clearTimeout(timer); }
     } catch (error) {
-      this.revokedPages.add(window.page);
+      if (mayHaveClicked) this.revokedPages.add(window.page);
       throw error;
     } finally {
       window.closed = true;
@@ -380,11 +510,20 @@ class WorkerRuntime {
     requireSafe(prepared.targetDigest === binding.targetDigest, 'WORKER_TARGET_DIGEST_MISMATCH');
     this.checkSend(binding);
     const boundary = Date.parse(binding.notBefore);
+    if (isWebBrowserPlatform(this.platformId) && Number.isFinite(boundary) && boundary > Date.now() && boundary - Date.now() <= 50) {
+      await new Promise(resolve => setTimeout(resolve, boundary - Date.now() + 1));
+    }
     requireSafe(Number.isFinite(boundary) && boundary <= Date.now(), 'WORKER_SEND_BOUNDARY_INVALID');
     if (prepared.handle) await this.verifyPrepared(prepared.handle.target, text);
     // Give pending pipe input a turn before reaching the adapter's final synchronous check.
     await setImmediate();
     this.checkSend(binding);
+    if (!this.syntheticOpen && isWebBrowserPlatform(this.platformId)) {
+      const latest = await requireCalibratedWebReplyMapping(this.root, this.platformId, { allowFixture: this.allowFixture });
+      if (prepared.handle?.mappingDigest) {
+        requireSafe(digest(latest) === prepared.handle.mappingDigest, 'TARGET_CHANGED_REAPPROVE');
+      }
+    }
     consumedNonces.add(binding.nonce);
     dispatchedIntents.add(binding.intentId);
     if (!this.syntheticOpen) {
@@ -424,6 +563,22 @@ class WorkerRuntime {
     return { verified: false, evidence: null };
   }
 
+  private async verifyExisting({ target, text, notBefore }: Extract<WorkerCommand, { action: 'verifyExisting' }>): Promise<{ verified: boolean; proof: SendProof | null }> {
+    this.requireOpen();
+    requireSafe(!this.prepared, 'WORKER_PREPARATION_IN_PROGRESS');
+    if (this.syntheticOpen || !isWebBrowserPlatform(this.platformId)) {
+      return { verified: false, proof: null };
+    }
+    const mapping = await requireCalibratedWebReplyMapping(this.root, this.platformId, { allowFixture: this.allowFixture });
+    requireSafe(mapping.selfId === target.ownId, 'ACCOUNT_CHANGED');
+    const channelConfig = target.event.channel === 'DIRECT_MESSAGE' ? mapping.selectors.dm : mapping.selectors.comment;
+    requireSafe(channelConfig, 'PLATFORM_MAPPING_UNCALIBRATED');
+    const page = await this.pageFor(target.event.channel, mapping.entryUrl, 'verify');
+    const adapter = new WebPlatformReplyAdapter(page, mapping, target.event.accountId, 500);
+    const proof = await adapter.verifyExisting(target.event, text, notBefore);
+    return { verified: Boolean(proof), proof };
+  }
+
   private assertBinding(sessionId: string, ownerEpoch: number): void {
     requireSafe(sessionId === this.hello.sessionId, 'WORKER_SESSION_MISMATCH');
     requireSafe(ownerEpoch === this.hello.ownerEpoch, 'WORKER_EPOCH_STALE');
@@ -461,6 +616,7 @@ class WorkerRuntime {
       case 'disposeTarget': await this.disposeTarget(command.handleId); return null;
       case 'executeSend': return this.execute(command);
       case 'readback': return this.readback(command);
+      case 'verifyExisting': return this.verifyExisting(command);
       case 'shutdown': return { shuttingDown: true };
     }
   }
@@ -492,7 +648,7 @@ async function main(): Promise<void> {
       clearTimeout(timer);
       permitChecks.delete(id);
     }
-  });
+  }, config.platformId, config.accountRoot, config.allowFixture);
   let queued = 0;
   let operations = Promise.resolve();
   const shutdown = async (exitCode: number) => {

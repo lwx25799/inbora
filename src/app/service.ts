@@ -124,6 +124,7 @@ export class ClientService {
       models: this.models, provider: this.provider, knowledge: this.knowledge.data,
       state: this.suggestionState(), signal: this.modelAbort.signal,
     }));
+    this.accounts.configureGlobalRecovery(t => this.dispatch(t, { command: "resume", eventId: null }).then(() => undefined));
     this.authority.recover();
     this.knowledge = new ReplyKnowledgeService(store, this.authority, browser.root, () => ({
       settings: this.projectedSettings(),
@@ -318,6 +319,7 @@ export class ClientService {
     this.modelAbort = new AbortController();
     this.automaticAbort = new AbortController();
     this.onlineKeeper.resetRetry();
+    this.accounts.onGlobalEmergencyResumed();
   }
   private stopAutomaticReply(reason = "AUTO_REPLY_DISABLED"): void {
     this.automaticAbort.abort(new Blocked("MODEL_CANCELLED"));
