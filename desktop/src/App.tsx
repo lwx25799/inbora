@@ -109,6 +109,7 @@ export function App() {
   const [activeAccount, setActiveAccount] = useState<ActiveWorkbenchAccount | null>(null);
   const [pendingAutoReply, setPendingAutoReply] = useState<boolean | null>(null);
   const autoReplyUpdating = useRef(false);
+  const accountSwitchSeq = useRef(0);
   const pendingPageFocusRef = useRef<DesktopPageId | null>(null);
   const connected = !!status;
 
@@ -329,12 +330,14 @@ export function App() {
   }
 
   async function selectWorkbenchAccount(account: AccountSummary | null) {
+    const seq = ++accountSwitchSeq.current;
     if (
       workspace.thread?.ownership.isMine &&
       canContinueReply(workspace.thread)
     ) {
       await workspace.closeDialog();
     }
+    if (accountSwitchSeq.current !== seq) return;
     const next = account
       ? { accountRef: account.accountRef, displayLabel: account.displayLabel, platform: account.platform }
       : null;
@@ -351,9 +354,10 @@ export function App() {
       setAppNotice("已返回主账号工作台。");
     }
     try {
-      setStatus(await request<Status>({ command: "getStatus" }));
+      const nextStatus = await request<Status>({ command: "getStatus" });
+      if (accountSwitchSeq.current === seq) setStatus(nextStatus);
     } catch (cause) {
-      setError(explain(cause));
+      if (accountSwitchSeq.current === seq) setError(explain(cause));
     }
   }
 

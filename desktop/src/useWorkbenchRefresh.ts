@@ -37,7 +37,8 @@ interface RefreshView {
 }
 
 const allReads = ["status", "inbox", "thread", "audit"] as const;
-const inboxKey = (view: RefreshView) => [view.channel, view.filter, view.pageNumber].join("|");
+const inboxKey = (view: RefreshView) =>
+  [view.activeAccountRef ?? "", view.channel, view.filter, view.pageNumber].join("|");
 const isAuditVisible = (view: RefreshView) =>
   view.page === "audit" || (view.page === "runtime" && (view.runtimeTab ?? "audit") === "audit");
 const unreadFrom = (data: Inbox) =>
@@ -58,13 +59,16 @@ export function useWorkbenchRefresh(view: RefreshView): void {
       {
         status: async (current) => {
           const previous = latest.current.status;
+          const accountAtStart = latest.current.activeAccountRef ?? null;
           const status = await request<Status>({ command: "getStatus" });
-          if (alive() && current()) {
+          if (alive() && current() && (latest.current.activeAccountRef ?? null) === accountAtStart) {
             latest.current.setStatus((existing) => (existing === previous ? status : existing));
           }
         },
         inbox: async (current) => {
           const currentView = latest.current;
+          const accountAtStart = currentView.activeAccountRef ?? null;
+          const sameAccount = () => (latest.current.activeAccountRef ?? null) === accountAtStart;
           if (currentView.page === "inbox") {
             const key = inboxKey(currentView);
             const inbox = await request<Inbox>({
@@ -73,7 +77,7 @@ export function useWorkbenchRefresh(view: RefreshView): void {
               status: currentView.filter,
               page: currentView.pageNumber,
             });
-            if (!alive() || !current()) return;
+            if (!alive() || !current() || !sameAccount()) return;
             if (key === inboxKey(latest.current)) {
               latest.current.setInbox(inbox);
             }
@@ -89,7 +93,7 @@ export function useWorkbenchRefresh(view: RefreshView): void {
                 status: "ALL",
                 page: 0,
               });
-              if (alive() && current()) {
+              if (alive() && current() && sameAccount()) {
                 latest.current.setInboxSummary?.(summary);
                 latest.current.setUnreadCount?.(unreadFrom(summary));
               }
@@ -102,7 +106,7 @@ export function useWorkbenchRefresh(view: RefreshView): void {
             status: "ALL",
             page: 0,
           });
-          if (alive() && current()) {
+          if (alive() && current() && sameAccount()) {
             latest.current.setInboxSummary?.(summary);
             latest.current.setUnreadCount?.(unreadFrom(summary));
           }
@@ -112,6 +116,7 @@ export function useWorkbenchRefresh(view: RefreshView): void {
         },
         audit: async (current) => {
           const currentView = latest.current;
+          const accountAtStart = currentView.activeAccountRef ?? null;
           if (!isAuditVisible(currentView)) return;
           const result = await request<{ items: AuditRow[] }>({
             command: "getAudit",
@@ -120,6 +125,7 @@ export function useWorkbenchRefresh(view: RefreshView): void {
           if (
             alive() &&
             current() &&
+            (latest.current.activeAccountRef ?? null) === accountAtStart &&
             isAuditVisible(latest.current) &&
             latest.current.auditPage === currentView.auditPage
           ) {

@@ -253,8 +253,14 @@ test('OfficialChannelManagerPanel locks bound BotID, clears secret on cancel, co
   }
 });
 
-test('setActiveWorkbenchAccount routes everyday reads and writes via Protocol V2 ACCOUNT scope and resets cleanly', async () => {
-  invokeMock.mockResolvedValue({ ok: true });
+test('setActiveWorkbenchAccount routes everyday reads and writes via Protocol V2 ACCOUNT scope and resets default primary routing immediately', async () => {
+  const secondaryStatus = {
+    runtime: 'r-switch', schema: 4, account: { id: wecomAccount.accountRef, identity: 'bot-ui-1' },
+    operator: { id: 'op-1', permissions: ['READ'], expiresAt: 0 },
+  };
+  invokeMock
+    .mockResolvedValueOnce({ accounts: [wecomAccount, { ...wecomAccount, id: 'account_001', accountRef: 'account_001', platform: 'douyin', connector: 'douyin' }], schemaVersion: 4 })
+    .mockResolvedValue({ ok: true });
   setActiveWorkbenchAccount({
     accountRef: wecomAccount.accountRef,
     displayLabel: wecomAccount.displayLabel,
@@ -273,6 +279,19 @@ test('setActiveWorkbenchAccount routes everyday reads and writes via Protocol V2
   }));
   await request({ command: 'emergencyStop' });
   expect(invokeMock).toHaveBeenLastCalledWith('client_request', { body: { command: 'emergencyStop' } });
+
+  // Returning to primary immediately routes subsequent writes back to account_001, never stale secondary
+  invokeMock.mockReset();
+  invokeMock.mockResolvedValueOnce({ accounts: [{ ...wecomAccount, id: 'account_001', accountRef: 'account_001', platform: 'douyin', connector: 'douyin' }, wecomAccount], schemaVersion: 4 })
+    .mockResolvedValue({ ok: true });
+  const { listAccountsV2 } = await import('./api');
+  await listAccountsV2(secondaryStatus as never);
+  setActiveWorkbenchAccount(null);
+  await request({ command: 'markInboxRead' });
+  expect(invokeMock).toHaveBeenLastCalledWith('client_request_v2', expect.objectContaining({
+    scope: { kind: 'ACCOUNT', accountRef: 'account_001' },
+    body: { command: 'markInboxRead' },
+  }));
 
   const html = renderToStaticMarkup(createElement(OfficialChannelCreator, {
     disabled: false, onRegistered: async () => {}, onClose: () => {},

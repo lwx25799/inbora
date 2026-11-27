@@ -73,58 +73,63 @@ export function dispatchOfflineOfficialRead(
   const store = new EventStore(dbPath, false, undefined, account.id);
   try {
     const authority = new WorkbenchAuthority(store, now, account.id);
-    const token = authority.issueSession(parent.permissions);
-    try {
-      const offlineBrowser = {
-        accountId: account.id,
-        platformId: account.platform,
-        capabilities: account.capabilities,
-        status: () => ({ state: 'CLOSED', mode: 'headless' as const, version: null }),
-        identity: () => null,
-      } as unknown as PlatformConnector;
-      const queries = new WorkbenchQueries(store, authority, offlineBrowser);
-      const automation = new AutomationStore(store, now);
-      switch (command.command) {
-        case 'getStatus': {
-          const shared = sharedModels();
-          return {
-            ...queries.status(token, {
-              settings: shared.state.settings,
-              keyPresent: shared.state.keyPresent,
-              modelAuthorized: shared.state.modelAuthorized,
-              modelBusy: false,
-              modelRoute: null,
-              modelUnavailable: shared.state.modelUnavailable ?? null,
-              keyStored: false,
-              keyStorageError: null,
-              automation,
-              collector: undefined,
-              inboxRevision: 0,
-              sync: { runId: null, running: false, cancelled: false, source: null, results: [] },
-            }),
-            schema: 4,
-          };
-        }
-        case 'getInbox':
-          return queries.inbox(command);
-        case 'getThread': {
-          const shared = sharedModels();
-          return {
-            ...queries.thread(token, command.eventId, automation, command.timelineBefore, {
-              ...shared.state, recovering: false, modelBusy: false, modelRoute: null,
-            }),
-            workUrl: null,
-          };
-        }
-        case 'getAudit':
-          return readAudit(store, command.page);
-        case 'getSendResult': {
-          const followups = new HumanFollowups(store, authority, offlineBrowser, () => false, () => {}, clientError);
-          return sendResultCommand(store, authority, followups, token, command.commandId);
-        }
+    // Pure read-only view: reuse the verified parent operator without inserting new operator_sessions rows
+    // or rotating operator.id across polls.
+    const readonlyAuthority = Object.assign(Object.create(authority) as WorkbenchAuthority, {
+      operator(_token: string, required: 'READ' | 'EDIT' | 'SEND' | 'CONTROL' = 'READ') {
+        requireSafe(parent.expires_at > now(), 'OPERATOR_EXPIRED');
+        requireSafe(parent.permissions.includes(required), 'OPERATOR_PERMISSION_DENIED');
+        return parent;
+      },
+    });
+    const offlineBrowser = {
+      accountId: account.id,
+      platformId: account.platform,
+      capabilities: account.capabilities,
+      status: () => ({ state: 'CLOSED', mode: 'headless' as const, version: null }),
+      identity: () => null,
+    } as unknown as PlatformConnector;
+    const queries = new WorkbenchQueries(store, readonlyAuthority, offlineBrowser);
+    const automation = new AutomationStore(store, now);
+    const token = 'offline-readonly';
+    switch (command.command) {
+      case 'getStatus': {
+        const shared = sharedModels();
+        return {
+          ...queries.status(token, {
+            settings: shared.state.settings,
+            keyPresent: shared.state.keyPresent,
+            modelAuthorized: shared.state.modelAuthorized,
+            modelBusy: false,
+            modelRoute: null,
+            modelUnavailable: shared.state.modelUnavailable ?? null,
+            keyStored: false,
+            keyStorageError: null,
+            automation,
+            collector: undefined,
+            inboxRevision: 0,
+            sync: { runId: null, running: false, cancelled: false, source: null, results: [] },
+          }),
+          schema: 4,
+        };
       }
-    } finally {
-      authority.revoke(token);
+      case 'getInbox':
+        return queries.inbox(command);
+      case 'getThread': {
+        const shared = sharedModels();
+        return {
+          ...queries.thread(token, command.eventId, automation, command.timelineBefore, {
+            ...shared.state, recovering: false, modelBusy: false, modelRoute: null,
+          }),
+          workUrl: null,
+        };
+      }
+      case 'getAudit':
+        return readAudit(store, command.page);
+      case 'getSendResult': {
+        const followups = new HumanFollowups(store, readonlyAuthority, offlineBrowser, () => false, () => {}, clientError);
+        return sendResultCommand(store, readonlyAuthority, followups, token, command.commandId);
+      }
     }
   } finally {
     store.close();

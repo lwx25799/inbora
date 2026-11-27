@@ -250,6 +250,9 @@ export function getActiveWorkbenchAccount(): ActiveWorkbenchAccount | null {
 
 export function setActiveWorkbenchAccount(next: ActiveWorkbenchAccount | null): void {
   activeWorkbenchAccount = next && next.accountRef !== DEFAULT_ACCOUNT_ID ? next : null;
+  if (!activeWorkbenchAccount && accountRouting) {
+    accountRouting.accountRef = DEFAULT_ACCOUNT_ID;
+  }
 }
 
 function observeRoutingStatus(status: Status): void {
@@ -259,7 +262,11 @@ function observeRoutingStatus(status: Status): void {
     return;
   }
   const session = runtimeSession(status);
-  const accountRef = status.account?.id ?? DEFAULT_ACCOUNT_ID;
+  // Only update default primary routing accountRef from primary status snapshots; never overwrite
+  // it with a secondary account ID while viewing a secondary official channel.
+  const accountRef = activeWorkbenchAccount
+    ? (accountRouting?.accountRef ?? DEFAULT_ACCOUNT_ID)
+    : (status.account?.id ?? DEFAULT_ACCOUNT_ID);
   if (accountRouting?.session === session) accountRouting.accountRef = accountRef;
   else accountRouting = { session, accountRef, active: null, loading: null };
 }

@@ -259,10 +259,16 @@ test('WeCom AI Bot enforces immutable identity, V2-only ledger without secret di
       credentialMode: 'SET', storage: 'DPAPI', secret: secretValue,
     }, wecomScope)).toMatchObject({ ok: false, error: 'ACCOUNT_IDENTITY_IMMUTABLE' });
 
-    // Offline active official account serves local read-only inbox & status (schema 4), blocks observe
+    // Offline active official account serves local read-only inbox & status (schema 4) with ZERO session writes & stable operator.id
+    const sessionsBefore = f.store.db.prepare('SELECT count(*) FROM operator_sessions').pluck().get();
     expect(await request({ command: 'getInbox', channel: 'ALL', status: 'ALL', page: 0 }, wecomScope))
       .toMatchObject({ ok: true, result: { total: 0 } });
-    expect(await request({ command: 'getStatus' }, wecomScope)).toMatchObject({ ok: true, result: { schema: 4 } });
+    const offlineStatus1 = await request({ command: 'getStatus' }, wecomScope);
+    const offlineStatus2 = await request({ command: 'getStatus' }, wecomScope);
+    expect(offlineStatus1).toMatchObject({ ok: true, result: { schema: 4 } });
+    expect((offlineStatus1 as { ok: true; result: { operator: { id: string } } }).result.operator.id)
+      .toBe((offlineStatus2 as { ok: true; result: { operator: { id: string } } }).result.operator.id);
+    expect(f.store.db.prepare('SELECT count(*) FROM operator_sessions').pluck().get()).toBe(sessionsBefore);
     expect(await request({ command: 'observe', source: 'dm' }, wecomScope, randomUUID()))
       .toMatchObject({ ok: false, error: 'OFFICIAL_CHANNEL_NOT_CONNECTED' });
 
@@ -344,13 +350,34 @@ test('WeCom AI Bot enforces immutable identity, V2-only ledger without secret di
       .toMatchObject({ ok: false, error: 'EMERGENCY_STOPPED' });
 
     // Disconnect wipes credentials while preserving history, then reactivateAccount restores the same accountId cleanly
+    const disconnectId = randomUUID();
     expect(await request({
-      command: 'accounts', action: 'disconnectAccount', commandId: randomUUID(), accountRef: wecomId, confirmed: true,
+      command: 'accounts', action: 'disconnectAccount', commandId: disconnectId, accountRef: wecomId, confirmed: true,
     }, wecomScope)).toMatchObject({ ok: true, result: { status: 'DISCONNECTED' } });
     expect(existsSync(join(f.root, 'channel-credentials', channelCredentialDirName(wecomId)))).toBe(false);
+    const reactivateId = randomUUID();
+    expect(await request({
+      command: 'accounts', action: 'reactivateAccount', commandId: reactivateId, accountRef: wecomId, confirmed: true,
+    }, wecomScope)).toMatchObject({ ok: true, result: { status: 'ACTIVE', id: wecomId } });
+    // Save fresh credentials on reactivated account, then replay old disconnect/reactivate & attempt fresh reactivate on ACTIVE:
+    // NONE of them may wipe the newly saved credentials!
+    expect(await request({
+      command: 'accounts', action: 'configureOfficialChannel', commandId: randomUUID(),
+      accountRef: wecomId, platform: WECOM_AIBOT_PLATFORM_ID, botId: 'bot-live-1',
+      credentialMode: 'SET', storage: 'DPAPI', secret: 'fresh-secret-after-reactivate',
+    }, wecomScope)).toMatchObject({ ok: true, result: { secretConfigured: true } });
+    expect(await request({
+      command: 'accounts', action: 'disconnectAccount', commandId: disconnectId, accountRef: wecomId, confirmed: true,
+    }, wecomScope)).toMatchObject({ ok: true, result: { status: 'DISCONNECTED' } });
+    expect(await request({
+      command: 'accounts', action: 'reactivateAccount', commandId: reactivateId, accountRef: wecomId, confirmed: true,
+    }, wecomScope)).toMatchObject({ ok: true, result: { status: 'ACTIVE' } });
     expect(await request({
       command: 'accounts', action: 'reactivateAccount', commandId: randomUUID(), accountRef: wecomId, confirmed: true,
-    }, wecomScope)).toMatchObject({ ok: true, result: { status: 'ACTIVE', id: wecomId } });
+    }, wecomScope)).toMatchObject({ ok: false, error: 'ACCOUNT_ALREADY_ACTIVE' });
+    expect(await request({
+      command: 'accounts', action: 'getOfficialChannelConfig', accountRef: wecomId,
+    }, wecomScope)).toMatchObject({ ok: true, result: { secretConfigured: true } });
     expect(f.store.db.prepare('SELECT count(*) FROM inbound_events WHERE account_id=?').pluck().get(wecomId)).toBe(1);
   } finally {
     await f.close();
@@ -435,10 +462,11 @@ test('WeChat KF validates credentials on connect, uses account creation boundary
       credentialMode: 'SET', storage: 'DPAPI', appSecret: 'bad-secret',
     }, kfScope)).toMatchObject({ ok: true });
 
-    // Connect must fail immediately if /gettoken rejects credentials (never falsely report connected)
+    // Connect must fail immediately if /gettoken rejects credentials AND must not persist SEND_AVAILABLE capability
     expect(await request({
       command: 'accounts', action: 'connectOfficialChannel', commandId: randomUUID(), accountRef: kfId,
     }, kfScope)).toMatchObject({ ok: false, error: 'WECHAT_KF_TOKEN_FETCH_FAILED' });
+    expect(f.store.db.prepare('SELECT count(*) FROM account_channel_capabilities WHERE account_id=?').pluck().get(kfId)).toBe(0);
 
     tokenShouldFail = false;
     expect(await request({
@@ -484,6 +512,22 @@ test('WeChat KF validates credentials on connect, uses account creation boundary
     }, kfScope)).toMatchObject({ ok: true, result: { connected: true } });
     expect(await request({ command: 'observe', source: 'dm' }, kfScope, randomUUID())).toMatchObject({ ok: true });
     expect(observedCursors).toEqual([undefined, 'cursor-page-2']);
+
+    // Disconnect + reactivate must still enforce original bound corpId (immutable across disconnect cycles)
+    expect(await request({
+      command: 'accounts', action: 'disconnectAccount', commandId: randomUUID(), accountRef: kfId, confirmed: true,
+    }, kfScope)).toMatchObject({ ok: true, result: { status: 'DISCONNECTED' } });
+    expect(await request({
+      command: 'accounts', action: 'reactivateAccount', commandId: randomUUID(), accountRef: kfId, confirmed: true,
+    }, kfScope)).toMatchObject({ ok: true, result: { status: 'ACTIVE' } });
+    expect(await request({
+      command: 'accounts', action: 'getOfficialChannelConfig', accountRef: kfId,
+    }, kfScope)).toMatchObject({ ok: true, result: { corpId: 'ww-live-corp', openKfId: 'wk-live-01', secretConfigured: false } });
+    expect(await request({
+      command: 'accounts', action: 'configureOfficialChannel', commandId: randomUUID(),
+      accountRef: kfId, platform: WECHAT_KF_PLATFORM_ID, corpId: 'ww-other-corp', openKfId: 'wk-live-01',
+      credentialMode: 'SET', storage: 'DPAPI', appSecret: 'new-secret',
+    }, kfScope)).toMatchObject({ ok: false, error: 'ACCOUNT_IDENTITY_IMMUTABLE' });
   } finally {
     await f.close();
   }

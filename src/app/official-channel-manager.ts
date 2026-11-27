@@ -49,6 +49,14 @@ function writeSanitizedAudit(store: EventStore, event: string, entity: string, a
   }
 }
 
+const WECHAT_KF_CORP_PROFILE_PREFIX = 'wechat-kf:';
+
+function parseBoundWechatCorpId(profileRef: string): string | null {
+  if (!profileRef.startsWith(WECHAT_KF_CORP_PROFILE_PREFIX)) return null;
+  const corpId = profileRef.slice(WECHAT_KF_CORP_PROFILE_PREFIX.length).trim();
+  return corpId.length > 0 ? corpId : null;
+}
+
 function accountStartBoundaryMs(account: AccountSummary, fallbackNow: () => number): number {
   const created = Date.parse(account.createdAt);
   if (Number.isSafeInteger(created) && created > 0) return created;
@@ -95,6 +103,10 @@ export class OfficialChannelManager {
     await this.credentials.cleanupAccounts(accountIds);
   }
 
+  purgeDisconnectedCredentials(accountId: AccountId): Promise<void> {
+    return this.sequenceAccount(accountId, () => this.credentials.deleteAccount(accountId, true));
+  }
+
   async getConfig(account: AccountSummary): Promise<OfficialChannelPublicConfig> {
     requireSafe(isOfficialApiPlatform(account.platform) && account.connector === account.platform, 'ACCOUNT_COMMAND_NOT_SUPPORTED');
     const config = await this.credentials.getPublicConfig(account.id, account.platform, account.ownId);
@@ -102,6 +114,10 @@ export class OfficialChannelManager {
     const transportStatus = runtime?.connector.transportStatus?.();
     const officialTransport = transportStatus?.transport === 'official_api' ? transportStatus : null;
     const connected = officialTransport ? officialTransport.state === 'CONNECTED' : (runtime?.connector.resourceIdentity().open ?? false);
+    if (config.platform === WECHAT_KF_PLATFORM_ID && !config.corpId) {
+      const boundCorp = parseBoundWechatCorpId(account.profileRef);
+      if (boundCorp) return { ...config, corpId: boundCorp, connected, transportStatus: officialTransport };
+    }
     return { ...config, connected, transportStatus: officialTransport };
   }
 
@@ -116,15 +132,22 @@ export class OfficialChannelManager {
       const existingRuntime = this.runtimes.get(account.id);
       if (existingRuntime) requireSafe(existingRuntime.isIdle(), 'ACCOUNT_OPERATION_IN_PROGRESS');
 
-      // Bound external identities are immutable once set so historical drafts/events can never send under another account.
+      // Bound external identities are immutable once set so historical drafts/events can never send under another account,
+      // even across disconnectAccount -> reactivateAccount cycles.
       const nextOwnId = command.platform === WECOM_AIBOT_PLATFORM_ID ? command.botId.trim() : command.openKfId.trim();
       const existingStored = await this.credentials.readStoredConfig(account.id, account.platform);
       if (account.ownId) {
         requireSafe(account.ownId === nextOwnId, 'ACCOUNT_IDENTITY_IMMUTABLE');
       }
-      if (existingStored?.platform === WECHAT_KF_PLATFORM_ID && command.platform === WECHAT_KF_PLATFORM_ID) {
-        requireSafe(existingStored.corpId === command.corpId.trim() && existingStored.openKfId === nextOwnId,
-          'ACCOUNT_IDENTITY_IMMUTABLE');
+      if (command.platform === WECHAT_KF_PLATFORM_ID) {
+        const boundCorpId = parseBoundWechatCorpId(account.profileRef)
+          ?? (existingStored?.platform === WECHAT_KF_PLATFORM_ID ? existingStored.corpId : null);
+        if (boundCorpId) {
+          requireSafe(boundCorpId === command.corpId.trim(), 'ACCOUNT_IDENTITY_IMMUTABLE');
+        }
+        if (existingStored?.platform === WECHAT_KF_PLATFORM_ID) {
+          requireSafe(existingStored.openKfId === nextOwnId, 'ACCOUNT_IDENTITY_IMMUTABLE');
+        }
       }
       const duplicate = this.deps.events.db.prepare(
         'SELECT 1 FROM accounts WHERE platform=? AND own_id=? AND id<>?',
@@ -137,22 +160,30 @@ export class OfficialChannelManager {
 
       const { stored } = await this.credentials.saveConfig(account.id, command);
       const nowIso = new Date(this.deps.now()).toISOString();
+      const nextProfileRef = command.platform === WECHAT_KF_PLATFORM_ID
+        ? `${WECHAT_KF_CORP_PROFILE_PREFIX}${command.corpId.trim()}`
+        : null;
       try {
         this.deps.events.db.transaction(() => {
-          const current = this.deps.events.db.prepare('SELECT status, own_id FROM accounts WHERE id=?')
-            .get(account.id) as { status: string; own_id: string } | undefined;
+          const current = this.deps.events.db.prepare('SELECT status, own_id, profile_ref FROM accounts WHERE id=?')
+            .get(account.id) as { status: string; own_id: string; profile_ref: string } | undefined;
           requireSafe(current?.status === 'ACTIVE', current?.status === 'DISCONNECTED' ? 'ACCOUNT_DISCONNECTED' : 'ACCOUNT_NOT_ACTIVE');
           requireSafe(!current.own_id || current.own_id === nextOwnId, 'ACCOUNT_IDENTITY_IMMUTABLE');
+          if (nextProfileRef) {
+            const persistedCorp = parseBoundWechatCorpId(current.profile_ref);
+            requireSafe(!persistedCorp || `${WECHAT_KF_CORP_PROFILE_PREFIX}${persistedCorp}` === nextProfileRef,
+              'ACCOUNT_IDENTITY_IMMUTABLE');
+          }
           const conflict = this.deps.events.db.prepare(
             'SELECT 1 FROM accounts WHERE platform=? AND own_id=? AND id<>?',
           ).get(account.platform, nextOwnId, account.id);
           requireSafe(!conflict, 'ACCOUNT_IDENTITY_CONFLICT');
-          if (!current.own_id) {
-            this.deps.events.db.prepare('UPDATE accounts SET own_id=?, updated_at=? WHERE id=?')
-              .run(nextOwnId, nowIso, account.id);
-          } else {
-            this.deps.events.db.prepare('UPDATE accounts SET updated_at=? WHERE id=?').run(nowIso, account.id);
-          }
+          const resolvedOwnId = current.own_id || nextOwnId;
+          const resolvedProfileRef = nextProfileRef && !parseBoundWechatCorpId(current.profile_ref)
+            ? nextProfileRef
+            : current.profile_ref;
+          this.deps.events.db.prepare('UPDATE accounts SET own_id=?, profile_ref=?, updated_at=? WHERE id=?')
+            .run(resolvedOwnId, resolvedProfileRef, nowIso, account.id);
           writeSanitizedAudit(this.deps.events, 'OFFICIAL_CHANNEL_CONFIGURED', account.id, account.id, {
             platform: account.platform,
             credentialStorage: stored.storage,
@@ -161,12 +192,16 @@ export class OfficialChannelManager {
         }).immediate();
       } catch (error) {
         const status = this.deps.events.db.prepare('SELECT status FROM accounts WHERE id=?').pluck().get(account.id);
-        if (status === 'DISCONNECTED') await this.credentials.deleteAccount(account.id).catch(() => {});
+        if (status === 'DISCONNECTED') await this.credentials.deleteAccount(account.id, false).catch(() => {});
         throw error;
       }
 
       this.deps.emit(account.id, 'status_updated');
-      return this.getConfig({ ...account, ownId: nextOwnId });
+      return this.getConfig({
+        ...account,
+        ownId: nextOwnId,
+        ...(nextProfileRef ? { profileRef: nextProfileRef } : {}),
+      });
     });
   }
 
@@ -186,84 +221,92 @@ export class OfficialChannelManager {
         await this.closeRuntime(account.id, existing);
       }
 
-      const platform: OfficialApiPlatformId = account.platform;
-      const stored = await this.credentials.readStoredConfig(account.id, platform);
-      requireSafe(stored, 'CHANNEL_CONFIG_REQUIRED');
-      const secretPayload = await this.credentials.loadSecret(account.id, platform);
-      const expectedOwnId = stored.platform === WECOM_AIBOT_PLATFORM_ID ? stored.botId : stored.openKfId;
-      requireSafe(!account.ownId || account.ownId === expectedOwnId, 'ACCOUNT_CHANGED');
-
-      // Use this account's own creation timestamp as firstRunAt so joining an older workspace
-      // never converts pre-existing customer messages into AWAITING_DRAFT.
-      const firstRunAt = accountStartBoundaryMs(account, this.deps.now);
-      let connector: PlatformConnector;
-      if (stored.platform === WECOM_AIBOT_PLATFORM_ID) {
-        const wecomSecret = secretPayload as WecomAibotSecretPayload;
-        const opts: WecomAibotConnectorOptions = {
-          accountId: account.id,
-          botId: stored.botId,
-          secret: () => wecomSecret.secret,
-          ...(stored.wsUrl ? { wsUrl: stored.wsUrl } : {}),
-          allowGroupMessages: stored.allowGroupMessages,
-          autoPersistInbound: true,
-          firstRunAt,
-          now: this.deps.now,
-        };
-        connector = this.options.createWecomConnector
-          ? this.options.createWecomConnector(opts)
-          : new WecomAibotPlatformConnector(opts);
-      } else {
-        const kfSecret = secretPayload as WechatKfSecretPayload;
-        const cursorStore = new SqliteWeChatKfCursorStore(this.deps.events.db, this.deps.now);
-        const opts: WeChatKfConnectorOptions = {
-          accountId: account.id,
-          openKfId: stored.openKfId,
-          root: this.deps.root,
-          credentials: () => ({
-            corpId: stored.corpId,
-            appSecret: kfSecret.appSecret,
-            ...(kfSecret.token ? { token: kfSecret.token } : {}),
-            ...(kfSecret.encodingAESKey ? { encodingAESKey: kfSecret.encodingAESKey } : {}),
-          }),
-          ...(stored.apiBaseUrl ? { apiBaseUrl: stored.apiBaseUrl } : {}),
-          cursorStore,
-          firstRunAt,
-          now: this.deps.now,
-        };
-        connector = this.options.createWechatKfConnector
-          ? this.options.createWechatKfConnector(opts)
-          : new WeChatKfPlatformConnector(opts);
-      }
-
       const connectAbort = new AbortController();
       this.connectingAborts.set(account.id, connectAbort);
-      const runtime = new OfficialAccountRuntime(
-        this.deps.events.db.name, connector, this.deps.now,
-        this.deps.sharedModels, event => this.deps.emit(account.id, event), this.deps.readAudit,
-      );
+      let runtime: OfficialAccountRuntime | undefined;
       try {
-        await runtime.openAndAttest(connectAbort.signal);
-        // For WeChat KF, verify credentials against official token endpoint before reporting connected.
+        const platform: OfficialApiPlatformId = account.platform;
+        const stored = await this.credentials.readStoredConfig(account.id, platform);
+        requireSafe(!connectAbort.signal.aborted && !isEmergencyStopped(this.deps.events), 'EMERGENCY_STOPPED');
+        requireSafe(stored, 'CHANNEL_CONFIG_REQUIRED');
+        const secretPayload = await this.credentials.loadSecret(account.id, platform);
+        requireSafe(!connectAbort.signal.aborted && !isEmergencyStopped(this.deps.events), 'EMERGENCY_STOPPED');
+        const expectedOwnId = stored.platform === WECOM_AIBOT_PLATFORM_ID ? stored.botId : stored.openKfId;
+        requireSafe(!account.ownId || account.ownId === expectedOwnId, 'ACCOUNT_CHANGED');
+
+        // Use this account's own creation timestamp as firstRunAt so joining an older workspace
+        // never converts pre-existing customer messages into AWAITING_DRAFT.
+        const firstRunAt = accountStartBoundaryMs(account, this.deps.now);
+        let connector: PlatformConnector;
+        if (stored.platform === WECOM_AIBOT_PLATFORM_ID) {
+          const wecomSecret = secretPayload as WecomAibotSecretPayload;
+          const opts: WecomAibotConnectorOptions = {
+            accountId: account.id,
+            botId: stored.botId,
+            secret: () => wecomSecret.secret,
+            ...(stored.wsUrl ? { wsUrl: stored.wsUrl } : {}),
+            allowGroupMessages: stored.allowGroupMessages,
+            autoPersistInbound: true,
+            firstRunAt,
+            now: this.deps.now,
+          };
+          connector = this.options.createWecomConnector
+            ? this.options.createWecomConnector(opts)
+            : new WecomAibotPlatformConnector(opts);
+        } else {
+          const kfSecret = secretPayload as WechatKfSecretPayload;
+          const cursorStore = new SqliteWeChatKfCursorStore(this.deps.events.db, this.deps.now);
+          const opts: WeChatKfConnectorOptions = {
+            accountId: account.id,
+            openKfId: stored.openKfId,
+            root: this.deps.root,
+            credentials: () => ({
+              corpId: stored.corpId,
+              appSecret: kfSecret.appSecret,
+              ...(kfSecret.token ? { token: kfSecret.token } : {}),
+              ...(kfSecret.encodingAESKey ? { encodingAESKey: kfSecret.encodingAESKey } : {}),
+            }),
+            ...(stored.apiBaseUrl ? { apiBaseUrl: stored.apiBaseUrl } : {}),
+            cursorStore,
+            firstRunAt,
+            now: this.deps.now,
+          };
+          connector = this.options.createWechatKfConnector
+            ? this.options.createWechatKfConnector(opts)
+            : new WeChatKfPlatformConnector(opts);
+        }
+
+        // For WeChat KF, verify credentials BEFORE opening/attesting SEND_AVAILABLE so bad secrets never persist capability rows.
         if (connector instanceof WeChatKfPlatformConnector) {
           await connector.apiClient.verifyCredentials(connectAbort.signal);
+          requireSafe(!connectAbort.signal.aborted && !isEmergencyStopped(this.deps.events), 'EMERGENCY_STOPPED');
         }
+
+        runtime = new OfficialAccountRuntime(
+          this.deps.events.db.name, connector, this.deps.now,
+          this.deps.sharedModels, event => this.deps.emit(account.id, event), this.deps.readAudit,
+        );
+        await runtime.openAndAttest(connectAbort.signal);
         requireSafe(!connectAbort.signal.aborted && !isEmergencyStopped(this.deps.events), 'EMERGENCY_STOPPED');
         const currentStatus = this.deps.events.db.prepare('SELECT status FROM accounts WHERE id=?').pluck().get(account.id);
         requireSafe(currentStatus === 'ACTIVE', currentStatus === 'DISCONNECTED' ? 'ACCOUNT_DISCONNECTED' : 'ACCOUNT_NOT_ACTIVE');
-      } catch (error) {
-        this.connectingAborts.delete(account.id);
-        await runtime.close().catch(() => {});
-        throw error;
-      }
 
-      this.connectingAborts.delete(account.id);
-      this.runtimes.set(account.id, runtime);
-      this.deps.onRegistryChanged();
-      writeSanitizedAudit(this.deps.events, 'OFFICIAL_CHANNEL_CONNECTED', account.id, account.id, {
-        platform: account.platform,
-      });
-      this.deps.emit(account.id, 'status_updated');
-      return this.getConfig(account);
+        this.runtimes.set(account.id, runtime);
+        runtime = undefined;
+        this.deps.onRegistryChanged();
+        writeSanitizedAudit(this.deps.events, 'OFFICIAL_CHANNEL_CONNECTED', account.id, account.id, {
+          platform: account.platform,
+        });
+        this.deps.emit(account.id, 'status_updated');
+        return this.getConfig(account);
+      } catch (error) {
+        if (runtime) await runtime.close().catch(() => {});
+        throw error;
+      } finally {
+        if (this.connectingAborts.get(account.id) === connectAbort) {
+          this.connectingAborts.delete(account.id);
+        }
+      }
     });
   }
 
@@ -298,24 +341,21 @@ export class OfficialChannelManager {
   }
 
   onAccountDisconnected(accountId: AccountId): Promise<void> {
+    this.connectingAborts.get(accountId)?.abort(new Blocked('ACCOUNT_DISCONNECTED'));
     return this.sequenceAccount(accountId, async () => {
-      const abort = this.connectingAborts.get(accountId);
-      if (abort) {
-        abort.abort(new Blocked('ACCOUNT_DISCONNECTED'));
-        this.connectingAborts.delete(accountId);
-      }
       const runtime = this.runtimes.get(accountId);
       if (runtime) {
         await this.closeRuntime(accountId, runtime);
       }
-      await this.credentials.deleteAccount(accountId);
+      await this.credentials.deleteAccount(accountId, true);
     });
   }
 
   onEmergencyStop(): void {
-    for (const [id, abort] of this.connectingAborts) {
+    // Abort connecting handshakes without clearing connectingAborts early; connect()'s finally block
+    // removes its entry only after teardown completes so isIdle() stays false until fully stopped.
+    for (const [, abort] of this.connectingAborts) {
       abort.abort(new Blocked('EMERGENCY_STOPPED'));
-      this.connectingAborts.delete(id);
     }
     const entries = [...this.runtimes.entries()];
     if (!entries.length) return;

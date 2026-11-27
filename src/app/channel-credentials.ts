@@ -307,20 +307,25 @@ export class ChannelCredentialStore {
     }
   }
 
-  private async removeSecretFile(file: string, confirmCache = true): Promise<void> {
+  private async removeSecretFile(file: string, confirmCache = true, strict = false): Promise<void> {
     if (statIfPresent(file)) removePrivateFile(file);
     if (confirmCache) {
-      await clearDeletedDpapiCache(file).catch(() => invalidateDeletedKey(this.root, file));
+      try {
+        await clearDeletedDpapiCache(file);
+      } catch {
+        invalidateDeletedKey(this.root, file);
+        if (strict) throw new Blocked('CHANNEL_CREDENTIAL_CLEANUP_FAILED');
+      }
     } else {
       invalidateDeletedKey(this.root, file);
     }
   }
 
-  private async pruneStaleSecretFiles(dir: string, activeFileName: string | null, confirmCache: boolean): Promise<void> {
+  private async pruneStaleSecretFiles(dir: string, activeFileName: string | null, confirmCache: boolean, strict = false): Promise<void> {
     for (const name of readdirSync(dir)) {
       if (name === activeFileName) continue;
       if (name === 'secret.dpapi' || (name.startsWith('secret.') && (name.endsWith('.dpapi') || name.endsWith('.tmp')))) {
-        await this.removeSecretFile(join(dir, name), confirmCache);
+        await this.removeSecretFile(join(dir, name), confirmCache, strict);
       }
     }
   }
@@ -516,15 +521,17 @@ export class ChannelCredentialStore {
         throw error;
       }
 
+      // New config is committed; prune superseded ciphertext best-effort so a transient file lock
+      // on an obsolete file never makes an already-committed rotation report failure.
       if (nextStorage === 'DPAPI') {
         this.memory.delete(memKey);
-        await this.pruneStaleSecretFiles(dir, secretFileName(nextRevision), true);
+        await this.pruneStaleSecretFiles(dir, secretFileName(nextRevision), true, false).catch(() => {});
       } else if (nextStorage === 'MEMORY' && nextSecret) {
         this.memory.set(memKey, nextSecret);
-        await this.pruneStaleSecretFiles(dir, null, true);
+        await this.pruneStaleSecretFiles(dir, null, true, false).catch(() => {});
       } else {
         this.memory.delete(memKey);
-        await this.pruneStaleSecretFiles(dir, null, true);
+        await this.pruneStaleSecretFiles(dir, null, true, true);
       }
 
       return {
@@ -549,13 +556,13 @@ export class ChannelCredentialStore {
     });
   }
 
-  deleteAccount(accountId: AccountId): Promise<void> {
+  deleteAccount(accountId: AccountId, strict = true): Promise<void> {
     return this.sequence(async () => {
       this.memory.delete(this.memoryKey(accountId, WECOM_AIBOT_PLATFORM_ID));
       this.memory.delete(this.memoryKey(accountId, WECHAT_KF_PLATFORM_ID));
       const dir = this.accountDir(accountId, false);
       if (!dir) return;
-      await this.pruneStaleSecretFiles(dir, null, true);
+      await this.pruneStaleSecretFiles(dir, null, true, strict);
       const configFile = join(dir, 'config.json');
       if (statIfPresent(configFile)) removePrivateFile(configFile);
       try { rmdirSync(dir); } catch { /* ignore non-empty or already removed */ }
@@ -564,7 +571,7 @@ export class ChannelCredentialStore {
 
   async cleanupAccounts(accountIds: readonly AccountId[]): Promise<void> {
     for (const accountId of accountIds) {
-      await this.deleteAccount(accountId).catch(() => {});
+      await this.deleteAccount(accountId, false).catch(() => {});
     }
   }
 }
