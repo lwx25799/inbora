@@ -26,6 +26,16 @@ const actions=z.discriminatedUnion('action',[
   z.object({...command,action:z.literal('importPreviewMapping'),id:uuid,mapping:importMappingSchema}).strict(),
   z.object({...command,action:z.literal('importCommit'),id:uuid,mapping:importMappingSchema.optional()}).strict(),
   z.object({...command,action:z.literal('importCancel'),id:uuid}).strict(),
+  z.object({...command,action:z.literal('listFaqSuggestions'),status:z.enum(['PENDING','ADOPTED','DISMISSED']).optional()}).strict(),
+  z.object({...command,action:z.literal('generateFaqSuggestions'),minClusterSize:z.number().int().min(1).max(20).optional()}).strict(),
+  z.object({...command,action:z.literal('adoptFaqSuggestion'),suggestionId:uuid,
+    title:z.string().trim().min(1).max(120).optional(),
+    topic:z.string().trim().min(1).max(80).optional(),
+    text:z.string().trim().min(1).max(4000).optional(),
+    aliases:z.array(z.string().trim().min(1).max(100)).max(30).optional(),
+    channels:z.array(channel).min(1).max(2).optional(),
+    activate:z.boolean().optional()}).strict(),
+  z.object({...command,action:z.literal('dismissFaqSuggestion'),suggestionId:uuid}).strict(),
 ]);
 export const knowledgeCommandSchema=actions;
 export type KnowledgeCommand=z.infer<typeof actions>;

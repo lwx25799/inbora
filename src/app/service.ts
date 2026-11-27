@@ -20,7 +20,7 @@ import { handleModelProviderCommand } from "./model-provider-commands.js";
 import { runServiceAutomaticReply } from "./automatic-reply.js";
 import type { ReplyPipelineConfig } from "./reply-pipeline/types.js";
 import { readDiagnostics } from "./diagnostics.js";
-import { markInboxRead } from "./inbox-read-state.js";
+import { handleReplyPipelineCommand } from "./reply-pipeline-commands.js";
 import { EvidenceMaintenance } from "./evidence-maintenance.js";
 import { runtimePerformance } from "../observability/runtime-performance.js";
 import { BrowserResources } from "../observability/browser-resources.js";
@@ -29,10 +29,11 @@ import { configureAssistantConnection } from "./local-assistant-connection.js";
 import { readSecurityHold } from "../storage/security-holds.js";
 import { securityRuntime } from "./security-runtime.js";
 import {
-  clientError, dismissSuggestion,
+  clientError, closeOtherDialogs, dismissSuggestion,
   handleConfigWriteCommand,
   handleLifecycleControlCommand,
   knowledgeMutatingActions,
+  markInboxReadCommand,
   type ConfigWriteCommand,
   type LifecycleControlCommand,
 } from "./service-guards.js";
@@ -494,6 +495,13 @@ export class ClientService {
         this.track(tracked);
         return tracked;
       }
+      case "replyPipeline":
+        return handleReplyPipelineCommand({
+          store: this.store, authority: this.authority, automation: this.automation,
+          knowledgeContext: (event, queryText) =>
+            this.knowledge.data.available() ? this.knowledge.data.context(event.accountId, event.channel, queryText) : null,
+          onConfigSaved: () => this.emit("status_updated"),
+        }, token, c);
       case "securityRecovery":
       case "setLocalAssistantGrant":
       case "pause":
@@ -533,7 +541,7 @@ export class ClientService {
       case "openHumanDialog": {
         this.authority.operator(token, "EDIT");
         this.authority.select(token, c.eventId, c.selectionId);
-        this.closeOtherDialogs(token, c.eventId);
+        closeOtherDialogs(this.dialogs, this.authority, token, c.eventId);
         const event = this.store.event(c.eventId);
         if (
           c.editing !== false &&
@@ -629,19 +637,13 @@ export class ClientService {
       case "getInbox":
         return this.queries.inbox(c);
       case "markInboxRead": {
-        this.authority.operator(token, "EDIT");
-        const version = this.authority.assistantVersion(token),
-          grant = version === null ? null : this.authority.assistant.require("editControl", version);
-        const ids = grant
-          ? this.store.events().filter((event) => this.authority.assistant.inScope(grant, event)).map((event) => event.id)
-          : undefined;
-        const result = markInboxRead(this.store, ids);
+        const result = markInboxReadCommand(this.store, this.authority, token);
         this.inboxRevision++;
         this.emit("inbox_updated");
         return result;
       }
       case "selectTarget":
-        this.closeOtherDialogs(token, c.eventId);
+        closeOtherDialogs(this.dialogs, this.authority, token, c.eventId);
         this.authority.select(token, c.eventId, c.selectionId);
         if (c.eventId && this.automation) {
           this.browser.prioritizePreview(this.automation, this.store.event(c.eventId).payload, c.eventId);
@@ -723,18 +725,6 @@ export class ClientService {
     const task = this.humanQueue.then(operation);
     this.humanQueue = task.catch(() => {});
     return task;
-  }
-  private closeOtherDialogs(token: string, current: string | null): void {
-    for (const [id, dialog] of this.dialogs) {
-      if (id !== current && dialog.token === token) {
-        try {
-          this.authority.release(token, id, dialog.generation);
-        } catch {
-          /* Pause may already have invalidated the lease. */
-        }
-        this.dialogs.delete(id);
-      }
-    }
   }
   setPipelineConfig(config: ReplyPipelineConfig | undefined): void {
     this.pipelineConfig = config;

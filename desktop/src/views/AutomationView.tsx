@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type * as React from 'react';
 import { FileTextIcon, SlidersHorizontalIcon, SparklesIcon } from 'lucide-react';
 import { AutomationSettings } from '@/AutomationSettings';
+import { ReplyPipelineSettings } from '@/ReplyPipelineSettings';
 import { SettingsDialog } from '@/SettingsDialog';
 import { AutoReplySwitch } from '@/components/AutoReplySwitch';
 import { PageHeader } from '@/components/PageHeader';
@@ -251,14 +252,20 @@ export function AutomationView({
 
       {/* Row 2: Full Automation Settings Panel */}
       {status.automation ? (
-        <AutomationSettings
-          status={status}
-          busy={busy}
-          error={error}
-          notice={notice}
-          act={act}
-          update={update}
-        />
+        <>
+          <AutomationSettings
+            status={status}
+            busy={busy}
+            error={error}
+            notice={notice}
+            act={act}
+            update={update}
+          />
+          <ReplyPipelineSettings
+            accountId={status.account?.id ?? null}
+            disabled={!!busy}
+          />
+        </>
       ) : (
         <Card className="p-6 text-center text-xs text-muted-foreground">
           当前内核尚未初始化自动化状态，请确认连接运行目录后重试。

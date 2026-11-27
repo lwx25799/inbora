@@ -13,6 +13,7 @@ import {OnnxEmbeddingManager,sanitizeEmbeddingStatus} from './embedding-engine.j
 import {LearningModelService,recoverLearningTasks,type LearningModelContext} from './model-service.js';
 import type {ModelProviderController} from '../app/model-provider-controller.js';
 import {replySettingsFingerprint} from './generation-context.js';
+import {handleFaqSuggestionCommand} from './faq-suggestion-commands.js';
 import type {KnowledgeCommand} from './commands.js';
 
 interface State {settings:AiSettings;models:ModelProviderController|null;modelUnavailable:string|null;automation:AutomationStore|null;signal:AbortSignal;closing:boolean}
@@ -65,6 +66,11 @@ export class ReplyKnowledgeService {
         return {...debug,onnxStatus:sanitizeEmbeddingStatus(debug.onnxStatus)};
       }
       case 'embeddingStatus':return sanitizeEmbeddingStatus(this.data.embeddingStatus());
+      case 'listFaqSuggestions':
+      case 'generateFaqSuggestions':
+      case 'adoptFaqSuggestion':
+      case 'dismissFaqSuggestion':
+        return handleFaqSuggestionCommand(this.store,this.data,accountId,command);
       case 'analyze':case 'tryReply':{
         requireSafe(!this.modelBusy,'KNOWLEDGE_MODEL_BUSY');const before=this.state(),auto=before.automation;
         const controller=before.models;

@@ -9,10 +9,12 @@ import { InboxList } from './InboxList';
 import { KnowledgeDocuments } from './KnowledgeDocuments';
 import { KnowledgeSamples } from './KnowledgeSamples';
 import { KnowledgeTrial } from './KnowledgeTrial';
+import { FaqSuggestionsPanel } from './FaqSuggestionsPanel';
 import { ModelConnectionEditor } from './ModelConnectionEditor';
 import { ModelSelector } from './ModelSelector';
 import { ReplyComposer } from './ReplyComposer';
 import { ReplyDetail } from './ReplyDetail';
+import { ReplyPipelineSettings } from './ReplyPipelineSettings';
 import { SecurityRecoveryDialog } from './SecurityRecoveryDialog';
 import { CommandPalette } from './components/CommandPalette';
 import { ConnectScreen } from './components/ConnectScreen';
@@ -450,8 +452,31 @@ describe('UX polish invariants across the 8 usability principles', () => {
           selectionRevision: 1,
         }),
       ),
+      renderToStaticMarkup(createElement(ReplyPipelineSettings, { accountId: null })),
+      renderToStaticMarkup(
+        createElement(FaqSuggestionsPanel, {
+          overview: {
+            available: true,
+            sources: [],
+            knowledge: [],
+            samples: [],
+            personas: [],
+            activePersonaId: null,
+            activePersona: null,
+            totals: { sources: 0, knowledge: 0, samples: 0, accepted: 0, holdout: 0, personas: 0 },
+            learningTasks: [],
+            page: 0,
+            pageSize: 50,
+          },
+          busy: false,
+          perform: async () => {},
+        }),
+      ),
     ];
 
+    expect(reasons.FAQ_SUGGESTION_NOT_FOUND).toBeTruthy();
+    expect(reasons.FAQ_SUGGESTION_NOT_PENDING).toBeTruthy();
+    expect(reasons.INVALID_PIPELINE_CONFIG).toBeTruthy();
     for (const html of viewsHtml) {
       expect(stripTags(html)).not.toMatch(jargonPattern);
       expect(html).not.toMatch(/title="[^"]*(schema3|schema4|DPAPI|无头|有头|协议\s*v2)/iu);

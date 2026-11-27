@@ -4,6 +4,7 @@ import { KnowledgeDocuments } from './KnowledgeDocuments';
 import { KnowledgeSamples } from './KnowledgeSamples';
 import { KnowledgePersona } from './KnowledgePersona';
 import { KnowledgeTrial } from './KnowledgeTrial';
+import { FaqSuggestionsPanel } from './FaqSuggestionsPanel';
 import { describeKnowledgeError, knowledgeRequest, type KnowledgeAction } from './knowledge-client';
 
 const tabs = [
@@ -11,6 +12,7 @@ const tabs = [
   ['samples', '聊天样本'],
   ['persona', '回复人格'],
   ['trial', '试聊'],
+  ['faq-suggestions', '候选 FAQ'],
 ] as const;
 type Tab = (typeof tabs)[number][0];
 
@@ -262,6 +264,14 @@ export function KnowledgeSettings({
             hidden={tab !== 'trial'}
           >
             <KnowledgeTrial {...panel} />
+          </section>
+          <section
+            id="knowledge-panel-faq-suggestions"
+            role="tabpanel"
+            aria-labelledby="knowledge-tab-faq-suggestions"
+            hidden={tab !== 'faq-suggestions'}
+          >
+            <FaqSuggestionsPanel {...panel} />
           </section>
           <div className="knowledge-pagination flex flex-wrap items-center justify-between gap-3 border-t border-border/75 pt-3.5 text-xs text-muted-foreground tabular-nums">
             <span>

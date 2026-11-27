@@ -8,6 +8,7 @@ import { CredentialStore } from "./credentials.js";
 import { configureAssistantConnection } from "./local-assistant-connection.js";
 import { recoverEmergency } from "./emergency-recovery.js";
 import { handleBrowserCommand } from "./browser-command.js";
+import { markInboxRead } from "./inbox-read-state.js";
 import type { AiSettings, ClientCommand } from "./contracts.js";
 import type { ModelProviderController } from "./model-provider-controller.js";
 import type { ReplyPolicy } from "./automation-contracts.js";
@@ -27,6 +28,9 @@ export const knowledgeMutatingActions = new Set<string>([
   "publishPersona",
   "importCommit",
   "analyze",
+  "generateFaqSuggestions",
+  "adoptFaqSuggestion",
+  "dismissFaqSuggestion",
 ]);
 
 const readOnlyCommands = new Set<string>([
@@ -46,7 +50,13 @@ export function isReadOnlySidecarCommand(raw: unknown): boolean {
   if (readOnlyCommands.has(body.command)) return true;
   if (body.command === "getMessagePreview") return body.refresh !== true;
   if (body.command === "replyKnowledge") {
-    return body.action === "overview" || body.action === "debugRetrieval" || body.action === "embeddingStatus";
+    return body.action === "overview"
+      || body.action === "debugRetrieval"
+      || body.action === "embeddingStatus"
+      || body.action === "listFaqSuggestions";
+  }
+  if (body.command === "replyPipeline") {
+    return body.action === "getConfig" || body.action === "dryRun";
   }
   if (body.command === "modelProviders") return body.action === "list";
   if (body.command === "accounts") {
@@ -135,6 +145,34 @@ export function dismissSuggestion(store: EventStore, authority: WorkbenchAuthori
     SELECT s.id FROM ai_suggestions s JOIN inbound_events e ON e.id=s.event_id WHERE s.id=? AND e.account_id=?)`)
     .run(suggestionId, store.accountId).changes === 1, "SUGGESTION_NOT_FOUND");
   return { dismissed: true };
+}
+
+export function markInboxReadCommand(store: EventStore, authority: WorkbenchAuthority, token: string) {
+  authority.operator(token, "EDIT");
+  const version = authority.assistantVersion(token);
+  const grant = version === null ? null : authority.assistant.require("editControl", version);
+  const ids = grant
+    ? store.events().filter((event) => authority.assistant.inScope(grant, event)).map((event) => event.id)
+    : undefined;
+  return markInboxRead(store, ids);
+}
+
+export function closeOtherDialogs(
+  dialogs: Map<string, { token: string; generation: number }>,
+  authority: WorkbenchAuthority,
+  token: string,
+  current: string | null,
+): void {
+  for (const [id, dialog] of dialogs) {
+    if (id !== current && dialog.token === token) {
+      try {
+        authority.release(token, id, dialog.generation);
+      } catch {
+        /* Pause may already have invalidated the lease. */
+      }
+      dialogs.delete(id);
+    }
+  }
 }
 
 /** Centralized GUI-only config/policy/key mutations and unified LIMITED_AUTO gating. */

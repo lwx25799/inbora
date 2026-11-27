@@ -10,6 +10,23 @@ import {explainSafe} from './error-messages.js';
 
 export type {OnnxEmbeddingStatus,RetrievalDebugResult};
 
+export type FaqSuggestionStatus = 'PENDING' | 'ADOPTED' | 'DISMISSED';
+
+export interface FaqSuggestion {
+  id: string;
+  accountId: string;
+  clusterDigest: string;
+  channels: Channel[];
+  question: string;
+  variants: string[];
+  suggestedAnswer: string;
+  sampleCount: number;
+  sourceEventIds: string[];
+  status: FaqSuggestionStatus;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ChatImportMapping {
   speakerColumn:string;
   textColumn:string;
@@ -41,7 +58,11 @@ export type KnowledgeAction=
   | {action:'importFinish';id:string}
   | {action:'importPreviewMapping';id:string;mapping:ChatImportMapping}
   | {action:'importCommit';id:string;mapping?:ChatImportMapping}
-  | {action:'importCancel';id:string};
+  | {action:'importCancel';id:string}
+  | {action:'listFaqSuggestions';status?:FaqSuggestionStatus}
+  | {action:'generateFaqSuggestions';minClusterSize?:number}
+  | {action:'adoptFaqSuggestion';suggestionId:string;title?:string;topic?:string;text?:string;aliases?:string[];channels?:Channel[];activate?:boolean}
+  | {action:'dismissFaqSuggestion';suggestionId:string};
 
 export async function knowledgeRequest<T>(body:KnowledgeAction):Promise<T> {
   if(body.action==='overview'&&(await desktopInfo()).features?.replyKnowledge!==true)

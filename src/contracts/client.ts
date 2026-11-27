@@ -4,6 +4,7 @@ import {knowledgeCommandSchema} from './knowledge-commands.js';
 import { collectionSchema, modelGrantInputSchema, replyPolicyInputSchema } from "./automation.js";
 import {manualRecoveryCommandSchema} from './manual-recovery.js';
 import { modelIdSchema, modelProvidersCommandSchema, type PublicModelState } from "./model-providers.js";
+import { replyPipelineCommandSchema } from "./reply-pipeline.js";
 
 export const protocolVersion = 1;
 export const protocolVersionV2 = 2;
@@ -186,7 +187,7 @@ const ordinaryCommandSchema = z.discriminatedUnion("command", [
 ]);
 export const commandSchema = z.union([
   ordinaryCommandSchema, browserCommandSchema, manualRecoveryCommandSchema,
-  knowledgeCommandSchema, modelProvidersCommandSchema, accountsCommandSchema,
+  knowledgeCommandSchema, modelProvidersCommandSchema, accountsCommandSchema, replyPipelineCommandSchema,
 ]);
 export type ClientCommand = z.infer<typeof commandSchema>;
 export interface ModelProviderStatusFields {

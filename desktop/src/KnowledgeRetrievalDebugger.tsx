@@ -55,6 +55,37 @@ export function describeEmbeddingBadge(status: OnnxEmbeddingStatus): {
   return { label: '已自动切换为关键词增强检索', tone: 'warning' };
 }
 
+export function describeLocalIndexVerification(status: OnnxEmbeddingStatus): {
+  verificationLabel: string;
+  fallbackNote: string;
+} {
+  if (status.engineMode === 'HYBRID_ONNX') {
+    return {
+      verificationLabel:
+        status.state === 'REUSED_LOCAL'
+          ? '已通过本机校验并直接复用现有模型'
+          : '本机语义模型已校验就绪',
+      fallbackNote: '正在使用词面关键词与本机语义双重召回，计算全部在本机完成，不消耗模型额度。',
+    };
+  }
+  if (status.state === 'REUSED_LOCAL' || status.state === 'DOWNLOAD_READY') {
+    return {
+      verificationLabel: '本机语义模型已校验（按增强关键词模式运行）',
+      fallbackNote: '当前按关键词增强检索运行，核心问答与精确直出功能正常。',
+    };
+  }
+  if (status.state === 'MISSING_NEEDS_DOWNLOAD') {
+    return {
+      verificationLabel: '本机尚未安装语义模型',
+      fallbackNote: '已无缝使用关键词增强检索兜底，不影响正常知识召回与标准问答命中。',
+    };
+  }
+  return {
+    verificationLabel: '本机语义索引暂不可用，已自动回退',
+    fallbackNote: '已自动切换为关键词增强检索保障稳定性，知识召回与精确匹配仍可正常使用。',
+  };
+}
+
 /** Pure state controller shared by the component and unit tests to guard async ordering and scope changes. */
 export interface DebuggerViewState {
   scopeKey: string;
@@ -179,7 +210,9 @@ export function KnowledgeRetrievalDebugger({
 
   const effectiveStatus = resolveLatestEmbeddingStatus(view);
   const badge = effectiveStatus ? describeEmbeddingBadge(effectiveStatus) : null;
+  const localIndexInfo = effectiveStatus ? describeLocalIndexVerification(effectiveStatus) : null;
   const disabled = busy || running;
+  const initialStatusFetchedRef = useRef(false);
 
   const inspectEmbedding = async () => {
     if (disabled || checkingStatus) return;
@@ -202,6 +235,12 @@ export function KnowledgeRetrievalDebugger({
       if (aliveRef.current) setCheckingStatus(false);
     }
   };
+
+  useEffect(() => {
+    if (disabled || initialStatusFetchedRef.current) return;
+    initialStatusFetchedRef.current = true;
+    void inspectEmbedding();
+  }, [disabled]);
 
   const runPreview = async (overrideQuery?: string) => {
     const targetQuery = (overrideQuery ?? query).trim();
@@ -287,6 +326,40 @@ export function KnowledgeRetrievalDebugger({
             {checkingStatus ? '检查中…' : '检查索引状态'}
           </button>
         </div>
+      </div>
+
+      <div
+        className="flex flex-col gap-1.5 rounded-xl border border-border/75 bg-muted/25 px-3.5 py-2.5 text-xs"
+        aria-label="本机语义索引状态面板"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="font-medium text-foreground">本机语义索引状态</span>
+          <span className="font-medium text-foreground">
+            {effectiveStatus
+              ? describeEngineMode(effectiveStatus.engineMode)
+              : checkingStatus
+                ? '正在检查索引能力…'
+                : '默认关键词增强检索'}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-muted-foreground">
+          <span>
+            校验与复用：
+            {localIndexInfo
+              ? localIndexInfo.verificationLabel
+              : checkingStatus
+                ? '正在核验本机语义模型状态…'
+                : '尚未检查，可点击右侧按钮核验'}
+          </span>
+          {effectiveStatus && (
+            <span className="tabular-nums">向量维度：{effectiveStatus.dims}</span>
+          )}
+        </div>
+        <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+          {localIndexInfo
+            ? localIndexInfo.fallbackNote
+            : '若本机尚未安装语义模型，系统会自动使用关键词增强检索，不阻塞日常知识匹配。'}
+        </p>
       </div>
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -472,11 +545,11 @@ export function KnowledgeRetrievalDebugger({
                   : '无'}
               </p>
               <p>
-                当前门槛值：{debugResult.minScore} · 检索模式代码：{debugResult.engineMode}
+                当前门槛值：{debugResult.minScore} · 检索方式：{describeEngineMode(debugResult.engineMode)}
               </p>
               <p>
-                语义索引状态：{(effectiveStatus ?? debugResult.onnxStatus).state}（
-                {(effectiveStatus ?? debugResult.onnxStatus).reason}）
+                语义索引状态：
+                {describeLocalIndexVerification(effectiveStatus ?? debugResult.onnxStatus).verificationLabel}
               </p>
             </div>
           </details>

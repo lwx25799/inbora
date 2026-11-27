@@ -85,7 +85,10 @@ export function isMutatingClientCommand(body: unknown): boolean {
     case 'replyKnowledge':
       return command.action !== 'overview'
         && command.action !== 'debugRetrieval'
-        && command.action !== 'embeddingStatus';
+        && command.action !== 'embeddingStatus'
+        && command.action !== 'listFaqSuggestions';
+    case 'replyPipeline':
+      return command.action === 'saveConfig';
     case 'modelProviders':
       return command.action !== 'list';
     case 'accounts':

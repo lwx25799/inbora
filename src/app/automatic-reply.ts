@@ -19,6 +19,7 @@ import {assertSecurityRevision,securityRevision} from '../storage/security-holds
 import {runtimePerformance} from '../observability/runtime-performance.js';
 import type {ReplyKnowledgeContext} from '../knowledge/contracts.js';
 import {assertReplyKnowledgeCurrent,bindReplyKnowledge,replySettingsFingerprint} from '../knowledge/generation-context.js';
+import {loadEffectivePipelineConfig} from './reply-pipeline-commands.js';
 import {
   HandoffAttributionStore,
   PersistentRhythmGate,
@@ -44,12 +45,13 @@ export interface ServiceAutomaticReplyHost {
 
 /** 供 ClientService 委派自动回复执行，保持 service.ts 精简且不压缩格式 */
 export async function runServiceAutomaticReply(host:ServiceAutomaticReplyHost):Promise<void>{
-  const allowNoModelKey=Boolean(host.pipelineConfig?.handoff?.exactFaqDirectReply);
+  const pipelineConfig=host.pipelineConfig??loadEffectivePipelineConfig(host.store);
+  const allowNoModelKey=Boolean(pipelineConfig.handoff?.exactFaqDirectReply);
   if(host.isClosing()||host.browser.loginRecovery||!host.automation||!host.models||(!host.keyPresent&&!allowNoModelKey)||host.modelPending.size)return;
   await runAutomaticReply({
     store:host.store,authority:host.authority,automation:host.automation,browser:host.browser,
     knowledgeContext:host.knowledgeContext,
-    ...(host.pipelineConfig?{pipelineConfig:host.pipelineConfig}:{}),
+    pipelineConfig,
     provider:host.provider,humanReplies:host.humanReplies,
     settings:host.settings(),currentSettings:host.settings,
     models:host.models,modelPending:host.modelPending,

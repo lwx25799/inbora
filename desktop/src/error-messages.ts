@@ -315,9 +315,13 @@ export const errorMessages: Record<string, string> = {
 
   // Knowledge base & persona learning
   KNOWLEDGE_NATIVE_UPDATE_REQUIRED: '当前窗口尚未加载知识与人格功能。请保存正在编辑的内容，关闭后从项目根目录的「启动inbora.cmd」重新打开，无需重新填写运行目录。',
+  KNOWLEDGE_GUI_ONLY: '知识与候选问答管理仅支持在桌面客户端内操作。',
   KNOWLEDGE_NOT_AVAILABLE: '知识与人格资料尚未就绪，请重新读取。',
   KNOWLEDGE_NOT_READY: '知识存储尚未就绪，请重新连接运行目录后读取。',
   KNOWLEDGE_MIGRATION_REQUIRED: '知识存储尚未升级。请重新连接运行目录，由应用完成备份与升级。',
+  FAQ_SUGGESTION_NOT_FOUND: '未找到对应的候选问答建议，请刷新列表后再试。',
+  FAQ_SUGGESTION_NOT_PENDING: '该候选问答已处理过，请刷新列表查看最新状态。',
+  INVALID_PIPELINE_CONFIG: '自动回复保护与节流设置不符合要求，请核对各项范围后再保存。',
   KNOWLEDGE_VERSION_CONFLICT: '条目已被更新。你的输入保留，请重新读取后核对版本。',
   KNOWLEDGE_ACCOUNT_REQUIRED: '请先连接并核验本人账号。',
   KNOWLEDGE_NOT_FOUND: '此知识条目已不存在，请重新读取。',

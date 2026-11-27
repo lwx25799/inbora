@@ -15,6 +15,7 @@ import { ModelProviderController } from './model-provider-controller.js';
 import { ModelRouteGuard } from './model-route-guard.js';
 import { previewSendCommand, reconcileUncertainCommand, sendResultCommand, type DeliveryContext } from './service-delivery.js';
 import { clientError, dismissSuggestion, isReadOnlySidecarCommand, updateModelGrant } from './service-guards.js';
+import { handleReplyPipelineCommand } from './reply-pipeline-commands.js';
 import type { SuggestionState } from './suggestion-eligibility.js';
 import { generateSuggestion } from './suggestion-generation.js';
 import { WorkbenchQueries } from './workbench-queries.js';
@@ -256,6 +257,15 @@ export class MockAccountRuntime {
       case 'reconcileUncertain':
         store.event(c.eventId);
         return reconcileUncertainCommand(this.deliveryContext(), token, c.eventId);
+      case 'replyPipeline':
+        return handleReplyPipelineCommand({
+          store, authority, automation: this.automation,
+          knowledgeContext: (event, queryText) => {
+            const shared = this.sharedModels();
+            return shared.knowledge.available() ? shared.knowledge.context(event.accountId, event.channel, queryText) : null;
+          },
+          onConfigSaved: () => this.emit('status_updated'),
+        }, token, c);
       default:
         throw new Blocked('ACCOUNT_COMMAND_NOT_SUPPORTED');
     }

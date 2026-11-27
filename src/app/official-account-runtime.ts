@@ -23,6 +23,7 @@ import {
   previewSendCommand, reconcileUncertainCommand, sendResultCommand, type DeliveryContext,
 } from './service-delivery.js';
 import { clientError, dismissSuggestion, isReadOnlySidecarCommand, updateModelGrant } from './service-guards.js';
+import { handleReplyPipelineCommand } from './reply-pipeline-commands.js';
 import type { SuggestionState } from './suggestion-eligibility.js';
 import { generateSuggestion } from './suggestion-generation.js';
 import { WorkbenchQueries } from './workbench-queries.js';
@@ -67,7 +68,8 @@ export function dispatchOfflineOfficialRead(
     || command.command === 'getInbox'
     || command.command === 'getThread'
     || command.command === 'getAudit'
-    || command.command === 'getSendResult';
+    || command.command === 'getSendResult'
+    || (command.command === 'replyPipeline' && (command.action === 'getConfig' || command.action === 'dryRun'));
   requireSafe(supported, 'OFFICIAL_CHANNEL_NOT_CONNECTED');
 
   const store = new EventStore(dbPath, false, undefined, account.id);
@@ -130,6 +132,15 @@ export function dispatchOfflineOfficialRead(
         const followups = new HumanFollowups(store, readonlyAuthority, offlineBrowser, () => false, () => {}, clientError);
         return sendResultCommand(store, readonlyAuthority, followups, token, command.commandId);
       }
+      case 'replyPipeline':
+        return handleReplyPipelineCommand({
+          store, authority: readonlyAuthority, automation,
+          knowledgeContext: (event, queryText) => {
+            const shared = sharedModels();
+            return shared.knowledge.available() ? shared.knowledge.context(event.accountId, event.channel, queryText) : null;
+          },
+          now,
+        }, token, command);
     }
   } finally {
     store.close();
@@ -485,6 +496,15 @@ export class OfficialAccountRuntime {
       case 'reconcileUncertain':
         store.event(c.eventId);
         return reconcileUncertainCommand(this.deliveryContext(), token, c.eventId);
+      case 'replyPipeline':
+        return handleReplyPipelineCommand({
+          store, authority, automation: this.automation,
+          knowledgeContext: (event, queryText) => {
+            const shared = this.sharedModels();
+            return shared.knowledge.available() ? shared.knowledge.context(event.accountId, event.channel, queryText) : null;
+          },
+          onConfigSaved: () => this.emit('status_updated'),
+        }, token, c);
       default:
         throw new Blocked('ACCOUNT_COMMAND_NOT_SUPPORTED');
     }

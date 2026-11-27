@@ -57,3 +57,8 @@ export interface KnowledgeOverview {available:boolean;sources:KnowledgeSource[];
   personas:PersonaVersion[];activePersonaId:string|null;activePersona:PersonaVersion|null;totals:{sources:number;knowledge:number;samples:number;accepted:number;holdout:number;personas:number};
   learningTasks:{id:string;state:string;personaId:string|null;completed:number}[];page:number;pageSize:number}
 export interface SourceInput {kind:'KNOWLEDGE'|'CHAT'|'MANUAL';title:string;digest?:string}
+export type FaqSuggestionStatus='PENDING'|'ADOPTED'|'DISMISSED';
+export interface FaqSuggestion {
+  id:string;accountId:string;clusterDigest:string;channels:Channel[];question:string;variants:string[];
+  suggestedAnswer:string;sampleCount:number;sourceEventIds:string[];status:FaqSuggestionStatus;createdAt:number;updatedAt:number;
+}
