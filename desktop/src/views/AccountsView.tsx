@@ -19,7 +19,7 @@ import {
   CardFrameHeader,
   CardFrameTitle,
 } from '@/components/ui/card';
-import { capabilityNames, reasons, request, type Status } from '@/api';
+import { capabilityNames, reasons, request, type AccountSummary, type Status } from '@/api';
 import { browserState, time } from '@/presentation';
 
 export interface AccountsViewProps {
@@ -27,6 +27,8 @@ export interface AccountsViewProps {
   busy: string;
   act: (label: string, fn: () => Promise<void>) => Promise<void>;
   update: (status: Status) => void;
+  activeAccountRef?: string | undefined;
+  onSelectWorkbenchAccount?: ((account: AccountSummary | null) => void) | undefined;
 }
 
 export function AccountsView({
@@ -34,6 +36,8 @@ export function AccountsView({
   busy,
   act,
   update,
+  activeAccountRef,
+  onSelectWorkbenchAccount,
 }: AccountsViewProps): React.ReactElement {
   const browserConnected = status.browser.state.startsWith('OPEN');
   const isHeaded = status.browser.loginRecovery || status.browser.mode === 'headed';
@@ -135,7 +139,12 @@ export function AccountsView({
       {/* Row 2: Multi-Account Registry + Channel & Browser Controls */}
       <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
         <div className="min-w-0">
-          <AccountPlatformPanel status={status} busy={busy} />
+          <AccountPlatformPanel
+            status={status}
+            busy={busy}
+            activeAccountRef={activeAccountRef}
+            onSelectWorkbenchAccount={onSelectWorkbenchAccount}
+          />
         </div>
 
         <div className="flex min-w-0 flex-col gap-5">

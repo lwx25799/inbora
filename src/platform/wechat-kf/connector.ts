@@ -199,7 +199,7 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
   identity(channel: Channel): CapabilityIdentity | null {
     if (!this.opened || channel !== 'DIRECT_MESSAGE') return null;
     return {
-      identityDigest: digest([this.accountId, this.openKfId]),
+      identityDigest: digest(this.openKfId),
       mappingDigest: digest([this.platformId, this.apiClient.endpointDigest]),
       browserVersion: 'official-api',
       browserMode: 'headless',

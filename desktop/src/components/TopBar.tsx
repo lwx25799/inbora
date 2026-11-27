@@ -7,7 +7,7 @@ import {
   ShieldCheckIcon,
   SunIcon,
 } from "lucide-react";
-import type { Status } from "@/api";
+import type { ActiveWorkbenchAccount, Status } from "@/api";
 import { DESKTOP_PAGE_CRUMBS, type DesktopPageId } from "@/components/AppSidebar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -18,6 +18,8 @@ export interface TopBarProps {
   theme: "light" | "dark";
   status: Status;
   busy: string;
+  activeAccount?: ActiveWorkbenchAccount | null | undefined;
+  onReturnPrimaryAccount?: (() => void) | undefined;
   onSync: () => void;
   onToggleTheme: () => void;
   onOpenPalette: () => void;
@@ -45,6 +47,8 @@ export function TopBar({
   theme,
   status,
   busy,
+  activeAccount,
+  onReturnPrimaryAccount,
   onSync,
   onToggleTheme,
   onOpenPalette,
@@ -92,14 +96,27 @@ export function TopBar({
         </div>
 
         <div className="hidden items-center gap-1.5 border-l border-border/80 pl-3 lg:flex">
-          <button
-            type="button"
-            onClick={() => onNavigate("accounts")}
-            className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-border/75 bg-background px-2 py-0.5 text-[11px] text-muted-foreground outline-none transition-colors hover:border-input hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <span className={cn("size-1.5 shrink-0 rounded-full", accountDotClass)} />
-            <span className="whitespace-nowrap">{accountPillLabel}</span>
-          </button>
+          {activeAccount && onReturnPrimaryAccount ? (
+            <button
+              type="button"
+              onClick={onReturnPrimaryAccount}
+              title="点击切回主账号工作台"
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-primary/40 bg-primary/8 px-2 py-0.5 text-[11px] font-medium text-foreground outline-none transition-colors hover:bg-primary/14 focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <span className="size-1.5 shrink-0 rounded-full bg-primary" />
+              <span className="max-w-[160px] truncate">{activeAccount.displayLabel}</span>
+              <span className="text-muted-foreground">· 返回主账号</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onNavigate("accounts")}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-border/75 bg-background px-2 py-0.5 text-[11px] text-muted-foreground outline-none transition-colors hover:border-input hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <span className={cn("size-1.5 shrink-0 rounded-full", accountDotClass)} />
+              <span className="whitespace-nowrap">{accountPillLabel}</span>
+            </button>
+          )}
 
           <button
             type="button"

@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import { isOfficialApiPlatform } from '../contracts/account.js';
 import { Blocked, DEFAULT_ACCOUNT_ID, MOCK_PLATFORM_ID, digest, requireSafe } from '../core/contracts.js';
 import { commandSchema } from '../contracts/client.js';
 import { MAX_NATIVE_BRIDGE_BYTES } from '../contracts/native-bridge.js';
@@ -133,13 +134,39 @@ function parseV2Command(envelope: ProtocolV2RequestEnvelope) {
   return { body, commandId: requestIdSchema.safeParse(commandId).data };
 }
 
+function sanitizeBodyForDigest(body: SidecarCommand): unknown {
+  if (body.command === 'accounts' && body.action === 'configureOfficialChannel') {
+    if (body.platform === 'wecom-aibot') {
+      const { secret, ...rest } = body;
+      return { ...rest, secretSupplied: secret !== undefined };
+    }
+    const { appSecret, token, encodingAESKey, ...rest } = body;
+    return {
+      ...rest,
+      appSecretSupplied: appSecret !== undefined,
+      tokenSupplied: token !== undefined && token !== null,
+      aesKeySupplied: encodingAESKey !== undefined && encodingAESKey !== null,
+    };
+  }
+  return body;
+}
+
+function isV2OnlyOfficialAccountWrite(body: SidecarCommand): boolean {
+  return body.command === 'accounts' && (
+    body.action === 'configureOfficialChannel'
+    || body.action === 'connectOfficialChannel'
+    || body.action === 'disconnectOfficialChannel'
+    || body.action === 'reactivateAccount'
+  );
+}
+
 function reserveCommand({ scope }: ProtocolV2RequestEnvelope, commandId: string | undefined,
   body: SidecarCommand, context: RoutingContext) {
   if (!commandId || body.command === 'emergencyStop' || !isMutatingClientCommand(body)) return;
   const storage = context.accounts?.storage;
   const accountRef = scope.kind === 'ACCOUNT' ? scope.accountRef : null;
   const action = 'action' in body ? body.action : null;
-  const requestDigest = digest([scope.kind, accountRef, body]);
+  const requestDigest = digest([scope.kind, accountRef, sanitizeBodyForDigest(body)]);
   const priorLifecycle = context.lifecycleCommandIds.get(commandId);
   if (priorLifecycle !== undefined) {
     requireSafe(priorLifecycle === requestDigest, 'COMMAND_ID_CONFLICT');
@@ -153,7 +180,11 @@ function reserveCommand({ scope }: ProtocolV2RequestEnvelope, commandId: string 
   }
   requireSafe(context.accounts, 'CONNECT_RUNTIME_FIRST');
   requireSafe(storage, 'SCHEMA4_REQUIRED');
-  if (body.command === 'accounts') {
+  if (body.command === 'accounts' && (
+    body.action === 'registerAccount'
+    || body.action === 'disconnectAccount'
+    || body.action === 'reactivateAccount'
+  )) {
     // AccountStore owns these records and returns the original result on repeat requests.
     context.accounts.validateProtocolWrite(body);
     return;
@@ -202,13 +233,18 @@ export async function routeSidecarEnvelope(envelope: SidecarEnvelope, context: R
           const account = context.accounts.storage?.getAccount(scope.accountRef);
           requireSafe(account, 'ACCOUNT_NOT_FOUND');
           requireSafe(account.status === 'ACTIVE', account.status === 'DISCONNECTED' ? 'ACCOUNT_DISCONNECTED' : 'ACCOUNT_NOT_ACTIVE');
-          requireSafe(account.platform === MOCK_PLATFORM_ID && account.connector === MOCK_PLATFORM_ID,
-            'ACCOUNT_COMMAND_NOT_SUPPORTED');
+          const supportedSecondary =
+            (account.platform === MOCK_PLATFORM_ID && account.connector === MOCK_PLATFORM_ID) ||
+            (isOfficialApiPlatform(account.platform) && account.connector === account.platform);
+          requireSafe(supportedSecondary, 'ACCOUNT_COMMAND_NOT_SUPPORTED');
         }
       }
       finish = reserveCommand(envelope, 'commandId' in parsed ? parsed.commandId : undefined, body, context);
-    } else if (isMutatingClientCommand(body) && body.command !== 'emergencyStop' && !isLifecycle(body) && !('accountRef' in body)) {
-      requireSafe(!context.accounts?.hasMultipleActiveAccounts(), 'PROTOCOL_V2_ACCOUNT_SCOPE_REQUIRED');
+    } else {
+      requireSafe(!isV2OnlyOfficialAccountWrite(body), 'PROTOCOL_V2_ACCOUNT_SCOPE_REQUIRED');
+      if (isMutatingClientCommand(body) && body.command !== 'emergencyStop' && !isLifecycle(body) && !('accountRef' in body)) {
+        requireSafe(!context.accounts?.hasMultipleActiveAccounts(), 'PROTOCOL_V2_ACCOUNT_SCOPE_REQUIRED');
+      }
     }
     const result = await context.dispatch(body, protocol === PROTOCOL_V2 ? envelope.scope : undefined);
     finish?.('COMPLETED');

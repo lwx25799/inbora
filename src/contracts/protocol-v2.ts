@@ -89,7 +89,9 @@ export function isMutatingClientCommand(body: unknown): boolean {
     case 'modelProviders':
       return command.action !== 'list';
     case 'accounts':
-      return command.action === 'registerAccount' || command.action === 'disconnectAccount';
+      return command.action !== 'listAccounts'
+        && command.action !== 'getAccountStatus'
+        && command.action !== 'getOfficialChannelConfig';
     default:
       return true;
   }

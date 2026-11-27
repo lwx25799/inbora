@@ -761,6 +761,16 @@ export function useReplyWorkspace({
     }
   }
 
+  function clearSelection(): void {
+    detailRequest.current++;
+    navigation.current++;
+    selectedRef.current = null;
+    editorLoaded.current = false;
+    buffers.current.clear();
+    setSelected(null); setThread(null); setText(""); setSuggestionId(null); setSend(null); setDialogOpen(false);
+    syncOtherUnsavedDrafts(null);
+  }
+
   return {
     selected,
     thread,
@@ -775,6 +785,7 @@ export function useReplyWorkspace({
     detailElement,
     dialogElement,
     choose,
+    clearSelection,
     refreshThread,
     reconnect,
     sendDisabled,

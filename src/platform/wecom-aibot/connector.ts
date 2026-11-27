@@ -201,7 +201,7 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
       return null;
     }
     return {
-      identityDigest: digest([this.accountId, this.ownId]),
+      identityDigest: digest(this.ownId),
       mappingDigest: digest([this.platformId, this.wsClient.endpointDigest]),
       browserVersion: 'wecom-ws',
       browserMode: 'headless',

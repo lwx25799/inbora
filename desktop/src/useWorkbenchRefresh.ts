@@ -16,6 +16,7 @@ type RefreshPage = DesktopPageId | "audit";
 
 interface RefreshView {
   connected: boolean;
+  activeAccountRef?: string | undefined;
   status: Status | null;
   selected: string | null;
   channel: "ALL" | "COMMENT_NOTIFICATION" | "DIRECT_MESSAGE";
@@ -173,6 +174,10 @@ export function useWorkbenchRefresh(view: RefreshView): void {
   }
   lastNotice.current = nonEmptyNotice;
   const noticeTick = noticeSignal.current;
+
+  useEffect(() => {
+    if (view.connected) queue.current?.schedule(allReads, 0);
+  }, [view.connected, view.activeAccountRef]);
 
   useEffect(() => {
     if (view.connected) queue.current?.schedule(["inbox"], 0);

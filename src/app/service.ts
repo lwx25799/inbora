@@ -453,7 +453,8 @@ export class ClientService {
     };
   }
   private handleAccounts(token: string, command: AccountsCommand): Promise<unknown> {
-    this.authority.operator(token, isAccountWrite(command) ? "CONTROL" : "READ");
+    if (isAccountWrite(command)) this.authority.requireGuiControl(token, "CONTROL");
+    else this.authority.operator(token, "READ");
     const task = this.accounts.dispatch(command);
     this.track(task);
     return task;

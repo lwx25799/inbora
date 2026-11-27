@@ -27,6 +27,9 @@ import {
   request,
   restoreDesktop,
   runtimeSession,
+  setActiveWorkbenchAccount,
+  type AccountSummary,
+  type ActiveWorkbenchAccount,
   type BusinessPrompts,
   type Inbox,
   type Status,
@@ -103,6 +106,7 @@ export function App() {
   const [dismissedSyncKey, setDismissedSyncKey] = useState("");
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [auditPage, setAuditPage] = useState(0);
+  const [activeAccount, setActiveAccount] = useState<ActiveWorkbenchAccount | null>(null);
   const [pendingAutoReply, setPendingAutoReply] = useState<boolean | null>(null);
   const autoReplyUpdating = useRef(false);
   const pendingPageFocusRef = useRef<DesktopPageId | null>(null);
@@ -154,6 +158,7 @@ export function App() {
 
   useWorkbenchRefresh({
     connected,
+    activeAccountRef: activeAccount?.accountRef,
     status,
     selected: workspace.selected,
     channel,
@@ -323,6 +328,35 @@ export function App() {
     await workspace.refreshThread();
   }
 
+  async function selectWorkbenchAccount(account: AccountSummary | null) {
+    if (
+      workspace.thread?.ownership.isMine &&
+      canContinueReply(workspace.thread)
+    ) {
+      await workspace.closeDialog();
+    }
+    const next = account
+      ? { accountRef: account.accountRef, displayLabel: account.displayLabel, platform: account.platform }
+      : null;
+    setActiveWorkbenchAccount(next);
+    setActiveAccount(next);
+    workspace.clearSelection();
+    setPageNumber(0);
+    setInbox({ items: [], total: 0, page: 0, pageSize: 20 });
+    setUnreadCount(0);
+    if (next) {
+      setPage("inbox");
+      setAppNotice(`已切换工作台至「${next.displayLabel}」。`);
+    } else {
+      setAppNotice("已返回主账号工作台。");
+    }
+    try {
+      setStatus(await request<Status>({ command: "getStatus" }));
+    } catch (cause) {
+      setError(explain(cause));
+    }
+  }
+
   function syncInbox() {
     setDismissedSyncKey("");
     void act("正在同步收件箱…", async () => {
@@ -442,6 +476,10 @@ export function App() {
           theme={theme}
           status={status}
           busy={busy}
+          activeAccount={activeAccount}
+          onReturnPrimaryAccount={() => {
+            void selectWorkbenchAccount(null);
+          }}
           onSync={syncInbox}
           onToggleTheme={toggleTheme}
           onOpenPalette={() => {
@@ -621,6 +659,10 @@ export function App() {
                 busy={busy}
                 act={act}
                 update={setStatus}
+                activeAccountRef={activeAccount?.accountRef}
+                onSelectWorkbenchAccount={(account) => {
+                  void selectWorkbenchAccount(account);
+                }}
               />
             )}
             {page === "automation" && (

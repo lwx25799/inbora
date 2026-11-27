@@ -2,14 +2,18 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import {
   accountIdSchema, accountSummarySchema, accountsCommandSchema, DEFAULT_ACCOUNT_ID, DOUYIN_PLATFORM_ID,
-  legacyTargetAliasSchema, type AccountId, type AccountSummary, type AccountsCommand, type LegacyTargetAlias,
+  isOfficialApiPlatform, legacyTargetAliasSchema, WECHAT_KF_PLATFORM_ID, WECOM_AIBOT_PLATFORM_ID,
+  type AccountId, type AccountSummary, type AccountsCommand, type LegacyTargetAlias,
 } from '../contracts/account.js';
 import { Blocked, digest, requireSafe, type Channel } from '../core/contracts.js';
 import { douyinCapabilities } from '../platform/douyin-platform-connector.js';
+import { wechatKfCapabilities } from '../platform/wechat-kf/connector.js';
+import { wecomAibotCapabilities } from '../platform/wecom-aibot/connector.js';
 import { parseStoredModelGrant } from './model-grant-binding.js';
 
 type RegisterAccount = Omit<Extract<AccountsCommand, { action: 'registerAccount' }>, 'command' | 'action'>;
 type DisconnectAccount = Omit<Extract<AccountsCommand, { action: 'disconnectAccount' }>, 'command' | 'action'>;
+type ReactivateAccount = Omit<Extract<AccountsCommand, { action: 'reactivateAccount' }>, 'command' | 'action'>;
 type AccountRow = Pick<AccountSummary, 'id' | 'platform' | 'connector' | 'status' | 'createdAt' | 'updatedAt'> & {
   ownId: string; displayLabel: string; profileRef: string;
 };
@@ -68,7 +72,13 @@ export class AccountStore {
   }
 
   private summary(row: AccountRow): AccountSummary {
-    const capabilities = row.connector === DOUYIN_PLATFORM_ID ? douyinCapabilities : noConnectorCapabilities;
+    const capabilities = row.connector === DOUYIN_PLATFORM_ID
+      ? douyinCapabilities
+      : row.connector === WECOM_AIBOT_PLATFORM_ID
+        ? wecomAibotCapabilities
+        : row.connector === WECHAT_KF_PLATFORM_ID
+          ? wechatKfCapabilities
+          : noConnectorCapabilities;
     const verifiedChannels = this.db.prepare(`SELECT DISTINCT channel FROM account_channel_capabilities
       WHERE account_id=? AND connector=? AND state IN ('READ_OK','SEND_REVIEW_ONLY','SEND_AVAILABLE') AND expires_at>?
       ORDER BY channel`).pluck().all(row.id, row.connector, this.now()) as Channel[];
@@ -120,6 +130,25 @@ export class AccountStore {
       requestDigest: digest([accountRef, confirmed]),
     }, now => {
       requireSafe(this.db.prepare("UPDATE accounts SET status='DISCONNECTED', updated_at=? WHERE id=?")
+        .run(now, accountRef).changes === 1, 'ACCOUNT_NOT_FOUND');
+      return accountRef;
+    });
+  }
+
+  reactivateAccount(input: ReactivateAccount): AccountSummary {
+    const parsed = accountsCommandSchema.safeParse({ ...input, command: 'accounts', action: 'reactivateAccount' });
+    requireSafe(parsed.success, 'INVALID_ACCOUNT_COMMAND');
+    const { commandId, accountRef, confirmed } = input;
+    return this.runAccountCommand({
+      commandId, scopeKind: 'ACCOUNT', accountRef, command: 'accounts', action: 'reactivateAccount',
+      requestDigest: digest([accountRef, confirmed]),
+    }, now => {
+      const existing = this.getAccount(accountRef);
+      requireSafe(existing, 'ACCOUNT_NOT_FOUND');
+      requireSafe(isOfficialApiPlatform(existing.platform) && existing.connector === existing.platform,
+        'ACCOUNT_COMMAND_NOT_SUPPORTED');
+      requireSafe(existing.status === 'DISCONNECTED', 'ACCOUNT_ALREADY_ACTIVE');
+      requireSafe(this.db.prepare("UPDATE accounts SET status='ACTIVE', updated_at=? WHERE id=? AND status='DISCONNECTED'")
         .run(now, accountRef).changes === 1, 'ACCOUNT_NOT_FOUND');
       return accountRef;
     });

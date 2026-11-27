@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { AccountActor } from '../browser/account-actor.js';
+import { isOfficialApiPlatform } from '../contracts/account.js';
 import { Blocked, DEFAULT_ACCOUNT_ID, MOCK_PLATFORM_ID, digest, eventBinding, requireSafe, targetKey,
   type AccountId, type AccountsCommand, type AccountSummary, type Channel, type Draft, type InboundEvent, type TargetSnapshot,
 } from '../core/contracts.js';
@@ -24,16 +25,26 @@ import { BrowserService } from './browser-service.js';
 import type { WorkbenchAuthority } from './authority.js';
 import type { ClientCommand } from './contracts.js';
 import { MockAccountRuntime, type SharedMockModels } from './mock-account-runtime.js';
+import { OfficialChannelManager, type OfficialChannelManagerOptions } from './official-channel-manager.js';
 
 type RegisterAccount = Extract<AccountsCommand, { action: 'registerAccount' }>;
 type DisconnectAccount = Extract<AccountsCommand, { action: 'disconnectAccount' }>;
+type ReactivateAccount = Extract<AccountsCommand, { action: 'reactivateAccount' }>;
 
 function copyCapabilities(capabilities: PlatformConnector['capabilities']): AccountSummary['capabilities'] {
   return { ...capabilities, channels: [...capabilities.channels] };
 }
 
-export function isAccountWrite(command: AccountsCommand): command is RegisterAccount | DisconnectAccount {
-  return command.action === 'registerAccount' || command.action === 'disconnectAccount';
+export function isAccountWrite(command: AccountsCommand): boolean {
+  return command.action !== 'listAccounts'
+    && command.action !== 'getAccountStatus'
+    && command.action !== 'getOfficialChannelConfig';
+}
+
+function isAccountLifecycleWrite(command: AccountsCommand): command is RegisterAccount | DisconnectAccount | ReactivateAccount {
+  return command.action === 'registerAccount'
+    || command.action === 'disconnectAccount'
+    || command.action === 'reactivateAccount';
 }
 
 function hasTable(store: EventStore, table: string): boolean {
@@ -87,11 +98,31 @@ export class AccountController {
   private registry = new PlatformConnectorRegistry();
   private readonly temporary = new Map<AccountId, MockPlatformConnector>();
   private readonly mockRuntimes = new Map<AccountId, MockAccountRuntime>();
+  private officialManager: OfficialChannelManager | null = null;
+  private officialOptions: OfficialChannelManagerOptions = {};
 
   constructor(private readonly events: EventStore, private readonly primary: PlatformConnector,
     private readonly now: () => number, private readonly primaryAuthority: WorkbenchAuthority,
     private readonly sharedModels: () => SharedMockModels) {
     this.registry.register(primary);
+  }
+
+  configureOfficialOptions(options: OfficialChannelManagerOptions): void {
+    requireSafe(!this.officialManager, 'OFFICIAL_CHANNEL_ALREADY_INITIALIZED');
+    this.officialOptions = options;
+  }
+
+  private get official(): OfficialChannelManager {
+    return this.officialManager ??= new OfficialChannelManager({
+      root: this.primary.root,
+      events: this.events,
+      now: this.now,
+      sharedModels: this.sharedModels,
+      emit: (accountId, event) => this.updates.emit('update', accountId, { event }),
+      readAudit: auditPage,
+      hasInFlightIntent: accountId => this.hasInFlightIntent(accountId),
+      onRegistryChanged: () => this.rebuildRegistry(),
+    }, this.officialOptions);
   }
 
   get schemaVersion(): number { return this.events.db.pragma('user_version', { simple: true }) as number; }
@@ -102,7 +133,16 @@ export class AccountController {
   }
 
   initialize(): void {
-    for (const account of this.storage?.listAccounts() ?? []) this.attachMock(account);
+    const disconnectedOfficial: AccountId[] = [];
+    for (const account of this.storage?.listAccounts() ?? []) {
+      this.attachMock(account);
+      if (account.status === 'DISCONNECTED' && isOfficialApiPlatform(account.platform)) {
+        disconnectedOfficial.push(account.id);
+      }
+    }
+    if (disconnectedOfficial.length > 0) {
+      void this.official.cleanupDisconnectedCredentials(disconnectedOfficial);
+    }
   }
 
   getMockConnector(accountId: AccountId): MockPlatformConnector | undefined {
@@ -120,9 +160,12 @@ export class AccountController {
     const account = this.storage?.getAccount(accountId);
     requireSafe(account, 'ACCOUNT_NOT_FOUND');
     requireSafe(account.status === 'ACTIVE', account.status === 'DISCONNECTED' ? 'ACCOUNT_DISCONNECTED' : 'ACCOUNT_NOT_ACTIVE');
+    const operator = this.primaryAuthority.requireGuiControl(parentToken, 'READ');
+    if (isOfficialApiPlatform(account.platform) && account.connector === account.platform) {
+      return this.official.dispatch(account, operator, command, () => { this.primaryAuthority.operator(parentToken, 'READ'); });
+    }
     const connector = this.getMockConnector(accountId);
     requireSafe(this.usesMock(account) && connector, 'ACCOUNT_COMMAND_NOT_SUPPORTED');
-    const operator = this.primaryAuthority.requireGuiControl(parentToken, 'READ');
     let runtime = this.mockRuntimes.get(accountId);
     if (!runtime) {
       runtime = new MockAccountRuntime(this.events.db.name, connector, this.now, this.sharedModels,
@@ -139,6 +182,7 @@ export class AccountController {
 
   abortWorkerSends(): void {
     if (this.primary instanceof IsolatedDouyinConnector) this.primary.abortInFlight();
+    this.officialManager?.onEmergencyStop();
   }
 
   recheckWorkerSend(): void {
@@ -146,15 +190,16 @@ export class AccountController {
   }
 
   validateProtocolWrite(command: AccountsCommand): void {
-    if (!isAccountWrite(command)) return;
+    if (!isAccountLifecycleWrite(command)) return;
     const storage = this.storage;
     const previous = storage && findProtocolCommand(storage, command.commandId.toLowerCase());
     if (!previous) return;
     // Match the existing AccountStore digest format, including records written by v1.
     const { action } = command;
-    const accountRef = action === 'disconnectAccount' ? command.accountRef : null;
-    const requestDigest = action === 'disconnectAccount' ? digest([accountRef, command.confirmed]) :
-      digest([command.platform, command.connector, command.accountId, command.ownId, command.displayLabel, command.profileRef]);
+    const accountRef = action === 'registerAccount' ? null : command.accountRef;
+    const requestDigest = action === 'registerAccount'
+      ? digest([command.platform, command.connector, command.accountId, command.ownId, command.displayLabel, command.profileRef])
+      : digest([accountRef, command.confirmed]);
     requireSafe(previous.command === 'accounts' && previous.action === action && previous.accountRef === accountRef &&
       previous.scopeKind === (accountRef === null ? 'GLOBAL' : 'ACCOUNT') && previous.requestDigest === requestDigest, 'COMMAND_ID_CONFLICT');
   }
@@ -166,7 +211,7 @@ export class AccountController {
         schemaVersion: this.schemaVersion };
     }
     requireSafe(storage, 'SCHEMA4_REQUIRED');
-    if (isAccountWrite(command)) command = { ...command, commandId: command.commandId.toLowerCase() };
+    if ('commandId' in command) command = { ...command, commandId: command.commandId.toLowerCase() };
     switch (command.action) {
       case 'registerAccount': {
         const account = this.change(storage, command, (_fresh, commandId) => {
@@ -182,9 +227,35 @@ export class AccountController {
         const account = storage.getAccount(command.accountRef);
         requireSafe(account, 'ACCOUNT_NOT_FOUND');
         const connector = this.connectorFor(account);
-        const connectorState = connector?.status().state ?? (account.status === 'DISCONNECTED' ? 'DISCONNECTED' : 'UNAVAILABLE');
-        return { ...this.withCapabilities(account, connector), connected: connectorState !== 'ACCOUNT_CHANGED' &&
-          (connector?.resourceIdentity().open ?? false), connectorState };
+        const transport = connector?.transportStatus?.();
+        const connectorState = transport?.transport === 'official_api'
+          ? transport.state
+          : connector?.status().state ?? (account.status === 'DISCONNECTED' ? 'DISCONNECTED' : 'UNAVAILABLE');
+        const connected = transport?.transport === 'official_api'
+          ? transport.state === 'CONNECTED'
+          : connectorState !== 'ACCOUNT_CHANGED' && (connector?.resourceIdentity().open ?? false);
+        return { ...this.withCapabilities(account, connector), connected, connectorState,
+          ...(transport?.transport === 'official_api' ? { transportStatus: transport } : {}) };
+      }
+      case 'getOfficialChannelConfig': {
+        const account = storage.getAccount(command.accountRef);
+        requireSafe(account, 'ACCOUNT_NOT_FOUND');
+        return this.official.getConfig(account);
+      }
+      case 'configureOfficialChannel': {
+        const account = storage.getAccount(command.accountRef);
+        requireSafe(account, 'ACCOUNT_NOT_FOUND');
+        return this.official.configure(account, command);
+      }
+      case 'connectOfficialChannel': {
+        const account = storage.getAccount(command.accountRef);
+        requireSafe(account, 'ACCOUNT_NOT_FOUND');
+        return this.official.connect(account);
+      }
+      case 'disconnectOfficialChannel': {
+        const account = storage.getAccount(command.accountRef);
+        requireSafe(account, 'ACCOUNT_NOT_FOUND');
+        return this.official.disconnectTransport(account);
       }
       case 'disconnectAccount': {
         requireSafe(command.confirmed === true, 'ACCOUNT_DISCONNECT_CONFIRMATION_REQUIRED');
@@ -194,8 +265,9 @@ export class AccountController {
           if (fresh) {
             requireSafe(command.accountRef !== DEFAULT_ACCOUNT_ID && command.accountRef !== this.primary.accountId,
               'PRIMARY_ACCOUNT_DISCONNECT_BLOCKED');
-            requireSafe((!connector || connector.isIdle()) && (!runtime || runtime.isIdle()) && !this.hasInFlightIntent(command.accountRef),
-              'ACCOUNT_OPERATION_IN_PROGRESS');
+            requireSafe((!connector || connector.isIdle()) && (!runtime || runtime.isIdle())
+              && (!this.officialManager || this.officialManager.isIdle(command.accountRef))
+              && !this.hasInFlightIntent(command.accountRef), 'ACCOUNT_OPERATION_IN_PROGRESS');
           }
           return storage.disconnectAccount({ ...command, commandId });
         }, 'ACCOUNT_DISCONNECTED');
@@ -205,12 +277,24 @@ export class AccountController {
           this.rebuildRegistry();
           await (runtime?.close() ?? connector.close());
         }
+        if (isOfficialApiPlatform(account.platform)) {
+          await this.official.onAccountDisconnected(account.id);
+        }
         return account;
+      }
+      case 'reactivateAccount': {
+        requireSafe(command.confirmed === true, 'ACCOUNT_DISCONNECT_CONFIRMATION_REQUIRED');
+        const existing = storage.getAccount(command.accountRef);
+        if (existing && isOfficialApiPlatform(existing.platform)) {
+          await this.official.cleanupDisconnectedCredentials([existing.id]);
+        }
+        return this.change(storage, command, (_fresh, commandId) =>
+          storage.reactivateAccount({ ...command, commandId }), 'ACCOUNT_REACTIVATED');
       }
     }
   }
 
-  private change(storage: AccountStore, command: RegisterAccount | DisconnectAccount,
+  private change(storage: AccountStore, command: RegisterAccount | DisconnectAccount | ReactivateAccount,
     write: (fresh: boolean, commandId: string) => AccountSummary, audit: string): AccountSummary {
     const outcome = storage.db.transaction(() => {
       const previous = findProtocolCommand(storage, command.commandId);
@@ -252,7 +336,11 @@ export class AccountController {
 
   private connectorFor(account: AccountSummary): PlatformConnector | undefined {
     if (account.status === 'DISCONNECTED') return;
-    if ((account.id === this.primary.accountId && account.platform === this.primary.platformId) || this.temporary.has(account.id)) {
+    if (
+      (account.id === this.primary.accountId && account.platform === this.primary.platformId)
+      || this.temporary.has(account.id)
+      || this.officialManager?.getConnector(account.id)
+    ) {
       return this.registry.resolve(account.platform, account.id);
     }
   }
@@ -265,14 +353,16 @@ export class AccountController {
     this.registry = new PlatformConnectorRegistry();
     this.registry.register(this.primary);
     for (const connector of this.temporary.values()) this.registry.register(connector);
+    for (const connector of this.officialManager?.activeConnectors() ?? []) this.registry.register(connector);
   }
 
   async close(): Promise<void> {
     const closing = [...this.temporary].map(([id, connector]) => this.mockRuntimes.get(id)?.close() ?? connector.close());
     this.temporary.clear();
     this.mockRuntimes.clear();
+    const officialClose = this.officialManager?.close() ?? Promise.resolve();
     this.rebuildRegistry();
-    await Promise.all(closing);
+    await Promise.all([...closing, officialClose]);
   }
 }
 

@@ -1,7 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
-  accountSummarySchema, DEFAULT_ACCOUNT_ID, DOUYIN_PLATFORM_ID, MOCK_PLATFORM_ID,
-  type AccountId, type AccountSummary, type AccountsCommand,
+  accountSummarySchema, DEFAULT_ACCOUNT_ID, DOUYIN_PLATFORM_ID, isOfficialApiPlatform, MOCK_PLATFORM_ID,
+  officialChannelPublicConfigSchema, WECHAT_KF_PLATFORM_ID, WECOM_AIBOT_PLATFORM_ID,
+  type AccountId, type AccountSummary, type AccountsCommand, type ChannelCredentialStorage,
+  type ConfigureOfficialChannelCommand, type OfficialApiPlatformId, type OfficialChannelCredentialMode,
+  type OfficialChannelPublicConfig,
 } from "../../src/contracts/account.js";
 import { isMutatingClientCommand, requiredScopeForCommand, type ProtocolScope } from "../../src/contracts/protocol-v2.js";
 import type { BrowserStatus } from "../../src/contracts/browser-resources.js";
@@ -28,8 +31,11 @@ import {
   type ModelPresetId, type ModelProtocol, type PublicModelConnection, type PublicModelState,
 } from '../../src/contracts/model-providers.js';
 export type { ReplyStatus, TimelineItem };
-export type { AccountSummary, AccountsCommand, ProtocolScope };
-export { DOUYIN_PLATFORM_ID, MOCK_PLATFORM_ID };
+export type {
+  AccountSummary, AccountsCommand, ChannelCredentialStorage, ConfigureOfficialChannelCommand,
+  OfficialApiPlatformId, OfficialChannelCredentialMode, OfficialChannelPublicConfig, ProtocolScope,
+};
+export { DOUYIN_PLATFORM_ID, MOCK_PLATFORM_ID, WECHAT_KF_PLATFORM_ID, WECOM_AIBOT_PLATFORM_ID, isOfficialApiPlatform };
 
 export type { SendParams, AiSettings, BrowserDraftChoice };
 export interface Status extends ModelProviderStatusFields {
@@ -223,6 +229,12 @@ type DesktopCommand = ClientCommand
   | { command: "connect"; runtime: string; initialize: boolean; consent: true }
   | { command: "disconnect" };
 
+export interface ActiveWorkbenchAccount {
+  accountRef: AccountId;
+  displayLabel: string;
+  platform: string;
+}
+
 interface AccountRouting {
   session: string;
   accountRef: AccountId;
@@ -230,10 +242,20 @@ interface AccountRouting {
   loading: Promise<AccountSummary[]> | null;
 }
 let accountRouting: AccountRouting | null = null;
+let activeWorkbenchAccount: ActiveWorkbenchAccount | null = null;
+
+export function getActiveWorkbenchAccount(): ActiveWorkbenchAccount | null {
+  return activeWorkbenchAccount;
+}
+
+export function setActiveWorkbenchAccount(next: ActiveWorkbenchAccount | null): void {
+  activeWorkbenchAccount = next && next.accountRef !== DEFAULT_ACCOUNT_ID ? next : null;
+}
 
 function observeRoutingStatus(status: Status): void {
   if (!(status?.schema >= 4)) {
     accountRouting = null;
+    activeWorkbenchAccount = null;
     return;
   }
   const session = runtimeSession(status);
@@ -253,11 +275,44 @@ function writeV2<T>(routing: AccountRouting, body: ClientCommand, kind: Protocol
 export async function request<T>(body: DesktopCommand): Promise<T> {
   if (body.command === 'emergencyStop') return invoke<T>("client_request", { body });
   const routing = accountRouting;
-  if (body.command === 'connect' || body.command === 'disconnect' || body.command === 'getStatus') {
+  if (body.command === 'connect' || body.command === 'disconnect') {
     try {
       const result = await invoke<T>("client_request", { body });
-      if (body.command === 'disconnect') accountRouting = null;
-      else if (body.command === 'connect' || accountRouting === routing) observeRoutingStatus(result as Status);
+      if (body.command === 'disconnect') {
+        accountRouting = null;
+        activeWorkbenchAccount = null;
+      } else {
+        activeWorkbenchAccount = null;
+        observeRoutingStatus(result as Status);
+      }
+      return result;
+    } catch (error) {
+      if (accountRouting === routing && extractErrorCode(error) === 'CONNECT_RUNTIME_FIRST') {
+        accountRouting = null;
+        activeWorkbenchAccount = null;
+      }
+      throw error;
+    }
+  }
+
+  // When the operator has switched the workbench to a secondary official account,
+  // route all account-scoped reads and writes explicitly over Protocol V2.
+  if (activeWorkbenchAccount && activeWorkbenchAccount.accountRef !== DEFAULT_ACCOUNT_ID) {
+    const scopeKind = requiredScopeForCommand(body);
+    if (scopeKind === 'ACCOUNT') {
+      const targetRef = 'accountRef' in body ? body.accountRef : activeWorkbenchAccount.accountRef;
+      const mutating = isMutatingClientCommand(body);
+      const commandId = mutating
+        ? (('commandId' in body ? body.commandId : undefined) ?? crypto.randomUUID())
+        : undefined;
+      return requestV2<T>({ kind: 'ACCOUNT', accountRef: targetRef }, body, commandId);
+    }
+  }
+
+  if (body.command === 'getStatus') {
+    try {
+      const result = await invoke<T>("client_request", { body });
+      if (accountRouting === routing) observeRoutingStatus(result as Status);
       return result;
     } catch (error) {
       if (accountRouting === routing && extractErrorCode(error) === 'CONNECT_RUNTIME_FIRST') accountRouting = null;
@@ -293,6 +348,8 @@ export function requestV2<T>(
 
 export const platformNames: Record<string, string> = {
   [DOUYIN_PLATFORM_ID]: '抖音',
+  [WECOM_AIBOT_PLATFORM_ID]: '企业微信智能机器人',
+  [WECHAT_KF_PLATFORM_ID]: '微信客服',
   [MOCK_PLATFORM_ID]: '合成验证平台 (Mock)',
 };
 
@@ -356,9 +413,81 @@ export function registerMockAccountV2({ commandId, displayLabel }: MockRegistrat
   });
 }
 
+export interface OfficialAccountRegistration {
+  commandId: string;
+  platform: OfficialApiPlatformId;
+  ownId: string;
+  displayLabel: string;
+}
+
+export function registerOfficialAccountV2({
+  commandId, platform, ownId, displayLabel,
+}: OfficialAccountRegistration): Promise<AccountSummary> {
+  return changeAccount({ kind: 'GLOBAL' }, {
+    command: 'accounts',
+    action: 'registerAccount',
+    commandId,
+    accountId: mockRegistrationAccountRef(commandId),
+    platform,
+    connector: platform,
+    ownId,
+    displayLabel,
+  });
+}
+
+export function getOfficialChannelConfigV2(accountRef: AccountSummary['accountRef']): Promise<OfficialChannelPublicConfig> {
+  return requestV2<unknown>(
+    { kind: 'ACCOUNT', accountRef },
+    { command: 'accounts', action: 'getOfficialChannelConfig', accountRef },
+  ).then(value => officialChannelPublicConfigSchema.parse(value));
+}
+
+export function configureOfficialChannelV2(
+  payload: ConfigureOfficialChannelCommand,
+): Promise<OfficialChannelPublicConfig> {
+  return requestV2<unknown>(
+    { kind: 'ACCOUNT', accountRef: payload.accountRef },
+    payload,
+    payload.commandId,
+  ).then(value => officialChannelPublicConfigSchema.parse(value));
+}
+
+export function connectOfficialChannelV2(accountRef: AccountSummary['accountRef']): Promise<OfficialChannelPublicConfig> {
+  const commandId = crypto.randomUUID();
+  return requestV2<unknown>(
+    { kind: 'ACCOUNT', accountRef },
+    { command: 'accounts', action: 'connectOfficialChannel', commandId, accountRef },
+    commandId,
+  ).then(value => officialChannelPublicConfigSchema.parse(value));
+}
+
+export function disconnectOfficialChannelV2(accountRef: AccountSummary['accountRef']): Promise<OfficialChannelPublicConfig> {
+  const commandId = crypto.randomUUID();
+  return requestV2<unknown>(
+    { kind: 'ACCOUNT', accountRef },
+    { command: 'accounts', action: 'disconnectOfficialChannel', commandId, accountRef },
+    commandId,
+  ).then(value => officialChannelPublicConfigSchema.parse(value));
+}
+
+export function observeOfficialAccountV2(accountRef: AccountSummary['accountRef']): Promise<unknown> {
+  const commandId = crypto.randomUUID();
+  return requestV2<unknown>(
+    { kind: 'ACCOUNT', accountRef },
+    { command: 'observe', source: 'dm' },
+    commandId,
+  );
+}
+
 export function disconnectAccountV2(accountRef: AccountSummary['accountRef']): Promise<AccountSummary> {
   return changeAccount({ kind: 'ACCOUNT', accountRef }, {
     command: 'accounts', action: 'disconnectAccount', commandId: crypto.randomUUID(), accountRef, confirmed: true,
+  });
+}
+
+export function reactivateAccountV2(accountRef: AccountSummary['accountRef']): Promise<AccountSummary> {
+  return changeAccount({ kind: 'ACCOUNT', accountRef }, {
+    command: 'accounts', action: 'reactivateAccount', commandId: crypto.randomUUID(), accountRef, confirmed: true,
   });
 }
 

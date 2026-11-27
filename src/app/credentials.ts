@@ -8,15 +8,20 @@ import type { ModelKeyStorage } from "../contracts/model-providers.js";
 import { Blocked, digest, requireSafe } from "../core/contracts.js";
 import { getNativeWin32Bridge } from "../native/win32-bridge.js";
 
-type DpapiCache = { cacheKey: string; mtimeMs: number };
+export type DpapiCache = { cacheKey: string; mtimeMs: number };
 const dpapiCacheKey = (file: string) => digest(resolve(file).toLowerCase());
+const safeEntropyPattern = /^[a-z0-9:_-]{1,128}$/u;
 
-async function clearDpapiCache(file: string): Promise<void> {
+export function dpapiSecretCacheKey(file: string): string {
+  return dpapiCacheKey(file);
+}
+
+export async function clearDpapiCache(file: string): Promise<void> {
   const bridge = getNativeWin32Bridge();
   if (process.platform === 'win32' && bridge.isAvailable()) await bridge.clearDpapiCache(dpapiCacheKey(file));
 }
 
-async function clearDeletedDpapiCache(file: string): Promise<void> {
+export async function clearDeletedDpapiCache(file: string): Promise<void> {
   const bridge = getNativeWin32Bridge();
   if (process.platform !== 'win32' || !bridge.isAvailable()) return;
   try { await bridge.clearDpapiCache(dpapiCacheKey(file)); }
@@ -30,7 +35,7 @@ type CacheInvalidation = { running: boolean; failed: boolean };
 const deletedCacheEntries = new Map<string, Map<string, CacheInvalidation>>();
 const cleanupRoot = (root: string) => resolve(root).toLowerCase();
 
-function invalidateDeletedKey(root: string, file: string): void {
+export function invalidateDeletedKey(root: string, file: string): void {
   if (process.platform !== 'win32' || !getNativeWin32Bridge().isAvailable()) return;
   const key = cleanupRoot(root);
   const entries = deletedCacheEntries.get(key) ?? new Map<string, CacheInvalidation>();
@@ -48,9 +53,14 @@ function invalidateDeletedKey(root: string, file: string): void {
   });
 }
 
-function dpapi(input:Buffer,operation:'Protect'|'Unprotect',scopeDigest?:string,cache?:DpapiCache):Promise<Buffer> {
-  requireSafe(process.platform==='win32','DPAPI_WINDOWS_REQUIRED');
-  const entropy=scopeDigest===undefined?'inbora:model-key:v1':`inbora:model-credential:v1:${scopeDigest}`;
+export function dpapiWithEntropy(
+  input: Buffer,
+  operation: 'Protect' | 'Unprotect',
+  entropy: string,
+  cache?: DpapiCache,
+): Promise<Buffer> {
+  requireSafe(process.platform === 'win32', 'DPAPI_WINDOWS_REQUIRED');
+  requireSafe(safeEntropyPattern.test(entropy), 'DPAPI_OPERATION_FAILED');
   const bridge = getNativeWin32Bridge();
   if (bridge.isAvailable()) return operation === 'Protect'
     ? bridge.dpapiProtect(input, entropy) : bridge.dpapiUnprotect(input, entropy, cache);
@@ -66,6 +76,11 @@ function dpapi(input:Buffer,operation:'Protect'|'Unprotect',scopeDigest?:string,
     child.on('close',code=>{clearTimeout(timer);if(code!==0||!output||!/^[A-Za-z0-9+/=]+$/.test(output))reject(Error('DPAPI_OPERATION_FAILED'));else resolve(Buffer.from(output,'base64'));});
     child.stdin.on('error',()=>{});child.stdin.end(input.toString('base64'));
   });
+}
+
+function dpapi(input:Buffer,operation:'Protect'|'Unprotect',scopeDigest?:string,cache?:DpapiCache):Promise<Buffer> {
+  const entropy=scopeDigest===undefined?'inbora:model-key:v1':`inbora:model-credential:v1:${scopeDigest}`;
+  return dpapiWithEntropy(input, operation, entropy, cache);
 }
 export class CredentialStore {
   private static queues=new Map<string,Promise<unknown>>();

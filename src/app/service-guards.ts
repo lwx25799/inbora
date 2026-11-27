@@ -49,7 +49,11 @@ export function isReadOnlySidecarCommand(raw: unknown): boolean {
     return body.action === "overview" || body.action === "debugRetrieval" || body.action === "embeddingStatus";
   }
   if (body.command === "modelProviders") return body.action === "list";
-  if (body.command === "accounts") return body.action === "listAccounts" || body.action === "getAccountStatus";
+  if (body.command === "accounts") {
+    return body.action === "listAccounts"
+      || body.action === "getAccountStatus"
+      || body.action === "getOfficialChannelConfig";
+  }
   return false;
 }
 

@@ -3,10 +3,12 @@ import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {
   accountRegistrationUnconfirmed,
   disconnectAccountV2,
+  isOfficialApiPlatform,
   listAccountsV2,
   mockRegistrationAccountRef,
   MOCK_PLATFORM_ID,
   platformNames,
+  reactivateAccountV2,
   registerMockAccountV2,
   runtimeSession,
   type AccountSummary,
@@ -14,6 +16,7 @@ import {
   type Status,
 } from './api';
 import { explainSafe, extractErrorCode } from './error-messages';
+import { OfficialChannelCreator, OfficialChannelManagerPanel } from './OfficialChannelEditor';
 
 const title = '已接入账号';
 const defaultDisplayLabel = '合成验证账号';
@@ -42,7 +45,17 @@ interface AccountMutation {
 // Settings can unmount while a registration is in flight. Keep its identity on return to the same directory.
 const pendingRegistrations = new Map<string, MockRegistration>();
 
-export function AccountPlatformPanel({ status, busy }: { status: Status; busy: string }) {
+export function AccountPlatformPanel({
+  status,
+  busy,
+  activeAccountRef,
+  onSelectWorkbenchAccount,
+}: {
+  status: Status;
+  busy: string;
+  activeAccountRef?: string | undefined;
+  onSelectWorkbenchAccount?: ((account: AccountSummary | null) => void) | undefined;
+}) {
   if (status.schema < 4) {
     return (
       <div className={cardCls}>
@@ -51,15 +64,35 @@ export function AccountPlatformPanel({ status, busy }: { status: Status; busy: s
       </div>
     );
   }
-  return <ConnectedAccounts key={runtimeSession(status)} status={status} busy={busy} />;
+  return (
+    <ConnectedAccounts
+      key={runtimeSession(status)}
+      status={status}
+      busy={busy}
+      activeAccountRef={activeAccountRef}
+      onSelectWorkbenchAccount={onSelectWorkbenchAccount}
+    />
+  );
 }
 
-function ConnectedAccounts({ status, busy }: { status: Status; busy: string }) {
+function ConnectedAccounts({
+  status,
+  busy,
+  activeAccountRef,
+  onSelectWorkbenchAccount,
+}: {
+  status: Status;
+  busy: string;
+  activeAccountRef?: string | undefined;
+  onSelectWorkbenchAccount?: ((account: AccountSummary | null) => void) | undefined;
+}) {
   const { runtime } = status;
   const [accounts, setAccounts] = useState<AccountSummary[] | null>(null);
   const [displayLabel, setDisplayLabel] = useState('');
   const [registration, setRegistration] = useState(pendingRegistrations.get(runtime) ?? null);
   const [confirmAccount, setConfirmAccount] = useState<string | null>(null);
+  const [showOfficialCreator, setShowOfficialCreator] = useState(false);
+  const [expandedOfficialRef, setExpandedOfficialRef] = useState<string | null>(null);
   const [pending, setPending] = useState<'list' | 'write' | null>('list');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -161,6 +194,14 @@ function ConnectedAccounts({ status, busy }: { status: Status; busy: string }) {
         <div className="row flex flex-wrap items-center gap-2">
           <button
             type="button"
+            className={btnPrimaryCls}
+            disabled={disabled}
+            onClick={() => setShowOfficialCreator(!showOfficialCreator)}
+          >
+            {showOfficialCreator ? '收起官方接入' : '接入官方渠道'}
+          </button>
+          <button
+            type="button"
             className={btnOutlineCls}
             disabled={disabled}
             onClick={() => void run()}
@@ -169,6 +210,21 @@ function ConnectedAccounts({ status, busy }: { status: Status; busy: string }) {
           </button>
         </div>
       </div>
+
+      {showOfficialCreator && (
+        <OfficialChannelCreator
+          disabled={disabled}
+          onClose={() => setShowOfficialCreator(false)}
+          onRegistered={async (message, accountRef) => {
+            const current = lifetime.current;
+            if (!current) return;
+            setShowOfficialCreator(false);
+            setExpandedOfficialRef(accountRef);
+            await run();
+            if (lifetime.current === current) setNotice(message);
+          }}
+        />
+      )}
 
       {pending && (
         <p className="hint rounded-xl border border-border/75 bg-muted/40 px-3 py-2 text-xs text-muted-foreground" role="status">
@@ -222,7 +278,11 @@ function ConnectedAccounts({ status, busy }: { status: Status; busy: string }) {
                           disabled={disabled}
                           onClick={() =>
                             void run({
-                              request: () => disconnectAccountV2(account.accountRef),
+                              request: async () => {
+                                const result = await disconnectAccountV2(account.accountRef);
+                                if (activeAccountRef === account.accountRef) onSelectWorkbenchAccount?.(null);
+                                return result;
+                              },
                               success: '账号已解绑。',
                               failure: '账号解绑失败，请刷新账号列表后核对状态。',
                             })
@@ -241,6 +301,34 @@ function ConnectedAccounts({ status, busy }: { status: Status; busy: string }) {
                     </div>
                   ) : (
                     <div className="row flex flex-wrap items-center gap-2 pt-0.5">
+                      {isOfficialApiPlatform(account.platform) && (
+                        <button
+                          type="button"
+                          className={btnOutlineCls}
+                          disabled={disabled}
+                          onClick={() =>
+                            setExpandedOfficialRef(
+                              expandedOfficialRef === account.accountRef ? null : account.accountRef,
+                            )
+                          }
+                        >
+                          {expandedOfficialRef === account.accountRef ? '收起接入管理' : '管理接入'}
+                        </button>
+                      )}
+                      {isOfficialApiPlatform(account.platform) && onSelectWorkbenchAccount && (
+                        <button
+                          type="button"
+                          className={activeAccountRef === account.accountRef ? btnPrimaryCls : btnOutlineCls}
+                          disabled={disabled}
+                          onClick={() =>
+                            onSelectWorkbenchAccount(
+                              activeAccountRef === account.accountRef ? null : account,
+                            )
+                          }
+                        >
+                          {activeAccountRef === account.accountRef ? '返回主账号工作台' : '切换工作台'}
+                        </button>
+                      )}
                       <button
                         type="button"
                         className={btnOutlineCls}
@@ -252,6 +340,37 @@ function ConnectedAccounts({ status, busy }: { status: Status; busy: string }) {
                     </div>
                   )
                 )}
+                {account.status === 'DISCONNECTED' && isOfficialApiPlatform(account.platform) && (
+                  <div className="row flex flex-wrap items-center gap-2 pt-0.5">
+                    <button
+                      type="button"
+                      className={btnOutlineCls}
+                      disabled={disabled}
+                      onClick={() =>
+                        void run({
+                          request: () => reactivateAccountV2(account.accountRef),
+                          success: '账号已重新启用，请点击“管理接入”重新保存凭据后连接。',
+                          failure: '重新启用账号失败，请刷新列表后重试。',
+                        })
+                      }
+                    >
+                      重新启用
+                    </button>
+                  </div>
+                )}
+                {account.status === 'ACTIVE' &&
+                  isOfficialApiPlatform(account.platform) &&
+                  expandedOfficialRef === account.accountRef && (
+                    <OfficialChannelManagerPanel
+                      account={account}
+                      disabled={disabled}
+                      emergencyStopped={Boolean(status.automation?.emergencyStopped)}
+                      onUpdated={() => run()}
+                      onOpenWorkbench={
+                        onSelectWorkbenchAccount ? () => onSelectWorkbenchAccount(account) : undefined
+                      }
+                    />
+                  )}
               </dd>
             </div>
           ))}

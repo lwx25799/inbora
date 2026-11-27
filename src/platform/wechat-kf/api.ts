@@ -200,6 +200,11 @@ export class WeChatKfApiClient {
     });
   }
 
+  /** Read-only credential check via /gettoken without exposing the raw access_token. */
+  async verifyCredentials(signal?: AbortSignal): Promise<void> {
+    await this.accessToken(signal);
+  }
+
   clearCachedToken(): void {
     const { corpId, appSecret } = this.credentials();
     this.tokenManager.clearAccessToken(corpId, appSecret, this.apiBaseUrl);

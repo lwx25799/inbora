@@ -86,12 +86,12 @@ export class InboxSyncRunner {
       this.observationFailed(source, error);
     }
   }
-  async observe(token: string, source: "works" | "dm" | "notifications"): Promise<void> {
+  async observe(token: string, source: "works" | "dm" | "notifications", signal?: AbortSignal): Promise<void> {
     this.host.authority.operator(token, "CONTROL");
     requireSafe(!this.syncTask && !this.observing, "INBOX_SYNC_IN_PROGRESS");
     this.observing = true;
     try {
-      await this.observeSource(source);
+      await this.observeSource(source, signal);
     } finally {
       this.observing = false;
     }
