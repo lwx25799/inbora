@@ -59,11 +59,32 @@ function hasExternalHumanReplyAfter(
     event.payload.conversationId &&
     store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='chat_messages'").get()
   ) {
+    const hasLinks = Boolean(
+      store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='chat_delivery_links'").get(),
+    );
+    const hasRevisions = Boolean(
+      store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='draft_revisions'").get(),
+    );
+    // 排除关联到 AUTO_POLICY / AUTO_FAQ_DIRECT 自动回复意图的平台同步回显，防止误将本机自动回复当成外部人工新回复
+    const excludeAutoEchoClause =
+      hasLinks && hasRevisions
+        ? `AND NOT EXISTS (
+            SELECT 1 FROM chat_delivery_links l
+            JOIN send_intents i ON i.id=l.intent_id
+            JOIN inbound_events ie ON ie.id=i.event_id
+            JOIN reply_drafts d ON d.id=i.draft_id
+            LEFT JOIN draft_revisions r ON r.draft_id=d.id AND r.version=d.version
+            WHERE l.native_id_digest=m.native_id_digest
+              AND ie.account_id=m.account_id
+              AND r.origin IN ('AUTO_POLICY', 'AUTO_FAQ_DIRECT')
+          )`
+        : '';
     const rows = store.db
       .prepare(
-        `SELECT payload FROM chat_messages
-         WHERE account_id=? AND own_id=? AND conversation_id=? AND conflicted=0
-         ORDER BY observed_at DESC LIMIT 20`,
+        `SELECT m.payload FROM chat_messages m
+         WHERE m.account_id=? AND m.own_id=? AND m.conversation_id=? AND m.conflicted=0
+           ${excludeAutoEchoClause}
+         ORDER BY m.observed_at DESC LIMIT 20`,
       )
       .all(event.payload.accountId, ownId, event.payload.conversationId) as { payload: string }[];
     for (const row of rows) {
@@ -434,7 +455,9 @@ export function runReplyPipelinePreGeneration(
   const stages: StageOutcome[] = [];
   let anchorEvent = input.event;
   let mergedText = input.event.payload.text;
+  let fullConcatText = input.event.payload.text;
   let mergedEventIds = [input.event.id];
+  let fragmentBindings: Record<string, string> = { [input.event.id]: input.event.binding };
   let contextVersion: string | null = null;
   let ownershipGeneration: number | null = null;
   let knowledge: PipelineKnowledgeContext | null = input.knowledge ?? null;
@@ -455,7 +478,9 @@ export function runReplyPipelinePreGeneration(
     contextVersion,
     ownershipGeneration,
     mergedText,
+    fullConcatText,
     mergedEventIds,
+    fragmentBindings,
     knowledge,
     directFaqReply,
     ...(deferUntilMs !== undefined ? { deferUntilMs } : {}),
@@ -500,7 +525,9 @@ export function runReplyPipelinePreGeneration(
   });
   anchorEvent = debounce.anchorEvent;
   mergedText = debounce.mergedText;
+  fullConcatText = debounce.fullConcatText;
   mergedEventIds = debounce.fragmentEventIds;
+  fragmentBindings = Object.fromEntries(debounce.fragments.map((item) => [item.id, item.binding]));
   contextVersion = debounce.latestContextVersion;
   ownershipGeneration = debounce.ownershipGeneration;
   if (debounce.deferUntilMs !== undefined) deferUntilMs = debounce.deferUntilMs;
@@ -520,19 +547,37 @@ export function runReplyPipelinePreGeneration(
     return stopWith(s6Defer);
   }
 
-  // 跨碎片聚合后复核敏感词，封堵拆分碎片绕过敏感词的路径
-  if (debounce.fragmentEventIds.length > 1) {
-    const mergedSafety = checkInboundSafety(mergedText, config.sensitive);
-    if (mergedSafety.blocked) {
+  // 对批次内每一条碎片的完整正文及完整未截断拼接文本统一安检，绝不因 maxMergedChars 截断漏检锚点敏感词
+  if (debounce.fragments.length > 1 || anchorEvent.id !== input.event.id) {
+    for (const fragment of debounce.fragments) {
+      const perFragmentSafety = checkInboundSafety(fragment.payload.text, config.sensitive);
+      if (perFragmentSafety.blocked) {
+        const s6Blocked: StageOutcome = {
+          stage: 'debounce_preprocess',
+          decision: 'handoff_human',
+          reasonCode: perFragmentSafety.reasonCode,
+          detail: {
+            perFragmentBlocked: true,
+            fragmentCount: debounce.fragmentEventIds.length,
+            layer: perFragmentSafety.layer,
+            ...(perFragmentSafety.category ? { category: perFragmentSafety.category } : {}),
+          },
+        };
+        stages.push(s6Blocked);
+        return stopWith(s6Blocked);
+      }
+    }
+    const fullConcatSafety = checkInboundSafety(fullConcatText, config.sensitive);
+    if (fullConcatSafety.blocked) {
       const s6Blocked: StageOutcome = {
         stage: 'debounce_preprocess',
         decision: 'handoff_human',
-        reasonCode: mergedSafety.reasonCode,
+        reasonCode: fullConcatSafety.reasonCode,
         detail: {
           crossFragmentBlocked: true,
           fragmentCount: debounce.fragmentEventIds.length,
-          layer: mergedSafety.layer,
-          ...(mergedSafety.category ? { category: mergedSafety.category } : {}),
+          layer: fullConcatSafety.layer,
+          ...(fullConcatSafety.category ? { category: fullConcatSafety.category } : {}),
         },
       };
       stages.push(s6Blocked);
@@ -551,11 +596,11 @@ export function runReplyPipelinePreGeneration(
     },
   });
 
-  // 阶段 7: handoff_rules_and_knowledge
+  // 阶段 7: handoff_rules_and_knowledge（知识检索使用聚合查询 mergedText，规则关键词扫描使用完整未截断 fullConcatText）
   if (knowledge === null && input.resolveKnowledge && !isMediaPayload(anchorEvent.payload)) {
     knowledge = input.resolveKnowledge(anchorEvent.payload, mergedText);
   }
-  const s7 = evaluateHandoffRulesAndKnowledge(anchorEvent, mergedText, knowledge, config.handoff);
+  const s7 = evaluateHandoffRulesAndKnowledge(anchorEvent, fullConcatText, knowledge, config.handoff);
   directFaqReply = s7.directFaqReply;
   stages.push(s7.outcome);
   if (s7.outcome.decision !== 'continue') return stopWith(s7.outcome);
@@ -574,7 +619,9 @@ export function runReplyPipelinePreGeneration(
     contextVersion,
     ownershipGeneration,
     mergedText,
+    fullConcatText,
     mergedEventIds,
+    fragmentBindings,
     knowledge,
     directFaqReply,
   };

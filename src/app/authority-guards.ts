@@ -159,6 +159,7 @@ export function assertCanSendImpl(
       : null;
   if (policy) {
     requireSafe(authority.modelRoute, "LEGACY_MODEL_ROUTE_UNPROVEN");
+    // ModelRouteGuard.assertAutomaticDraft 对普通 AUTO_POLICY 严检模型绑定，仅对经核验带知识快照的 AUTO_FAQ_DIRECT 放行免模型直出
     authority.modelRoute.assertAutomaticDraft({ ownerKind: "DRAFT", ownerId: p.draftId, ownerVersion: p.draftVersion }, policy.grant_version, e.id);
     const auto = new AutomationStore(store, authority.now),
       grant = auto.active("AUTO_REPLY") as Grant<ReplyPolicy> | null;

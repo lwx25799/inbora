@@ -194,7 +194,11 @@ export interface PipelinePreGenerationResult {
   contextVersion: string | null;
   ownershipGeneration: number | null;
   mergedText: string;
+  /** 全部碎片的完整未截断拼接文本（用于风控安检与关键词检查） */
+  fullConcatText: string;
   mergedEventIds: string[];
+  /** 批次中每条碎片事件在预检时的 binding 快照（用于模型前与落草稿时防并发冲突漂移） */
+  fragmentBindings: Record<string, string>;
   knowledge: PipelineKnowledgeContext | null;
   directFaqReply: DirectFaqReply | null;
   deferUntilMs?: number;

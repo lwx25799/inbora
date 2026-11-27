@@ -22,6 +22,9 @@ const shadowTables = [
   'k_terms_data', 'k_terms_idx', 'k_terms_content', 'k_terms_docsize', 'k_terms_config',
 ] as const;
 const statisticsTables = ['sqlite_stat1', 'sqlite_stat4'];
+const lazyExtensionTables = [
+  'k_chunk_vectors', 'rhythm_account_state', 'handoff_attributions', 'faq_suggestion_candidates',
+] as const;
 const sourceTables = new Set<string>([
   ...coreTables,
   'operator_sessions', 'thread_ownership', 'draft_revisions', 'manual_send_commands', 'client_approvals',
@@ -31,7 +34,7 @@ const sourceTables = new Set<string>([
   'automation_human_pauses', 'grant_reservations', 'automation_jobs', 'verification_jobs', 'verification_results',
   'automation_schema', 'chat_messages', 'chat_delivery_links', 'budget_limits', 'sqlite_sequence',
   'human_reply_drafts', 'human_reply_turns', 'assistant_sessions', 'assistant_commands', 'assistant_operations',
-  ...knowledgeTables, ...shadowTables, ...statisticsTables,
+  ...knowledgeTables, ...shadowTables, ...statisticsTables, ...lazyExtensionTables,
   'm_provider_schema', 'm_connections', 'm_connection_revisions', 'm_credentials', 'm_selection',
   'm_call_routes', 'm_generation_bindings', 'm_commands',
 ]);

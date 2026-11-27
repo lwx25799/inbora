@@ -26,7 +26,12 @@ export interface DebounceEvaluationResult {
     | 'DEBOUNCE_MERGED_READY'
     | 'DEBOUNCE_OWNERSHIP_CHANGED';
   anchorEvent: StoredEvent;
+  /** 参与本次聚合的完整事件列表（按时间升序，包含每条完整原文与 binding） */
+  fragments: StoredEvent[];
+  /** 受 maxMergedChars 约束的聚合上下文文本（用于知识检索与模型生成） */
   mergedText: string;
+  /** 全部碎片的完整未截断拼接文本（仅用于安全与转人工关键词检查，绝不因截断漏检） */
+  fullConcatText: string;
   fragmentEventIds: string[];
   latestContextVersion: string;
   ownershipGeneration: number;
@@ -106,6 +111,13 @@ function mergeFragmentTexts(fragments: StoredEvent[], maxMergedChars: number): s
   return parts.join('\n');
 }
 
+function concatFullFragmentTexts(fragments: StoredEvent[]): string {
+  return fragments
+    .map((fragment) => fragment.payload.text.replace(/\r\n?/gu, '\n').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
 /**
  * 阶段 6：私信碎片消息 2-5 秒静默聚合。
  * - 仅针对 DIRECT_MESSAGE 生效；评论区直接透传。
@@ -122,7 +134,9 @@ export function evaluateDebounce(input: DebounceEvaluationInput): DebounceEvalua
       decision: 'continue',
       reasonCode: 'DEBOUNCE_DISABLED',
       anchorEvent: event,
+      fragments: [event],
       mergedText: event.payload.text,
+      fullConcatText: event.payload.text,
       fragmentEventIds: [event.id],
       latestContextVersion: currentContextVersion,
       ownershipGeneration: currentOwnership.generation,
@@ -134,7 +148,9 @@ export function evaluateDebounce(input: DebounceEvaluationInput): DebounceEvalua
       decision: 'continue',
       reasonCode: 'DEBOUNCE_NON_DM_BYPASS',
       anchorEvent: event,
+      fragments: [event],
       mergedText: event.payload.text,
+      fullConcatText: event.payload.text,
       fragmentEventIds: [event.id],
       latestContextVersion: currentContextVersion,
       ownershipGeneration: currentOwnership.generation,
@@ -146,7 +162,9 @@ export function evaluateDebounce(input: DebounceEvaluationInput): DebounceEvalua
       decision: 'defer',
       reasonCode: 'DEBOUNCE_OWNERSHIP_CHANGED',
       anchorEvent: event,
+      fragments: [event],
       mergedText: event.payload.text,
+      fullConcatText: event.payload.text,
       fragmentEventIds: [event.id],
       latestContextVersion: currentContextVersion,
       ownershipGeneration: currentOwnership.generation,
@@ -163,13 +181,16 @@ export function evaluateDebounce(input: DebounceEvaluationInput): DebounceEvalua
   const elapsedMs = now - latestAtMs;
   const latestContextVersion = authority.contextVersion(anchorEvent);
   const latestOwnership = authority.ownership(anchorEvent);
+  const fullConcatText = concatFullFragmentTexts(fragments) || anchorEvent.payload.text;
 
   if (expectedOwnershipGeneration !== undefined && latestOwnership.generation !== expectedOwnershipGeneration) {
     return {
       decision: 'defer',
       reasonCode: 'DEBOUNCE_OWNERSHIP_CHANGED',
       anchorEvent,
+      fragments,
       mergedText: mergeFragmentTexts(fragments, maxMergedChars),
+      fullConcatText,
       fragmentEventIds: fragments.map((item) => item.id),
       latestContextVersion,
       ownershipGeneration: latestOwnership.generation,
@@ -183,7 +204,9 @@ export function evaluateDebounce(input: DebounceEvaluationInput): DebounceEvalua
       decision: 'defer',
       reasonCode: 'DEBOUNCE_WINDOW_PENDING',
       anchorEvent,
+      fragments,
       mergedText: mergeFragmentTexts(fragments, maxMergedChars),
+      fullConcatText,
       fragmentEventIds: fragments.map((item) => item.id),
       latestContextVersion,
       ownershipGeneration: latestOwnership.generation,
@@ -197,7 +220,9 @@ export function evaluateDebounce(input: DebounceEvaluationInput): DebounceEvalua
     decision: 'continue',
     reasonCode: merged ? 'DEBOUNCE_MERGED_READY' : 'DEBOUNCE_SINGLE_READY',
     anchorEvent,
+    fragments,
     mergedText,
+    fullConcatText,
     fragmentEventIds: fragments.map((item) => item.id),
     latestContextVersion,
     ownershipGeneration: latestOwnership.generation,

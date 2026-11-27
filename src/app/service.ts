@@ -18,6 +18,7 @@ import type { VerificationScheduler } from "./verification-scheduler.js";
 import type { ModelProviderController } from "./model-provider-controller.js";
 import { handleModelProviderCommand } from "./model-provider-commands.js";
 import { runAutomaticReply } from "./automatic-reply.js";
+import type { ReplyPipelineConfig } from "./reply-pipeline/types.js";
 import { readDiagnostics } from "./diagnostics.js";
 import { markInboxRead } from "./inbox-read-state.js";
 import { EvidenceMaintenance } from "./evidence-maintenance.js";
@@ -27,24 +28,10 @@ import { generateSuggestion } from "./suggestion-generation.js";
 import { configureAssistantConnection } from "./local-assistant-connection.js";
 import { readSecurityHold } from "../storage/security-holds.js";
 import { securityRuntime } from "./security-runtime.js";
-import {
-  clientError, dismissSuggestion,
-  handleConfigWriteCommand,
-  handleLifecycleControlCommand,
-  knowledgeMutatingActions,
-  type ConfigWriteCommand,
-  type LifecycleControlCommand,
-} from "./service-guards.js";
+import { clientError, dismissSuggestion, handleConfigWriteCommand, handleLifecycleControlCommand, knowledgeMutatingActions, type ConfigWriteCommand, type LifecycleControlCommand } from "./service-guards.js";
 import { InboxSyncRunner } from "./inbox-sync-runner.js";
 import { OnlineKeeper } from "./online-keeper.js";
-import {
-  deliverCommand,
-  openTargetCommand,
-  previewSendCommand,
-  reconcileUncertainCommand,
-  sendResultCommand,
-  type DeliveryContext,
-} from "./service-delivery.js";
+import { deliverCommand, openTargetCommand, previewSendCommand, reconcileUncertainCommand, sendResultCommand, type DeliveryContext } from "./service-delivery.js";
 import { bootstrapAutomationRuntime, bootstrapModelProviders, loadClientSettings } from "./service-bootstrap.js";
 import { AccountController, auditPage, isAccountWrite } from "./account-controller.js";
 import { CredentialStore } from "./credentials.js";
@@ -97,6 +84,7 @@ export class ClientService {
     private readonly provider = new DeepSeekProvider(),
     now: () => number = Date.now,
     startedAt = now(),
+    private pipelineConfig?: ReplyPipelineConfig,
   ) {
     const browser = this.browser = "platformId" in connection ? connection : new DouyinPlatformConnector(connection);
     this.accountId = browser.accountId;
@@ -733,15 +721,21 @@ export class ClientService {
       }
     }
   }
-  async runAutomaticReply(): Promise<void> {
-    if (this.closing || this.browser.loginRecovery || !this.automation || !this.models || !this.selectedModelState().applied?.keyPresent || this.modelPending.size) return;
+  setPipelineConfig(config: ReplyPipelineConfig | undefined): void {
+    this.pipelineConfig = config;
+  }
+  async runAutomaticReply(overridePipelineConfig?: ReplyPipelineConfig): Promise<void> {
+    const pipelineConfig = overridePipelineConfig ?? this.pipelineConfig;
+    const allowNoModelKey = Boolean(pipelineConfig?.handoff?.exactFaqDirectReply);
+    if (this.closing || this.browser.loginRecovery || !this.automation || !this.models || (!this.selectedModelState().applied?.keyPresent && !allowNoModelKey) || this.modelPending.size) return;
     await runAutomaticReply({
       store: this.store,
       authority: this.authority,
       automation: this.automation,
       browser: this.browser,
-      knowledgeContext: (event) =>
-        this.knowledge.data.available() ? this.knowledge.data.context(event.accountId, event.channel, event.text) : null,
+      knowledgeContext: (event, queryText) =>
+        this.knowledge.data.available() ? this.knowledge.data.context(event.accountId, event.channel, queryText ?? event.text) : null,
+      ...(pipelineConfig ? { pipelineConfig } : {}),
       provider: this.provider,
       humanReplies: this.humanReplies,
       settings: this.projectedSettings(),

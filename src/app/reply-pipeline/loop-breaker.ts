@@ -73,9 +73,10 @@ export function queryRecentTargetReplies(
   const hasRevisions = Boolean(
     store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='draft_revisions'").get(),
   );
+  const collected: RecentSentReply[] = [];
 
   if (hasRevisions) {
-    const originClause = autoPolicyOnly ? "AND r.origin='AUTO_POLICY'" : '';
+    const originClause = autoPolicyOnly ? "AND r.origin IN ('AUTO_POLICY', 'AUTO_FAQ_DIRECT')" : '';
     const rows = store.db
       .prepare(
         `SELECT d.text, i.attempt_started_at AS sent_at, COALESCE(r.origin, 'LEGACY') AS origin
@@ -90,22 +91,57 @@ export function queryRecentTargetReplies(
          LIMIT ?`,
       )
       .all(accountId, targetKey, limit) as { text: string; sent_at: string; origin: string }[];
-    return rows.map((row) => ({ text: row.text, sentAt: row.sent_at, origin: row.origin }));
+    for (const row of rows) {
+      collected.push({ text: row.text, sentAt: row.sent_at, origin: row.origin });
+    }
+  } else {
+    const rows = store.db
+      .prepare(
+        `SELECT d.text, i.attempt_started_at AS sent_at
+         FROM send_intents i
+         JOIN inbound_events e ON e.id=i.event_id
+         JOIN reply_drafts d ON d.id=i.draft_id
+         WHERE e.account_id=? AND i.target_key=?
+           AND i.status IN ('INTENT_RECORDED', 'CONFIRMED', 'UNCERTAIN')
+         ORDER BY i.rowid DESC
+         LIMIT ?`,
+      )
+      .all(accountId, targetKey, limit) as { text: string; sent_at: string }[];
+    for (const row of rows) {
+      collected.push({ text: row.text, sentAt: row.sent_at });
+    }
   }
 
-  const rows = store.db
-    .prepare(
-      `SELECT d.text, i.attempt_started_at AS sent_at
-       FROM send_intents i
-       JOIN inbound_events e ON e.id=i.event_id
-       JOIN reply_drafts d ON d.id=i.draft_id
-       WHERE e.account_id=? AND i.target_key=?
-         AND i.status IN ('INTENT_RECORDED', 'CONFIRMED', 'UNCERTAIN')
-       ORDER BY i.rowid DESC
-       LIMIT ?`,
-    )
-    .all(accountId, targetKey, limit) as { text: string; sent_at: string }[];
-  return rows.map((row) => ({ text: row.text, sentAt: row.sent_at }));
+  // 非仅限自动回复模式下，合并本账号已提交/已确认的人工追发记录，防止自动回复复读人工刚发过的话术
+  if (
+    !autoPolicyOnly &&
+    store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='human_reply_turns'").get()
+  ) {
+    const turnRows = store.db
+      .prepare(
+        `SELECT t.text, COALESCE(t.verified_at, t.attempt_started_at) AS sent_at
+         FROM human_reply_turns t
+         JOIN inbound_events e ON e.id=t.event_id
+         WHERE e.account_id=? AND t.target_key=?
+           AND t.status IN ('INTENT_RECORDED', 'CONFIRMED', 'UNCERTAIN')
+           AND COALESCE(t.verified_at, t.attempt_started_at) IS NOT NULL
+         ORDER BY t.rowid DESC
+         LIMIT ?`,
+      )
+      .all(accountId, targetKey, limit) as { text: string; sent_at: string }[];
+    for (const row of turnRows) {
+      collected.push({ text: row.text, sentAt: row.sent_at, origin: 'HUMAN_FOLLOWUP' });
+    }
+  }
+
+  collected.sort((a, b) => {
+    const ta = Date.parse(a.sentAt);
+    const tb = Date.parse(b.sentAt);
+    const na = Number.isFinite(ta) ? ta : 0;
+    const nb = Number.isFinite(tb) ? tb : 0;
+    return nb - na;
+  });
+  return collected.slice(0, limit);
 }
 
 export interface CheckReplyLoopInput {

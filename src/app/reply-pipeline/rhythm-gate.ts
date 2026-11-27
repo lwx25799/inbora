@@ -71,6 +71,7 @@ interface RhythmRow {
   next_allowed_at: number;
   cooloff_until: number;
   window_timestamps_json: string;
+  recorded_intents_json?: string;
   total_actions: number;
   cooloff_hits: number;
   updated_at: number;
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS rhythm_account_state (
   next_allowed_at INTEGER NOT NULL DEFAULT 0,
   cooloff_until INTEGER NOT NULL DEFAULT 0,
   window_timestamps_json TEXT NOT NULL DEFAULT '[]',
+  recorded_intents_json TEXT NOT NULL DEFAULT '[]',
   total_actions INTEGER NOT NULL DEFAULT 0,
   cooloff_hits INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
@@ -99,6 +101,21 @@ function hasRhythmTable(db: Database.Database): boolean {
 
 function ensureRhythmTable(db: Database.Database): void {
   db.exec(CREATE_TABLE_SQL);
+  const cols = db.prepare("SELECT name FROM pragma_table_info('rhythm_account_state')").pluck().all() as string[];
+  if (!cols.includes('recorded_intents_json')) {
+    db.exec("ALTER TABLE rhythm_account_state ADD COLUMN recorded_intents_json TEXT NOT NULL DEFAULT '[]'");
+  }
+}
+
+function parseRecordedIntents(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((value): value is string => typeof value === 'string' && value.length > 0);
+  } catch {
+    return [];
+  }
 }
 
 export function resolveRhythmPreset(config: RhythmConfig): RhythmPreset | null {
@@ -231,6 +248,8 @@ export class PersistentRhythmGate {
 
     return this.db
       .transaction(() => {
+        // 先补记本账号窗口内因崩溃可能漏记的已落盘 send_intents（仅查本 account_id，不跨账号串扰）
+        this.reconcileAccountIntentsInTx(accountId, scope, config.profile, preset, now);
         const row = this.readRowReadOnly(accountId, scope);
         const decision = this.evaluateRow(row, config.profile, scope, preset, now);
         if (decision.reasonCode === 'RHYTHM_BURST_LIMIT_REACHED') {
@@ -241,16 +260,18 @@ export class PersistentRhythmGate {
             now,
             preset.burstWindowMs,
           );
+          const recordedIntents = parseRecordedIntents(row?.recorded_intents_json);
           const nextAllowedAt = Math.max(row?.next_allowed_at ?? 0, cooloffUntil);
           this.db
             .prepare(
-              `INSERT INTO rhythm_account_state (account_id, channel, profile, last_action_at, next_allowed_at, cooloff_until, window_timestamps_json, total_actions, cooloff_hits, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+              `INSERT INTO rhythm_account_state (account_id, channel, profile, last_action_at, next_allowed_at, cooloff_until, window_timestamps_json, recorded_intents_json, total_actions, cooloff_hits, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                ON CONFLICT(account_id, channel) DO UPDATE SET
                  profile=excluded.profile,
                  next_allowed_at=excluded.next_allowed_at,
                  cooloff_until=excluded.cooloff_until,
                  window_timestamps_json=excluded.window_timestamps_json,
+                 recorded_intents_json=excluded.recorded_intents_json,
                  cooloff_hits=rhythm_account_state.cooloff_hits + 1,
                  updated_at=excluded.updated_at`,
             )
@@ -262,6 +283,7 @@ export class PersistentRhythmGate {
               nextAllowedAt,
               cooloffUntil,
               JSON.stringify(activeWindow),
+              JSON.stringify(recordedIntents),
               row?.total_actions ?? 0,
               now,
             );
@@ -280,24 +302,37 @@ export class PersistentRhythmGate {
 
   /**
    * 记录一笔真实写动作并持久化最新窗口计数与随机最小间隔。
+   * 当传入 intentId 时严格按本账号 + intentId 幂等去重，重复调用不会重复计数。
    * 当 profile === 'off' 时不建表也不写库。
    */
-  recordAction(accountId: AccountId, config: RhythmConfig): RhythmStateSnapshot | null {
+  recordAction(
+    accountId: AccountId,
+    config: RhythmConfig,
+    options: { intentId?: string; actionAtMs?: number } = {},
+  ): RhythmStateSnapshot | null {
     const scope = config.scope ?? 'ALL';
     const preset = resolveRhythmPreset(config);
     if (!preset) return null;
 
-    const now = this.now();
+    const now = options.actionAtMs ?? this.now();
     return this.db
       .transaction(() => {
         ensureRhythmTable(this.db);
         const row = this.readRowReadOnly(accountId, scope);
+        const recordedIntents = parseRecordedIntents(row?.recorded_intents_json);
+        if (options.intentId && recordedIntents.includes(options.intentId)) {
+          return this.rowToSnapshot(row!, config.profile);
+        }
         const pruned = pruneWindow(
           row ? parseWindowTimestamps(row.window_timestamps_json) : [],
           now,
           preset.burstWindowMs,
         );
         pruned.push(now);
+        if (options.intentId) {
+          recordedIntents.push(options.intentId);
+        }
+        const boundedIntents = recordedIntents.slice(-Math.max(50, preset.burstMaxActions * 4));
         const intervalMs = computeNextIntervalMs(preset, this.rng);
         let cooloffUntil = row && row.cooloff_until > now ? row.cooloff_until : 0;
         let cooloffHits = row?.cooloff_hits ?? 0;
@@ -306,19 +341,21 @@ export class PersistentRhythmGate {
           cooloffUntil = Math.max(cooloffUntil, now + preset.cooloffMs);
           cooloffHits += 1;
         }
-        const nextAllowedAt = Math.max(now + intervalMs, cooloffUntil);
+        const nextAllowedAt = Math.max(row?.next_allowed_at ?? 0, now + intervalMs, cooloffUntil);
         const totalActions = (row?.total_actions ?? 0) + 1;
+        const lastActionAt = Math.max(row?.last_action_at ?? 0, now);
 
         this.db
           .prepare(
-            `INSERT INTO rhythm_account_state (account_id, channel, profile, last_action_at, next_allowed_at, cooloff_until, window_timestamps_json, total_actions, cooloff_hits, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `INSERT INTO rhythm_account_state (account_id, channel, profile, last_action_at, next_allowed_at, cooloff_until, window_timestamps_json, recorded_intents_json, total_actions, cooloff_hits, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(account_id, channel) DO UPDATE SET
                profile=excluded.profile,
                last_action_at=excluded.last_action_at,
                next_allowed_at=excluded.next_allowed_at,
                cooloff_until=excluded.cooloff_until,
                window_timestamps_json=excluded.window_timestamps_json,
+               recorded_intents_json=excluded.recorded_intents_json,
                total_actions=excluded.total_actions,
                cooloff_hits=excluded.cooloff_hits,
                updated_at=excluded.updated_at`,
@@ -327,10 +364,11 @@ export class PersistentRhythmGate {
             accountId,
             scope,
             config.profile,
-            now,
+            lastActionAt,
             nextAllowedAt,
             cooloffUntil,
             JSON.stringify(pruned),
+            JSON.stringify(boundedIntents),
             totalActions,
             cooloffHits,
             now,
@@ -340,7 +378,7 @@ export class PersistentRhythmGate {
           accountId,
           scope,
           profile: config.profile,
-          lastActionAt: now,
+          lastActionAt,
           nextAllowedAt,
           cooloffUntil,
           windowTimestamps: pruned,
@@ -350,6 +388,123 @@ export class PersistentRhythmGate {
         };
       })
       .immediate();
+  }
+
+  private rowToSnapshot(row: RhythmRow, fallbackProfile: RhythmProfile): RhythmStateSnapshot {
+    const profile: RhythmProfile = isValidProfile(row.profile) ? row.profile : fallbackProfile;
+    return {
+      accountId: row.account_id as AccountId,
+      scope: row.channel as RhythmScope,
+      profile,
+      lastActionAt: row.last_action_at,
+      nextAllowedAt: row.next_allowed_at,
+      cooloffUntil: row.cooloff_until,
+      windowTimestamps: parseWindowTimestamps(row.window_timestamps_json),
+      totalActions: row.total_actions,
+      cooloffHits: row.cooloff_hits,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  /**
+   * 仅同步当前 accountId 在突发窗口内已提交但因崩溃尚未记入的自动策略意图，
+   * 杜绝全库 send_intents 跨账号串扰并封堵意图落盘后崩溃漏记窗口。
+   */
+  private reconcileAccountIntentsInTx(
+    accountId: AccountId,
+    scope: RhythmScope,
+    profile: RhythmProfile,
+    preset: RhythmPreset,
+    now: number,
+  ): void {
+    const hasIntents = Boolean(
+      this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='send_intents'").get(),
+    );
+    const hasPolicyCommands = Boolean(
+      this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='policy_commands'").get(),
+    );
+    if (!hasIntents || !hasPolicyCommands) return;
+
+    const row = this.readRowReadOnly(accountId, scope);
+    const recordedSet = new Set(parseRecordedIntents(row?.recorded_intents_json));
+    const cutoffMs = now - preset.burstWindowMs;
+    const channelFilter = scope === 'ALL' ? '' : 'AND e.channel=?';
+    const args: unknown[] = scope === 'ALL' ? [accountId] : [accountId, scope];
+
+    const recentIntents = this.db
+      .prepare(
+        `SELECT i.id, i.attempt_started_at FROM send_intents i
+         JOIN inbound_events e ON e.id=i.event_id
+         JOIN manual_send_commands c ON c.intent_id=i.id
+         JOIN policy_commands p ON p.command_id=c.command_id
+         WHERE e.account_id=? ${channelFilter}
+         ORDER BY i.rowid DESC
+         LIMIT ?`,
+      )
+      .all(...args, Math.max(20, preset.burstMaxActions * 2)) as { id: string; attempt_started_at: string }[];
+
+    const missing = recentIntents
+      .map((item) => ({ id: item.id, ts: Date.parse(item.attempt_started_at) }))
+      .filter((item) => !recordedSet.has(item.id) && Number.isFinite(item.ts) && item.ts > cutoffMs && item.ts <= now + 60_000)
+      .sort((a, b) => a.ts - b.ts);
+
+    if (!missing.length) return;
+
+    ensureRhythmTable(this.db);
+    const pruned = pruneWindow(
+      row ? parseWindowTimestamps(row.window_timestamps_json) : [],
+      now,
+      preset.burstWindowMs,
+    );
+    const recordedIntents = parseRecordedIntents(row?.recorded_intents_json);
+    let lastActionAt = row?.last_action_at ?? 0;
+    let nextAllowedAt = row?.next_allowed_at ?? 0;
+    let cooloffUntil = row && row.cooloff_until > now ? row.cooloff_until : 0;
+    let cooloffHits = row?.cooloff_hits ?? 0;
+    let totalActions = row?.total_actions ?? 0;
+
+    for (const item of missing) {
+      pruned.push(item.ts);
+      recordedIntents.push(item.id);
+      totalActions += 1;
+      lastActionAt = Math.max(lastActionAt, item.ts);
+      const intervalMs = computeNextIntervalMs(preset, this.rng);
+      if (pruned.length >= preset.burstMaxActions) {
+        cooloffUntil = Math.max(cooloffUntil, item.ts + preset.cooloffMs);
+        cooloffHits += 1;
+      }
+      nextAllowedAt = Math.max(nextAllowedAt, item.ts + intervalMs, cooloffUntil);
+    }
+
+    const boundedIntents = recordedIntents.slice(-Math.max(50, preset.burstMaxActions * 4));
+    this.db
+      .prepare(
+        `INSERT INTO rhythm_account_state (account_id, channel, profile, last_action_at, next_allowed_at, cooloff_until, window_timestamps_json, recorded_intents_json, total_actions, cooloff_hits, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, channel) DO UPDATE SET
+           profile=excluded.profile,
+           last_action_at=excluded.last_action_at,
+           next_allowed_at=excluded.next_allowed_at,
+           cooloff_until=excluded.cooloff_until,
+           window_timestamps_json=excluded.window_timestamps_json,
+           recorded_intents_json=excluded.recorded_intents_json,
+           total_actions=excluded.total_actions,
+           cooloff_hits=excluded.cooloff_hits,
+           updated_at=excluded.updated_at`,
+      )
+      .run(
+        accountId,
+        scope,
+        profile,
+        lastActionAt,
+        nextAllowedAt,
+        cooloffUntil,
+        JSON.stringify(pruned),
+        JSON.stringify(boundedIntents),
+        totalActions,
+        cooloffHits,
+        now,
+      );
   }
 
   /** 只读查询当前账号节流状态快照（表不存在则返回 null） */

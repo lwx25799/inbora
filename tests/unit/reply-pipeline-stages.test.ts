@@ -1,23 +1,28 @@
 import { afterEach, describe, expect, test } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { migrateClient } from '../../src/storage/client-migration.js';
 import { migrateAutomation } from '../../src/storage/automation-migration.js';
+import { migrateFollowups } from '../../src/storage/followup-migration.js';
 import { AutomationStore } from '../../src/storage/automation-store.js';
 import { ChatMessageStore } from '../../src/storage/chat-messages.js';
 import { WorkbenchAuthority } from '../../src/app/authority.js';
 import { replyPolicySchema } from '../../src/app/automation-contracts.js';
+import { digest, targetKey } from '../../src/core/contracts.js';
 import {
+  FaqSuggestionService,
   PIPELINE_STAGE_ORDER,
   checkInboundSafety,
   checkOutboundSafety,
   computeReplySimilarity,
   dryRunReplyPipeline,
   evaluateDebounce,
+  redactFaqText,
   resolvePipelineConfig,
   type PipelineKnowledgeContext,
 } from '../../src/app/reply-pipeline/index.js';
-import { candidate, database, pending, privateTemp } from '../helpers.js';
+import { candidate, database, pending, privateTemp, snapshot } from '../helpers.js';
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -533,5 +538,170 @@ describe('8 阶段标准流水线编排与干跑轨迹（pipeline）', () => {
     expect(loopTrace.finalDecision).toBe('handoff_human');
     expect(loopTrace.stoppedAt).toBe('outbound_safety_and_loop_check');
     expect(loopTrace.reasonCode).toBe('LOOP_BREAKER_HANDOFF');
+  });
+
+  test('R1回归：前序碎片占满 maxMergedChars 时仍检出锚点自定义敏感词，且不误把自动回复回显当外部人工', async () => {
+    const f = await createPipelineFixture();
+    await migrateFollowups(f.store, join(f.root, 'followups.sqlite'));
+    const t1 = new Date(baseOrigin + 10_000).toISOString();
+    const t2 = new Date(baseOrigin + 11_000).toISOString();
+
+    // 1. 截断绕过回归：前序安全碎片超过 maxMergedChars=50，锚点含自定义敏感词 -> 阶段 6 仍必须拦截
+    const longSafePrefix = '你好请问这件商品的材质和尺码标准以及洗护方式可以详细介绍一下吗非常感谢'.repeat(2);
+    const id1 = pending(
+      f.store,
+      candidate({ conversationId: 'conv-trunc', platformEventId: 'trunc-1', text: longSafePrefix, occurredAt: t1 }),
+    );
+    f.store.observe(
+      'DIRECT_MESSAGE',
+      'conv-trunc',
+      [candidate({ conversationId: 'conv-trunc', platformEventId: 'trunc-2', text: '我要找内部渠道拿货', occurredAt: t2 })],
+      'own-1',
+      'fixture',
+      t2,
+    );
+    const truncTrace = dryRunReplyPipeline({
+      store: f.store,
+      authority: f.authority,
+      automation: f.automation,
+      grant: f.grant,
+      event: f.store.event(id1),
+      config: {
+        debounce: { enabled: true, windowMs: 3000, maxMergedChars: 50 },
+        sensitive: { customWords: ['内部渠道'], enablePlatformRedline: true },
+      },
+      now: () => baseOrigin + 20_000,
+    });
+    expect(truncTrace.finalDecision).toBe('handoff_human');
+    expect(truncTrace.stoppedAt).toBe('debounce_preprocess');
+    expect(truncTrace.reasonCode).toBe('CUSTOM_SENSITIVE_WORD');
+
+    // 2. 自动回复回显排除回归：通过 chat_delivery_links 关联 AUTO_POLICY 意图的 chat_messages 不应误触发 EXTERNAL_HUMAN_REPLIED
+    const firstDm = pending(
+      f.store,
+      candidate({ conversationId: 'conv-echo', platformEventId: 'echo-in-1', text: '请问有货吗', occurredAt: t1 }),
+    );
+    const firstEvent = f.store.event(firstDm);
+    const draftId = randomUUID();
+    f.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,?,1,'DRAFT',NULL,NULL)").run(draftId, firstDm, '您好有货', 'deepseek-flash');
+    f.store.db.prepare("INSERT INTO draft_revisions VALUES(?,1,'AUTO_POLICY',?,?,?)").run(draftId, '您好有货', `policy:${f.grant.version}`, baseOrigin + 10_500);
+    f.store.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(firstDm);
+    f.store.approve(draftId, snapshot(firstEvent.payload), 1, '您好有货');
+    const intentId = f.store.recordIntent(draftId, snapshot(firstEvent.payload), false, { check() {}, committed() {} });
+    const nativeEchoId = 'native-auto-echo-1';
+    f.store.receipt(intentId, 'CONFIRMED', 'proof-echo', {
+      id: nativeEchoId,
+      ownId: 'own-1',
+      targetKey: targetKey(firstEvent.payload),
+      text: '您好有货',
+      pending: false,
+      sentAt: new Date(baseOrigin + 12_000).toISOString(),
+    });
+    const chatStore = new ChatMessageStore(f.store);
+    chatStore.observe(
+      [
+        candidate({
+          conversationId: 'conv-echo',
+          platformEventId: nativeEchoId,
+          actorId: 'own-1',
+          direction: 'OUTGOING',
+          text: '您好有货',
+          occurredAt: new Date(baseOrigin + 12_000).toISOString(),
+        }),
+      ],
+      'own-1',
+      baseOrigin,
+      baseOrigin + 13_000,
+    );
+    const secondDm = f.store.observe(
+      'DIRECT_MESSAGE',
+      'conv-echo',
+      [candidate({ conversationId: 'conv-echo', platformEventId: 'echo-in-2', text: '尺码偏大吗', occurredAt: t2 })],
+      'own-1',
+      'fixture',
+      t2,
+    )[0]!;
+    const echoTrace = dryRunReplyPipeline({
+      store: f.store,
+      authority: f.authority,
+      automation: f.automation,
+      grant: f.grant,
+      event: f.store.event(secondDm),
+      candidateReplyText: '这款是标准尺码，按平时码数选购即可。',
+      now: () => baseOrigin + 20_000,
+    });
+    expect(echoTrace.finalDecision).toBe('continue');
+
+    // 3. 死循环保护在 autoPolicyOnly=false 时合并 human_reply_turns 已确认人工追发（人工追发早于新入站消息但在冷却期内）
+    f.store.db.prepare(
+      `INSERT INTO human_reply_turns VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      'turn-loop-1',
+      firstDm,
+      targetKey(firstEvent.payload),
+      'op-1',
+      digest('turn-loop'),
+      '{}',
+      '这款是标准尺码，按平时码数选购即可！',
+      1,
+      'CONFIRMED',
+      null,
+      'turn-intent-1',
+      new Date(baseOrigin + 10_400).toISOString(),
+      null,
+      'proof-turn',
+      new Date(baseOrigin + 10_500).toISOString(),
+      null,
+      baseOrigin + 10_400,
+    );
+    const followupLoopTrace = dryRunReplyPipeline({
+      store: f.store,
+      authority: f.authority,
+      automation: f.automation,
+      grant: f.grant,
+      event: f.store.event(secondDm),
+      candidateReplyText: '这款是标准尺码，按平时码数选购即可。',
+      now: () => baseOrigin + 20_000,
+    });
+    expect(followupLoopTrace.finalDecision).toBe('handoff_human');
+    expect(followupLoopTrace.reasonCode).toBe('LOOP_BREAKER_HANDOFF');
+  });
+
+  test('R1回归：FAQ 脱敏收件人与省市区详细地址、过滤个人订单查件，且非法采纳先校验不改 ADOPTED', async () => {
+    const f = await createPipelineFixture();
+    const redacted = redactFaqText('收件人：张三，收货地址：北京市朝阳区建国门外街道88号楼3单元，运单号 SF123456789012');
+    expect(redacted).not.toContain('张三');
+    expect(redacted).not.toContain('朝阳区');
+    expect(redacted).not.toContain('SF123456789012');
+    expect(redacted).toContain('[姓名]');
+    expect(redacted).toContain('[地址]');
+    expect(redacted).toContain('[运单号]');
+
+    // 构造 2 条通用问答 + 2 条个人订单改地址问答
+    const seedConfirmed = (pid: string, conv: string, q: string, a: string) => {
+      const evId = pending(f.store, candidate({ platformEventId: pid, conversationId: conv, text: q, occurredAt: new Date(baseOrigin + 10_000).toISOString() }));
+      const ev = f.store.event(evId);
+      const dId = randomUUID();
+      f.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,?,1,'DRAFT',NULL,NULL)").run(dId, evId, a, 'HUMAN_TYPED');
+      f.store.db.prepare("INSERT INTO draft_revisions VALUES(?,1,'HUMAN_TYPED',?,?,?)").run(dId, a, 'op-1', baseOrigin + 11_000);
+      f.store.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(evId);
+      f.store.approve(dId, snapshot(ev.payload), 1, a);
+      const iId = f.store.recordIntent(dId, snapshot(ev.payload), false, { check() {}, committed() {} });
+      f.store.receipt(iId, 'CONFIRMED', 'proof');
+    };
+    seedConfirmed('po-1', 'c-po1', '帮我改一下收货地址，收件人张三，北京市朝阳区建国路88号', '已为您修改收货地址');
+    seedConfirmed('po-2', 'c-po2', '帮我改一下收货地址，收件人李四，上海市浦东新区张杨路99号', '已为您修改收货地址');
+    seedConfirmed('gen-1', 'c-g1', '包装盒是否防震防压', '全部采用加厚瓦楞防震盒发货。');
+    seedConfirmed('gen-2', 'c-g2', '快递包装防震吗怕压坏', '全部采用加厚瓦楞防震盒发货。');
+
+    const faqSvc = new FaqSuggestionService(f.store);
+    const list = faqSvc.generateSuggestions({ minClusterSize: 2 });
+    expect(list).toHaveLength(1);
+    expect(list[0]!.question).toContain('包装');
+
+    // 传入空白 title 必须抛出校验错误，且记录保持 PENDING 绝不被错误更新为 ADOPTED
+    expect(() => faqSvc.adoptSuggestion(list[0]!.id, { title: '   ' })).toThrow();
+    expect(faqSvc.listSuggestions('PENDING')).toHaveLength(1);
+    expect(faqSvc.listSuggestions('ADOPTED')).toHaveLength(0);
   });
 });

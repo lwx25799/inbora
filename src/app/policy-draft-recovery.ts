@@ -8,15 +8,39 @@ import type {Grant,ReplyPolicy} from './automation-contracts.js';
 import {sendParamsSchema,type SendParams} from './contracts.js';
 import {sameReplyPolicy,type ModelRouteGuard} from './model-route-guard.js';
 import {assertDraftLearningCurrent} from '../knowledge/generation-context.js';
+import {
+  evaluateOutboundStage,
+  HandoffAttributionStore,
+  recordPipelineHandoffAttribution,
+  resolvePipelineConfig,
+  type ResolvedReplyPipelineConfig,
+} from './reply-pipeline/index.js';
+
+export interface PolicyDraftRecoveryOptions {
+  pipelineConfig?:ResolvedReplyPipelineConfig;
+  attributionStore?:HandoffAttributionStore;
+  onIntentSubmitted?:(intentId:string)=>void;
+}
+
+const recoverableBeforeClickReasons=new Set([
+  'CLIENT_CLOSING',
+  'TARGET_CHANGED_REAPPROVE',
+  'NATIVE_REPLY_EXISTING_DRAFT',
+  'COMMENT_REPLY_ROOT_NOT_UNIQUE',
+  'COMMENT_REPLY_CLOCK_UNVERIFIED',
+]);
 
 /** Requalify one generated policy draft that never acquired an intent. No model call or submit replay is available here. */
 export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAuthority,auto:AutomationStore,
-  workflow:HumanReplyWorkflow,grant:Grant<ReplyPolicy>,beforeWork:()=>void=()=>{},route?:ModelRouteGuard):Promise<boolean>{
+  workflow:HumanReplyWorkflow,grant:Grant<ReplyPolicy>,beforeWork:()=>void=()=>{},route?:ModelRouteGuard,
+  options?:PolicyDraftRecoveryOptions):Promise<boolean>{
   if(!auto.allowance(grant.version,'SEND'))return false;
+  const pipelineConfig=options?.pipelineConfig??resolvePipelineConfig();
+  const attributionStore=options?.attributionStore??new HandoffAttributionStore(store.db,authority.now);
   const jobs=store.db.prepare(`SELECT j.event_id,j.context_version,j.draft_version,j.command_id,j.grant_version,j.reason,g.scope_json,g.scope_digest FROM automation_jobs j
     JOIN automation_grants g ON g.version=j.grant_version AND g.kind='AUTO_REPLY'
     JOIN reply_drafts d ON d.event_id=j.event_id JOIN draft_revisions r ON r.draft_id=d.id AND r.version=d.version
-    WHERE r.origin='AUTO_POLICY' AND d.version=j.draft_version
+    WHERE r.origin IN ('AUTO_POLICY','AUTO_FAQ_DIRECT') AND d.version=j.draft_version
     AND ((j.state='FAILED_BEFORE_CLICK' AND j.reason IN ('CLIENT_CLOSING','TARGET_CHANGED_REAPPROVE','NATIVE_REPLY_EXISTING_DRAFT','COMMENT_REPLY_ROOT_NOT_UNIQUE','COMMENT_REPLY_CLOCK_UNVERIFIED')) OR (j.state='REVIEW' AND j.reason='RESTART_NO_REPLAY'))
     AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=j.event_id)
     AND NOT EXISTS(SELECT 1 FROM audit_events a WHERE a.event_type='AUTO_COMMENT_ROOT_CLOSE_RESUMED' AND a.entity_id=d.id)
@@ -40,8 +64,36 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
       assertDraftLearningCurrent(store,draft.id,draft.version);
     };
     try{check();}catch(error){
-      store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE event_id=?")
-        .run(error instanceof Blocked?error.code:'MODEL_ROUTE_CHANGED',authority.now(),event.id);continue;
+      const now=authority.now(),reason=error instanceof Blocked?error.code:'MODEL_ROUTE_CHANGED';
+      store.db.transaction(()=>{
+        store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE event_id=?")
+          .run(reason,now,event.id);
+        if(job.command_id){
+          store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE state='MERGED' AND command_id=?")
+            .run(reason,now,job.command_id);
+        }
+      }).immediate();
+      continue;
+    }
+    // 恢复旧自动草稿提交前必须复用阶段 8 出站双层敏感词与同目标死循环守卫
+    const outbound=evaluateOutboundStage({
+      store,event,replyText:draft.text,config:pipelineConfig,now:authority.now,
+    });
+    if(outbound.decision!=='continue'){
+      const now=authority.now();
+      store.db.transaction(()=>{
+        store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE event_id=?")
+          .run(outbound.reasonCode,now,event.id);
+        if(job.command_id){
+          store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE state='MERGED' AND command_id=?")
+            .run(outbound.reasonCode,now,job.command_id);
+        }
+        if(pipelineConfig.recordAttribution){
+          recordPipelineHandoffAttribution(attributionStore,event,'outbound_safety_and_loop_check',outbound.reasonCode);
+        }
+        store.audit('AUTO_REPLY_HANDOFF',event.id,{stage:'outbound_safety_and_loop_check',reasonCode:outbound.reasonCode,recovery:true});
+      }).immediate();
+      continue;
     }
     const marker=store.db.prepare("SELECT id FROM audit_events WHERE event_type='AUTO_COMMENT_ROOT_REQUALIFIED' AND entity_id=?").get(draft.id);
     // Root and clock failures share the original one-time comment preparation contract, not separate retry budgets.
@@ -54,7 +106,7 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
       const failed=store.db.prepare(`SELECT c.params,c.params_digest FROM manual_send_commands c JOIN policy_commands p ON p.command_id=c.command_id
         WHERE c.command_id=? AND c.event_id=? AND c.status='FAILED_BEFORE_CLICK' AND c.reason=?
         AND c.intent_id IS NULL AND p.grant_version=?`).get(job.command_id,event.id,job.reason,job.grant_version) as {params:string;params_digest:string}|undefined;
-      if(!failed||!store.db.prepare("SELECT job_key FROM grant_reservations WHERE grant_version=? AND kind='MODEL' AND job_key=?").get(job.grant_version,event.id)||
+      if(!failed||(draft.origin!=='AUTO_FAQ_DIRECT'&&!store.db.prepare("SELECT job_key FROM grant_reservations WHERE grant_version=? AND kind='MODEL' AND job_key=?").get(job.grant_version,event.id))||
         store.db.prepare("SELECT job_key FROM grant_reservations WHERE kind='SEND' AND job_key=?").get(event.id))continue;
       let raw:unknown,prior:SendParams;try{raw=JSON.parse(failed.params);prior=sendParamsSchema.parse(raw);}catch{continue;}
       if(digest(raw)!==failed.params_digest||prior.eventId!==event.id||prior.draftId!==draft.id||prior.draftVersion!==draft.version||
@@ -82,7 +134,7 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
             AND p.grant_version=j.grant_version AND c.params=? AND c.params_digest=?`).get(event.id,job.command_id,job.grant_version,
               draft.version,job.context_version,priorCommand!.params,priorCommand!.params_digest),'COMMENT_ROOT_CLOSE_COMMAND_CHANGED');
           const current=authority.draftFor(event.id);
-          requireSafe(current?.id===draft.id&&current.version===draft.version&&current.text===draft.text&&current.origin==='AUTO_POLICY'&&
+          requireSafe(current?.id===draft.id&&current.version===draft.version&&current.text===draft.text&&(current.origin==='AUTO_POLICY'||current.origin==='AUTO_FAQ_DIRECT')&&
             authority.contextVersion(store.event(event.id))===job.context_version&&!store.db.prepare("SELECT job_key FROM grant_reservations WHERE kind='SEND' AND job_key=?").get(event.id),
             'COMMENT_ROOT_CLOSE_COMMAND_CHANGED');
         }
@@ -95,6 +147,10 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
         store.db.prepare('INSERT INTO policy_commands VALUES(?,?,?)').run(commandId,grant.version,generation);
         store.db.prepare("UPDATE automation_jobs SET grant_version=?,state='PREPARING',reason=NULL,command_id=?,ownership_generation=?,updated_at=? WHERE event_id=?")
           .run(grant.version,commandId,generation,authority.now(),event.id);
+        if(job.command_id){
+          store.db.prepare("UPDATE automation_jobs SET command_id=?,updated_at=? WHERE state='MERGED' AND command_id=?")
+            .run(commandId,authority.now(),job.command_id);
+        }
         // Corrective contracts consume their own durable qualification; historical attempts stay intact.
         if(rootClose)store.audit('AUTO_COMMENT_ROOT_CLOSE_RESUMED',draft.id,{version:draft.version,contract:1});
         else if(commentRoot)store.audit('AUTO_COMMENT_ROOT_REQUALIFIED',draft.id,{version:draft.version,contract:1});
@@ -103,8 +159,18 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
       }).immediate();
       await workflow.prepare(token,commandId);
       const result=authority.command(commandId);
-      store.db.prepare('UPDATE automation_jobs SET state=?,reason=?,updated_at=? WHERE event_id=?')
-        .run(result.status,result.reason,authority.now(),event.id);
+      const updatedAt=authority.now();
+      store.db.transaction(()=>{
+        store.db.prepare('UPDATE automation_jobs SET state=?,reason=?,updated_at=? WHERE event_id=?')
+          .run(result.status,result.reason,updatedAt,event.id);
+        if(result.intent_id===null&&(!result.reason||!recoverableBeforeClickReasons.has(result.reason))){
+          store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE state='MERGED' AND command_id=?")
+            .run(result.reason??'AUTO_SEND_FAILED_BEFORE_CLICK',updatedAt,commandId);
+        }
+      }).immediate();
+      if(result.intent_id!==null){
+        options?.onIntentSubmitted?.(result.intent_id);
+      }
       return true;
     }finally{authority.revoke(token);}
   }

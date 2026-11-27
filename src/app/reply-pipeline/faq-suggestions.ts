@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { digest, isStrong, requireSafe, type AccountId, type Channel, type InboundEvent } from '../../core/contracts.js';
-import type { KnowledgeInput } from '../../knowledge/contracts.js';
+import { knowledgeInputSchema, type KnowledgeInput } from '../../knowledge/contracts.js';
 import { decodeEventRow, type EventStore } from '../../storage/store.js';
 import { checkInboundSafety, checkOutboundSafety } from './sensitive-guard.js';
 
@@ -104,8 +104,14 @@ function hasFaqTable(db: Database.Database): boolean {
   );
 }
 
+const PERSONAL_TRACKING_CODE_PATTERN = /\b(?:SF|YT|YD|ZT|ST|JT|EMS|JD|YZ)\d{10,20}\b/iu;
+const PERSONAL_ORDER_QUERY_PATTERN =
+  /(?:帮我查(?:一下|下)?(?:我的)?(?:订单|快递|物流)|我这个(?:订单|单号|快递)|改(?:一下|下)?(?:收货)?地址|修改(?:收货)?地址|寄到这个地址|收件人(?:改|是|：|:))/iu;
+const PERSONAL_ORDER_ANSWER_PATTERN =
+  /(?:已为您(?:修改|更改)(?:了)?(?:收货)?地址|您的(?:订单|包裹|快递).{0,10}(?:已签收|正在派送|已揽收|在途中|发往)|已帮您备注(?:修改)?地址)/iu;
+
 /**
- * 脱敏清理文本中的常见隐私字段（手机号、长编号/订单号/银行卡、身份证、邮箱、外链、社交账号）。
+ * 脱敏清理文本中的常见隐私字段（手机号、长编号/订单号/银行卡、身份证、邮箱、外链、社交账号、收件人姓名及省市区详细地址）。
  */
 export function redactFaqText(text: string): string {
   return text
@@ -116,13 +122,28 @@ export function redactFaqText(text: string): string {
     .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/giu, '[邮箱]')
     .replace(/\b\d{17}[\dxX]\b/gu, '[证件号]')
     .replace(/(?<!\d)1[3-9]\d{9}(?!\d)/gu, '[手机号]')
+    .replace(PERSONAL_TRACKING_CODE_PATTERN, '[运单号]')
     .replace(/\b\d{10,24}\b/gu, '[编号]')
     .replace(/((?:微信号|vx号?|wx号?|qq号?)\s*[:：=]?\s*)[a-z0-9_-]{3,}/giu, '$1[账号]')
+    .replace(/((?:收件人|收货人|联系人|寄给|姓名为?)\s*[:：]?\s*)([\u4e00-\u9fa5]{2,4})/gu, '$1[姓名]')
+    .replace(/((?:收货地址|寄件地址|详细地址|送货地址|地址)\s*[:：]\s*)[^\n，。；,]{4,80}/gu, '$1[地址]')
+    .replace(
+      /(?:(?:北京市|上海市|天津市|重庆市|[\u4e00-\u9fa5]{2,8}(?:省|自治区))?(?:[\u4e00-\u9fa5]{2,10}(?:市|自治州|地区))?[\u4e00-\u9fa5]{1,10}(?:区|县|旗|镇|乡|街道)[\u4e00-\u9fa5A-Za-z0-9\-－#号楼室单元路街巷弄村组]{3,40})/gu,
+      '[地址]',
+    )
     .trim();
+}
+
+function isPersonalOrderSpecificQa(rawQuestion: string, rawAnswer: string): boolean {
+  if (PERSONAL_ORDER_ANSWER_PATTERN.test(rawAnswer)) return true;
+  if (PERSONAL_ORDER_QUERY_PATTERN.test(rawQuestion)) return true;
+  if (PERSONAL_TRACKING_CODE_PATTERN.test(rawQuestion) || PERSONAL_TRACKING_CODE_PATTERN.test(rawAnswer)) return true;
+  return false;
 }
 
 function isSafeForFaq(rawQuestion: string, rawAnswer: string, cleanQuestion: string, cleanAnswer: string): boolean {
   if (!cleanQuestion || !cleanAnswer) return false;
+  if (isPersonalOrderSpecificQa(rawQuestion, rawAnswer)) return false;
   // 对原文与脱敏后文本检查严禁导流/私下转账/凭据/违禁词
   const guardConfig = { customWords: [], enablePlatformRedline: true, enablePromptInjectionGuard: true };
   const rawCheck = checkInboundSafety(rawQuestion, guardConfig);
@@ -474,30 +495,32 @@ export class FaqSuggestionService {
         requireSafe(row, 'FAQ_SUGGESTION_NOT_FOUND');
         requireSafe(row.status === 'PENDING', 'FAQ_SUGGESTION_NOT_PENDING');
 
-        db.prepare("UPDATE faq_suggestion_candidates SET status='ADOPTED', updated_at=? WHERE id=?").run(now, row.id);
-        const updated = decodeRow({ ...row, status: 'ADOPTED', updated_at: now });
-
-        const title = (overrides.title ?? updated.question).trim().slice(0, 200);
-        const topic = (overrides.topic ?? '人工对话提炼FAQ').trim().slice(0, 100);
-        const text = (overrides.text ?? updated.suggestedAnswer).trim().slice(0, 100_000);
-        const aliases = (overrides.aliases ?? updated.variants)
-          .map((item) => item.trim().slice(0, 100))
+        const existing = decodeRow(row);
+        const title = (overrides.title ?? existing.question).trim();
+        const topic = (overrides.topic ?? '人工对话提炼FAQ').trim();
+        const text = (overrides.text ?? existing.suggestedAnswer).trim();
+        const aliases = (overrides.aliases ?? existing.variants)
+          .map((item) => item.trim())
           .filter(Boolean)
           .slice(0, 30);
         const channels: Channel[] =
           overrides.channels && overrides.channels.length > 0
             ? [...new Set(overrides.channels)]
-            : updated.channels.length > 0
-              ? updated.channels
+            : existing.channels.length > 0
+              ? existing.channels
               : ['DIRECT_MESSAGE'];
 
-        const knowledgeDraft: KnowledgeInput = {
+        // 先用权威 knowledgeInputSchema 严格校验，非法输入直接回滚事务，绝不先将状态置为 ADOPTED
+        const knowledgeDraft: KnowledgeInput = knowledgeInputSchema.parse({
           title,
           topic,
           text,
           aliases,
           channels,
-        };
+        });
+
+        db.prepare("UPDATE faq_suggestion_candidates SET status='ADOPTED', updated_at=? WHERE id=?").run(now, row.id);
+        const updated = decodeRow({ ...row, status: 'ADOPTED', updated_at: now });
         this.store.audit('FAQ_SUGGESTION_ADOPTED', updated.id, { sampleCount: updated.sampleCount });
         return { suggestion: updated, knowledgeDraft };
       })

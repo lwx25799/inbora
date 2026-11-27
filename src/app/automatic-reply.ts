@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {digest,requireSafe,targetKey,type StoredEvent,type InboundEvent} from '../core/contracts.js';
+import {digest,requireSafe,targetKey,validText,type StoredEvent,type InboundEvent} from '../core/contracts.js';
 import {decodeEventRow,type EventRow,type EventStore} from '../storage/store.js';
 import type {AutomationStore} from '../storage/automation-store.js';
 import type {ModelProviderController} from './model-provider-controller.js';
@@ -27,6 +27,7 @@ import {
   resolvePipelineConfig,
   runReplyPipelinePreGeneration,
   type PipelinePreGenerationResult,
+  type PipelineStageName,
   type ReplyPipelineConfig,
   type ResolvedReplyPipelineConfig,
 } from './reply-pipeline/index.js';
@@ -36,13 +37,21 @@ export interface AutomaticReplyContext {
   models:ModelProviderController;provider:DeepSeekProvider;humanReplies:HumanReplyWorkflow;settings:AiSettings;
   modelPending:Set<string>;automaticSignal:AbortSignal;modelSignal:AbortSignal;
   isClosing():boolean;updated():void;stop(code:string):void;beforeWork():void;statusUpdated():void;errorCode(error:unknown):string;
-  knowledgeContext?(event:InboundEvent):ReplyKnowledgeContext|null;
+  knowledgeContext?(event:InboundEvent,queryText?:string):ReplyKnowledgeContext|null;
   currentSettings?():AiSettings;
   pipelineConfig?:ReplyPipelineConfig;
   rhythmGate?:PersistentRhythmGate;
   attributionStore?:HandoffAttributionStore;
   rng?:()=>number;
 }
+
+const recoverableBeforeClickReasons=new Set([
+  'CLIENT_CLOSING',
+  'TARGET_CHANGED_REAPPROVE',
+  'NATIVE_REPLY_EXISTING_DRAFT',
+  'COMMENT_REPLY_ROOT_NOT_UNIQUE',
+  'COMMENT_REPLY_CLOCK_UNVERIFIED',
+]);
 
 function resolveEffectivePipelineConfig(c:AutomaticReplyContext,rhythmGate:PersistentRhythmGate):ResolvedReplyPipelineConfig{
   const base=resolvePipelineConfig(c.pipelineConfig);
@@ -85,25 +94,95 @@ function buildModelHistory(c:AutomaticReplyContext,event:StoredEvent,mergedEvent
   return [...extras,...history].sort((a,b)=>(a.occurredAt??'').localeCompare(b.occurredAt??''));
 }
 
+/** 预占模型前与落草稿事务内逐条复核全部非锚点碎片仍为 AWAITING_DRAFT、binding 未变且无冲突/草稿/发送意图 */
+function assertBatchFragmentsCurrent(store:EventStore,anchorId:string,fragmentBindings:Record<string,string>):void{
+  for(const [id,expectedBinding] of Object.entries(fragmentBindings)){
+    if(id===anchorId)continue;
+    const row=store.db.prepare('SELECT status,binding FROM inbound_events WHERE id=? AND account_id=?')
+      .get(id,store.accountId) as {status:string;binding:string}|undefined;
+    requireSafe(
+      row&&row.status==='AWAITING_DRAFT'&&row.binding===expectedBinding&&
+        !store.db.prepare('SELECT 1 FROM source_collisions WHERE event_id=? LIMIT 1').get(id)&&
+        !store.db.prepare('SELECT 1 FROM reply_drafts WHERE event_id=? LIMIT 1').get(id)&&
+        !store.db.prepare('SELECT 1 FROM send_intents WHERE event_id=? LIMIT 1').get(id)&&
+        !store.db.prepare('SELECT 1 FROM automation_jobs WHERE event_id=? LIMIT 1').get(id),
+      'AUTO_RESULT_STALE',
+    );
+  }
+}
+
+/** 同事务原子写入整批事件为 REVIEW（避免前序碎片残留 AWAITING_DRAFT 下轮单独触发回复），并记录转人工归因 */
 function recordHandoffStop(
   c:AutomaticReplyContext,
   grant:Grant<ReplyPolicy>,
   event:StoredEvent,
+  mergedEventIds:readonly string[],
   contextVersion:string,
   generation:number,
-  stage:'eligibility_check'|'scope_and_blacklist_check'|'ownership_handoff_check'|'rhythm_rate_limit_check'|'content_safety_check'|'debounce_preprocess'|'handoff_rules_and_knowledge'|'outbound_safety_and_loop_check',
+  stage:PipelineStageName,
   reasonCode:string,
   attributionStore:HandoffAttributionStore,
   recordAttribution:boolean,
 ):void{
   const now=c.authority.now();
+  const batchIds=mergedEventIds.length?mergedEventIds:[event.id];
   c.store.db.transaction(()=>{
-    c.store.db.prepare(`INSERT INTO automation_jobs VALUES(?,?,?,?,?,?,?,NULL,?,?)
-      ON CONFLICT(event_id) DO UPDATE SET state='REVIEW',reason=excluded.reason,updated_at=excluded.updated_at`)
-      .run(event.id,grant.version,'REVIEW',contextVersion,generation,0,reasonCode,now,now);
+    for(const id of batchIds){
+      if(id!==event.id&&(
+        c.store.db.prepare('SELECT 1 FROM reply_drafts WHERE event_id=? LIMIT 1').get(id)||
+        c.store.db.prepare('SELECT 1 FROM send_intents WHERE event_id=? LIMIT 1').get(id)
+      ))continue;
+      c.store.db.prepare(`INSERT INTO automation_jobs VALUES(?,?,?,?,?,?,?,NULL,?,?)
+        ON CONFLICT(event_id) DO UPDATE SET state='REVIEW',reason=excluded.reason,updated_at=excluded.updated_at`)
+        .run(id,grant.version,'REVIEW',contextVersion,generation,0,reasonCode,now,now);
+    }
     if(recordAttribution)recordPipelineHandoffAttribution(attributionStore,event,stage,reasonCode);
-    c.store.audit('AUTO_REPLY_HANDOFF',event.id,{stage,reasonCode});
+    c.store.audit('AUTO_REPLY_HANDOFF',event.id,{stage,reasonCode,batchSize:batchIds.length});
   }).immediate();
+}
+
+/** 同事务写入非锚点碎片 MERGED 状态并绑定 commandId，发送前非白名单失败时再统一转 REVIEW */
+function markMergedFragmentsInTx(
+  c:AutomaticReplyContext,
+  grant:Grant<ReplyPolicy>,
+  anchorEventId:string,
+  mergedEventIds:readonly string[],
+  fragmentBindings:Record<string,string>,
+  contextVersion:string,
+  generation:number,
+  commandId:string,
+):void{
+  if(mergedEventIds.length<=1)return;
+  assertBatchFragmentsCurrent(c.store,anchorEventId,fragmentBindings);
+  const mergedTs=c.authority.now();
+  for(const mergedId of mergedEventIds){
+    if(mergedId===anchorEventId)continue;
+    c.store.db.prepare("INSERT INTO automation_jobs VALUES(?,?,?,?,?,0,'DEBOUNCE_MERGED_INTO_ANCHOR',?,?,?)")
+      .run(mergedId,grant.version,'MERGED',contextVersion,generation,commandId,mergedTs,mergedTs);
+  }
+}
+
+function finalizePreparedCommand(
+  c:AutomaticReplyContext,
+  eventId:string,
+  commandId:string,
+  rhythmGate:PersistentRhythmGate,
+  pipelineConfig:ResolvedReplyPipelineConfig,
+):void{
+  const command=c.authority.command(commandId);
+  const updatedAt=c.authority.now();
+  c.store.db.transaction(()=>{
+    c.store.db.prepare('UPDATE automation_jobs SET state=?,reason=?,updated_at=? WHERE event_id=?')
+      .run(command.status,command.reason,updatedAt,eventId);
+    // 发送前失败且未生成 send_intents 且不在恢复白名单时，将关联前序碎片统一置 REVIEW，避免永久滞留 MERGED
+    if(command.intent_id===null&&(!command.reason||!recoverableBeforeClickReasons.has(command.reason))){
+      c.store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE state='MERGED' AND command_id=?")
+        .run(command.reason??'AUTO_SEND_FAILED_BEFORE_CLICK',updatedAt,commandId);
+    }
+  }).immediate();
+  if(command.intent_id!==null){
+    rhythmGate.recordAction(c.store.accountId,pipelineConfig.rhythm,{intentId:command.intent_id});
+  }
 }
 
 async function qualifyPolicyTarget(c:AutomaticReplyContext,grant:Grant<ReplyPolicy>,event:StoredEvent,signal:AbortSignal):Promise<void>{
@@ -197,11 +276,12 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
     for(const job of heldJobs)if((securityCandidateCodes.has(job.reason)||job.reason==='SECURITY_CHANNEL_HELD')&&
       c.automation.policyMatches(grant,c.store.event(job.event_id)))
       c.store.db.prepare("DELETE FROM automation_jobs WHERE event_id=? AND state='REVIEW' AND draft_version=0").run(job.event_id);
-    if(pipelineConfig.rhythm.profile==='off'||rhythmGate.check(c.store.accountId,pipelineConfig.rhythm).allowed){
-      const intentsBefore=(c.store.db.prepare('SELECT count(*) AS n FROM send_intents').get() as {n:number}).n;
-      if(await recoverPolicyDraft(c.store,c.authority,c.automation,c.humanReplies,grant,c.beforeWork,c.models.guard)){
-        const intentsAfter=(c.store.db.prepare('SELECT count(*) AS n FROM send_intents').get() as {n:number}).n;
-        if(intentsAfter>intentsBefore)rhythmGate.recordAction(c.store.accountId,pipelineConfig.rhythm);
+    if(pipelineConfig.rhythm.profile==='off'||rhythmGate.evaluateOrTriggerCooloff(c.store.accountId,pipelineConfig.rhythm).allowed){
+      if(await recoverPolicyDraft(c.store,c.authority,c.automation,c.humanReplies,grant,c.beforeWork,c.models.guard,{
+        pipelineConfig,
+        attributionStore,
+        onIntentSubmitted:intentId=>rhythmGate.recordAction(c.store.accountId,pipelineConfig.rhythm,{intentId}),
+      })){
         c.updated();return;
       }
     }
@@ -217,18 +297,35 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
         c.store.audit('AUTO_QUALIFICATION_RESUMED',event.id);c.store.db.prepare('DELETE FROM automation_jobs WHERE event_id=?').run(event.id);
       }).immediate();
     }catch{/* Current content or context remains unverified; retain the stop without a paid retry. */}
-    if(!c.automation.allowance(grant.version,'MODEL')||!c.automation.allowance(grant.version,'SEND'))return;
+    if(!c.automation.allowance(grant.version,'SEND'))return;
+    const hasModelAllowance=c.automation.allowance(grant.version,'MODEL');
+    if(!hasModelAllowance&&!pipelineConfig.handoff.exactFaqDirectReply)return;
     const candidates=listAutomaticCandidates(c,grant);
     if(!candidates.length)return;
     let selectedPre:PipelinePreGenerationResult|null=null;
     for(const candidate of candidates){
-      const pre=runReplyPipelinePreGeneration({
-        store:c.store,authority:c.authority,automation:c.automation,grant,event:candidate,
-        config:pipelineConfig,
-        resolveKnowledge:ev=>c.knowledgeContext?.(ev)??null,
-        now:c.authority.now,
-        ...(c.rng?{rng:c.rng}:{}),
-      },rhythmGate);
+      let pre:PipelinePreGenerationResult;
+      try{
+        pre=runReplyPipelinePreGeneration({
+          store:c.store,authority:c.authority,automation:c.automation,grant,event:candidate,
+          config:pipelineConfig,
+          resolveKnowledge:(ev,mergedText)=>c.knowledgeContext?.(ev,mergedText)??null,
+          now:c.authority.now,
+          ...(c.rng?{rng:c.rng}:{}),
+        },rhythmGate);
+      }catch(error){
+        const code=c.errorCode(error);
+        if(shouldStopGlobally(code)){c.stop(code);return;}
+        const nowTs=c.authority.now();
+        c.store.db.transaction(()=>{
+          c.store.db.prepare(`INSERT INTO automation_jobs VALUES(?,?,?,?,?,?,?,NULL,?,?)
+            ON CONFLICT(event_id) DO UPDATE SET state='REVIEW',reason=excluded.reason,updated_at=excluded.updated_at`)
+            .run(candidate.id,grant.version,'REVIEW',c.authority.contextVersion(candidate),c.authority.ownership(candidate).generation,0,code,nowTs,nowTs);
+          c.store.audit('AUTO_REPLY_STOPPED',candidate.id,{stage:'pre_generation',reasonCode:code});
+        }).immediate();
+        c.updated();
+        continue;
+      }
       if(pre.decision==='defer'){
         if(pre.stoppedAt==='rhythm_rate_limit_check')return;
         continue;
@@ -237,7 +334,7 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
       if(pre.decision==='handoff_human'){
         const handoffEvent=pre.anchorEvent;
         recordHandoffStop(
-          c,grant,handoffEvent,
+          c,grant,handoffEvent,pre.mergedEventIds,
           pre.contextVersion??c.authority.contextVersion(handoffEvent),
           pre.ownershipGeneration??c.authority.ownership(handoffEvent).generation,
           pre.stoppedAt??'content_safety_check',
@@ -246,6 +343,8 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
         c.updated();
         return;
       }
+      // 无 MODEL 额度时，仅放行命中高置信 FAQ 确定性直出的候选，跳过需调模型的普通候选
+      if(!hasModelAllowance&&!pre.directFaqReply)continue;
       selectedPre=pre;
       break;
     }
@@ -264,33 +363,78 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
     try {
       await qualifyPolicyTarget(c,grant,event,signal);
       requireSafe(!signal.aborted&&c.automation.policyMatches(grant,c.store.event(event.id))&&c.authority.contextVersion(event)===context&&c.authority.ownership(event).generation===generation,'AUTO_RESULT_STALE');
-      c.store.db.prepare("UPDATE automation_jobs SET state='GENERATING',updated_at=? WHERE event_id=?").run(c.authority.now(),event.id);
-      const knowledge=selectedPre.knowledge??c.knowledgeContext?.(event.payload)??null;
-      if(selectedPre.directFaqReply){
+      assertBatchFragmentsCurrent(c.store,event.id,selectedPre.fragmentBindings);
+      const effectiveQuery=selectedPre.mergedEventIds.length>1?selectedPre.mergedText:event.payload.text;
+      const knowledge=selectedPre.knowledge??c.knowledgeContext?.(event.payload,effectiveQuery)??null;
+      const settings={...c.settings,rules:grant.scope.instructions},settingsFingerprint=replySettingsFingerprint(settings,knowledge?.persona);
+      const checkSettings=()=>requireSafe(replySettingsFingerprint(c.currentSettings?.()??c.settings,knowledge?.persona,grant.scope.instructions)===settingsFingerprint,'AI_SETTINGS_CHANGED');
+
+      // 高置信 FAQ 确定性免模型直出分支：零模型调用、零 MODEL 预占，完整经安全校验与唯一 SendCoordinator 单次提交
+      if(pipelineConfig.handoff.exactFaqDirectReply&&selectedPre.directFaqReply&&knowledge){
         const faqOutbound=evaluateOutboundStage({
           store:c.store,event,replyText:selectedPre.directFaqReply.text,config:pipelineConfig,now:c.authority.now,
         });
         if(faqOutbound.decision!=='continue'){
-          recordHandoffStop(c,grant,event,context,generation,'outbound_safety_and_loop_check',faqOutbound.reasonCode,attributionStore,pipelineConfig.recordAttribution);
+          recordHandoffStop(
+            c,grant,event,selectedPre.mergedEventIds,context,generation,
+            'outbound_safety_and_loop_check',faqOutbound.reasonCode,attributionStore,pipelineConfig.recordAttribution,
+          );
           return;
         }
-        c.store.audit('AUTO_PIPELINE_EXACT_FAQ_MATCHED',event.id,{entryId:selectedPre.directFaqReply.entryId});
+        const directText=validText(selectedPre.directFaqReply.text);
+        if(signal.aborted)throw signal.reason;
+        checkSettings();
+        assertSecurityRevision(c.store,event.payload.channel,security);
+        const commandId=randomUUID(),selectionId=randomUUID();
+        const token=c.authority.issueSession();
+        try{
+          c.store.db.transaction(()=>{
+            checkSettings();
+            assertReplyKnowledgeCurrent(c.store,knowledge);
+            assertSecurityRevision(c.store,event.payload.channel,security);
+            assertBatchFragmentsCurrent(c.store,event.id,selectedPre.fragmentBindings);
+            requireSafe(!c.isClosing()&&c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
+            requireSafe(c.automation.allowance(grant.version,'SEND'),'SEND_GRANT_EXHAUSTED');
+            requireSafe(c.authority.ownership(event).generation===generation&&c.authority.contextVersion(event)===context&&!c.authority.draftFor(event.id),'AUTO_RESULT_STALE');
+            const draftId=randomUUID(),ts=c.authority.now();
+            c.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,?,1,'DRAFT',NULL,NULL)").run(draftId,event.id,directText,'AUTO_FAQ_DIRECT');
+            c.store.db.prepare("INSERT INTO draft_revisions VALUES(?,1,'AUTO_FAQ_DIRECT',?,?,?)").run(draftId,directText,`policy:${grant.version}`,ts);
+            bindReplyKnowledge(c.store,'DRAFT',draftId,1,knowledge);
+            c.store.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(event.id);
+            const params:SendParams={eventId:event.id,generation,draftId,draftVersion:1,text:directText,contextVersion:context,selectionId};
+            c.store.db.prepare("INSERT INTO manual_send_commands VALUES(?,?,?,?,?,'PREPARING',NULL,NULL,?)").run(commandId,event.id,
+              c.authority.operator(token).id,digest(params),JSON.stringify(params),ts);
+            c.store.db.prepare('INSERT INTO policy_commands VALUES(?,?,?)').run(commandId,grant.version,generation);
+            c.store.db.prepare("UPDATE automation_jobs SET state='PREPARING',draft_version=1,command_id=?,updated_at=? WHERE event_id=?").run(commandId,ts,event.id);
+            markMergedFragmentsInTx(c,grant,event.id,selectedPre.mergedEventIds,selectedPre.fragmentBindings,context,generation,commandId);
+            c.store.audit('AUTO_PIPELINE_EXACT_FAQ_MATCHED',event.id,{entryId:selectedPre.directFaqReply!.entryId,direct:true});
+          }).immediate();
+          await c.humanReplies.prepare(token,commandId);
+          finalizePreparedCommand(c,event.id,commandId,rhythmGate,pipelineConfig);
+        }finally{c.authority.revoke(token);}
+        return;
       }
-      const settings={...c.settings,rules:grant.scope.instructions},settingsFingerprint=replySettingsFingerprint(settings,knowledge?.persona);
-      const checkSettings=()=>requireSafe(replySettingsFingerprint(c.currentSettings?.()??c.settings,knowledge?.persona,grant.scope.instructions)===settingsFingerprint,'AI_SETTINGS_CHANGED');
+
+      c.store.db.prepare("UPDATE automation_jobs SET state='GENERATING',updated_at=? WHERE event_id=?").run(c.authority.now(),event.id);
       const binding={controller:c.models,kind:grant.kind,snapshot:c.models.guard.snapshot(grant,'REPLY_GENERATION')};
       const validate=()=>{
         checkSettings();
         requireSafe(c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
         requireSafe(c.authority.ownership(event).generation===generation&&c.authority.contextVersion(event)===context&&!c.authority.draftFor(event.id),'AUTO_RESULT_STALE');
+        assertBatchFragmentsCurrent(c.store,event.id,selectedPre.fragmentBindings);
       };
+      // 碎片聚合命中多条消息时，仅向模型提示与知识校验传入聚合文本浅拷贝；数据库/目标/意图绑定 100% 保持原始 anchorEvent
+      const modelEvent=selectedPre.mergedEventIds.length>1&&selectedPre.mergedText!==event.payload.text
+        ?{...event.payload,text:selectedPre.mergedText}
+        :event.payload;
       const modelEnd=runtimePerformance.start('MODEL',event.payload.channel);
-      const result=await c.provider.generate(c.store,event.payload,buildModelHistory(c,event,selectedPre.mergedEventIds),
+      const result=await c.provider.generate(c.store,modelEvent,buildModelHistory(c,event,selectedPre.mergedEventIds),
         settings,'',true,signal,()=>{
           requireSafe(!signal.aborted,'MODEL_CANCELLED');
           c.models.guard.assertCurrent(binding.snapshot,'AUTO_REPLY');
           checkSettings();
           assertReplyKnowledgeCurrent(c.store,knowledge);
+          assertBatchFragmentsCurrent(c.store,event.id,selectedPre.fragmentBindings);
           requireSafe(c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
           requireSafe(c.automation.allowance(grant.version,'SEND'),'SEND_GRANT_EXHAUSTED');
           c.automation.reserve(grant.version,'MODEL',event.id);
@@ -309,7 +453,10 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
           outbound.reasonCode==='LOOP_BREAKER_HANDOFF'?'MODEL_DUPLICATE_OUTPUT':'MODEL_SENSITIVE_OUTPUT',
         );
         callId=undefined;
-        recordHandoffStop(c,grant,event,context,generation,'outbound_safety_and_loop_check',outbound.reasonCode,attributionStore,pipelineConfig.recordAttribution);
+        recordHandoffStop(
+          c,grant,event,selectedPre.mergedEventIds,context,generation,
+          'outbound_safety_and_loop_check',outbound.reasonCode,attributionStore,pipelineConfig.recordAttribution,
+        );
         return;
       }
       const commandId=randomUUID(),selectionId=randomUUID();
@@ -320,6 +467,7 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
           checkSettings();
           assertReplyKnowledgeCurrent(c.store,knowledge);
           assertSecurityRevision(c.store,event.payload.channel,security);
+          assertBatchFragmentsCurrent(c.store,event.id,selectedPre.fragmentBindings);
           requireSafe(!c.isClosing()&&c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
           requireSafe(c.authority.ownership(event).generation===generation&&c.authority.contextVersion(event)===context&&!c.authority.draftFor(event.id),'AUTO_RESULT_STALE');
           const draftId=randomUUID();
@@ -333,25 +481,11 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
             c.authority.operator(token).id,digest(params),JSON.stringify(params),c.authority.now());
           c.store.db.prepare('INSERT INTO policy_commands VALUES(?,?,?)').run(commandId,grant.version,generation);
           c.store.db.prepare("UPDATE automation_jobs SET state='PREPARING',draft_version=1,command_id=?,updated_at=? WHERE event_id=?").run(commandId,c.authority.now(),event.id);
-          for(const mergedId of selectedPre.mergedEventIds){
-            if(mergedId===event.id)continue;
-            const hasState=c.store.db.prepare('SELECT 1 FROM automation_jobs WHERE event_id=?').get(mergedId)||
-              c.store.db.prepare('SELECT 1 FROM reply_drafts WHERE event_id=?').get(mergedId)||
-              c.store.db.prepare('SELECT 1 FROM send_intents WHERE event_id=?').get(mergedId);
-            if(!hasState){
-              const mergedTs=c.authority.now();
-              c.store.db.prepare("INSERT INTO automation_jobs VALUES(?,?,?,?,?,0,'DEBOUNCE_MERGED_INTO_ANCHOR',?,?,?)")
-                .run(mergedId,grant.version,'MERGED',context,generation,event.id,mergedTs,mergedTs);
-            }
-          }
+          markMergedFragmentsInTx(c,grant,event.id,selectedPre.mergedEventIds,selectedPre.fragmentBindings,context,generation,commandId);
         }).immediate();
         callId=undefined;
         await c.humanReplies.prepare(token,commandId);
-        const command=c.authority.command(commandId);
-        c.store.db.prepare('UPDATE automation_jobs SET state=?,reason=?,updated_at=? WHERE event_id=?').run(command.status,command.reason,c.authority.now(),event.id);
-        if(command.intent_id!==null){
-          rhythmGate.recordAction(c.store.accountId,pipelineConfig.rhythm);
-        }
+        finalizePreparedCommand(c,event.id,commandId,rhythmGate,pipelineConfig);
       }finally{c.authority.revoke(token);}
     }catch(error){
       const code=c.errorCode(routeSignal.aborted?routeSignal.reason:error);
@@ -359,12 +493,23 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
       const paid=c.store.db.prepare("SELECT job_key FROM grant_reservations WHERE grant_version=? AND kind='MODEL' AND job_key=?").get(grant.version,event.id);
       if(automaticSignal.aborted&&!paid)c.store.db.prepare("DELETE FROM automation_jobs WHERE event_id=? AND command_id IS NULL AND state IN ('QUALIFYING','GENERATING')").run(event.id);
       else {
-        c.store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE event_id=?").run(code,c.authority.now(),event.id);
-        if(pipelineConfig.recordAttribution&&catchAttributionCodes.has(code)){
-          const stage=code==='MODEL_SENSITIVE_OUTPUT'||code==='MODEL_DUPLICATE_OUTPUT'?'outbound_safety_and_loop_check':
-            code==='KNOWLEDGE_CONFLICT'?'handoff_rules_and_knowledge':'content_safety_check';
-          recordPipelineHandoffAttribution(attributionStore,event,stage,code);
-        }
+        const ts=c.authority.now();
+        c.store.db.transaction(()=>{
+          c.store.db.prepare("UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE event_id=?").run(code,ts,event.id);
+          for(const id of selectedPre.mergedEventIds){
+            if(id===event.id)continue;
+            if(c.store.db.prepare('SELECT 1 FROM reply_drafts WHERE event_id=? LIMIT 1').get(id)||
+              c.store.db.prepare('SELECT 1 FROM send_intents WHERE event_id=? LIMIT 1').get(id))continue;
+            c.store.db.prepare(`INSERT INTO automation_jobs VALUES(?,?,?,?,?,?,?,NULL,?,?)
+              ON CONFLICT(event_id) DO UPDATE SET state='REVIEW',reason=excluded.reason,updated_at=excluded.updated_at`)
+              .run(id,grant.version,'REVIEW',context,generation,0,code,ts,ts);
+          }
+          if(pipelineConfig.recordAttribution&&catchAttributionCodes.has(code)){
+            const stage=code==='MODEL_SENSITIVE_OUTPUT'||code==='MODEL_DUPLICATE_OUTPUT'?'outbound_safety_and_loop_check':
+              code==='KNOWLEDGE_CONFLICT'?'handoff_rules_and_knowledge':'content_safety_check';
+            recordPipelineHandoffAttribution(attributionStore,event,stage,code);
+          }
+        }).immediate();
       }
       if(shouldStopGlobally(code))c.stop(code);
       c.store.audit('AUTO_REPLY_STOPPED',event.id);

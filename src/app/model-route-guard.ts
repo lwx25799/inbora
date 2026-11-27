@@ -76,6 +76,10 @@ export class ModelRouteGuard {
   }
 
   assertAutomaticDraft(owner: GenerationOwner, grantVersion: number, eventId: string): void {
+    const { store } = this.automation;
+    if (this.isVerifiedDirectFaqDraft(owner, grantVersion, eventId)) {
+      return;
+    }
     const id = this.models.getGenerationCallId(owner);
     requireSafe(id, "LEGACY_MODEL_ROUTE_UNPROVEN");
     const call = this.models.getCallRoute(id);
@@ -88,7 +92,6 @@ export class ModelRouteGuard {
       protocol: call.protocol, endpointDigest: call.endpointDigest, presetId: route.presetId,
       modelId: call.requestedModel, grantVersion,
     }, "AUTO_REPLY");
-    const { store } = this.automation;
     const reservation = store.db.prepare("SELECT reserved_at FROM grant_reservations WHERE grant_version=? AND kind='MODEL' AND job_key=?").pluck();
     const original = reservation.get(call.grantVersion, eventId);
     requireSafe(original !== undefined && original === reservation.get(grantVersion, eventId), "POLICY_NO_LONGER_AUTHORIZED");
@@ -103,6 +106,52 @@ export class ModelRouteGuard {
     requireSafe(grantMatchesModel({ ...current, version: call.grantVersion, scope: previous }, selection, route) &&
       sameReplyPolicy(previous as ReplyPolicy, current.scope as ReplyPolicy, store.event(eventId).payload.kind === "REPLY"),
     "POLICY_NO_LONGER_AUTHORIZED");
+  }
+
+  /**
+   * 仅放行严格核验的高置信 FAQ 确定性免模型直出草稿（AUTO_FAQ_DIRECT）：
+   * 必须同时满足草稿 model/origin 标记、归属当前有效 AUTO_REPLY 策略（或规则未变的策略版本）、
+   * 存在已绑定的知识库上下文快照（后续由 assertDraftLearningCurrent 核验未失效）且未急停。
+   */
+  private isVerifiedDirectFaqDraft(owner: GenerationOwner, grantVersion: number, eventId: string): boolean {
+    if (owner.ownerKind !== "DRAFT") return false;
+    const { store } = this.automation;
+    const draft = store.db.prepare(
+      `SELECT d.event_id, d.model, d.version, r.origin, r.operator_id
+       FROM reply_drafts d
+       JOIN draft_revisions r ON r.draft_id=d.id AND r.version=d.version
+       WHERE d.id=? AND d.version=?`,
+    ).get(owner.ownerId, owner.ownerVersion) as
+      | { event_id: string; model: string; version: number; origin: string; operator_id: string }
+      | undefined;
+    if (!draft || draft.event_id !== eventId || draft.model !== "AUTO_FAQ_DIRECT" || draft.origin !== "AUTO_FAQ_DIRECT") {
+      return false;
+    }
+    const match = /^policy:(\d+)$/u.exec(draft.operator_id);
+    requireSafe(match, "POLICY_NO_LONGER_AUTHORIZED");
+    const originGrantVersion = Number(match[1]);
+    requireSafe(!this.automation.state().emergencyStopped, "EMERGENCY_STOPPED");
+    const active = this.automation.active("AUTO_REPLY") as Grant<ReplyPolicy> | null;
+    requireSafe(active?.version === grantVersion, "GRANT_REVOKED");
+    this.automation.requireAccount(active.scope.ownId);
+    // 必须存在与本草稿版本绑定的知识库快照，严禁无知识库凭证伪造免模型直出
+    requireSafe(
+      store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='k_generation_contexts'").get() &&
+        store.db.prepare("SELECT 1 FROM k_generation_contexts WHERE kind='DRAFT' AND entity_id=? AND version=?")
+          .get(owner.ownerId, owner.ownerVersion),
+      "KNOWLEDGE_CONTEXT_INVALID",
+    );
+    if (originGrantVersion !== grantVersion) {
+      const row = store.db.prepare("SELECT scope_json,scope_digest FROM automation_grants WHERE version=? AND kind='AUTO_REPLY'")
+        .get(originGrantVersion) as { scope_json: string; scope_digest: string } | undefined;
+      requireSafe(row, "POLICY_NO_LONGER_AUTHORIZED");
+      const previous = this.automation.readGrantScope("AUTO_REPLY", { ...row, grant_version: originGrantVersion }) as ReplyPolicy;
+      requireSafe(
+        sameReplyPolicy(previous, active.scope, store.event(eventId).payload.kind === "REPLY"),
+        "POLICY_NO_LONGER_AUTHORIZED",
+      );
+    }
+    return true;
   }
 
   switchGrants(previous: ModelSelection, next: ModelSelection, route: RouteRevision, legacyOnly = false): void {
