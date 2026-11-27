@@ -1,9 +1,11 @@
-import { Blocked, digest, requireSafe } from "../core/contracts.js";
+import { Blocked, digest, requireSafe, validText } from "../core/contracts.js";
 import type { ModelCallPurpose, ModelRouteSnapshot, ModelSelection } from "../contracts/model-providers.js";
 import type { AutomationStore } from "../storage/automation-store.js";
 import type { Grant, ReplyPolicy } from "../contracts/automation.js";
 import { bindModelGrant, grantMatchesModel } from "../storage/model-grant-binding.js";
 import type { GenerationOwner, ModelProviderStore } from "../storage/model-provider-store.js";
+import { ReplyKnowledgeStore } from "../knowledge/store.js";
+import type { ReplyKnowledgeContext } from "../knowledge/contracts.js";
 
 type BusinessPurpose = Exclude<ModelCallPurpose, "PROVIDER_TEST">;
 export type BusinessRoute = Exclude<ModelRouteSnapshot, { purpose: "PROVIDER_TEST" }>;
@@ -111,18 +113,18 @@ export class ModelRouteGuard {
   /**
    * 仅放行严格核验的高置信 FAQ 确定性免模型直出草稿（AUTO_FAQ_DIRECT）：
    * 必须同时满足草稿 model/origin 标记、归属当前有效 AUTO_REPLY 策略（或规则未变的策略版本）、
-   * 存在已绑定的知识库上下文快照（后续由 assertDraftLearningCurrent 核验未失效）且未急停。
+   * 绑定知识快照重检仍一致、确实产出 exactFaqMatch 且 validText(exactFaqMatch.text) === draft.text，且未急停。
    */
   private isVerifiedDirectFaqDraft(owner: GenerationOwner, grantVersion: number, eventId: string): boolean {
     if (owner.ownerKind !== "DRAFT") return false;
     const { store } = this.automation;
     const draft = store.db.prepare(
-      `SELECT d.event_id, d.model, d.version, r.origin, r.operator_id
+      `SELECT d.event_id, d.text, d.model, d.version, r.origin, r.operator_id
        FROM reply_drafts d
        JOIN draft_revisions r ON r.draft_id=d.id AND r.version=d.version
        WHERE d.id=? AND d.version=?`,
     ).get(owner.ownerId, owner.ownerVersion) as
-      | { event_id: string; model: string; version: number; origin: string; operator_id: string }
+      | { event_id: string; text: string; model: string; version: number; origin: string; operator_id: string }
       | undefined;
     if (!draft || draft.event_id !== eventId || draft.model !== "AUTO_FAQ_DIRECT" || draft.origin !== "AUTO_FAQ_DIRECT") {
       return false;
@@ -134,20 +136,51 @@ export class ModelRouteGuard {
     const active = this.automation.active("AUTO_REPLY") as Grant<ReplyPolicy> | null;
     requireSafe(active?.version === grantVersion, "GRANT_REVOKED");
     this.automation.requireAccount(active.scope.ownId);
-    // 必须存在与本草稿版本绑定的知识库快照，严禁无知识库凭证伪造免模型直出
-    requireSafe(
-      store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='k_generation_contexts'").get() &&
-        store.db.prepare("SELECT 1 FROM k_generation_contexts WHERE kind='DRAFT' AND entity_id=? AND version=?")
-          .get(owner.ownerId, owner.ownerVersion),
-      "KNOWLEDGE_CONTEXT_INVALID",
+    // 必须存在与本草稿版本绑定的知识库快照，并实时重检产出 exactFaqMatch 且与草稿全文逐字一致
+    const ctxRow = store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='k_generation_contexts'").get()
+      ? (store.db.prepare("SELECT snapshot_json FROM k_generation_contexts WHERE kind='DRAFT' AND entity_id=? AND version=?")
+          .get(owner.ownerId, owner.ownerVersion) as { snapshot_json: string } | undefined)
+      : undefined;
+    requireSafe(ctxRow, "KNOWLEDGE_CONTEXT_INVALID");
+    let snapshot: ReplyKnowledgeContext;
+    try {
+      snapshot = JSON.parse(ctxRow.snapshot_json) as ReplyKnowledgeContext;
+      requireSafe(
+        snapshot &&
+          typeof snapshot.fingerprint === "string" &&
+          typeof snapshot.query === "string" &&
+          snapshot.accountId === store.accountId,
+        "KNOWLEDGE_CONTEXT_INVALID",
+      );
+    } catch {
+      requireSafe(false, "KNOWLEDGE_CONTEXT_INVALID");
+    }
+    const event = store.event(eventId);
+    requireSafe(snapshot.channel === event.payload.channel, "KNOWLEDGE_CONTEXT_INVALID");
+    const rechecked = new ReplyKnowledgeStore(store, { now: this.automation.now }).context(
+      snapshot.accountId,
+      snapshot.channel,
+      snapshot.query,
+      {
+        ...(snapshot.accountPersonaOnly
+          ? { personaId: null }
+          : snapshot.personaPinned && snapshot.personaId
+            ? { personaId: snapshot.personaId }
+            : {}),
+        ...(snapshot.sourceIds ? { sourceIds: snapshot.sourceIds } : {}),
+        ...(snapshot.minScore !== undefined ? { minScore: snapshot.minScore } : {}),
+      },
     );
+    requireSafe(rechecked.fingerprint === snapshot.fingerprint, "KNOWLEDGE_CONTEXT_CHANGED");
+    requireSafe(rechecked.conflicts.length === 0 && rechecked.exactFaqMatch, "KNOWLEDGE_CONTEXT_INVALID");
+    requireSafe(validText(rechecked.exactFaqMatch.text) === draft.text, "KNOWLEDGE_CONTEXT_INVALID");
     if (originGrantVersion !== grantVersion) {
       const row = store.db.prepare("SELECT scope_json,scope_digest FROM automation_grants WHERE version=? AND kind='AUTO_REPLY'")
         .get(originGrantVersion) as { scope_json: string; scope_digest: string } | undefined;
       requireSafe(row, "POLICY_NO_LONGER_AUTHORIZED");
       const previous = this.automation.readGrantScope("AUTO_REPLY", { ...row, grant_version: originGrantVersion }) as ReplyPolicy;
       requireSafe(
-        sameReplyPolicy(previous, active.scope, store.event(eventId).payload.kind === "REPLY"),
+        sameReplyPolicy(previous, active.scope, event.payload.kind === "REPLY"),
         "POLICY_NO_LONGER_AUTHORIZED",
       );
     }
@@ -190,6 +223,7 @@ export class ModelRouteGuard {
 
   invalidateUnsent(reason: "MODEL_ROUTE_CHANGED" | "LEGACY_MODEL_ROUTE_UNPROVEN"): void {
     const { store, now } = this.automation;
+    const ts = now();
     const legacy = reason === "LEGACY_MODEL_ROUTE_UNPROVEN" ? `
       AND NOT EXISTS (SELECT 1 FROM reply_drafts d JOIN m_generation_bindings b ON b.owner_kind='DRAFT'
         AND b.owner_id=d.id AND b.owner_version=d.version WHERE d.event_id=automation_jobs.event_id)
@@ -198,7 +232,11 @@ export class ModelRouteGuard {
     const legacyCommand = reason === "LEGACY_MODEL_ROUTE_UNPROVEN" ? `
       AND NOT EXISTS (SELECT 1 FROM m_generation_bindings b WHERE b.owner_kind='DRAFT'
         AND b.owner_id=json_extract(manual_send_commands.params,'$.draftId')
-        AND b.owner_version=json_extract(manual_send_commands.params,'$.draftVersion'))` : "";
+        AND b.owner_version=json_extract(manual_send_commands.params,'$.draftVersion'))
+      AND EXISTS (SELECT 1 FROM reply_drafts d JOIN draft_revisions r ON r.draft_id=d.id AND r.version=d.version
+        WHERE d.id=json_extract(manual_send_commands.params,'$.draftId')
+        AND d.version=json_extract(manual_send_commands.params,'$.draftVersion')
+        AND r.origin='AUTO_POLICY')` : "";
     store.db.prepare(`UPDATE manual_send_commands SET status='FAILED_BEFORE_CLICK',reason=?
         WHERE command_id IN (SELECT command_id FROM policy_commands) AND intent_id IS NULL
         AND (status IN ('PREPARING','PREVIEW','QUEUED','PREFLIGHT') OR (?='LEGACY_MODEL_ROUTE_UNPROVEN' AND status='FAILED_BEFORE_CLICK'))
@@ -207,7 +245,18 @@ export class ModelRouteGuard {
       NOT EXISTS (SELECT 1 FROM send_intents i WHERE i.event_id=automation_jobs.event_id)
       AND (draft_version>0 OR state IN ('QUALIFYING','GENERATING','PREPARING','QUEUED','PREFLIGHT'))
       AND reason IS NOT 'LEGACY_MODEL_ROUTE_UNPROVEN'${legacy}`)
-      .run(reason, now());
+      .run(reason, ts);
+    // 锚点因路由失效置为 REVIEW 时，同步把关联的 MERGED 碎片也置为 REVIEW，防止前序碎片永久滞留
+    store.db.prepare(`UPDATE automation_jobs SET state='REVIEW',reason=?,updated_at=? WHERE
+      state='MERGED' AND command_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM send_intents i WHERE i.event_id=automation_jobs.event_id)
+      AND NOT EXISTS (SELECT 1 FROM reply_drafts d WHERE d.event_id=automation_jobs.event_id)
+      AND EXISTS (
+        SELECT 1 FROM automation_jobs anchor
+        WHERE anchor.command_id=automation_jobs.command_id
+          AND anchor.event_id<>automation_jobs.event_id
+          AND anchor.state='REVIEW' AND anchor.reason=?
+      )`).run(reason, ts, reason);
     if (reason === "MODEL_ROUTE_CHANGED") store.audit(reason, store.accountId);
   }
 }

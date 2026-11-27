@@ -609,14 +609,29 @@ describe('R1 端到端回归：FAQ免模型直出、碎片批次/恢复守卫、
     expect(store.event(evId).status).toBe('CONFIRMED');
     expect(store.budget('MODEL').used).toBe(0);
     expect(store.budget('SEND').used).toBe(1);
-    const rev = store.db.prepare('SELECT d.model, r.origin FROM reply_drafts d JOIN draft_revisions r ON r.draft_id=d.id WHERE d.event_id=?').get(evId);
-    expect(rev).toEqual({ model: 'AUTO_FAQ_DIRECT', origin: 'AUTO_FAQ_DIRECT' });
-    // 伪造无知识上下文绑定的 AUTO_FAQ_DIRECT 草稿必须被 ModelRouteGuard 拒绝
+    const rev = store.db.prepare('SELECT d.id, d.model, r.origin FROM reply_drafts d JOIN draft_revisions r ON r.draft_id=d.id WHERE d.event_id=?').get(evId) as { id: string; model: string; origin: string };
+    expect({ model: rev.model, origin: rev.origin }).toEqual({ model: 'AUTO_FAQ_DIRECT', origin: 'AUTO_FAQ_DIRECT' });
+    // 伪造无知识上下文绑定的 AUTO_FAQ_DIRECT 草稿、或篡改草稿全文与命中 FAQ 不一致时，必须被 ModelRouteGuard 拒绝
     const forgedEv = pending(store, candidate({ conversationId: 'conv-forged', platformEventId: 'forged-1', text: '你好', occurredAt: '2026-11-12T01:02:00Z' }));
     const forgedDraftId = randomUUID();
     store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,'AUTO_FAQ_DIRECT',1,'DRAFT',NULL,NULL)").run(forgedDraftId, forgedEv, '伪造文本');
     store.db.prepare("INSERT INTO draft_revisions VALUES(?,1,'AUTO_FAQ_DIRECT',?,?,?)").run(forgedDraftId, '伪造文本', `policy:${grantVersion}`, Date.now());
     expect(() => service!.authority.modelRoute!.assertAutomaticDraft({ ownerKind: 'DRAFT', ownerId: forgedDraftId, ownerVersion: 1 }, grantVersion, forgedEv)).toThrow('KNOWLEDGE_CONTEXT_INVALID');
+    // 绑定有效快照但篡改草稿正文 -> 重检 exactFaqMatch 全文不一致被拒
+    const faqCtx = kStore.context('account_001', 'DIRECT_MESSAGE', '发货时间');
+    store.db.prepare("INSERT INTO k_generation_contexts VALUES('DRAFT',?,1,?)").run(forgedDraftId, JSON.stringify({ accountId: faqCtx.accountId, channel: faqCtx.channel, query: faqCtx.query, persona: '', personaId: faqCtx.personaId, examples: [], knowledge: [], conflicts: [], fingerprint: faqCtx.fingerprint }));
+    expect(() => service!.authority.modelRoute!.assertAutomaticDraft({ ownerKind: 'DRAFT', ownerId: forgedDraftId, ownerVersion: 1 }, grantVersion, forgedEv)).toThrow('KNOWLEDGE_CONTEXT_INVALID');
+    // invalidateUnsent('LEGACY_MODEL_ROUTE_UNPROVEN') 不破坏待恢复 AUTO_FAQ_DIRECT 命令；MODEL_ROUTE_CHANGED 联动将关联 MERGED 碎片置 REVIEW
+    const cmdFaq = randomUUID(), cmdMerged = randomUUID(), mergedFrag = pending(store, candidate({ conversationId: 'conv-merged-inv', platformEventId: 'mi-1', text: '前序', occurredAt: '2026-11-12T01:03:00Z' }));
+    const opId = service.authority.operator(token).id;
+    store.db.prepare("INSERT INTO manual_send_commands VALUES(?,?,?,'d',?,'FAILED_BEFORE_CLICK',NULL,'CLIENT_CLOSING',1)").run(cmdFaq, forgedEv, opId, JSON.stringify({ draftId: forgedDraftId, draftVersion: 1 }));
+    store.db.prepare('INSERT INTO policy_commands VALUES(?,?,0)').run(cmdFaq, grantVersion);
+    service.authority.modelRoute!.invalidateUnsent('LEGACY_MODEL_ROUTE_UNPROVEN');
+    expect(store.db.prepare('SELECT reason FROM manual_send_commands WHERE command_id=?').get(cmdFaq)).toEqual({ reason: 'CLIENT_CLOSING' });
+    store.db.prepare("INSERT INTO automation_jobs VALUES(?,?,'PREPARING','c',0,1,NULL,?,1,1)").run(forgedEv, grantVersion, cmdMerged);
+    store.db.prepare("INSERT INTO automation_jobs VALUES(?,?,'MERGED','c',0,0,'DEBOUNCE_MERGED_INTO_ANCHOR',?,1,1)").run(mergedFrag, grantVersion, cmdMerged);
+    service.authority.modelRoute!.invalidateUnsent('MODEL_ROUTE_CHANGED');
+    expect(store.db.prepare('SELECT state, reason FROM automation_jobs WHERE event_id=?').get(mergedFrag)).toEqual({ state: 'REVIEW', reason: 'MODEL_ROUTE_CHANGED' });
   });
 
   test('recoverPolicyDraft 经阶段8拦截新增敏感词 + 碎片批次整批转人工/非白名单失败回退/聚合知识检索/异常隔离', async () => {
@@ -746,5 +761,21 @@ describe('R1 端到端回归：FAQ免模型直出、碎片批次/恢复守卫、
     expect(gate.inspectState('account_001')?.totalActions).toBe(1);
     expect(attrStore.querySummary({ accountId: 'account_001' }).total).toBe(1);
     expect(new FaqSuggestionService(store).listSuggestions('PENDING')).toHaveLength(1);
+
+    // 3. R2回归：模拟旧版无 recorded_intents_json 列的 rhythm_account_state 升级补列后，reconcile 不重复累加 <= last_action_at 的已记账意图
+    const legacyT = 1_800_000_010_000;
+    const legacyEv = pending(store, candidate({ conversationId: 'conv-leg-rhy', platformEventId: 'leg-rhy-1', text: '咨询', occurredAt: new Date(legacyT - 1000).toISOString() }));
+    const legacyDraft = randomUUID(), legacyCmd = randomUUID(), legacyIntent = randomUUID();
+    store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,'deepseek-flash',1,'APPROVED',NULL,NULL)").run(legacyDraft, legacyEv, '回复');
+    store.db.prepare("INSERT INTO send_intents VALUES(?,?,?,?,?,?,'CONFIRMED',?)").run(legacyIntent, legacyEv, legacyDraft, 'dm:conv-leg-rhy', 'td', 'xd', new Date(legacyT).toISOString());
+    store.db.prepare("INSERT INTO manual_send_commands VALUES(?,?,?,'d','{}','CONFIRMED',?,NULL,?)").run(legacyCmd, legacyEv, 'op-1', legacyIntent, legacyT);
+    const gVer = store.db.prepare("INSERT INTO automation_grants(kind,scope_json,scope_digest,created_at) VALUES('AUTO_REPLY','{}','d',1)").run().lastInsertRowid;
+    store.db.prepare('INSERT INTO policy_commands VALUES(?,?,0)').run(legacyCmd, gVer);
+    store.db.prepare("UPDATE rhythm_account_state SET last_action_at=?, next_allowed_at=?, cooloff_until=0, window_timestamps_json=?, recorded_intents_json='[]', total_actions=1 WHERE account_id='account_001' AND channel='ALL'").run(legacyT, legacyT + 1000, JSON.stringify([legacyT]));
+    const upgradedGate = new PersistentRhythmGate(store.db, { now: () => legacyT + 5000, rng: () => 0.5 });
+    const dec = upgradedGate.evaluateOrTriggerCooloff('account_001', { profile: 'calm', overrides: { minIntervalMs: 1000, maxIntervalMs: 1000, burstWindowMs: 60_000, burstMaxActions: 2, cooloffMs: 30_000 } });
+    expect(dec.allowed).toBe(true);
+    expect(dec.windowCount).toBe(1);
+    expect(upgradedGate.inspectState('account_001')?.totalActions).toBe(1);
   });
 });

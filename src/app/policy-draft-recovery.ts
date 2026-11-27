@@ -30,6 +30,18 @@ const recoverableBeforeClickReasons=new Set([
   'COMMENT_REPLY_CLOCK_UNVERIFIED',
 ]);
 
+/** 恢复锚点草稿前复核关联 MERGED 碎片未发生 source_collisions 且仍为 AWAITING_DRAFT */
+function hasConflictedMergedFragment(store:EventStore,anchorEventId:string,commandId:string|null):boolean{
+  if(!commandId)return false;
+  return Boolean(
+    store.db.prepare(`SELECT 1 FROM automation_jobs j
+      JOIN inbound_events e ON e.id=j.event_id
+      WHERE j.state='MERGED' AND j.command_id=? AND j.event_id<>? AND e.account_id=?
+        AND (e.status<>'AWAITING_DRAFT' OR EXISTS(SELECT 1 FROM source_collisions c WHERE c.event_id=e.id))
+      LIMIT 1`).get(commandId,anchorEventId,store.accountId),
+  );
+}
+
 /** Requalify one generated policy draft that never acquired an intent. No model call or submit replay is available here. */
 export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAuthority,auto:AutomationStore,
   workflow:HumanReplyWorkflow,grant:Grant<ReplyPolicy>,beforeWork:()=>void=()=>{},route?:ModelRouteGuard,
@@ -62,6 +74,7 @@ export async function recoverPolicyDraft(store:EventStore,authority:WorkbenchAut
       requireSafe(route,'LEGACY_MODEL_ROUTE_UNPROVEN');
       route.assertAutomaticDraft({ownerKind:'DRAFT',ownerId:draft.id,ownerVersion:draft.version},grant.version,event.id);
       assertDraftLearningCurrent(store,draft.id,draft.version);
+      requireSafe(!hasConflictedMergedFragment(store,event.id,job.command_id),'AUTO_RESULT_STALE');
     };
     try{check();}catch(error){
       const now=authority.now(),reason=error instanceof Blocked?error.code:'MODEL_ROUTE_CHANGED';

@@ -214,8 +214,9 @@ export function evaluateDebounce(input: DebounceEvaluationInput): DebounceEvalua
     };
   }
 
-  const mergedText = mergeFragmentTexts(fragments, maxMergedChars) || anchorEvent.payload.text;
   const merged = fragments.length > 1;
+  // 单条消息不截断 mergedText，完整保留原始正文以避免超过 maxMergedChars 的长私信触发 KNOWLEDGE_CONTEXT_MISMATCH
+  const mergedText = merged ? mergeFragmentTexts(fragments, maxMergedChars) || anchorEvent.payload.text : anchorEvent.payload.text;
   return {
     decision: 'continue',
     reasonCode: merged ? 'DEBOUNCE_MERGED_READY' : 'DEBOUNCE_SINGLE_READY',

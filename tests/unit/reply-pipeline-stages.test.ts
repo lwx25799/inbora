@@ -704,4 +704,75 @@ describe('8 阶段标准流水线编排与干跑轨迹（pipeline）', () => {
     expect(faqSvc.listSuggestions('PENDING')).toHaveLength(1);
     expect(faqSvc.listSuggestions('ADOPTED')).toHaveLength(0);
   });
+
+  test('R2回归：移除多块 FAQ 兜底、单条>1500字长私信不截断、跨碎片换行拆分外链被拦截', async () => {
+    const f = await createPipelineFixture();
+    const t1 = new Date(baseOrigin + 10_000).toISOString();
+    const t2 = new Date(baseOrigin + 11_000).toISOString();
+
+    // 1. 多块条目被检索拒绝（exactFaqMatch 为 null）或超 500 字时，阶段 7 绝不兜底直出
+    const faqId = pending(f.store, candidate({ conversationId: 'conv-r2-faq', platformEventId: 'r2-faq-1', text: '运费说明', occurredAt: t1 }));
+    const multiChunkKnowledge: PipelineKnowledgeContext = {
+      accountId: 'account_001',
+      channel: 'DIRECT_MESSAGE',
+      query: '运费说明',
+      persona: '',
+      personaId: null,
+      examples: [],
+      knowledge: [{ id: 'k1', sourceId: 's1', title: '运费说明', topic: '物流', text: '被截断的第一块内容', version: 1, chunkId: 'c1' }],
+      fingerprint: 'fp-multi',
+      conflicts: [],
+      exactFaqMatch: null,
+    };
+    const noFallbackTrace = dryRunReplyPipeline({
+      store: f.store,
+      authority: f.authority,
+      automation: f.automation,
+      grant: f.grant,
+      event: f.store.event(faqId),
+      knowledge: multiChunkKnowledge,
+      config: { handoff: { exactFaqDirectReply: true } },
+    });
+    expect(noFallbackTrace.directFaqReply).toBeNull();
+    expect(noFallbackTrace.stages[6]?.reasonCode).toBe('HANDOFF_RULES_PASSED');
+
+    // 2. 开启聚合后，单条 >1500 字长私信不截断 mergedText，避免 KNOWLEDGE_CONTEXT_MISMATCH
+    const longSingleText = '请问这批春季新款面料透气性和清洗注意事项如何安排，'.repeat(80);
+    expect(longSingleText.length).toBeGreaterThan(1500);
+    const longId = pending(f.store, candidate({ conversationId: 'conv-r2-long', platformEventId: 'r2-long-1', text: longSingleText, occurredAt: t1 }));
+    const longTrace = dryRunReplyPipeline({
+      store: f.store,
+      authority: f.authority,
+      automation: f.automation,
+      grant: f.grant,
+      event: f.store.event(longId),
+      config: { debounce: { enabled: true, windowMs: 3000, maxMergedChars: 1500 } },
+      now: () => baseOrigin + 20_000,
+    });
+    expect(longTrace.finalDecision).toBe('continue');
+    expect(longTrace.mergedText).toBe(longSingleText);
+
+    // 3. 两条碎片跨换行拆分外链协议头 "https:" + "//evil.com/pay"（单条与含换行拼接均绕过正则）-> 去换行拼接复检必须拦截
+    const u1 = pending(f.store, candidate({ conversationId: 'conv-r2-url', platformEventId: 'r2-url-1', text: '链接看这里 https:', occurredAt: t1 }));
+    f.store.observe(
+      'DIRECT_MESSAGE',
+      'conv-r2-url',
+      [candidate({ conversationId: 'conv-r2-url', platformEventId: 'r2-url-2', text: '//evil.com/pay', occurredAt: t2 })],
+      'own-1',
+      'fixture',
+      t2,
+    );
+    const splitUrlTrace = dryRunReplyPipeline({
+      store: f.store,
+      authority: f.authority,
+      automation: f.automation,
+      grant: f.grant,
+      event: f.store.event(u1),
+      config: { debounce: { enabled: true, windowMs: 3000 } },
+      now: () => baseOrigin + 20_000,
+    });
+    expect(splitUrlTrace.finalDecision).toBe('handoff_human');
+    expect(splitUrlTrace.stoppedAt).toBe('debounce_preprocess');
+    expect(splitUrlTrace.reasonCode).toBe('PLATFORM_REDLINE_WORD');
+  });
 });

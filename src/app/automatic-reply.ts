@@ -32,6 +32,33 @@ import {
   type ResolvedReplyPipelineConfig,
 } from './reply-pipeline/index.js';
 
+export interface ServiceAutomaticReplyHost {
+  store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore|null;browser:PlatformConnector;
+  models:ModelProviderController|null;provider:DeepSeekProvider;humanReplies:HumanReplyWorkflow;
+  modelPending:Set<string>;automaticSignal:AbortSignal;modelSignal:AbortSignal;
+  isClosing():boolean;keyPresent:boolean;settings():AiSettings;
+  knowledgeContext(event:InboundEvent,queryText?:string):ReplyKnowledgeContext|null;
+  pipelineConfig?:ReplyPipelineConfig;
+  updated():void;stop(code:string):void;beforeWork():void;statusUpdated():void;errorCode(error:unknown):string;
+}
+
+/** 供 ClientService 委派自动回复执行，保持 service.ts 精简且不压缩格式 */
+export async function runServiceAutomaticReply(host:ServiceAutomaticReplyHost):Promise<void>{
+  const allowNoModelKey=Boolean(host.pipelineConfig?.handoff?.exactFaqDirectReply);
+  if(host.isClosing()||host.browser.loginRecovery||!host.automation||!host.models||(!host.keyPresent&&!allowNoModelKey)||host.modelPending.size)return;
+  await runAutomaticReply({
+    store:host.store,authority:host.authority,automation:host.automation,browser:host.browser,
+    knowledgeContext:host.knowledgeContext,
+    ...(host.pipelineConfig?{pipelineConfig:host.pipelineConfig}:{}),
+    provider:host.provider,humanReplies:host.humanReplies,
+    settings:host.settings(),currentSettings:host.settings,
+    models:host.models,modelPending:host.modelPending,
+    automaticSignal:host.automaticSignal,modelSignal:host.modelSignal,
+    isClosing:host.isClosing,updated:host.updated,errorCode:host.errorCode,
+    beforeWork:host.beforeWork,statusUpdated:host.statusUpdated,stop:host.stop,
+  });
+}
+
 export interface AutomaticReplyContext {
   store:EventStore;authority:WorkbenchAuthority;automation:AutomationStore;browser:PlatformConnector;
   models:ModelProviderController;provider:DeepSeekProvider;humanReplies:HumanReplyWorkflow;settings:AiSettings;

@@ -583,6 +583,26 @@ export function runReplyPipelinePreGeneration(
       stages.push(s6Blocked);
       return stopWith(s6Blocked);
     }
+    // 额外对去换行直接拼接文本复检，封堵跨碎片换行拆分外链/隐私串（如 "https://evil." + "com/pay"）的绕过路径
+    const joinedWithoutNewlines = fullConcatText.replace(/\r?\n/gu, '');
+    if (joinedWithoutNewlines !== fullConcatText) {
+      const joinedSafety = checkInboundSafety(joinedWithoutNewlines, config.sensitive);
+      if (joinedSafety.blocked) {
+        const s6JoinedBlocked: StageOutcome = {
+          stage: 'debounce_preprocess',
+          decision: 'handoff_human',
+          reasonCode: joinedSafety.reasonCode,
+          detail: {
+            crossFragmentJoinedBlocked: true,
+            fragmentCount: debounce.fragmentEventIds.length,
+            layer: joinedSafety.layer,
+            ...(joinedSafety.category ? { category: joinedSafety.category } : {}),
+          },
+        };
+        stages.push(s6JoinedBlocked);
+        return stopWith(s6JoinedBlocked);
+      }
+    }
   }
 
   stages.push({

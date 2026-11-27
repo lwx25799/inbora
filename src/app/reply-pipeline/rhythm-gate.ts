@@ -427,6 +427,7 @@ export class PersistentRhythmGate {
 
     const row = this.readRowReadOnly(accountId, scope);
     const recordedSet = new Set(parseRecordedIntents(row?.recorded_intents_json));
+    const lastActionAtBaseline = row?.last_action_at ?? 0;
     const cutoffMs = now - preset.burstWindowMs;
     const channelFilter = scope === 'ALL' ? '' : 'AND e.channel=?';
     const args: unknown[] = scope === 'ALL' ? [accountId] : [accountId, scope];
@@ -443,9 +444,17 @@ export class PersistentRhythmGate {
       )
       .all(...args, Math.max(20, preset.burstMaxActions * 2)) as { id: string; attempt_started_at: string }[];
 
+    // 仅补记晚于 last_action_at 的未记账意图，防止旧版表升级新增 recorded_intents_json 列后对历史已计账意图重复累加
     const missing = recentIntents
       .map((item) => ({ id: item.id, ts: Date.parse(item.attempt_started_at) }))
-      .filter((item) => !recordedSet.has(item.id) && Number.isFinite(item.ts) && item.ts > cutoffMs && item.ts <= now + 60_000)
+      .filter(
+        (item) =>
+          !recordedSet.has(item.id) &&
+          Number.isFinite(item.ts) &&
+          item.ts > lastActionAtBaseline &&
+          item.ts > cutoffMs &&
+          item.ts <= now + 60_000,
+      )
       .sort((a, b) => a.ts - b.ts);
 
     if (!missing.length) return;

@@ -16,47 +16,29 @@ const AFTER_SALES_KEYWORDS_PATTERN =
 const BARGAIN_KEYWORDS_PATTERN =
   /(?:便宜点|便宜些|少点|再少|最低价|底价|砍价|抹零|打折吗|能优惠|优惠多少|太贵了|贵了点|包邮吗可以再便宜|送个|送点|怎么优惠|讲价|discount|cheaper)/iu;
 
-function normalizeExactText(text: string): string {
-  return text
-    .normalize('NFKC')
-    .toLocaleLowerCase()
-    .replace(/[\s\p{P}\p{S}]+/gu, '');
-}
-
 export function isMediaPayload(payload: InboundEvent): boolean {
   return Boolean(payload.contentType || payload.observationIssue === 'DM_CONTENT_UNVERIFIED');
 }
 
+const EXACT_FAQ_MAX_SEND_CHARS = 500;
+
 export function resolveDirectFaqMatch(
   knowledge: PipelineKnowledgeContext | null,
-  queryText: string,
+  _queryText: string,
 ): DirectFaqReply | null {
   if (!knowledge || knowledge.conflicts.length > 0) return null;
 
+  // 只信任检索阶段已核验的单块且满足发送长度上限的 exactFaqHit / exactFaqMatch，绝不做多块兜底直出
   const explicit = knowledge.exactFaqHit ?? knowledge.exactFaqMatch;
-  if (explicit && explicit.text.trim().length > 0) {
-    return {
-      entryId: explicit.id,
-      title: explicit.title,
-      text: explicit.text.trim(),
-      source: 'exact_faq_hit',
-    };
-  }
-
-  if (knowledge.knowledge.length === 1) {
-    const only = knowledge.knowledge[0]!;
-    const qNorm = normalizeExactText(queryText);
-    const tNorm = normalizeExactText(only.title);
-    if (qNorm.length >= 2 && qNorm === tNorm && only.text.trim().length > 0) {
-      return {
-        entryId: only.id,
-        title: only.title,
-        text: only.text.trim(),
-        source: 'unique_title_match',
-      };
-    }
-  }
-  return null;
+  if (!explicit) return null;
+  const text = explicit.text.trim();
+  if (!text || Array.from(text).length > EXACT_FAQ_MAX_SEND_CHARS) return null;
+  return {
+    entryId: explicit.id,
+    title: explicit.title,
+    text,
+    source: 'exact_faq_hit',
+  };
 }
 
 /** 阶段 7：精细转人工独立开关 + 知识库命中/冲突 + 高置信 FAQ 直出判断 */
