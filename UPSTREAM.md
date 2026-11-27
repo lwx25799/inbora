@@ -51,6 +51,7 @@
 | [chatwoot/chatwoot](https://github.com/chatwoot/chatwoot) | `625d5964e3cb3f1d917b43c3b8332219e525a4b8` | MIT | 会话列表与消息状态同步交互对照（`conversations/actions.js`） | 服务端多租户或后端代码 |
 | [TeamBreakerr/douyin-chat-export](https://github.com/TeamBreakerr/douyin-chat-export) | `9e39afa980945737270ee88f8e33da470742cd9b` | 仅结构核对（未复制源码） | 抖音私信消息结构与类型字段核对 | 批量导出或绕过平台边界的脚本 |
 | [Johnserf-Seed/f2](https://github.com/Johnserf-Seed/f2) | `f6be8c0ffba9a127075bbeafe4838716650b6325` | Apache-2.0（仅结构核对） | 分享链接作品类型与引用格式核对 | 下载器、签名算法或反爬模块 |
+| [ZeZhizhan/Fathom](https://github.com/ZeZhizhan/Fathom) | `24d223de611c451deeeeea90c53705aa4f348175` | MIT（`third_party/Fathom-MIT.txt`） | 中文对话停用 bigram 过滤、双向覆盖率门槛与预算统计思路 | 睡眠/情绪状态机与 3D 星图面板 |
 
 ---
 
@@ -58,3 +59,6 @@
 
 以下仓库仅在调研期核对过许可或技术边界，**未复制或采用任何代码**：
 - `hycarbon-b/crawl-douyin`（`cdde8d7bfec3b018454705240fa0df6550ece6db`）、`JMY2003/a-skill-to-do-anything-in-douyin`（`d5211b3d687ddab0d5efc32b915a636aba764423`）、`NanmiCoder/MediaCrawler`、`pcmxiao/dsh-douyin-bridge`：涉及非官方签名、激进抓取或不符合本项目本地合规边界，全部排除。
+- `wechatauto-replica`：涉及个人微信进程内存扫描、DLL 热修补与拟人轨迹/指纹伪造，违反本机安全与平台合规红线，排除（未复制任何源码）。
+- `openilink-hub`：依赖未授权非官方协议，违反官方接口与账号安全边界，排除。
+- `pysxt`：依赖私有加密 WebSocket 通道，存在逆向依赖与风控合规风险，排除。
