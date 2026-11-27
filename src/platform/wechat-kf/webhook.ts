@@ -213,13 +213,29 @@ export async function validateWebhookCallbackUrl(
   return validated.url;
 }
 
-/** Read an incoming HTTP body stream with a strict byte ceiling (default 64KB) and AbortSignal support. */
+function destroyStreamBestEffort(stream: unknown): void {
+  if (!stream || typeof stream !== 'object') return;
+  try {
+    if ('destroy' in stream && typeof (stream as { destroy?: unknown }).destroy === 'function') {
+      (stream as { destroy: () => void }).destroy();
+    } else if ('cancel' in stream && typeof (stream as { cancel?: unknown }).cancel === 'function') {
+      void Promise.resolve((stream as { cancel: () => unknown }).cancel()).catch(() => {});
+    }
+  } catch {
+    // Best-effort cleanup on abort or size ceiling.
+  }
+}
+
+/** Read an incoming HTTP body stream with a strict byte ceiling (default 64KB) and non-hanging AbortSignal support. */
 export async function readBoundedWebhookBody(
   stream: AsyncIterable<Buffer | Uint8Array | string>,
   maxBytes: number = WECHAT_KF_WEBHOOK_MAX_BODY_BYTES,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (signal?.aborted) throw new WeChatKfError('WECHAT_KF_TIMEOUT');
+  if (signal?.aborted) {
+    destroyStreamBestEffort(stream);
+    throw new WeChatKfError('WECHAT_KF_TIMEOUT');
+  }
   const iterator = stream[Symbol.asyncIterator]();
   const chunks: Buffer[] = [];
   let totalBytes = 0;
@@ -239,7 +255,8 @@ export async function readBoundedWebhookBody(
     }
     return Buffer.concat(chunks, totalBytes).toString('utf8');
   } catch (error) {
-    await iterator.return?.().catch(() => {});
+    destroyStreamBestEffort(stream);
+    void iterator.return?.().catch(() => {});
     throw error;
   }
 }

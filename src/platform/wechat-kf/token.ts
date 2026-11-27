@@ -429,13 +429,18 @@ export class WeChatKfTokenManager {
       return cached.accessToken;
     }
 
-    const existing = this.#inFlight.get(key);
-    if (existing) {
-      return raceWithAbort(existing, options.signal);
-    }
-
     const startGlobalGen = this.#globalGeneration;
     const startKeyGen = this.#generations.get(key) ?? 0;
+
+    const existing = this.#inFlight.get(key);
+    if (existing) {
+      const token = await raceWithAbort(existing, options.signal);
+      if (this.#globalGeneration !== startGlobalGen || (this.#generations.get(key) ?? 0) !== startKeyGen) {
+        throw new WeChatKfError('WECHAT_KF_TOKEN_EXPIRED');
+      }
+      return token;
+    }
+
     const timeoutMs = options.timeoutMs ?? WECHAT_KF_DEFAULT_TIMEOUT_MS;
     const refreshBufferMs = options.refreshBufferMs ?? WECHAT_KF_TOKEN_REFRESH_BUFFER_MS;
 
@@ -490,7 +495,11 @@ export class WeChatKfTokenManager {
     void tracked.catch(() => {});
     this.#inFlight.set(key, tracked);
 
-    return raceWithAbort(tracked, options.signal);
+    const token = await raceWithAbort(tracked, options.signal);
+    if (this.#globalGeneration !== startGlobalGen || (this.#generations.get(key) ?? 0) !== startKeyGen) {
+      throw new WeChatKfError('WECHAT_KF_TOKEN_EXPIRED');
+    }
+    return token;
   }
 
   clearAccessToken(corpId: string, appSecret: string, apiBaseUrl: string = WECHAT_KF_DEFAULT_API_BASE): void {

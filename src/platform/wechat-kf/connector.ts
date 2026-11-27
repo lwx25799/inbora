@@ -130,11 +130,13 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
   readonly #readCredentials: WeChatKfCredentialProvider;
   readonly #cursorStore: WeChatKfCursorStore;
   readonly #firstRunAtMs: number | undefined;
+  readonly #createdAtMs: number;
   readonly #maxSyncPages: number;
   readonly #syncPageLimit: number;
   readonly #now: () => number;
 
   private store: EventStore | undefined;
+  private rememberedStartedAtMs: number | undefined;
   private epoch = 1;
   private opened = true;
   private transportState: WeChatKfTransportState = 'CONNECTED';
@@ -158,6 +160,7 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
     this.#maxSyncPages = Math.max(1, options.maxSyncPages ?? DEFAULT_MAX_SYNC_PAGES);
     this.#syncPageLimit = Math.max(1, Math.min(1000, options.syncPageLimit ?? DEFAULT_SYNC_PAGE_LIMIT));
     this.#now = options.now ?? (() => Date.now());
+    this.#createdAtMs = Math.max(1, Math.trunc(this.#now()));
 
     this.apiClient = new WeChatKfApiClient({
       credentials: this.#readCredentials,
@@ -295,6 +298,9 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
     if (source !== 'dm') return;
     const state = data.state();
     requireSafe(!signal.aborted && !state.emergencyStopped, 'COLLECTION_CANCELLED');
+    if (Number.isSafeInteger(state.startedAt) && state.startedAt > 0) {
+      this.rememberedStartedAtMs = state.startedAt;
+    }
     await this.observeWithSyncToken(data.store, undefined, signal, state.startedAt);
   }
 
@@ -337,12 +343,20 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
             if (event) normalizedEvents.push(event);
           }
 
-          if (res.next_cursor && res.next_cursor !== cursor) {
+          const previousCursor = cursor;
+          const advanced = Boolean(res.next_cursor && res.next_cursor !== previousCursor);
+          if (advanced) {
             cursor = res.next_cursor;
             nextCursorToPersist = res.next_cursor;
           }
-          if (res.has_more !== 1 || !res.next_cursor) break;
-          if (page === this.#maxSyncPages - 1) truncated = true;
+          if (res.has_more === 1) {
+            if (!advanced || page === this.#maxSyncPages - 1) {
+              truncated = true;
+              break;
+            }
+          } else {
+            break;
+          }
         }
       } catch (error) {
         this.recordTransportFailure(error);
@@ -351,10 +365,7 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
 
       const observedMs = this.#now();
       const observedAt = new Date(observedMs).toISOString();
-      const configuredStart = overrideFirstRunAt ?? this.#firstRunAtMs;
-      const firstBoundary = configuredStart !== undefined
-        ? Math.max(1, Math.min(Math.trunc(configuredStart), observedMs))
-        : undefined;
+      const firstBoundary = this.resolveFirstRunBoundaryMs(store, observedMs, overrideFirstRunAt);
 
       const newEventIds: string[] = [];
       const byConversation = Map.groupBy(normalizedEvents, event => event.conversationId!);
@@ -708,6 +719,24 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
     return { corpId: creds.corpId, token: creds.token, encodingAESKey: creds.encodingAESKey };
   }
 
+  private resolveFirstRunBoundaryMs(store: EventStore, observedMs: number, overrideFirstRunAt?: number): number {
+    let candidate = overrideFirstRunAt ?? this.#firstRunAtMs ?? this.rememberedStartedAtMs;
+    if (candidate === undefined) {
+      const hasAutomationState = !!store.db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_state'")
+        .get();
+      if (hasAutomationState) {
+        const row = store.db.prepare('SELECT started_at FROM automation_state WHERE id=1').get() as { started_at?: unknown } | undefined;
+        if (typeof row?.started_at === 'number' && Number.isSafeInteger(row.started_at) && row.started_at > 0) {
+          this.rememberedStartedAtMs = row.started_at;
+          candidate = row.started_at;
+        }
+      }
+    }
+    const effective = candidate ?? this.#createdAtMs;
+    return Math.max(1, Math.min(Math.trunc(effective), observedMs));
+  }
+
   private assertStore(store: EventStore, bound = true): void {
     store.assertAccount(this.accountId);
     requireSafe(!this.store || this.store === store, 'WECHAT_KF_STORE_CHANGED');
@@ -715,11 +744,9 @@ export class WeChatKfPlatformConnector implements PlatformConnector {
       const account = store.db
         .prepare('SELECT platform, own_id FROM accounts WHERE id=?')
         .get(this.accountId) as { platform: string; own_id: string } | undefined;
-      if (account) {
-        requireSafe(account.platform === this.platformId, 'WECHAT_KF_ACCOUNT_CHANGED');
-        requireSafe(account.own_id === this.openKfId || (!bound && account.own_id === ''), 'WECHAT_KF_ACCOUNT_CHANGED');
-        return;
-      }
+      requireSafe(account !== undefined && account.platform === this.platformId, 'WECHAT_KF_ACCOUNT_CHANGED');
+      requireSafe(account.own_id === this.openKfId || (!bound && account.own_id === ''), 'WECHAT_KF_ACCOUNT_CHANGED');
+      return;
     }
     const ownId = store.accountOwnId(this.accountId);
     requireSafe(ownId === this.openKfId || (!bound && !ownId), 'WECHAT_KF_ACCOUNT_CHANGED');

@@ -171,7 +171,7 @@ describe('WeChatKfPlatformConnector integration', () => {
       });
       expect(failAudit!.detail_redacted).not.toContain('failed_api_msgid_42');
 
-      // Restart with new connector instance: old messages idempotent, post-restart message enters AWAITING_DRAFT (#43-5)
+      // Restart WITHOUT explicit firstRunAt: reads persisted automation_state.started_at for both observe and webhook (#51-1)
       const afterRestartSec = Math.floor(Date.now() / 1000) + 2;
       batch = [
         batch[0]!,
@@ -184,7 +184,7 @@ describe('WeChatKfPlatformConnector integration', () => {
           msgtype: 'text',
           text: { content: '重启后追问' },
         },
-        // New peer discovered after restart still respects firstRunAt for pre-start history
+        // New peer discovered after restart still respects persisted startedAt for pre-start history & live message
         {
           msgid: 'msg_peer2_old',
           open_kfid: TEST_OPEN_KFID,
@@ -194,19 +194,43 @@ describe('WeChatKfPlatformConnector integration', () => {
           msgtype: 'text',
           text: { content: '新会话的历史旧消息' },
         },
+        {
+          msgid: 'msg_peer2_live',
+          open_kfid: TEST_OPEN_KFID,
+          external_userid: 'wm_customer_002',
+          send_time: startedSec + 5,
+          origin: 3,
+          msgtype: 'text',
+          text: { content: '新会话首条实时消息' },
+        },
       ];
       const restarted = new WeChatKfPlatformConnector({
         root,
         openKfId: TEST_OPEN_KFID,
-        firstRunAt: startedAtMs,
-        credentials: { corpId: TEST_CORP_ID, appSecret: TEST_SECRET },
+        credentials: { corpId: TEST_CORP_ID, appSecret: TEST_SECRET, token: TEST_TOKEN, encodingAESKey: TEST_AES_KEY },
         fetchImpl,
       });
       const restartObs = await restarted.observe(store, 'dm');
-      expect(restartObs.newEventIds).toHaveLength(1);
-      expect(store.event(restartObs.newEventIds[0]!).payload.platformEventId).toBe('msg_after_restart_5');
-      expect(store.event(restartObs.newEventIds[0]!).status).toBe('AWAITING_DRAFT');
+      expect(restartObs.newEventIds).toHaveLength(2);
+      expect(store.events().find(e => e.payload.platformEventId === 'msg_after_restart_5')?.status).toBe('AWAITING_DRAFT');
       expect(store.events().find(e => e.payload.platformEventId === 'msg_peer2_old')?.status).toBe('BASELINE');
+      expect(store.events().find(e => e.payload.platformEventId === 'msg_peer2_live')?.status).toBe('AWAITING_DRAFT');
+
+      // Webhook for a brand-new peer without explicit firstRunAt also reuses startedAt -> AWAITING_DRAFT (#51-1)
+      batch = [{
+        msgid: 'msg_peer3_wh_live',
+        open_kfid: TEST_OPEN_KFID,
+        external_userid: 'wm_customer_003',
+        send_time: afterRestartSec + 1,
+        origin: 3,
+        msgtype: 'text',
+        text: { content: 'Webhook 新客户实时消息' },
+      }];
+      const whPacket = buildWebhookPost('WH_STARTED_AT_SHARED', TEST_OPEN_KFID, String(afterRestartSec + 1), 'n_shared');
+      const whRes = await restarted.handleWebhookEvent(whPacket.query, whPacket.body, store);
+      expect(whRes).toMatchObject({ accepted: true, synced: true, truncated: false });
+      expect(store.events().find(e => e.payload.platformEventId === 'msg_peer3_wh_live')?.status).toBe('AWAITING_DRAFT');
+
       await restarted.close();
       await connector.close();
     });
@@ -537,11 +561,48 @@ describe('WeChatKfPlatformConnector integration', () => {
       const res3 = await connector.handleWebhookEvent(secondPacket.query, secondPacket.body, store, new AbortController().signal);
       expect(res3).toMatchObject({ accepted: true, duplicate: true, synced: false, truncated: false });
 
+      // Upstream has_more=1 with missing or repeated next_cursor marks truncated=true and preserves retry eligibility (#51-5)
+      let stallMode: 'missing' | 'repeated' | 'done' = 'missing';
+      const stallFetch = vi.fn<typeof fetch>(async url => {
+        if (String(url).includes('/gettoken')) {
+          return jsonResponse({ errcode: 0, errmsg: 'ok', access_token: 'tok_stall', expires_in: 7200 });
+        }
+        if (stallMode === 'missing') {
+          return jsonResponse({ errcode: 0, errmsg: 'ok', has_more: 1, msg_list: [] });
+        }
+        if (stallMode === 'repeated') {
+          return jsonResponse({ errcode: 0, errmsg: 'ok', next_cursor: 'cur_p2', has_more: 1, msg_list: [] });
+        }
+        return jsonResponse({ errcode: 0, errmsg: 'ok', next_cursor: 'cur_p3', has_more: 0, msg_list: [] });
+      });
+      const stallCursor = new MemoryWeChatKfCursorStore();
+      stallCursor.save(store.accountId, TEST_OPEN_KFID, 'cur_p2');
+      const stallConnector = new WeChatKfPlatformConnector({
+        root,
+        openKfId: TEST_OPEN_KFID,
+        firstRunAt: startMs,
+        cursorStore: stallCursor,
+        credentials: { corpId: TEST_CORP_ID, appSecret: TEST_SECRET, token: TEST_TOKEN, encodingAESKey: TEST_AES_KEY },
+        fetchImpl: stallFetch,
+      });
+      const stallPacket = buildWebhookPost('WH_TOK_STALL', TEST_OPEN_KFID, '1700000109', 'nonce_stall');
+      expect(await stallConnector.handleWebhookEvent(stallPacket.query, stallPacket.body, store))
+        .toMatchObject({ accepted: true, duplicate: false, synced: true, truncated: true });
+      stallMode = 'repeated';
+      expect(await stallConnector.handleWebhookEvent(stallPacket.query, stallPacket.body, store))
+        .toMatchObject({ accepted: true, duplicate: false, synced: true, truncated: true });
+      stallMode = 'done';
+      expect(await stallConnector.handleWebhookEvent(stallPacket.query, stallPacket.body, store))
+        .toMatchObject({ accepted: true, duplicate: false, synced: true, truncated: false });
+      expect(await stallConnector.handleWebhookEvent(stallPacket.query, stallPacket.body, store))
+        .toMatchObject({ accepted: true, duplicate: true, synced: false, truncated: false });
+
+      await stallConnector.close();
       await connector.close();
     });
   });
 
-  test('schema4 bindStore rejects binding a Douyin account row while allowing a wechat-kf account (#43-6)', async () => {
+  test('schema4 bindStore requires an existing wechat-kf account row and refuses missing or Douyin rows (#43-6, #51-2)', async () => {
     const root = privateTemp('wechat-kf-schema4-');
     const dbFile = join(root, 'schema4.sqlite');
     const baseStore = new EventStore(dbFile, true);
@@ -553,16 +614,20 @@ describe('WeChatKfPlatformConnector integration', () => {
       await migrateModelProviders(baseStore, root);
       await migrateToSchema4(baseStore, join(root, 's4.bak'));
 
-      const accounts = new AccountStore(baseStore.db);
-      accounts.ensureLegacyPrimaryAccount('douyin-profile');
-      // account_001 in schema4 has platform='douyin', own_id=''
-      const wrongPlatformConnector = new WeChatKfPlatformConnector({
+      // Before account_001 exists in schema4 accounts table, bindStore MUST refuse instead of inserting default 'douyin' (#51-2)
+      const missingRowConnector = new WeChatKfPlatformConnector({
         root,
         accountId: 'account_001',
         openKfId: TEST_OPEN_KFID,
         credentials: { corpId: TEST_CORP_ID, appSecret: TEST_SECRET },
       });
-      expect(() => wrongPlatformConnector.bindStore(baseStore)).toThrow('WECHAT_KF_ACCOUNT_CHANGED');
+      expect(() => missingRowConnector.bindStore(baseStore)).toThrow('WECHAT_KF_ACCOUNT_CHANGED');
+      expect(baseStore.db.prepare('SELECT id FROM accounts WHERE id=?').get('account_001')).toBeUndefined();
+
+      const accounts = new AccountStore(baseStore.db);
+      accounts.ensureLegacyPrimaryAccount('douyin-profile');
+      // account_001 now exists with platform='douyin', own_id='' -> still refused (#43-6)
+      expect(() => missingRowConnector.bindStore(baseStore)).toThrow('WECHAT_KF_ACCOUNT_CHANGED');
       expect(baseStore.accountOwnId('account_001')).toBe('');
 
       // Registering a dedicated wechat-kf account succeeds cleanly
@@ -583,7 +648,7 @@ describe('WeChatKfPlatformConnector integration', () => {
       okConnector.bindStore(kfStore);
       expect(kfStore.accountOwnId('account_kf_1')).toBe(TEST_OPEN_KFID);
       await okConnector.close();
-      await wrongPlatformConnector.close();
+      await missingRowConnector.close();
     } finally {
       kfStore?.close();
       baseStore.close();

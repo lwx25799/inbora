@@ -188,6 +188,29 @@ describe('wechat-kf token cache (singleflight, private inspect redaction, DNS ti
     expect(calls).toBe(2);
   });
 
+  test('post-cache-write microtask clearAll/clearAccessToken still rejects stale token for all waiters (#51-4)', async () => {
+    const manager = new WeChatKfTokenManager();
+    let nowCalls = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ errcode: 0, errmsg: 'ok', access_token: 'tok_stale_microtask', expires_in: 7200 }),
+    );
+    const now = () => {
+      nowCalls++;
+      // Second now() call happens inside pending right before cache.set and pending resolve.
+      // Queue clearAll() before tracked.finally resumes the awaiting callers.
+      if (nowCalls === 2) {
+        queueMicrotask(() => manager.clearAll());
+      }
+      return 1_700_000_000_000;
+    };
+
+    const p1 = manager.getAccessToken(TEST_CORP_ID, TEST_SECRET, { fetchImpl, now });
+    const p2 = manager.getAccessToken(TEST_CORP_ID, TEST_SECRET, { fetchImpl, now });
+    await expect(p1).rejects.toThrow('WECHAT_KF_TOKEN_EXPIRED');
+    await expect(p2).rejects.toThrow('WECHAT_KF_TOKEN_EXPIRED');
+    expect(manager.cachedKeyCount()).toBe(0);
+  });
+
   test('enforces signal timeout during DNS lookup and rejects body already aborted on done (#43-9)', async () => {
     const hangingLookup = () => new Promise<never>(() => {});
     await expect(executeSafeWeChatKfJsonRequest({
@@ -306,17 +329,29 @@ describe('wechat-kf webhook (linear XML parser, ReDoS defense, abortable body, s
     const hugeStream = Readable.from([Buffer.alloc(WECHAT_KF_WEBHOOK_MAX_BODY_BYTES + 1, 0x41)]);
     await expect(readBoundedWebhookBody(hugeStream)).rejects.toThrow('WECHAT_KF_BODY_TOO_LARGE');
 
-    // Hanging stream respects AbortSignal immediately (#43-4)
+    // Hanging Readable stream and hanging iterator.return() do not stall on AbortSignal (#43-4, #51-3)
     const ac = new AbortController();
-    const hangingStream: AsyncIterable<Buffer> = {
+    const stalledReadable = new Readable({ read() {} });
+    const readReadablePromise = readBoundedWebhookBody(stalledReadable, WECHAT_KF_WEBHOOK_MAX_BODY_BYTES, ac.signal);
+    const abortStart = performance.now();
+    ac.abort();
+    await expect(readReadablePromise).rejects.toThrow('WECHAT_KF_TIMEOUT');
+    expect(stalledReadable.destroyed).toBe(true);
+    expect(performance.now() - abortStart).toBeLessThan(100);
+
+    const ac2 = new AbortController();
+    let destroyCalled = false;
+    const hangingIterable = {
+      destroy() { destroyCalled = true; },
       [Symbol.asyncIterator]: () => ({
-        next: () => new Promise(() => {}),
-        return: async () => ({ value: undefined, done: true }),
+        next: () => new Promise<IteratorResult<Buffer>>(() => {}),
+        return: () => new Promise<IteratorResult<Buffer>>(() => {}),
       }),
     };
-    const readPromise = readBoundedWebhookBody(hangingStream, WECHAT_KF_WEBHOOK_MAX_BODY_BYTES, ac.signal);
-    ac.abort();
-    await expect(readPromise).rejects.toThrow('WECHAT_KF_TIMEOUT');
+    const readHangingPromise = readBoundedWebhookBody(hangingIterable, WECHAT_KF_WEBHOOK_MAX_BODY_BYTES, ac2.signal);
+    ac2.abort();
+    await expect(readHangingPromise).rejects.toThrow('WECHAT_KF_TIMEOUT');
+    expect(destroyCalled).toBe(true);
 
     // Concurrent same-Token requests wait for the first handler to finish before returning duplicate (#43-10)
     let onEventCalls = 0;
