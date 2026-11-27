@@ -31,6 +31,7 @@ export interface SystemSettingsViewProps {
   status: Status;
   runtime: string;
   busy: string;
+  hasUnsavedDraft?: boolean;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
   act: (label: string, fn: () => Promise<void>) => Promise<void>;
@@ -43,6 +44,7 @@ export function SystemSettingsView({
   status,
   runtime,
   busy,
+  hasUnsavedDraft = false,
   theme,
   onToggleTheme,
   act,
@@ -52,10 +54,16 @@ export function SystemSettingsView({
 }: SystemSettingsViewProps): React.ReactElement {
   const emergencyStopped = Boolean(status.automation?.emergencyStopped);
   const [faultOpen, setFaultOpen] = useState(emergencyStopped);
+  const [confirmExit, setConfirmExit] = useState(false);
+  const reconnecting = busy === '重新连接内核';
 
   useEffect(() => {
     if (emergencyStopped) setFaultOpen(true);
   }, [emergencyStopped]);
+
+  useEffect(() => {
+    if (busy) setConfirmExit(false);
+  }, [busy]);
 
   return (
     <div className="settings mx-auto max-w-[1160px] space-y-5 px-6 py-5">
@@ -112,13 +120,19 @@ export function SystemSettingsView({
 
             <div className="space-y-2 text-xs">
               <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">快速跳转页面与常用操作</span>
+                <kbd className="rounded border border-border bg-muted px-2 py-0.5 font-mono text-[11px] text-foreground">
+                  Ctrl + K
+                </kbd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
                 <span className="text-muted-foreground">展开 / 收起左侧导航栏</span>
                 <kbd className="rounded border border-border bg-muted px-2 py-0.5 font-mono text-[11px] text-foreground">
                   Ctrl + B
                 </kbd>
               </div>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-muted-foreground">会话中心确认发送当前全文</span>
+                <span className="text-muted-foreground">会话中心或试聊确认发送</span>
                 <kbd className="rounded border border-border bg-muted px-2 py-0.5 font-mono text-[11px] text-foreground">
                   Ctrl + Enter
                 </kbd>
@@ -147,9 +161,13 @@ export function SystemSettingsView({
                 </code>
               </div>
               <div className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">本地库结构</span>
-                <Badge variant="outline" size="sm" className="font-mono">
-                  schema{status.schema}
+                <span className="text-muted-foreground">本地数据能力</span>
+                <Badge
+                  variant="outline"
+                  size="sm"
+                  title={`数据库结构版本 schema${status.schema}`}
+                >
+                  {status.schema >= 4 ? '支持多账号独立存储' : '单账号本地存储'}
                 </Badge>
               </div>
             </div>
@@ -160,25 +178,48 @@ export function SystemSettingsView({
 
             <Separator />
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <Button
                 variant="outline"
                 size="sm"
                 disabled={!!busy}
                 onClick={() => void act('重新连接内核', reconnect)}
               >
-                <RefreshCwIcon />
-                重新连接内核
+                <RefreshCwIcon className={reconnecting ? 'animate-spin' : ''} />
+                {reconnecting ? '正在重连…' : '重新连接内核'}
               </Button>
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => void closeDesktop().catch(() => {})}
+                disabled={!!busy}
+                onClick={() => setConfirmExit(open => !open)}
               >
                 <LogOutIcon />
                 退出工作台并保留数据
               </Button>
             </div>
+            {confirmExit && !busy && (
+              <div className="flex flex-col gap-2 rounded-xl border border-warning/35 bg-warning/8 p-3">
+                <p className="text-xs leading-relaxed text-warning-foreground">
+                  {hasUnsavedDraft
+                    ? '当前会话中心仍有尚未保存到本地数据库的内存草稿，现在关闭窗口会丢失这部分未保存内容。已保存记录与授权配置会保留，确认仍要退出？'
+                    : '确认关闭工作台窗口？已保存的本地数据、草稿与授权配置会完整保留。'}
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="destructive"
+                    size="xs"
+                    disabled={!!busy}
+                    onClick={() => void closeDesktop().catch(() => {})}
+                  >
+                    确认退出
+                  </Button>
+                  <Button variant="outline" size="xs" onClick={() => setConfirmExit(false)}>
+                    取消
+                  </Button>
+                </div>
+              </div>
+            )}
           </Card>
         </CardFrame>
       </div>

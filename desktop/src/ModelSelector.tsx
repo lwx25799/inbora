@@ -206,6 +206,7 @@ export function ModelSelector({
         <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground">
           切换到连接
           <select
+            id="model-selector-connection"
             className={selectCls}
             value={target?.id ?? ''}
             disabled={!connections.length || applying}

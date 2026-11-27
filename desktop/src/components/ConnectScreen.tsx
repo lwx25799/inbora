@@ -79,7 +79,7 @@ export function ConnectScreen({
           <CardFrameHeader className="gap-y-1.5">
             <div className="flex items-center gap-2">
               <Badge variant="secondary" size="sm">
-                单账号 · 受控试用
+                本机优先 · 隐私隔离
               </Badge>
             </div>
             <CardFrameTitle
@@ -89,7 +89,7 @@ export function ConnectScreen({
               连接你的本地收件箱
             </CardFrameTitle>
             <CardFrameDescription className="text-xs leading-relaxed">
-              评论与私信统一处理。没有 Key，也可以人工写回复。
+              评论与私信统一处理。未配置模型 Key 也可以直接人工回复。
             </CardFrameDescription>
           </CardFrameHeader>
 
@@ -148,7 +148,7 @@ export function ConnectScreen({
                   className="mt-0.5 size-3.5 shrink-0 text-primary"
                 />
                 <span>
-                  升级前验证备份与恢复，保留预算、旧意图和冻结。连接后恢复已启用的后台收取；外发仅在你已启用的准确策略内执行。
+                  升级前会自动验证备份，保留已有记录与额度。连接后恢复已开启的后台收取，仅在你的授权范围内自动发送。
                 </span>
               </div>
 
@@ -161,20 +161,27 @@ export function ConnectScreen({
                 </Alert>
               )}
 
-              <Button
-                type="submit"
-                size="default"
-                className="w-full"
-                disabled={!canConnect}
-              >
-                {busy || "连接收件箱"}
-              </Button>
+              <div className="space-y-1.5">
+                <Button
+                  type="submit"
+                  size="default"
+                  className="w-full"
+                  disabled={!canConnect}
+                >
+                  {busy || "连接收件箱"}
+                </Button>
+                {!canConnect && !busy && (
+                  <p className="text-center text-[11px] text-muted-foreground">
+                    {!runtime.trim() ? "请先填写本地私有运行目录" : "勾选上方确认后即可连接"}
+                  </p>
+                )}
+              </div>
             </form>
           </Card>
         </CardFrame>
 
         <p className="text-center text-[11px] text-muted-foreground tabular-nums">
-          版本 {version || "读取中"} · PoC GO 与客户端验收分别记录
+          版本 {version || "读取中"} · 账号资料与对话记录仅保存在本机私有目录
         </p>
       </div>
     </main>

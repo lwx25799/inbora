@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { ImagesIcon, PlayIcon } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { CheckIcon, ImagesIcon, PlayIcon } from 'lucide-react';
 
 export interface SharedWork {
   kind: 'DOUYIN_WORK';
@@ -17,16 +17,36 @@ export const sharedWorkLabel = (share: SharedWork) => (share.url.includes('/note
 
 export function ShareLink({ share }: { share: SharedWork }) {
   const [notice, setNotice] = useState('');
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const seqRef = useRef(0);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      seqRef.current++;
+      clearTimeout(timerRef.current);
+    };
+  }, []);
   const link = validShare(share);
   if (!link) return null;
   const label = sharedWorkLabel(link);
   const isNote = label === '图集';
 
   async function copy() {
+    const seq = ++seqRef.current;
+    clearTimeout(timerRef.current);
     try {
       await navigator.clipboard.writeText(link!.url);
+      if (!mountedRef.current || seqRef.current !== seq) return;
+      clearTimeout(timerRef.current);
       setNotice('链接已复制');
+      timerRef.current = setTimeout(() => {
+        if (mountedRef.current && seqRef.current === seq) setNotice('');
+      }, 2_500);
     } catch {
+      if (!mountedRef.current || seqRef.current !== seq) return;
+      clearTimeout(timerRef.current);
       setNotice('请选中链接后复制');
     }
   }
@@ -58,7 +78,8 @@ export function ShareLink({ share }: { share: SharedWork }) {
           复制{label}链接
         </button>
         {notice && (
-          <small role="status" className="text-[11px] font-medium text-success-foreground">
+          <small role="status" className="inline-flex items-center gap-1 text-[11px] font-medium text-success-foreground">
+            {notice === '链接已复制' && <CheckIcon aria-hidden="true" className="size-3" />}
             {notice}
           </small>
         )}

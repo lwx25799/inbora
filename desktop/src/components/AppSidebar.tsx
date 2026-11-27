@@ -5,20 +5,19 @@ import {
   CpuIcon,
   InboxIcon,
   LayoutDashboardIcon,
-  MoonIcon,
   PanelLeftIcon,
   RefreshCwIcon,
   SettingsIcon,
   SlidersHorizontalIcon,
-  SunIcon,
   UsersIcon,
 } from "lucide-react";
 import type { Status } from "@/api";
+import { AutoReplySwitch } from "@/components/AutoReplySwitch";
 import { BrandTile, BrandWordmark } from "@/components/BrandLogo";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { browserState, time } from "@/presentation";
+import { browserState, compactTime, formatBudgetLimit, time } from "@/presentation";
 
 export type DesktopPageId =
   | "overview"
@@ -81,7 +80,6 @@ export const DESKTOP_PAGE_CRUMBS: Record<DesktopPageId, { group: string; title: 
 export interface AppSidebarProps {
   page: DesktopPageId;
   collapsed: boolean;
-  theme: "light" | "dark";
   status: Status;
   version: string;
   busy: string;
@@ -89,7 +87,6 @@ export interface AppSidebarProps {
   pendingAutoReply: boolean | null;
   onSelectPage: (page: DesktopPageId) => void;
   onSetCollapsed: (collapsed: boolean) => void;
-  onToggleTheme: () => void;
   onToggleAutoReply: (enabled: boolean) => void;
   onReconnect: () => void;
 }
@@ -101,8 +98,8 @@ function findBudget(budgets: Status["budgets"], kind: "SEND" | "MODEL"): BudgetE
 }
 
 function formatBudgetText(budget: BudgetEntry | undefined): string {
-  if (!budget) return "0 / 未设";
-  return budget.maximum === null ? `${budget.used} / 不限` : `${budget.used} / ${budget.maximum}`;
+  if (!budget) return "0 / 未设置";
+  return `${budget.used} / ${formatBudgetLimit(budget.maximum)}`;
 }
 
 function computeBudgetPercent(budget: BudgetEntry | undefined): number {
@@ -116,48 +113,9 @@ function isEditableElement(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
 }
 
-function AutoReplySwitch({
-  checked,
-  disabled,
-  onChange,
-}: {
-  checked: boolean;
-  disabled: boolean;
-  onChange: (enabled: boolean) => void;
-}): React.ReactElement {
-  return (
-    <span className="relative inline-flex h-[18px] w-[34px] shrink-0 items-center">
-      <input
-        type="checkbox"
-        role="switch"
-        aria-label="自动回复"
-        checked={checked}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
-        className="peer absolute inset-0 z-10 m-0 size-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
-      />
-      <span
-        aria-hidden="true"
-        className={cn(
-          "pointer-events-none flex h-full w-full items-center rounded-full p-0.5 transition-[background-color,box-shadow] duration-150 peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-1 peer-focus-visible:ring-offset-background peer-disabled:opacity-64",
-          checked ? "bg-primary" : "bg-input",
-        )}
-      >
-        <span
-          className={cn(
-            "block size-3.5 rounded-full bg-background shadow-xs transition-transform duration-150",
-            checked ? "translate-x-4" : "translate-x-0",
-          )}
-        />
-      </span>
-    </span>
-  );
-}
-
 export function AppSidebar({
   page,
   collapsed,
-  theme,
   status,
   version,
   busy,
@@ -165,7 +123,6 @@ export function AppSidebar({
   pendingAutoReply,
   onSelectPage,
   onSetCollapsed,
-  onToggleTheme,
   onToggleAutoReply,
   onReconnect,
 }: AppSidebarProps): React.ReactElement {
@@ -206,11 +163,17 @@ export function AppSidebar({
   const autoReplyActive = status.configuredMode === "LIMITED_AUTO" && hasReplyPolicy;
   const autoReplyChecked = pendingAutoReply ?? autoReplyActive;
   const autoReplyDisabled = pendingAutoReply !== null || Boolean(busy) || !hasReplyPolicy;
+  const reconnecting = busy === "重新连接内核";
 
   const sendBudget = findBudget(status.budgets, "SEND");
   const modelBudget = findBudget(status.budgets, "MODEL");
   const sendPercent = computeBudgetPercent(sendBudget);
   const modelPercent = computeBudgetPercent(modelBudget);
+
+  const latestSync = status.lastSync.reduce<Status["lastSync"][number] | null>((latest, item) => {
+    if (!latest) return item;
+    return Date.parse(item.at) > Date.parse(latest.at) ? item : latest;
+  }, null);
 
   const statusDotClass = emergencyStopped
     ? "bg-destructive"
@@ -238,6 +201,14 @@ export function AppSidebar({
         : autoReplyActive
           ? "自动回复：开"
           : "自动回复：关";
+
+  const autoReplySwitchHint = !hasReplyPolicy
+    ? "尚未配置自动回复规则，请先前往「自动化规则」设置"
+    : emergencyStopped
+      ? "当前处于急停状态，请先恢复运行"
+      : autoReplyActive
+        ? "点击暂停自动回复（保留已保存策略）"
+        : "点击按已保存策略开启自动回复";
 
   return (
     <aside
@@ -279,7 +250,7 @@ export function AppSidebar({
         )}
       </div>
 
-      {/* Real Workspace & Runtime Status Card */}
+      {/* Unified Compact Workspace Status Card */}
       {collapsed ? (
         <div className="runtime-status sr-only">
           <p>
@@ -294,71 +265,55 @@ export function AppSidebar({
           </small>
         </div>
       ) : (
-        <div className="space-y-2 px-3 pb-2">
+        <div className="px-3 pb-2">
           <button
             type="button"
             onClick={() => onSelectPage("accounts")}
-            className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-xl border border-sidebar-border bg-card px-2.5 py-2 text-left shadow-xs/10 transition-colors hover:border-input"
+            title={
+              latestSync
+                ? `查看账号与通道 · 最近同步 ${time(latestSync.at)}`
+                : "查看账号与通道状态"
+            }
+            className="runtime-status flex w-full cursor-pointer flex-col gap-1.5 rounded-xl border border-sidebar-border bg-card px-2.5 py-2 text-left shadow-xs/10 transition-colors hover:border-input focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <div className="flex min-w-0 items-center gap-2.5">
-              <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/12 text-xs font-semibold text-primary">
-                {accountBound ? "本" : "待"}
-              </span>
-              <div className="min-w-0 leading-tight">
-                <div className="truncate text-xs font-semibold text-foreground">
-                  {accountBound ? "本地值守账号" : "本地工作台"}
-                </div>
-                <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
-                  <span className={cn("size-1.5 shrink-0 rounded-full", statusDotClass)} />
-                  <span className="truncate">
-                    {accountBound ? "已绑定本地账号" : "尚未核验账号"}
-                  </span>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/12 text-xs font-semibold text-primary">
+                  {accountBound ? "本" : "待"}
+                </span>
+                <div className="min-w-0 leading-tight">
+                  <p className="truncate text-xs font-semibold text-foreground">
+                    {accountBound ? "本地值守账号" : "本地工作台"}
+                  </p>
+                  <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
+                    <span className={cn("size-1.5 shrink-0 rounded-full", statusDotClass)} />
+                    <span className="truncate">
+                      {emergencyStopped
+                        ? "已急停"
+                        : browserOpen
+                          ? accountBound
+                            ? "账号保持连接"
+                            : "浏览器已打开"
+                          : "正在连接账号"}
+                    </span>
+                  </div>
                 </div>
               </div>
+              <Badge variant={workspaceBadge.variant} size="sm" className="shrink-0 text-[10px]">
+                {workspaceBadge.text}
+              </Badge>
             </div>
-            <Badge variant={workspaceBadge.variant} size="sm" className="shrink-0 text-[10px]">
-              {workspaceBadge.text}
-            </Badge>
-          </button>
-
-          <div className="runtime-status space-y-1 rounded-xl border border-sidebar-border/80 bg-card/70 px-2.5 py-2 text-[11px] leading-snug text-muted-foreground">
-            <p className="flex items-center gap-1.5 font-medium text-foreground">
-              <span
-                className={cn(
-                  "inline-block size-1.5 shrink-0 rounded-full",
-                  statusDotClass,
-                )}
-              />
-              <span className="truncate">
-                {emergencyStopped
-                  ? "已急停"
-                  : browserOpen
-                    ? "账号保持连接"
-                    : "正在连接账号"}
-              </span>
-            </p>
-            <small className="block break-words text-[10.5px] text-muted-foreground">
-              浏览器：{browserState(status.browser.state, status.automation?.emergencyStopped)}
-            </small>
-            <small className="block truncate text-[10.5px] text-muted-foreground tabular-nums">
-              {status.browser.mode === "headed" ? "有头 Edge" : "无头 Edge"}
-              {status.browser.version ? ` ${status.browser.version}` : ""}
-            </small>
-            {status.lastSync.length > 0 ? (
-              status.lastSync.map((syncItem) => (
-                <small
-                  key={syncItem.channel}
-                  className="block truncate text-[10px] text-muted-foreground/90 tabular-nums"
-                >
-                  {syncItem.channel === "DIRECT_MESSAGE" ? "私信" : "评论"}同步 {time(syncItem.at)}
-                </small>
-              ))
-            ) : (
-              <small className="block text-[10px] text-muted-foreground/90">
-                尚无成功同步记录
+            <div className="flex items-center justify-between gap-2 border-t border-border/60 pt-1 text-[10.5px] text-muted-foreground tabular-nums">
+              <small className="truncate text-[10.5px]">
+                浏览器：{browserState(status.browser.state, status.automation?.emergencyStopped)}
               </small>
-            )}
-          </div>
+              {latestSync && (
+                <small className="shrink-0 text-[10px] text-muted-foreground/85">
+                  同步 {compactTime(latestSync.at)}
+                </small>
+              )}
+            </div>
+          </button>
         </div>
       )}
 
@@ -447,13 +402,15 @@ export function AppSidebar({
         ))}
       </nav>
 
-      {/* Bottom Real Budget, Auto-Reply Switch, Theme & Reconnect */}
+      {/* Bottom Real Budget, Auto-Reply Switch & Reconnect */}
       <div className="shrink-0 space-y-2 border-t border-sidebar-border bg-sidebar/95 p-2.5">
         {collapsed ? (
           <div className="flex flex-col items-center gap-2">
             <AutoReplySwitch
               checked={autoReplyChecked}
               disabled={autoReplyDisabled}
+              ariaLabel="自动回复"
+              title={autoReplySwitchHint}
               onChange={onToggleAutoReply}
             />
             <Button
@@ -472,49 +429,50 @@ export function AppSidebar({
             <Button
               variant="ghost"
               size="icon-xs"
-              aria-label="切换浅色/深色主题"
-              title={theme === "dark" ? "切换浅色模式" : "切换深色模式"}
-              onClick={onToggleTheme}
-            >
-              {theme === "dark" ? <SunIcon aria-hidden="true" /> : <MoonIcon aria-hidden="true" />}
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-xs"
               aria-label="重新连接内核"
-              title="重新连接内核"
+              title="重新同步本地服务状态（保留草稿，不重发消息）"
               disabled={Boolean(busy)}
               onClick={onReconnect}
             >
-              <RefreshCwIcon aria-hidden="true" />
+              <RefreshCwIcon
+                aria-hidden="true"
+                className={reconnecting ? "animate-spin" : ""}
+              />
             </Button>
           </div>
         ) : (
           <>
             {/* Real Budget Progress Card */}
-            <div className="rounded-xl border border-sidebar-border bg-card/85 px-3 py-2 text-[11px] shadow-xs/5">
+            <button
+              type="button"
+              onClick={() => onSelectPage("automation")}
+              title="点击前往「自动化规则」调整发送与模型额度"
+              className="block w-full cursor-pointer rounded-xl border border-sidebar-border bg-card/85 px-3 py-2 text-left text-[11px] shadow-xs/5 transition-colors hover:border-input focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
               <div className="flex items-center justify-between gap-2 text-muted-foreground">
                 <span>发送额度</span>
                 <span className="font-mono font-medium text-foreground tabular-nums">
                   {formatBudgetText(sendBudget)}
                 </span>
               </div>
-              <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                <div
-                  className={cn(
-                    "h-full rounded-full",
-                    sendPercent >= 90 ? "bg-warning" : "bg-primary",
-                  )}
-                  style={{ width: `${sendPercent}%` }}
-                />
-              </div>
+              {sendBudget && sendBudget.maximum !== null && sendBudget.maximum > 0 && (
+                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className={cn(
+                      "h-full rounded-full",
+                      sendPercent >= 90 ? "bg-warning" : "bg-primary",
+                    )}
+                    style={{ width: `${sendPercent}%` }}
+                  />
+                </div>
+              )}
               <div className="mt-2 flex items-center justify-between gap-2 text-[10.5px] text-muted-foreground">
                 <span>模型额度</span>
                 <span className="font-mono font-medium text-foreground tabular-nums">
                   {formatBudgetText(modelBudget)}
                 </span>
               </div>
-              {modelBudget && modelBudget.maximum !== null && (
+              {modelBudget && modelBudget.maximum !== null && modelBudget.maximum > 0 && (
                 <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted">
                   <div
                     className={cn(
@@ -525,7 +483,7 @@ export function AppSidebar({
                   />
                 </div>
               )}
-            </div>
+            </button>
 
             {/* Real Unified Auto-Reply Toggle Card */}
             <div className="rounded-xl border border-sidebar-border bg-card px-3 py-2 shadow-xs/10">
@@ -561,6 +519,8 @@ export function AppSidebar({
                 <AutoReplySwitch
                   checked={autoReplyChecked}
                   disabled={autoReplyDisabled}
+                  ariaLabel="自动回复"
+                  title={autoReplySwitchHint}
                   onChange={onToggleAutoReply}
                 />
               </div>
@@ -570,40 +530,29 @@ export function AppSidebar({
                   onClick={() => onSelectPage("automation")}
                   className="mt-2 w-full cursor-pointer rounded-md border border-border/80 bg-muted/45 py-1 text-center text-[11px] font-medium text-primary transition-colors hover:bg-primary/10"
                 >
-                  设置自动回复
+                  配置自动回复规则
                 </button>
               )}
             </div>
 
-            {/* Reconnect + Theme + Version Footer */}
-            <div className="flex items-center gap-1.5">
-              <Button
-                variant="outline"
-                size="xs"
-                className="flex-1 justify-center"
-                disabled={Boolean(busy)}
-                onClick={onReconnect}
-              >
-                <RefreshCwIcon aria-hidden="true" />
-                <span>重新连接内核</span>
-              </Button>
-              <Button
-                variant="outline"
-                size="icon-xs"
-                aria-label="切换浅色/深色主题"
-                title={theme === "dark" ? "切换浅色模式" : "切换深色模式"}
-                onClick={onToggleTheme}
-              >
-                {theme === "dark" ? (
-                  <SunIcon aria-hidden="true" />
-                ) : (
-                  <MoonIcon aria-hidden="true" />
-                )}
-              </Button>
-            </div>
+            {/* Reconnect & Version Footer */}
+            <Button
+              variant="outline"
+              size="xs"
+              className="w-full justify-center"
+              title="重新同步本地服务状态（保留草稿，不重发消息）"
+              disabled={Boolean(busy)}
+              onClick={onReconnect}
+            >
+              <RefreshCwIcon
+                aria-hidden="true"
+                className={reconnecting ? "animate-spin" : ""}
+              />
+              <span>{reconnecting ? "正在重连…" : "重新连接内核"}</span>
+            </Button>
             <div className="flex items-center justify-between px-1 text-[10.5px] text-muted-foreground tabular-nums">
               <span>版本 {version || "读取中"}</span>
-              <span>受控试用</span>
+              <span>本机运行</span>
             </div>
           </>
         )}

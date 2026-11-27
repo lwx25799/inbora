@@ -375,6 +375,7 @@ test.each([
       await expect.poll(()=>service.authority.mode()).toBe('LIMITED_AUTO');
       expect(store.db.prepare('SELECT count(*) AS n FROM model_calls').get()).toEqual({n:0});
       await page.getByRole('button',{name:'撤销自动回复策略',exact:true}).click();
+      await page.getByRole('button',{name:'确认撤销策略',exact:true}).click();
       await expect.poll(async()=>((await service.dispatch(token,{command:'getStatus'})) as {automation:{replyPolicy:unknown}}).automation.replyPolicy).toBe(null);
       await page.getByRole('combobox',{name:'工作模式',exact:true}).selectOption('MANUAL');
       await page.getByRole('button',{name:'多模型配置',exact:true}).click();

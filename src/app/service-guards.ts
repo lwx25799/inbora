@@ -115,7 +115,10 @@ export function updateModelGrant(token: string, c: Extract<ClientCommand, { comm
     requireSafe(ctx.models, "MODEL_PROVIDERS_NOT_INITIALIZED");
     ctx.automation.grant("MODEL", c.scope);
   } else {
-    ctx.automation.revoke("MODEL");
+    ctx.automation.revoke("MODEL", {
+      ...(c.expectedVersion !== undefined ? { version: c.expectedVersion } : {}),
+      ...(c.expectedOwnId !== undefined ? { ownId: c.expectedOwnId } : {}),
+    });
     ctx.abortModel();
   }
 }
@@ -154,7 +157,10 @@ export async function handleConfigWriteCommand(
         ctx.automation.grant("AUTO_REPLY", c.policy);
       }
       else {
-        ctx.automation.revoke("AUTO_REPLY");
+        ctx.automation.revoke("AUTO_REPLY", {
+          ...(c.expectedVersion !== undefined ? { version: c.expectedVersion } : {}),
+          ...(c.expectedOwnId !== undefined ? { ownId: c.expectedOwnId } : {}),
+        });
         ctx.stopAutomaticReply();
       }
       ctx.emit("status_updated");

@@ -165,6 +165,15 @@ export function useWorkbenchRefresh(view: RefreshView): void {
   }, [view.connected]);
 
   const status = view.status;
+  const nonEmptyNotice = view.notice ? view.notice : "";
+  const noticeSignal = useRef(0);
+  const lastNotice = useRef("");
+  if (nonEmptyNotice && nonEmptyNotice !== lastNotice.current) {
+    noticeSignal.current++;
+  }
+  lastNotice.current = nonEmptyNotice;
+  const noticeTick = noticeSignal.current;
+
   useEffect(() => {
     if (view.connected) queue.current?.schedule(["inbox"], 0);
   }, [
@@ -173,7 +182,7 @@ export function useWorkbenchRefresh(view: RefreshView): void {
     view.channel,
     view.filter,
     view.pageNumber,
-    view.notice,
+    noticeTick,
     view.sendStatus,
     status?.sync.runId,
     status?.sync.running,
@@ -194,5 +203,5 @@ export function useWorkbenchRefresh(view: RefreshView): void {
   ]);
   useEffect(() => {
     if (view.connected && isAuditVisible(view)) queue.current?.schedule(["audit"], 0);
-  }, [view.connected, view.page, view.runtimeTab, view.auditPage, view.notice]);
+  }, [view.connected, view.page, view.runtimeTab, view.auditPage, noticeTick]);
 }

@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { XIcon } from "lucide-react";
 import { EmergencyStopNotice } from "./EmergencyStopNotice";
 import { InboxList } from "./InboxList";
 import { ReplyDetail } from "./ReplyDetail";
 import { AppSidebar, type DesktopPageId } from "./components/AppSidebar";
+import { CommandPalette } from "./components/CommandPalette";
 import { ConnectScreen } from "./components/ConnectScreen";
 import { TopBar } from "./components/TopBar";
+import { Spinner } from "./components/ui/spinner";
 import { AccountsView } from "./views/AccountsView";
 import { AutomationView } from "./views/AutomationView";
 import { KnowledgePageView } from "./views/KnowledgePageView";
@@ -39,6 +42,23 @@ const syncStates = {
   SKIPPED: "未继续同步",
   CANCELLED: "同步已停止",
 };
+
+function hasBlockingModalOpen(): boolean {
+  return Boolean(
+    document.querySelector(
+      'dialog[open]:not([data-command-palette="true"]), [role="dialog"][aria-modal="true"]:not([data-command-palette="true"])',
+    ),
+  );
+}
+
+function isStickyNotice(text: string): boolean {
+  return (
+    text.includes("未重放发送") ||
+    text.includes("全局急停") ||
+    text.includes("开发内核已恢复") ||
+    text.includes("恢复运行")
+  );
+}
 
 function readInitialTheme(): "light" | "dark" {
   try {
@@ -77,11 +97,34 @@ export function App() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [safetyNotice, setSafetyNotice] = useState("");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [recoveryModalActive, setRecoveryModalActive] = useState(false);
+  const [dismissedSyncKey, setDismissedSyncKey] = useState("");
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [auditPage, setAuditPage] = useState(0);
   const [pendingAutoReply, setPendingAutoReply] = useState<boolean | null>(null);
   const autoReplyUpdating = useRef(false);
+  const pendingPageFocusRef = useRef<DesktopPageId | null>(null);
   const connected = !!status;
+
+  const setAppNotice = useCallback((next: string) => {
+    if (!next) {
+      setNotice("");
+      return;
+    }
+    if (isStickyNotice(next)) {
+      setSafetyNotice(next);
+      setNotice("");
+      return;
+    }
+    setNotice(next);
+  }, []);
+
+  const handleRecoveryActiveChange = useCallback((active: boolean) => {
+    setRecoveryModalActive(active);
+    if (active) setPaletteOpen(false);
+  }, []);
 
   const workspace = useReplyWorkspace({
     connected,
@@ -91,7 +134,7 @@ export function App() {
     error,
     setStatus,
     setError,
-    setNotice,
+    setNotice: setAppNotice,
   });
 
   function updatePrompts(session: string, prompts: BusinessPrompts) {
@@ -119,7 +162,7 @@ export function App() {
     page,
     runtimeTab,
     auditPage,
-    notice,
+    notice: notice || safetyNotice,
     sendStatus: workspace.send?.status,
     readThread: (alive) => workspace.refreshThread(undefined, alive),
     setStatus,
@@ -167,10 +210,52 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!connected) {
+      setPaletteOpen(false);
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "k"
+      ) {
+        if (recoveryModalActive || hasBlockingModalOpen()) return;
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [connected, recoveryModalActive]);
+
+  useEffect(() => {
+    if (pendingPageFocusRef.current !== page) return;
+    pendingPageFocusRef.current = null;
+    const frame = requestAnimationFrame(() => {
+      const target =
+        document.querySelector<HTMLElement>("#main-content h1, #main-content h2") ??
+        document.getElementById("main-content");
+      if (target) {
+        if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+        target.focus({ preventScroll: true });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [page]);
+
+  useEffect(() => {
+    if (!notice || error || busy) return;
+    const timer = setTimeout(() => setNotice(""), 5_000);
+    return () => clearTimeout(timer);
+  }, [notice, error, busy]);
+
   async function act(label: string, fn: () => Promise<void>) {
     setBusy(label);
     setError("");
-    setNotice("");
+    setAppNotice("");
     try {
       await fn();
     } catch (cause) {
@@ -207,6 +292,17 @@ export function App() {
     ) {
       await workspace.closeDialog();
     }
+    if (
+      next !== page &&
+      status?.sync.runId &&
+      !status.sync.running &&
+      status.sync.results.length > 0 &&
+      status.sync.results.every((result) => result.state === "SUCCEEDED")
+    ) {
+      setDismissedSyncKey(
+        `${status.sync.runId}:${status.sync.results.map((result) => `${result.source}:${result.state}:${result.error ?? ""}`).join("|")}`,
+      );
+    }
     setPage(next);
   }
 
@@ -223,12 +319,13 @@ export function App() {
           }
         : current,
     );
-    setNotice("急停已生效；已存意图仍需回读或冻结");
+    setAppNotice("全局急停已生效，后台收取与自动回复已停止；已提交消息仅做结果核对，不会重复发送。");
     await workspace.refreshThread();
   }
 
   function syncInbox() {
-    void act("启动同步", async () => {
+    setDismissedSyncKey("");
+    void act("正在同步收件箱…", async () => {
       setStatus(await request<Status>({ command: "syncInbox" }));
     });
   }
@@ -298,6 +395,12 @@ export function App() {
   const readOnly = workspace.devRecovery.restoring || status.mode === "OBSERVE";
   const pendingCount = unreadCount;
   const syncFailed = status.sync.results.some((result) => result.state === "FAILED");
+  const syncSignature = status.sync.runId
+    ? `${status.sync.runId}:${status.sync.results.map((result) => `${result.source}:${result.state}:${result.error ?? ""}`).join("|")}`
+    : "";
+  const showSyncBar =
+    Boolean(status.sync.runId) &&
+    (status.sync.running || dismissedSyncKey !== syncSignature);
   const sessionKey = JSON.stringify([runtimeSession(status), workspace.devRecovery.generation]);
 
   return (
@@ -312,7 +415,6 @@ export function App() {
       <AppSidebar
         page={page}
         collapsed={collapsed}
-        theme={theme}
         status={status}
         version={version}
         busy={busy}
@@ -322,7 +424,6 @@ export function App() {
           void navigatePage(next).catch((cause) => setError(explain(cause)));
         }}
         onSetCollapsed={setCollapsed}
-        onToggleTheme={toggleTheme}
         onToggleAutoReply={(enabled) => {
           void act("更新自动回复", () => toggleAuto(enabled));
         }}
@@ -333,7 +434,8 @@ export function App() {
 
       <main
         id="main-content"
-        className="workspace m-2 ml-0 flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border/80 bg-background shadow-xs"
+        tabIndex={-1}
+        className="workspace m-2 ml-0 flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border/80 bg-background shadow-xs outline-none"
       >
         <TopBar
           page={page}
@@ -342,17 +444,26 @@ export function App() {
           busy={busy}
           onSync={syncInbox}
           onToggleTheme={toggleTheme}
+          onOpenPalette={() => {
+            if (!recoveryModalActive && !hasBlockingModalOpen()) setPaletteOpen(true);
+          }}
           onNavigate={(next) => {
             void navigatePage(next).catch((cause) => setError(explain(cause)));
           }}
         />
 
-        <EmergencyStopNotice status={status} busy={busy} act={act} update={setStatus} />
+        <EmergencyStopNotice
+          status={status}
+          busy={busy}
+          act={act}
+          update={setStatus}
+          onRecoveryActiveChange={handleRecoveryActiveChange}
+        />
 
-        {status.sync.runId && (
+        {showSyncBar && (
           <div
             className={cn(
-              "message shrink-0 border-b px-5 py-2 text-xs leading-relaxed",
+              "message flex shrink-0 items-center justify-between gap-3 border-b px-5 py-2 text-xs leading-relaxed",
               syncFailed
                 ? "error border-destructive/30 bg-destructive/8 text-destructive-foreground"
                 : "border-border/75 bg-muted/45 text-muted-foreground",
@@ -360,26 +471,71 @@ export function App() {
             role={syncFailed ? "alert" : "status"}
             data-testid="inbox-sync-progress"
           >
-            {status.sync.results
-              .map(
-                (result) =>
-                  `${syncNames[result.source]}${syncStates[result.state]}${result.error ? "：" + (reasons[result.error] ?? result.error) : ""}`,
-              )
-              .join("；")}
+            <span>
+              {status.sync.results
+                .map(
+                  (result) =>
+                    `${syncNames[result.source]}${syncStates[result.state]}${result.error ? "：" + (reasons[result.error] ?? result.error) : ""}`,
+                )
+                .join("；")}
+            </span>
+            {!status.sync.running && (
+              <button
+                type="button"
+                aria-label="关闭同步提示"
+                onClick={() => setDismissedSyncKey(syncSignature)}
+                className="inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <XIcon aria-hidden="true" className="size-3.5" />
+              </button>
+            )}
+          </div>
+        )}
+
+        {safetyNotice && (
+          <div
+            className="message flex shrink-0 items-center justify-between gap-3 border-b border-primary/25 bg-primary/[0.06] px-5 py-2 text-xs leading-relaxed text-foreground"
+            role="status"
+          >
+            <span>{safetyNotice}</span>
+            <button
+              type="button"
+              aria-label="关闭安全回执"
+              onClick={() => setSafetyNotice("")}
+              className="inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md text-current/70 transition-colors hover:bg-black/5 hover:text-current focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/10"
+            >
+              <XIcon aria-hidden="true" className="size-3.5" />
+            </button>
           </div>
         )}
 
         {(error || notice || busy) && (
           <div
             className={cn(
-              "message shrink-0 border-b px-5 py-2 text-xs leading-relaxed",
+              "message flex shrink-0 items-center justify-between gap-3 border-b px-5 py-2 text-xs leading-relaxed",
               error
                 ? "error border-destructive/30 bg-destructive/8 font-medium text-destructive-foreground"
                 : "border-primary/20 bg-primary/[0.05] text-foreground",
             )}
             role={error ? "alert" : "status"}
           >
-            {error || busy || notice}
+            <span className="flex min-w-0 items-center gap-2">
+              {!error && busy && <Spinner className="size-3.5 shrink-0 text-primary" />}
+              <span>{error || busy || notice}</span>
+            </span>
+            {(error || (!busy && notice)) && (
+              <button
+                type="button"
+                aria-label="关闭提示"
+                onClick={() => {
+                  if (error) setError("");
+                  else setNotice("");
+                }}
+                className="inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md text-current/70 transition-colors hover:bg-black/5 hover:text-current focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/10"
+              >
+                <XIcon aria-hidden="true" className="size-3.5" />
+              </button>
+            )}
           </div>
         )}
 
@@ -387,6 +543,7 @@ export function App() {
           <div className="inbox-layout flex min-h-0 flex-1 overflow-hidden">
             <InboxList
               inbox={inbox}
+              accountUnreadTotal={unreadCount}
               selected={workspace.selected}
               selectedGroup={
                 workspace.thread?.event.id === workspace.selected
@@ -419,7 +576,7 @@ export function App() {
               choose={workspace.choose}
               busy={busy}
               act={act}
-              setNotice={setNotice}
+              setNotice={setAppNotice}
               openDialog={workspace.openDialog}
               closeDialog={workspace.closeDialog}
               readOnly={readOnly}
@@ -427,8 +584,9 @@ export function App() {
               saving={workspace.saving}
               dirty={workspace.dirty}
               error={error}
-              notice={notice}
+              notice={notice || safetyNotice}
               text={workspace.text}
+              suggestionId={workspace.suggestionId}
               setText={workspace.updateEditorText}
               setSuggestionId={workspace.updateEditorSuggestion}
               refreshThread={() => workspace.refreshThread()}
@@ -505,6 +663,7 @@ export function App() {
                 status={status}
                 runtime={runtime}
                 busy={busy}
+                hasUnsavedDraft={workspace.hasUnsavedDraft}
                 theme={theme}
                 onToggleTheme={toggleTheme}
                 act={act}
@@ -516,6 +675,37 @@ export function App() {
           </div>
         )}
       </main>
+
+      <CommandPalette
+        open={paletteOpen}
+        theme={theme}
+        collapsed={collapsed}
+        syncDisabled={Boolean(busy) || status.sync.running}
+        onClose={() => setPaletteOpen(false)}
+        onNavigate={(next) => {
+          pendingPageFocusRef.current = next;
+          if (next === page) {
+            pendingPageFocusRef.current = null;
+            requestAnimationFrame(() => {
+              const target =
+                document.querySelector<HTMLElement>("#main-content h1, #main-content h2") ??
+                document.getElementById("main-content");
+              if (target) {
+                if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+                target.focus({ preventScroll: true });
+              }
+            });
+            return;
+          }
+          void navigatePage(next).catch((cause) => {
+            if (pendingPageFocusRef.current === next) pendingPageFocusRef.current = null;
+            setError(explain(cause));
+          });
+        }}
+        onSync={syncInbox}
+        onToggleTheme={toggleTheme}
+        onToggleCollapsed={() => setCollapsed((current) => !current)}
+      />
     </div>
   );
 }

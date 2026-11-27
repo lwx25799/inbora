@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { MonitorIcon, OctagonAlertIcon, ShieldAlertIcon } from 'lucide-react';
 import { request, type Status } from './api';
 import type { ManualRecoverySession, ManualRecoveryStart } from '../../src/contracts/manual-recovery.js';
@@ -50,17 +50,26 @@ export function EmergencyStopNotice({
   busy,
   act,
   update,
+  onRecoveryActiveChange,
 }: {
   status: Status;
   busy: string;
   act: (label: string, run: () => Promise<void>) => Promise<void>;
   update: (status: Status) => void;
+  onRecoveryActiveChange?: (active: boolean) => void;
 }) {
   const [session, setSession] = useState<ManualRecoverySession | null>(null);
+  const [startingRecovery, setStartingRecovery] = useState(false);
   const [openingError, setOpeningError] = useState('');
   const holds = status.securityHolds ?? [];
   const stopped = status.automation?.emergencyStopped;
   const recovery = status.browser.loginRecovery || status.browser.mode === 'headed';
+
+  useEffect(() => {
+    onRecoveryActiveChange?.(startingRecovery || Boolean(session));
+  }, [startingRecovery, session, onRecoveryActiveChange]);
+
+  useEffect(() => () => onRecoveryActiveChange?.(false), [onRecoveryActiveChange]);
 
   const resume = async () => {
     if (recovery) update(await request<Status>({ command: 'browser', open: true, mode: 'headless' }));
@@ -80,8 +89,10 @@ export function EmergencyStopNotice({
       ),
     );
 
-  const openOriginal = (channel: ManualRecoverySession['channel']) =>
-    act('正在接管原验证页面…', async () => {
+  const openOriginal = (channel: ManualRecoverySession['channel']) => {
+    setStartingRecovery(true);
+    onRecoveryActiveChange?.(true);
+    return act('正在接管原验证页面…', async () => {
       setOpeningError('');
       try {
         const result = await request<ManualRecoveryStart>({ command: 'securityRecovery', action: 'start', channel });
@@ -89,8 +100,11 @@ export function EmergencyStopNotice({
         else setSession(result);
       } catch (error) {
         setOpeningError(recoveryError(error));
+      } finally {
+        setStartingRecovery(false);
       }
     });
+  };
 
   const recoveryHelp =
     '在客户端内处理当前无头验证页面。若原现场已丢失，点击处理会重新检查原授权地址：已正常则恢复对应通道，仍有验证则显示新的实时画面；原现场证据仍单独保留。';

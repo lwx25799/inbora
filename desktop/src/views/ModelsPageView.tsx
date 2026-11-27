@@ -96,7 +96,7 @@ export function ModelsPageView({
           <p className="mt-1 truncate text-xs text-muted-foreground">
             {activeConn && activeApplied
               ? `${activeConn.name} · ${modelPresetNames[activeApplied.presetId]} · ${
-                  activeApplied.keyStored ? '本机 DPAPI 加密' : activeApplied.keyPresent ? '仅本次内存' : '未配置 Key'
+                  activeApplied.keyStored ? '本机加密保存' : activeApplied.keyPresent ? '仅本次内存' : '未配置 Key'
                 }`
               : '尚未在下方应用模型连接'}
           </p>

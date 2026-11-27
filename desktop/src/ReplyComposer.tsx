@@ -1,4 +1,5 @@
-import { SparklesIcon } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { RotateCcwIcon, SparklesIcon } from 'lucide-react';
 import { request, reasons, type Thread } from './api';
 import { time } from './presentation';
 import { completedReply, submittedReplyText, hasReplyHistory, canContinueReply } from './reply-editor-draft';
@@ -39,6 +40,7 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
     error,
     notice,
     text,
+    suggestionId = null,
     setText,
     setSuggestionId,
     refreshThread,
@@ -49,16 +51,18 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
   const completed = completedReply(thread);
   const submitted = hasReplyHistory(thread);
   const hasHumanOwnership = thread.ownership.isMine && thread.ownership.lease_expires_at > Date.now();
-  const quoteDisabled = readOnly || !!thread.intent || !hasHumanOwnership;
-  const quoteReason = readOnly
-    ? status.mode === 'OBSERVE'
-      ? '当前为观察模式，切换工作模式后可引用'
-      : '正在恢复连接，暂不能引用'
-    : thread.intent
-      ? '此条消息已有发送意图，暂不能引用建议'
-      : !hasHumanOwnership
-        ? '当前未持有人工接管，点击输入框进入编辑后可引用'
-        : '';
+  const quoteDisabled = readOnly || !!busy || !!thread.intent || !hasHumanOwnership;
+  const quoteReason = busy
+    ? '正在处理当前操作，请稍候引用'
+    : readOnly
+      ? status.mode === 'OBSERVE'
+        ? '当前为观察模式，切换工作模式后可引用'
+        : '正在恢复连接，暂不能引用'
+      : thread.intent
+        ? '此条消息已有发送意图，暂不能引用建议'
+        : !hasHumanOwnership
+          ? '当前未持有人工接管，点击输入框进入编辑后可引用'
+          : '';
   const suggestionReason = busy
     ? 'SUGGESTION_BUSY'
     : readOnly || status.mode === 'OBSERVE'
@@ -87,6 +91,50 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
         ? thread.receipt.verified_at
         : null;
   const charCount = [...text].length;
+  const sendingNow = busy === '发送中';
+  const generatingNow = busy === '生成 AI 建议';
+  const undoRoundKey = [
+    thread.event.id,
+    Number(submitted),
+    thread.ownership.generation,
+    thread.intent?.id ?? '',
+    turn?.commandId ?? '',
+    send?.commandId ?? '',
+  ].join(':');
+  const [undoState, setUndoState] = useState<{
+    kind: 'clear' | 'quote';
+    roundKey: string;
+    expectedText: string;
+    previousText: string;
+    previousSuggestionId: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    setUndoState(current => {
+      if (!current) return null;
+      if (
+        readOnly ||
+        !!busy ||
+        current.roundKey !== undoRoundKey ||
+        current.expectedText !== text
+      ) {
+        return null;
+      }
+      return current;
+    });
+  }, [undoRoundKey, text, readOnly, busy]);
+
+  const activeUndo =
+    undoState &&
+    !readOnly &&
+    !busy &&
+    undoState.roundKey === undoRoundKey &&
+    undoState.expectedText === text
+      ? undoState
+      : null;
+  const keyAlreadyExplained =
+    suggestionReason === 'MODEL_KEY_REQUIRED' ||
+    suggestionReason === 'REAL_MODEL_AUTHORIZATION_REQUIRED';
 
   return (
     <div className="reply-composer space-y-2.5">
@@ -151,10 +199,10 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
         <div className="editor-title mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-2">
           <h3 className="text-xs font-semibold text-foreground">{submitted ? '继续回复' : '回复草稿'}</h3>
           <small className="text-[11px] text-muted-foreground tabular-nums">
-            {!submitted && (
+            {!submitted && thread.draft && (
               <>
-                版本 {thread.draft?.version ?? 0} ·{' '}
-                {thread.draft ? draftOrigins.get(thread.draft.origin) ?? '来源待核对' : '尚未保存'} ·{' '}
+                版本 {thread.draft.version} ·{' '}
+                {draftOrigins.get(thread.draft.origin) ?? '来源待核对'} ·{' '}
               </>
             )}
             <span
@@ -181,6 +229,7 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
           placeholder={readOnly ? '此回复暂时无法编辑' : '直接输入回复，无需 Key'}
           onChange={e => {
             if (canContinueReply(thread) && !thread.ownership.isMine) void act('准备人工输入', props.openDialog);
+            setUndoState(null);
             setText(e.target.value);
           }}
           onKeyDown={event => {
@@ -193,11 +242,18 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
         />
 
         <div className="editor-actions mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-2">
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               disabled={readOnly || !!busy || !text}
               onClick={() => {
+                setUndoState({
+                  kind: 'clear',
+                  roundKey: undoRoundKey,
+                  expectedText: '',
+                  previousText: text,
+                  previousSuggestionId: suggestionId,
+                });
                 setText('');
                 setSuggestionId(null);
               }}
@@ -208,6 +264,27 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
             >
               清空
             </button>
+            {activeUndo && (
+              <span
+                role="status"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border/80 bg-muted/55 px-2 py-0.5 text-[11.5px] text-foreground"
+              >
+                <span>{activeUndo.kind === 'clear' ? '已清空草稿' : '已替换为 AI 建议'}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const saved = activeUndo;
+                    setUndoState(null);
+                    setText(saved.previousText);
+                    setSuggestionId(saved.previousSuggestionId);
+                  }}
+                  className="inline-flex cursor-pointer items-center gap-1 font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <RotateCcwIcon aria-hidden="true" className="size-3" />
+                  撤销
+                </button>
+              </span>
+            )}
           </div>
           <button
             type="button"
@@ -221,7 +298,7 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
                   draftVersion: thread.draft?.version ?? 0,
                 });
                 await refreshThread();
-                setNotice('AI 建议已到达，当前人稿保留');
+                setNotice('AI 建议已生成，当前人稿未受影响');
               })
             }
             className={cn(
@@ -229,7 +306,7 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
               !!suggestionReason && 'pointer-events-none opacity-50',
             )}
           >
-            生成 AI 建议
+            {generatingNow ? '正在生成…' : '生成 AI 建议'}
           </button>
         </div>
 
@@ -245,7 +322,7 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
           </p>
         )}
 
-        {!submitted && !status.keyPresent && (
+        {!submitted && !status.keyPresent && !keyAlreadyExplained && (
           <p className="hint mt-1.5 text-[11.5px] text-muted-foreground">未配置 Key，人工回复仍可直接发送。</p>
         )}
       </section>
@@ -273,6 +350,18 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
                   disabled={quoteDisabled}
                   title={quoteReason || undefined}
                   onClick={() => {
+                    if (quoteDisabled) return;
+                    if (text.trim() && text !== s.text) {
+                      setUndoState({
+                        kind: 'quote',
+                        roundKey: undoRoundKey,
+                        expectedText: s.text,
+                        previousText: text,
+                        previousSuggestionId: suggestionId,
+                      });
+                    } else {
+                      setUndoState(null);
+                    }
                     setText(s.text);
                     setSuggestionId(s.id);
                   }}
@@ -353,7 +442,7 @@ export function ReplyComposer(props: ReplyViewProps & { thread: Thread }) {
             disabled={!!block || !!busy}
             onClick={() => void act('发送中', sendCurrentText)}
           >
-            发送
+            {sendingNow ? '发送中…' : '发送'}
           </button>
         </div>
       </div>

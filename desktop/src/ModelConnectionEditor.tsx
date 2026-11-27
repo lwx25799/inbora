@@ -47,8 +47,16 @@ const hintCls = 'hint text-xs leading-relaxed text-muted-foreground';
 const errorCls = 'error rounded-xl border border-destructive/30 bg-destructive/6 px-3 py-2 text-xs font-medium text-destructive-foreground';
 const inputCls = 'h-8.5 w-full min-w-0 rounded-lg border border-input bg-background px-2.5 text-[13px] text-foreground shadow-xs/5 outline-none transition-shadow focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-input/32';
 const btnOutlineCls = 'inline-flex h-8 shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-input bg-popover px-3 text-xs font-medium text-foreground shadow-xs/5 transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-55 dark:bg-input/32 dark:hover:bg-input/64';
+const btnDangerCls = 'danger inline-flex h-8 shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-destructive/35 bg-destructive/8 px-3 text-xs font-medium text-destructive-foreground shadow-xs/5 transition-colors hover:bg-destructive/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-55';
 const btnPrimaryCls = 'primary inline-flex h-8 shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-primary bg-primary px-3 text-xs font-medium text-primary-foreground shadow-xs transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-55';
 const subSectionCls = 'model-editor-section flex flex-col gap-3 rounded-xl border border-border/75 bg-card p-4';
+
+function defaultPresetName(presetId: ModelPresetId, regionId: string | null): string {
+  if (presetId === 'custom') return '';
+  const base = modelPresetNames[presetId];
+  const region = presets[presetId].regions?.find(item => item.id === regionId);
+  return region ? `${base}（${region.name}）` : base;
+}
 
 type SaveCommand = Extract<ModelProvidersCommand, { action: 'save' }>;
 type Form = Pick<SaveCommand, 'name' | 'presetId' | 'baseUrl' | 'region'> & {
@@ -69,12 +77,14 @@ const emptyKey = { value: '', destination: '' };
 
 function snapshot(connection?: PublicModelConnection, models = connection?.models ?? [], complete = !connection?.modelsTruncated): FormState {
   const draft = connection?.draft;
+  const presetId = draft?.presetId ?? 'deepseek';
+  const region = draft?.region ?? null;
   const form: Form = {
-    name: connection?.name ?? '',
-    presetId: draft?.presetId ?? 'deepseek',
+    name: connection?.name ?? defaultPresetName(presetId, region),
+    presetId,
     protocol: draft?.protocol ?? 'OPENAI_CHAT',
     baseUrl: draft?.baseUrl ?? presets.deepseek.url,
-    region: draft?.region ?? null,
+    region,
     manualModels: models.filter(model => model.source === 'MANUAL').map(({ modelId, displayName }) => ({ modelId, displayName })),
   };
   return { form, baseline: form, version: connection?.version ?? 0, complete };
@@ -108,11 +118,11 @@ function endpointPreview(form: Form, modelId: string) {
 }
 
 export function ModelConnectionEditor({
-  connection, change, onCreated, onClose, budgetExhausted, stopped, hidden, refreshing, selectionRevision,
+  connection, change, onCreated, onClose, budgetExhausted, stopped, hidden, refreshing, connectionWriting = false, selectionRevision,
 }: {
   connection?: PublicModelConnection; change: ChangeModelProviders; onCreated: (id: string) => void;
   onClose: () => void; budgetExhausted: boolean; stopped: boolean; hidden: boolean;
-  refreshing: boolean; selectionRevision: number;
+  refreshing: boolean; connectionWriting?: boolean; selectionRevision: number;
 }) {
   const [editor, setEditor] = useState(() => snapshot(connection));
   const { form, version } = editor;
@@ -122,6 +132,7 @@ export function ModelConnectionEditor({
   const [manualName, setManualName] = useState('');
   const [manualError, setManualError] = useState('');
   const [chosenModel, setChosenModel] = useState('');
+  const [confirmClearKey, setConfirmClearKey] = useState<{ id: string; version: number } | null>(null);
   const [busy, setBusy] = useState<Partial<Record<EditorCommand['action'], boolean>>>({});
   const [feedback, setFeedback] = useState<Partial<Record<EditorCommand['action'], Feedback>>>({});
   const sequences = useRef(new Map<EditorCommand['action'], number>());
@@ -136,7 +147,11 @@ export function ModelConnectionEditor({
   const canClearKey = hasCredential(connection?.draft ?? null) || hasCredential(connection?.applied ?? null);
   const regionOptions = presets[form.presetId].regions;
   const validBaseUrl = modelBaseUrlSchema.safeParse(form.baseUrl).success;
-  const modelId = directory.models.some(model => model.modelId === chosenModel) ? chosenModel : '';
+  const modelId = directory.models.some(model => model.modelId === chosenModel)
+    ? chosenModel
+    : directory.models.length === 1
+      ? directory.models[0]!.modelId
+      : '';
   const catalog = revision?.catalogResult;
   const catalogCount = catalog && ('totalCount' in catalog ? catalog.totalCount : catalog.models.length);
   const test = revision?.testResult;
@@ -170,7 +185,16 @@ export function ModelConnectionEditor({
 
   function selectPreset(presetId: ModelPresetId) {
     const preset = presets[presetId];
-    edit({ presetId, protocol: preset.protocol, baseUrl: preset.url, region: preset.regions?.[0]?.id ?? null });
+    const nextRegion = preset.regions?.[0]?.id ?? null;
+    const prevAuto = defaultPresetName(form.presetId, form.region);
+    const shouldAutoName = !connection && (!form.name.trim() || form.name === prevAuto);
+    edit({
+      presetId,
+      protocol: preset.protocol,
+      baseUrl: preset.url,
+      region: nextRegion,
+      ...(shouldAutoName ? { name: defaultPresetName(presetId, nextRegion) } : {}),
+    });
   }
 
   function addModel() {
@@ -265,12 +289,37 @@ export function ModelConnectionEditor({
     });
   }
 
-  function writeKey(clear: boolean) {
+  const anyBusy = connectionWriting || Object.values(busy).some(Boolean);
+  useEffect(() => {
+    setConfirmClearKey(current => {
+      if (!current) return null;
+      if (
+        hidden ||
+        anyBusy ||
+        !connection ||
+        !canClearKey ||
+        current.id !== connection.id ||
+        current.version !== connection.version
+      ) {
+        return null;
+      }
+      return current;
+    });
+  }, [hidden, anyBusy, connection?.id, connection?.version, canClearKey]);
+
+  function writeKey(clear: boolean, expectedVersion?: number) {
     if (refreshing || !connection || !revision || (clear ? !canClearKey : !savedRoute || !keyValue.trim())) return;
-    if (clear && !window.confirm('清除这条连接的全部 Key？依赖该连接的模型调用将停止。')) return;
+    if (clear && expectedVersion !== undefined && connection.version !== expectedVersion) {
+      setConfirmClearKey(null);
+      return;
+    }
+    setConfirmClearKey(null);
     const submitted = keyDraft;
     const parsed = modelProvidersCommandSchema.safeParse({
-      command: 'modelProviders', action: 'setKey', connectionId: connection.id, expectedVersion: connection.version,
+      command: 'modelProviders',
+      action: 'setKey',
+      connectionId: connection.id,
+      expectedVersion: expectedVersion ?? connection.version,
       ...(clear ? { storage: 'DELETE' } : { storage, key: keyValue }),
     });
     if (!parsed.success || parsed.data.action !== 'setKey') { setMessage('setKey', reasons.INVALID_MODEL_KEY!, true); return; }
@@ -349,7 +398,15 @@ export function ModelConnectionEditor({
               value={form.region ?? regionOptions.find(region => region.url === form.baseUrl)?.id ?? ''}
               onChange={event => {
                 const region = regionOptions.find(item => item.id === event.target.value);
-                if (region) edit({ region: region.id, baseUrl: region.url });
+                if (region) {
+                  const prevAuto = defaultPresetName(form.presetId, form.region);
+                  const shouldAutoName = !connection && (!form.name.trim() || form.name === prevAuto);
+                  edit({
+                    region: region.id,
+                    baseUrl: region.url,
+                    ...(shouldAutoName ? { name: defaultPresetName(form.presetId, region.id) } : {}),
+                  });
+                }
               }}
             >
               {!regionOptions.some(region => region.id === form.region || (form.region === null && region.url === form.baseUrl)) && (
@@ -373,7 +430,7 @@ export function ModelConnectionEditor({
       <label className={labelCls}>
         Base URL
         <input className={`${inputCls} font-mono text-xs`} value={form.baseUrl} maxLength={2048} aria-invalid={!!form.baseUrl && !validBaseUrl}
-          onChange={event => edit({ baseUrl: event.target.value })} />
+          onChange={event => edit({ baseUrl: event.target.value.trim() })} />
       </label>
       {form.baseUrl && !validBaseUrl && <p className={errorCls}>{reasons.INVALID_MODEL_BASE_URL}</p>}
       <p className={`model-endpoint ${hintCls}`}>
@@ -406,11 +463,37 @@ export function ModelConnectionEditor({
         <div className="model-fields grid grid-cols-1 gap-3 sm:grid-cols-2">
           <label className={labelCls}>
             手动模型 ID
-            <input className={`${inputCls} font-mono text-xs`} value={manualId} maxLength={256} onChange={event => setManualId(event.target.value)} />
+            <input
+              className={`${inputCls} font-mono text-xs`}
+              value={manualId}
+              maxLength={256}
+              placeholder="如 deepseek-chat，按 Enter 添加"
+              onChange={event => setManualId(event.target.value)}
+              onKeyDown={event => {
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+                if (event.key === 'Enter' && manualId && canEditModels) {
+                  event.preventDefault();
+                  addModel();
+                }
+              }}
+            />
           </label>
           <label className={labelCls}>
             模型显示名称（可选）
-            <input className={inputCls} value={manualName} maxLength={200} onChange={event => setManualName(event.target.value)} />
+            <input
+              className={inputCls}
+              value={manualName}
+              maxLength={200}
+              placeholder="留空则直接显示模型 ID"
+              onChange={event => setManualName(event.target.value)}
+              onKeyDown={event => {
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+                if (event.key === 'Enter' && manualId && canEditModels) {
+                  event.preventDefault();
+                  addModel();
+                }
+              }}
+            />
           </label>
         </div>
         <div>
@@ -431,7 +514,25 @@ export function ModelConnectionEditor({
       </div>
       {versionConflict && <p className={errorCls} role="status">{reasons.MODEL_CONNECTION_CONFLICT}</p>}
       {actionFeedback('save')}
-      {draftChanged && <p className={hintCls}>{reasons.MODEL_CONNECTION_NOT_APPLIED}</p>}
+      {draftChanged && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-primary/25 bg-primary/[0.045] px-3 py-2 text-xs text-foreground">
+          <span>{reasons.MODEL_CONNECTION_NOT_APPLIED}</span>
+          <button
+            type="button"
+            className="shrink-0 cursor-pointer font-medium text-primary hover:underline"
+            onClick={() => {
+              const heading = document.getElementById('current-model-heading');
+              heading?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              const target = document.getElementById('model-selector-connection');
+              if (target instanceof HTMLElement && !(target as HTMLSelectElement).disabled) {
+                target.focus({ preventScroll: true });
+              }
+            }}
+          >
+            前往上方应用切换
+          </button>
+        </div>
+      )}
 
       {connection && revision ? (
         <>
@@ -448,19 +549,57 @@ export function ModelConnectionEditor({
               <label className={labelCls}>
                 Key 存储方式
                 <select className={inputCls} value={storage} onChange={event => setStorage(event.target.value as ModelKeyStorage)}>
-                  <option value="MEMORY">仅保存在内存</option>
-                  <option value="DPAPI">本机加密保存（DPAPI）</option>
+                  <option value="MEMORY">仅保存在内存（退出后清除）</option>
+                  <option value="DPAPI">本机加密保存（DPAPI，重启保留）</option>
                 </select>
               </label>
             </div>
-            <div className="model-actions flex flex-wrap items-center gap-2">
-              <button className={btnOutlineCls} disabled={refreshing || busy.setKey || !keyValue.trim()} onClick={() => writeKey(false)}>
+            <div className="model-actions flex flex-wrap items-center justify-between gap-2">
+              <button className={btnPrimaryCls} disabled={refreshing || busy.setKey || !keyValue.trim()} onClick={() => writeKey(false)}>
                 {busy.setKey ? '正在更新 Key…' : '保存 Key'}
               </button>
-              <button className={btnOutlineCls} disabled={refreshing || busy.setKey || !canClearKey} onClick={() => writeKey(true)}>
+              <button
+                type="button"
+                className={btnDangerCls}
+                disabled={refreshing || anyBusy || !canClearKey}
+                onClick={() =>
+                  setConfirmClearKey(current =>
+                    current?.id === connection.id && current.version === connection.version
+                      ? null
+                      : { id: connection.id, version: connection.version },
+                  )
+                }
+              >
                 清除 Key
               </button>
             </div>
+            {confirmClearKey?.id === connection.id &&
+              confirmClearKey.version === connection.version &&
+              !anyBusy &&
+              canClearKey && (
+              <div className="flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/6 p-3">
+                <p className="text-xs text-destructive-foreground">
+                  确认清除「{connection.name}」的全部 Key？依赖该连接的模型调用将停止。
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className={btnDangerCls}
+                    disabled={refreshing || anyBusy}
+                    onClick={() => writeKey(true, confirmClearKey.version)}
+                  >
+                    确认清除 Key
+                  </button>
+                  <button
+                    type="button"
+                    className={btnOutlineCls}
+                    onClick={() => setConfirmClearKey(null)}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
             {actionFeedback('setKey')}
           </div>
 

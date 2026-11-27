@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { KnowledgeEntry, KnowledgeInput } from '../../src/contracts/knowledge.js';
 import type { Channel } from '../../src/contracts/events.js';
 import { channelName, formatDate, type KnowledgePanelProps } from './knowledge-client';
@@ -36,7 +36,9 @@ const btnDangerCls =
 export function KnowledgeDocuments({ overview, busy, perform }: KnowledgePanelProps) {
   const [draft, setDraft] = useState(empty),
     [deleteId, setDeleteId] = useState<string | null>(null);
-  const edit = (entry: KnowledgeEntry) =>
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const editorFormRef = useRef<HTMLFormElement | null>(null);
+  const edit = (entry: KnowledgeEntry) => {
     setDraft({
       id: entry.id,
       title: entry.title,
@@ -48,10 +50,18 @@ export function KnowledgeDocuments({ overview, busy, perform }: KnowledgePanelPr
       expiresAt: toInputDate(entry.expiresAt),
       expectedVersion: entry.version,
     });
+    requestAnimationFrame(() => {
+      editorFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      titleInputRef.current?.focus();
+    });
+  };
   const aliases = draft.aliases
     .split(/[,，\n]/u)
     .map(value => value.trim())
     .filter(Boolean);
+  const datesInvalid = Boolean(
+    draft.effectiveAt && draft.expiresAt && !(Date.parse(draft.expiresAt) > Date.parse(draft.effectiveAt)),
+  );
   const valid =
     !!draft.title.trim() &&
     !!draft.topic.trim() &&
@@ -59,9 +69,38 @@ export function KnowledgeDocuments({ overview, busy, perform }: KnowledgePanelPr
     draft.channels.length > 0 &&
     aliases.length <= 30 &&
     aliases.every(value => value.length <= 100) &&
-    (!draft.effectiveAt ||
-      !draft.expiresAt ||
-      Date.parse(draft.expiresAt) > Date.parse(draft.effectiveAt));
+    !datesInvalid;
+  const channelsChanged =
+    draft.channels.length !== 2 ||
+    !draft.channels.includes('DIRECT_MESSAGE') ||
+    !draft.channels.includes('COMMENT_NOTIFICATION');
+  const hasAnyInput = Boolean(
+    draft.id ||
+      draft.title.trim() ||
+      draft.topic.trim() ||
+      draft.text.trim() ||
+      draft.aliases.trim() ||
+      draft.effectiveAt ||
+      draft.expiresAt ||
+      channelsChanged,
+  );
+  const validationHint = !hasAnyInput
+    ? ''
+    : datesInvalid
+      ? '失效时间须晚于生效时间。'
+      : aliases.length > 30
+        ? `当前已填写 ${aliases.length} 个关键词，最多支持 30 个。`
+        : aliases.some(value => value.length > 100)
+          ? '单个关键词不能超过 100 字。'
+          : draft.channels.length === 0
+            ? '请至少勾选一个可用通道。'
+            : !draft.title.trim()
+              ? '请填写知识标题。'
+              : !draft.topic.trim()
+                ? '请填写所属主题。'
+                : !draft.text.trim()
+                  ? '请填写知识正文。'
+                  : '';
 
   return (
     <div className="knowledge-documents flex flex-col gap-4">
@@ -79,10 +118,16 @@ export function KnowledgeDocuments({ overview, busy, perform }: KnowledgePanelPr
               还没有知识条目。导入文件，或直接填写一条知识。
             </p>
           ) : (
-            overview.knowledge.map(entry => (
+            overview.knowledge.map(entry => {
+              const isEditing = draft.id === entry.id;
+              return (
               <article
                 key={entry.id}
-                className="knowledge-entry flex flex-col gap-2 rounded-xl border border-border/80 bg-background p-4"
+                className={`knowledge-entry flex flex-col gap-2 rounded-xl border p-4 transition-colors ${
+                  isEditing
+                    ? 'border-primary/45 bg-primary/[0.03] ring-1 ring-primary/15'
+                    : 'border-border/80 bg-background'
+                }`}
               >
                 <div className="knowledge-entry-heading flex flex-wrap items-center justify-between gap-2">
                   <h4 className="font-semibold text-[13.5px] text-foreground">{entry.title}</h4>
@@ -163,11 +208,13 @@ export function KnowledgeDocuments({ overview, busy, perform }: KnowledgePanelPr
                   </div>
                 )}
               </article>
-            ))
+            );
+            })
           )}
         </div>
 
         <form
+          ref={editorFormRef}
           className="knowledge-editor flex min-w-0 flex-col gap-3 rounded-xl border border-border/80 bg-background p-4"
           onSubmit={event => {
             event.preventDefault();
@@ -189,19 +236,22 @@ export function KnowledgeDocuments({ overview, busy, perform }: KnowledgePanelPr
             <h3 className="font-heading text-[14px] font-semibold text-foreground">
               {draft.id ? '编辑知识' : '新增知识'}
             </h3>
-            <button
-              type="button"
-              className={btnOutlineCls}
-              disabled={busy}
-              onClick={() => setDraft(empty())}
-            >
-              新建条目
-            </button>
+            {hasAnyInput && (
+              <button
+                type="button"
+                className={btnOutlineCls}
+                disabled={busy}
+                onClick={() => setDraft(empty())}
+              >
+                {draft.id ? '取消编辑' : '清空重填'}
+              </button>
+            )}
           </div>
 
           <label className={labelCls}>
             知识标题
             <input
+              ref={titleInputRef}
               className={inputCls}
               maxLength={200}
               value={draft.title}
@@ -292,9 +342,9 @@ export function KnowledgeDocuments({ overview, busy, perform }: KnowledgePanelPr
             </label>
           </div>
 
-          {!valid && draft.text && (
-            <p className="hint text-xs text-warning-foreground">
-              请填写标题、主题和正文，选择至少一个通道；失效时间须晚于生效时间。
+          {validationHint && (
+            <p className="hint text-xs text-warning-foreground" role="status">
+              {validationHint}
             </p>
           )}
           <div className="pt-1">

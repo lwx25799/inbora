@@ -48,13 +48,19 @@ export function SecurityRecoveryDialog({
   const moveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pendingMove = useRef<QueuedInput | null>(null);
   const closeAction = useRef<() => void>(() => {});
+  const submittingText = useRef(false);
+  const [textSubmitting, setTextSubmitting] = useState(false);
 
   const fail = (cause: unknown) => {
     stopped.current = true;
     queue.current = [];
     pendingMove.current = null;
+    submittingText.current = false;
     if (moveTimer.current) clearTimeout(moveTimer.current);
-    if (active.current) setError(recoveryError(cause));
+    if (active.current) {
+      setTextSubmitting(false);
+      setError(recoveryError(cause));
+    }
   };
 
   const drain = async () => {
@@ -80,8 +86,8 @@ export function SecurityRecoveryDialog({
     }
   };
 
-  const enqueue = (item: QueuedInput) => {
-    if (stopped.current || !active.current || finalized.current || finalizing.current) return;
+  const enqueue = (item: QueuedInput): boolean => {
+    if (stopped.current || !active.current || finalized.current || finalizing.current) return false;
     const last = queue.current.at(-1);
     if (
       item.input.kind === 'pointer' &&
@@ -95,9 +101,10 @@ export function SecurityRecoveryDialog({
     } else {
       fail('MANUAL_RECOVERY_INPUT_QUEUE_FULL');
       void closeAction.current();
-      return;
+      return false;
     }
     void drain();
+    return true;
   };
 
   const flushMove = () => {
@@ -111,14 +118,14 @@ export function SecurityRecoveryDialog({
     }
   };
 
-  const input = (value: RecoveryInput, completed?: () => void) => {
+  const input = (value: RecoveryInput, completed?: () => void): boolean => {
     const current = displayed.current;
     if (!current || Date.now() > current.expiresAt) {
       fail('MANUAL_RECOVERY_FRAME_EXPIRED');
-      return;
+      return false;
     }
     flushMove();
-    enqueue({ input: value, frameId: current.frameId, completed });
+    return enqueue({ input: value, frameId: current.frameId, completed });
   };
 
   const pointerInput = (event: ReactPointerEvent<HTMLImageElement>, phase: 'down' | 'move' | 'up') => {
@@ -227,6 +234,7 @@ export function SecurityRecoveryDialog({
   }, [frame]);
 
   const keyInput = (event: ReactKeyboardEvent<HTMLImageElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       void close();
@@ -238,6 +246,7 @@ export function SecurityRecoveryDialog({
   };
 
   const dialogKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       void close();
@@ -284,6 +293,7 @@ export function SecurityRecoveryDialog({
     return () => {
       active.current = false;
       stopped.current = true;
+      submittingText.current = false;
       if (timer) clearTimeout(timer);
       if (moveTimer.current) clearTimeout(moveTimer.current);
       window.removeEventListener('pagehide', pageHide);
@@ -296,6 +306,22 @@ export function SecurityRecoveryDialog({
       }
     };
   }, [session.sessionId]);
+
+  const submitCodeText = () => {
+    if (!text || !frame || !!error || closing || finishing || submittingText.current) return;
+    submittingText.current = true;
+    setTextSubmitting(true);
+    const submitted = text;
+    const accepted = input({ kind: 'text', text: submitted }, () => {
+      submittingText.current = false;
+      setTextSubmitting(false);
+      setText(current => (current === submitted ? '' : current));
+    });
+    if (!accepted) {
+      submittingText.current = false;
+      setTextSubmitting(false);
+    }
+  };
 
   return (
     <div className="security-recovery-backdrop fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-5 backdrop-blur-[2px] max-[700px]:p-2">
@@ -392,20 +418,22 @@ export function SecurityRecoveryDialog({
             value={text}
             maxLength={100}
             autoComplete="off"
-            disabled={!!error || closing || finishing}
+            disabled={!!error || closing || finishing || textSubmitting}
             onChange={event => setText(event.target.value)}
-            placeholder="先在画面中点击验证码输入框"
+            onKeyDown={event => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229 || event.repeat) return;
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                submitCodeText();
+              }
+            }}
+            placeholder="先在画面中点击验证码输入框，输入后按 Enter 提交"
             className="h-8 min-w-[180px] flex-1 rounded-lg border border-input bg-card px-2.5 text-sm text-foreground shadow-xs/5 outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:opacity-55 dark:bg-input/32"
           />
           <button
             type="button"
-            disabled={!text || !frame || !!error || closing || finishing}
-            onClick={() => {
-              const submitted = text;
-              input({ kind: 'text', text: submitted }, () =>
-                setText(current => (current === submitted ? '' : current)),
-              );
-            }}
+            disabled={!text || !frame || !!error || closing || finishing || textSubmitting}
+            onClick={submitCodeText}
             className="inline-flex h-8 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-input bg-card px-3 text-xs font-medium text-foreground shadow-xs/5 transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-55 dark:bg-input/32"
           >
             输入到验证框

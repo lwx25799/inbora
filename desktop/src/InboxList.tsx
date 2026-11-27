@@ -1,5 +1,7 @@
+import { useEffect, useRef, useState } from 'react';
+import { SearchIcon, XIcon } from 'lucide-react';
 import type { Inbox } from './api';
-import { time, replyStatusLabel } from './presentation';
+import { compactTime, time, replyStatusLabel } from './presentation';
 import { MessageAttachments, isMediaPlaceholder } from './MessageAttachments';
 import { validShare, sharedWorkLabel } from './ShareLink';
 import { MessageText } from './MessageText';
@@ -43,6 +45,7 @@ function statusBadgeClass(replyStatus: Inbox['items'][number]['replyStatus'], st
 
 interface InboxListProps {
   inbox: Inbox;
+  accountUnreadTotal?: number;
   selected: string | null;
   selectedGroup?: string;
   channel: 'ALL' | 'COMMENT_NOTIFICATION' | 'DIRECT_MESSAGE';
@@ -58,6 +61,7 @@ interface InboxListProps {
 
 export function InboxList({
   inbox,
+  accountUnreadTotal,
   selected,
   selectedGroup,
   channel,
@@ -70,6 +74,39 @@ export function InboxList({
   markRead,
   markingRead,
 }: InboxListProps) {
+  const [confirmMarkRead, setConfirmMarkRead] = useState(false);
+  const [query, setQuery] = useState('');
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const filterSelectRef = useRef<HTMLSelectElement | null>(null);
+  const noAccountUnread = accountUnreadTotal === 0;
+
+  useEffect(() => {
+    setConfirmMarkRead(false);
+  }, [channel, filter, pageNumber, inbox.total, inbox.unreadTotal, accountUnreadTotal, markingRead]);
+
+  const clearQueryAndFocus = () => {
+    setQuery('');
+    requestAnimationFrame(() => {
+      if (searchInputRef.current) searchInputRef.current.focus();
+      else filterSelectRef.current?.focus();
+    });
+  };
+
+  const focusFilter = () => {
+    requestAnimationFrame(() => filterSelectRef.current?.focus());
+  };
+
+  const trimmedQuery = query.trim().toLowerCase();
+  const visibleItems = trimmedQuery
+    ? inbox.items.filter(item => {
+        const hay = `${item.author ?? ''} ${item.displayText ?? ''} ${item.preview ?? ''}`.toLowerCase();
+        return hay.includes(trimmedQuery);
+      })
+    : inbox.items;
+
+  const showQuickSearch = inbox.items.length > 3 || Boolean(query);
+  const showPager = pageNumber > 0 || inbox.total > inbox.pageSize;
+
   return (
     <section className="inbox-list flex h-full min-h-0 w-[304px] max-w-full shrink-0 flex-col border-r border-border bg-muted/30 max-[1050px]:w-[256px]">
       <div className="filters space-y-2.5 border-b border-border/80 bg-card/65 px-3.5 py-3">
@@ -81,9 +118,47 @@ export function InboxList({
             </small>
           </div>
           <span className="inline-flex shrink-0 [&>button]:inline-flex [&>button]:h-7 [&>button]:cursor-pointer [&>button]:items-center [&>button]:justify-center [&>button]:rounded-md [&>button]:border [&>button]:border-input [&>button]:bg-card [&>button]:px-2.5 [&>button]:text-xs [&>button]:font-medium [&>button]:text-foreground [&>button]:shadow-xs/5 [&>button]:transition-colors [&>button]:hover:bg-accent [&>button]:focus-visible:outline-none [&>button]:focus-visible:ring-2 [&>button]:focus-visible:ring-ring [&>button]:disabled:pointer-events-none [&>button]:disabled:opacity-50 dark:[&>button]:bg-input/32 dark:[&>button]:hover:bg-input/55">
-            <button disabled={markingRead} onClick={markRead} title="将当前账号已收取的私信和评论全部标为已读">全部已读</button>
+            <button
+              disabled={markingRead || noAccountUnread}
+              onClick={() => setConfirmMarkRead(open => !open)}
+              title={
+                noAccountUnread
+                  ? '当前账号已无未读消息'
+                  : '将当前账号已收取的私信和评论全部标为已读'
+              }
+            >
+              全部已读
+            </button>
           </span>
         </div>
+
+        {confirmMarkRead && !noAccountUnread && (
+          <div className="flex flex-col gap-2 rounded-lg border border-warning/35 bg-warning/8 px-2.5 py-2 text-[11.5px] text-foreground">
+            <p className="leading-snug text-warning-foreground">
+              将本账号全部私信与评论标为已读？消息和回复记录会保留。
+            </p>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                disabled={markingRead}
+                onClick={() => {
+                  setConfirmMarkRead(false);
+                  markRead();
+                }}
+                className="inline-flex h-6.5 cursor-pointer items-center justify-center rounded-md border border-primary bg-primary px-2.5 text-[11px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50"
+              >
+                确认标为已读
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmMarkRead(false)}
+                className="inline-flex h-6.5 cursor-pointer items-center justify-center rounded-md border border-input bg-card px-2.5 text-[11px] font-medium text-foreground transition-colors hover:bg-accent"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="segments flex items-center gap-0.5 rounded-lg bg-muted p-0.5" aria-label="通道筛选">
           {(['ALL', 'COMMENT_NOTIFICATION', 'DIRECT_MESSAGE'] as const).map(value => (
@@ -108,6 +183,7 @@ export function InboxList({
         </div>
 
         <select
+          ref={filterSelectRef}
           aria-label="任务状态"
           value={filter}
           onChange={event => {
@@ -122,10 +198,38 @@ export function InboxList({
           <option value="CONFIRMED">已回复</option>
           <option value="ALL">全部消息</option>
         </select>
+
+        {showQuickSearch && (
+          <div className="relative flex items-center">
+            <SearchIcon
+              aria-hidden="true"
+              className="pointer-events-none absolute left-2.5 size-3.5 text-muted-foreground"
+            />
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={query}
+              onChange={event => setQuery(event.target.value)}
+              aria-label="筛选本页联系人或内容"
+              placeholder="筛选本页联系人或内容…"
+              className="h-7.5 w-full rounded-lg border border-input bg-card pr-7 pl-7.5 text-xs text-foreground shadow-xs/5 outline-none placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/32"
+            />
+            {query && (
+              <button
+                type="button"
+                aria-label="清除筛选"
+                onClick={clearQueryAndFocus}
+                className="absolute right-1.5 inline-flex size-5 cursor-pointer items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <XIcon aria-hidden="true" className="size-3" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="task-list scroll flex-1 space-y-1.5 overflow-y-auto p-2.5 overscroll-contain">
-        {inbox.items.map(item => {
+        {visibleItems.map(item => {
           const active = selected === item.id || (!!selectedGroup && item.groupKey === selectedGroup);
           const share = validShare(item.share);
           const attachmentPreview = !share && item.previewEventId && item.attachments?.length;
@@ -203,7 +307,10 @@ export function InboxList({
                   />
                 ) : null}
 
-                <small className="flex flex-wrap items-center gap-1 pt-0.5 text-[11px] text-muted-foreground tabular-nums">
+                <small
+                  className="flex flex-wrap items-center gap-1 pt-0.5 text-[11px] text-muted-foreground tabular-nums"
+                  title={item.time ? time(item.time) : undefined}
+                >
                   <span
                     className={cn(
                       'channel-label inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold',
@@ -214,45 +321,108 @@ export function InboxList({
                   >
                     {isDm ? '私信' : '评论'}
                   </span>
-                  <span>· {time(item.time)}</span>
-                  {isDm && item.messageCount ? <span>· {item.messageCount} 条入站</span> : null}
+                  <span>· {compactTime(item.time)}</span>
+                  {isDm && item.messageCount ? <span>· {item.messageCount} 条消息</span> : null}
                 </small>
               </div>
             </button>
           );
         })}
 
-        {!inbox.items.length && (
+        {!visibleItems.length && (
           <div className="empty rounded-xl border border-dashed border-border/80 bg-card/50 px-4 py-8 text-center">
             <strong className="block text-xs font-semibold text-foreground">
-              {filter === 'UNREAD' ? '当前没有未读消息' : '当前没有这类待办'}
+              {trimmedQuery
+                ? '本页没有匹配的消息'
+                : filter === 'UNREAD'
+                  ? '当前没有未读消息'
+                  : '当前没有这类待办'}
             </strong>
             <p className="mt-1.5 text-[11.5px] leading-relaxed text-muted-foreground">
-              后台按已启用范围自动收取，新消息会显示在对应会话。
+              {trimmedQuery
+                ? '可清空筛选词，或切换到其他页面继续查找。'
+                : '后台按已启用范围自动收取，新消息会显示在对应会话。'}
             </p>
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5">
+              {trimmedQuery ? (
+                <button
+                  type="button"
+                  onClick={clearQueryAndFocus}
+                  className="inline-flex h-7 cursor-pointer items-center justify-center rounded-md border border-input bg-card px-2.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+                >
+                  清除筛选
+                </button>
+              ) : (
+                <>
+                  {filter !== 'PENDING' && filter !== 'ALL' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFilter('PENDING');
+                        setPageNumber(0);
+                        focusFilter();
+                      }}
+                      className="inline-flex h-7 cursor-pointer items-center justify-center rounded-md border border-input bg-card px-2.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+                    >
+                      查看等待回复
+                    </button>
+                  )}
+                  {filter !== 'ALL' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFilter('ALL');
+                        setPageNumber(0);
+                        focusFilter();
+                      }}
+                      className="inline-flex h-7 cursor-pointer items-center justify-center rounded-md border border-input bg-card px-2.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+                    >
+                      查看全部消息
+                    </button>
+                  )}
+                  {channel !== 'ALL' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setChannel('ALL');
+                        setPageNumber(0);
+                        focusFilter();
+                      }}
+                      className="inline-flex h-7 cursor-pointer items-center justify-center rounded-md border border-input bg-card px-2.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+                    >
+                      查看全部通道
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      <div className="pager flex shrink-0 items-center justify-between gap-2 border-t border-border/80 bg-card/65 px-3 py-2">
-        <button
-          type="button"
-          disabled={pageNumber === 0}
-          onClick={() => setPageNumber(pageNumber - 1)}
-          className="inline-flex h-7 cursor-pointer items-center justify-center rounded-md border border-input bg-card px-2.5 text-xs font-medium text-foreground shadow-xs/5 transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 dark:bg-input/32"
-        >
-          上一页
-        </button>
-        <span className="text-xs font-medium text-muted-foreground tabular-nums">{pageNumber + 1}</span>
-        <button
-          type="button"
-          disabled={(pageNumber + 1) * inbox.pageSize >= inbox.total}
-          onClick={() => setPageNumber(pageNumber + 1)}
-          className="inline-flex h-7 cursor-pointer items-center justify-center rounded-md border border-input bg-card px-2.5 text-xs font-medium text-foreground shadow-xs/5 transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 dark:bg-input/32"
-        >
-          下一页
-        </button>
-      </div>
+      {showPager && (
+        <div className="pager flex shrink-0 items-center justify-between gap-2 border-t border-border/80 bg-card/65 px-3 py-2">
+          <button
+            type="button"
+            disabled={pageNumber === 0}
+            onClick={() => setPageNumber(pageNumber - 1)}
+            className="inline-flex h-7 cursor-pointer items-center justify-center rounded-md border border-input bg-card px-2.5 text-xs font-medium text-foreground shadow-xs/5 transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 dark:bg-input/32"
+          >
+            上一页
+          </button>
+          <span className="text-xs font-medium text-muted-foreground tabular-nums">
+            第 {pageNumber + 1} 页
+          </span>
+          <button
+            type="button"
+            disabled={(pageNumber + 1) * inbox.pageSize >= inbox.total}
+            onClick={() => setPageNumber(pageNumber + 1)}
+            className="inline-flex h-7 cursor-pointer items-center justify-center rounded-md border border-input bg-card px-2.5 text-xs font-medium text-foreground shadow-xs/5 transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 dark:bg-input/32"
+          >
+            下一页
+          </button>
+        </div>
+      )}
     </section>
   );
 }

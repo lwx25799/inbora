@@ -202,10 +202,10 @@ export function ReplyDetail(props: ReplyViewProps) {
             </section>
           )}
 
-          {!thread.commentContext && (
+          {!thread.commentContext && thread.history.length > 0 && (
             <details className="history mx-auto w-full max-w-[780px] rounded-xl border border-border/80 bg-card/70 px-4 py-3 text-xs">
               <summary className="cursor-pointer select-none font-medium text-muted-foreground transition-colors hover:text-foreground tabular-nums">
-                有限上下文 · {thread.history.length} 条
+                历史对话记录 · {thread.history.length} 条
               </summary>
               <div className="mt-3 space-y-2">
                 {thread.history.map((message, index) => (
@@ -219,7 +219,7 @@ export function ReplyDetail(props: ReplyViewProps) {
                     )}
                   >
                     <small className="text-[11px] text-muted-foreground tabular-nums">
-                      {message.direction === 'OUTGOING' ? '我方已确认回复' : '入站观察'} · {time(message.occurredAt)}
+                      {message.direction === 'OUTGOING' ? '我方回复' : '对方留言'} · {time(message.occurredAt)}
                     </small>
                     <p className="mt-1 text-[13px] leading-relaxed text-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">
                       <MessageText text={message.text} />
@@ -264,13 +264,16 @@ export function ReplyDetail(props: ReplyViewProps) {
               </div>
 
               {!thread.ownership.isMine && !thread.intent && (
-                <button
-                  type="button"
-                  onClick={() => void act('继续写回复', openDialog)}
-                  className="inline-flex h-7.5 cursor-pointer items-center justify-center rounded-lg border border-input bg-card px-3 text-xs font-medium text-foreground shadow-xs/5 transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/32"
-                >
-                  继续写回复
-                </button>
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-warning/30 bg-warning/8 px-3.5 py-2 text-xs text-warning-foreground">
+                  <span>当前编辑权已释放，点击恢复后可继续输入并自动保存。</span>
+                  <button
+                    type="button"
+                    onClick={() => void act('继续写回复', openDialog)}
+                    className="inline-flex h-7 cursor-pointer items-center justify-center rounded-lg border border-input bg-card px-3 text-xs font-medium text-foreground shadow-xs/5 transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/32"
+                  >
+                    继续写回复
+                  </button>
+                </div>
               )}
 
               <details className="identity rounded-xl border border-border/80 bg-muted/40 px-3.5 py-2.5 text-xs">
@@ -299,10 +302,10 @@ export function ReplyDetail(props: ReplyViewProps) {
                 </p>
               )}
 
-              {!thread.commentContext && (
+              {!thread.commentContext && thread.history.length > 0 && (
                 <details className="rounded-xl border border-border/80 bg-muted/35 px-3.5 py-2.5 text-xs">
                   <summary className="cursor-pointer select-none font-medium text-muted-foreground transition-colors hover:text-foreground tabular-nums">
-                    上下文 · {thread.history.length} 条
+                    历史对话记录 · {thread.history.length} 条
                   </summary>
                   <div className="mt-2 space-y-1.5">
                     {thread.history.map((message, index) => (

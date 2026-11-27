@@ -41,7 +41,7 @@ test('unlimited model and send choices apply only on explicit policy save and ke
     await expect.poll(()=>data.active('AUTO_REPLY')!.scope.modelLimit).toBeNull();expect(data.active('AUTO_REPLY')!.scope).toMatchObject({modelLimit:null,sendLimit:null});
     expect((data.active('AUTO_REPLY')!.scope as ReplyPolicy).replyToNestedComments).toBe(false);
     expect(store.budgets()).toEqual([{kind:'MODEL',used:4,maximum:null},{kind:'SEND',used:6,maximum:null}]);
-    await expect.poll(()=>page.locator('.settings').innerText()).toContain('MODEL 4/无上限');
+    await expect.poll(()=>page.locator('.settings').innerText()).toContain('模型 4/无上限');
     await page.getByRole('button',{name:'会话中心',exact:true}).click();await page.getByRole('button',{name:'自动化规则',exact:true}).click();
     expect(await page.getByLabel('模型次数无上限',{exact:true}).isChecked()).toBe(true);expect(await page.getByLabel('发送次数无上限',{exact:true}).isChecked()).toBe(true);
     expect(await page.getByLabel('自动回复楼中楼评论',{exact:true}).isChecked()).toBe(false);

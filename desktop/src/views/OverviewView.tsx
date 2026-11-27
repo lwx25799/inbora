@@ -32,7 +32,14 @@ import {
   type Inbox,
   type Status,
 } from '@/api';
-import { browserState, modes, replyStatusLabel, time } from '@/presentation';
+import {
+  browserState,
+  compactTime,
+  formatSyncLabel,
+  modes,
+  replyStatusLabel,
+  time,
+} from '@/presentation';
 
 export type DesktopPageId =
   | 'overview'
@@ -186,7 +193,7 @@ export function OverviewView({
               onClick={() => onNavigate('automation')}
             >
               <SlidersHorizontalIcon />
-              配置自动规则
+              配置自动回复规则
             </Button>
           )}
           <Button
@@ -196,7 +203,7 @@ export function OverviewView({
             onClick={() => void onSync()}
           >
             <RefreshCwIcon className={status.sync.running ? 'animate-spin' : ''} />
-            {status.sync.running ? '同步中…' : '立即同步'}
+            {formatSyncLabel(status.sync)}
           </Button>
           <Button size="sm" onClick={() => onNavigate('inbox')}>
             <InboxIcon />
@@ -205,9 +212,13 @@ export function OverviewView({
         </div>
       </div>
 
-      {/* Row 1: 4 Real Telemetry Cards */}
+      {/* Row 1: 4 Real Interactive Telemetry Cards */}
       <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
-        <Card className="p-4">
+        <button
+          type="button"
+          onClick={() => onNavigate('inbox')}
+          className="group cursor-pointer rounded-2xl border border-border/85 bg-card p-4 text-left shadow-xs/5 transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1.5 font-medium">
               <InboxIcon className="size-3.5 text-primary" />
@@ -223,12 +234,19 @@ export function OverviewView({
             </span>
             <span className="text-xs text-muted-foreground">条未读</span>
           </div>
-          <p className="mt-2 text-[11.5px] text-muted-foreground tabular-nums">
-            当前列表等待回复 {waitingCount} 条 · 需人工查看 {manualCount} 条
+          <p className="mt-2 flex items-center justify-between gap-1 text-[11.5px] text-muted-foreground tabular-nums">
+            <span className="truncate">
+              当前列表等待回复 {waitingCount} 条 · 需人工查看 {manualCount} 条
+            </span>
+            <ArrowRightIcon aria-hidden="true" className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
           </p>
-        </Card>
+        </button>
 
-        <Card className="p-4">
+        <button
+          type="button"
+          onClick={() => onNavigate('automation')}
+          className="group cursor-pointer rounded-2xl border border-border/85 bg-card p-4 text-left shadow-xs/5 transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1.5 font-medium">
               <RadioIcon className="size-3.5 text-primary" />
@@ -243,7 +261,7 @@ export function OverviewView({
               {sendBudget ? sendBudget.used : 0}
             </span>
             <span className="text-xs text-muted-foreground tabular-nums">
-              / {sendBudget ? (sendBudget.maximum === null ? '无上限' : sendBudget.maximum) : '未记录'}
+              / {sendBudget ? (sendBudget.maximum === null ? '无上限' : sendBudget.maximum) : '未设置'}
             </span>
           </div>
           {sendBudget && sendBudget.maximum !== null ? (
@@ -254,13 +272,18 @@ export function OverviewView({
               />
             </div>
           ) : (
-            <p className="mt-2 text-[11.5px] text-muted-foreground">
-              已确认发送计数随内核持久保存
+            <p className="mt-2 flex items-center justify-between gap-1 text-[11.5px] text-muted-foreground">
+              <span className="truncate">已确认发送计数持久保存</span>
+              <ArrowRightIcon aria-hidden="true" className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
             </p>
           )}
-        </Card>
+        </button>
 
-        <Card className="p-4">
+        <button
+          type="button"
+          onClick={() => onNavigate('models')}
+          className="group cursor-pointer rounded-2xl border border-border/85 bg-card p-4 text-left shadow-xs/5 transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1.5 font-medium">
               <CpuIcon className="size-3.5 text-primary" />
@@ -278,13 +301,20 @@ export function OverviewView({
               / {modelBudget ? (modelBudget.maximum === null ? '无上限' : modelBudget.maximum) : '次请求'}
             </span>
           </div>
-          <p className="mt-2 text-[11.5px] text-muted-foreground tabular-nums">
-            输入 {status.usage.inputTokens.toLocaleString('zh-CN')} · 输出{' '}
-            {status.usage.outputTokens.toLocaleString('zh-CN')}
+          <p className="mt-2 flex items-center justify-between gap-1 text-[11.5px] text-muted-foreground tabular-nums">
+            <span className="truncate">
+              输入 {status.usage.inputTokens.toLocaleString('zh-CN')} · 输出{' '}
+              {status.usage.outputTokens.toLocaleString('zh-CN')}
+            </span>
+            <ArrowRightIcon aria-hidden="true" className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
           </p>
-        </Card>
+        </button>
 
-        <Card className="p-4">
+        <button
+          type="button"
+          onClick={() => onNavigate('accounts')}
+          className="group cursor-pointer rounded-2xl border border-border/85 bg-card p-4 text-left shadow-xs/5 transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1.5 font-medium">
               <ShieldCheckIcon className="size-3.5 text-primary" />
@@ -301,10 +331,13 @@ export function OverviewView({
             </span>
             <span className="text-xs text-muted-foreground">通道可发送</span>
           </div>
-          <p className="mt-2 truncate text-[11.5px] text-muted-foreground">
-            {browserState(status.browser.state, status.automation?.emergencyStopped)}
+          <p className="mt-2 flex items-center justify-between gap-1 text-[11.5px] text-muted-foreground">
+            <span className="truncate">
+              {browserState(status.browser.state, status.automation?.emergencyStopped)}
+            </span>
+            <ArrowRightIcon aria-hidden="true" className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
           </p>
-        </Card>
+        </button>
       </div>
 
       {/* Row 2: Pending Inbox Queue + Real Channel & Sync Status */}
@@ -328,7 +361,7 @@ export function OverviewView({
                 <MessageSquareIcon className="size-6 text-muted-foreground/60" />
                 <p className="text-sm font-medium text-foreground">当前没有待处理消息</p>
                 <p className="max-w-sm text-xs text-muted-foreground">
-                  点击上方「立即同步」读取最新私信和评论，或前往会话中心查看历史记录。
+                  点击上方「同步收件箱」读取最新私信和评论，或前往会话中心查看历史记录。
                 </p>
               </div>
             ) : (
@@ -349,7 +382,7 @@ export function OverviewView({
                           />
                         )}
                         <span className="truncate text-[13.5px] font-medium text-foreground">
-                          {item.author || '未命名访客'}
+                          {item.author || '当前联系人'}
                         </span>
                         <Badge variant="outline" size="sm">
                           {item.channel === 'DIRECT_MESSAGE' ? '私信' : '评论'}
@@ -372,8 +405,11 @@ export function OverviewView({
                         {item.displayText || item.preview || '（无文字摘要）'}
                       </p>
                     </div>
-                    <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-                      {item.time ? time(item.time) : ''}
+                    <span
+                      className="shrink-0 text-[11px] text-muted-foreground tabular-nums"
+                      title={item.time ? time(item.time) : undefined}
+                    >
+                      {item.time ? compactTime(item.time) : ''}
                     </span>
                   </button>
                 ))}

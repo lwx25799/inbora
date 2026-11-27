@@ -21,6 +21,7 @@ export interface ReplyViewProps {
   error:string;
   notice:string;
   text:string;
+  suggestionId?:string|null;
   setText:(text:string)=>void;
   setSuggestionId:(id:string|null)=>void;
   refreshThread:()=>Promise<unknown>;

@@ -99,6 +99,8 @@ function AvailableProviders({
   const publishedRead = useRef(0);
   const latestStatus = useRef(status);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [writingConnections, setWritingConnections] = useState<Record<string, number>>({});
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; version: number } | null>(null);
   const [deleteFeedback, setDeleteFeedback] = useState<ModelFeedback>();
   const connection = state.connections.find(item => item.id === editing?.id);
   const retained = lastEditorConnection.current;
@@ -197,24 +199,65 @@ function AvailableProviders({
   const change: ChangeModelProviders = async (command, onCommitted) => {
     if (!mounted.current) return;
     if (refreshing) throw new Error('MODEL_CONNECTION_CONFLICT');
-    try {
-      await request<unknown>(command);
-    } catch (error) {
-      if (mounted.current) await readStatus(true).catch(() => {});
-      throw error;
+    const targetConnectionId = 'connectionId' in command && typeof command.connectionId === 'string'
+      ? command.connectionId
+      : null;
+    if (targetConnectionId) {
+      setConfirmDelete(current => (current?.id === targetConnectionId ? null : current));
+      setWritingConnections(current => ({
+        ...current,
+        [targetConnectionId]: (current[targetConnectionId] ?? 0) + 1,
+      }));
     }
-    if (!mounted.current) return;
-    onCommitted?.();
-    return readStatus(true).catch(() => {
-      throw new Error('MODEL_PROVIDER_STATUS_UNCONFIRMED');
-    });
+    try {
+      try {
+        await request<unknown>(command);
+      } catch (error) {
+        if (mounted.current) await readStatus(true).catch(() => {});
+        throw error;
+      }
+      if (!mounted.current) return;
+      onCommitted?.();
+      return await readStatus(true).catch(() => {
+        throw new Error('MODEL_PROVIDER_STATUS_UNCONFIRMED');
+      });
+    } finally {
+      if (mounted.current && targetConnectionId) {
+        setWritingConnections(current => {
+          const nextCount = (current[targetConnectionId] ?? 1) - 1;
+          if (nextCount > 0) return { ...current, [targetConnectionId]: nextCount };
+          const { [targetConnectionId]: _, ...rest } = current;
+          return rest;
+        });
+      }
+    }
   };
 
-  async function deleteConnection(id: string) {
+  useEffect(() => {
+    setConfirmDelete(current => {
+      if (!current) return null;
+      const target = state.connections.find(item => item.id === current.id);
+      if (!target || target.version !== current.version || target.id === state.selection.connectionId) {
+        return null;
+      }
+      return current;
+    });
+  }, [state.connections, state.selection.connectionId]);
+
+  async function deleteConnection(id: string, expectedVersion: number) {
     const target = state.connections.find(item => item.id === id);
-    if (refreshing || !target || deleting || id === state.selection.connectionId) return;
-    if (!window.confirm(`删除「${target.name}」及关联的 Key？历史调用记录会保留。`)) return;
+    if (
+      refreshing ||
+      !target ||
+      target.version !== expectedVersion ||
+      deleting ||
+      id === state.selection.connectionId
+    ) {
+      setConfirmDelete(null);
+      return;
+    }
     const editor = activeEditor.current;
+    setConfirmDelete(null);
     setDeleting(id);
     setDeleteFeedback(undefined);
     try {
@@ -222,7 +265,7 @@ function AvailableProviders({
         command: 'modelProviders',
         action: 'delete',
         connectionId: id,
-        expectedVersion: target.version,
+        expectedVersion,
       });
       if (!mounted.current) return;
       if (!next?.modelProviders || next.modelProviders.connections.some(item => item.id === id))
@@ -326,14 +369,47 @@ function AvailableProviders({
                       </button>
                       <button
                         className={btnDangerCls}
-                        disabled={refreshing || current || deleting !== null}
+                        disabled={refreshing || current || deleting !== null || Boolean(writingConnections[item.id])}
                         aria-label={`${deleting === item.id ? '正在删除' : '删除'} ${item.name}`}
-                        onClick={() => void deleteConnection(item.id)}
+                        onClick={() =>
+                          setConfirmDelete(prev =>
+                            prev?.id === item.id && prev.version === item.version
+                              ? null
+                              : { id: item.id, version: item.version },
+                          )
+                        }
                       >
                         {deleting === item.id ? '正在删除' : '删除'}
                       </button>
                     </div>
                   </div>
+                  {confirmDelete?.id === item.id &&
+                    confirmDelete.version === item.version &&
+                    !current &&
+                    !writingConnections[item.id] && (
+                    <div className="mt-2.5 flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/6 p-3">
+                      <p className="text-xs text-destructive-foreground">
+                        确认删除「{item.name}」及关联的 Key？历史调用记录会保留。
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          className={btnDangerCls}
+                          disabled={refreshing || deleting !== null || Boolean(writingConnections[item.id])}
+                          onClick={() => void deleteConnection(item.id, confirmDelete.version)}
+                        >
+                          确认删除
+                        </button>
+                        <button
+                          type="button"
+                          className={btnOutlineCls}
+                          onClick={() => setConfirmDelete(null)}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </li>
               );
             })}
@@ -358,6 +434,7 @@ function AvailableProviders({
             budgetExhausted={budgetExhausted}
             hidden={!expanded}
             refreshing={refreshing}
+            connectionWriting={Boolean(editorConnection && writingConnections[editorConnection.id])}
             selectionRevision={state.selection.selectionRevision}
             stopped={Boolean(status.automation?.emergencyStopped)}
             onCreated={id => {

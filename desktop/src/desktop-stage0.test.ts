@@ -566,7 +566,8 @@ test('AutomationSettings syncs baseline on model grant and policy revoke without
       automation: { ...activePolicyStatus.automation!, replyPolicy: null },
     });
     requestMock.mockResolvedValueOnce(afterRevoke);
-    await (findButton(view.getTree(), '撤销自动回复策略').props.onClick as () => Promise<void>)();
+    (findButton(view.getTree(), '撤销自动回复策略').props.onClick as () => void)();
+    await (findButton(view.getTree(), '确认撤销策略').props.onClick as () => Promise<void>)();
     expect(findControlByLabel(view.getTree(), '自动回复规则', 'textarea').props.value).toBe('撤销后默认规则');
 
     const laterBackend = baseStatus({

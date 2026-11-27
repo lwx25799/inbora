@@ -25,6 +25,7 @@ interface BufferDraft {
   suggestionId: string | null;
   editVersion?: number;
   submitted?: SubmittedReply;
+  unsaved?: boolean;
 }
 
 export interface SendState {
@@ -46,7 +47,7 @@ interface ReplyWorkspaceParams {
   error: string;
   setStatus: Dispatch<SetStateAction<Status | null>>;
   setError: Dispatch<SetStateAction<string>>;
-  setNotice: Dispatch<SetStateAction<string>>;
+  setNotice: (value: string) => void;
 }
 
 export function useReplyWorkspace({
@@ -66,10 +67,24 @@ export function useReplyWorkspace({
   const [send, setSend] = useState<SendState | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [otherUnsavedDrafts, setOtherUnsavedDrafts] = useState(false);
 
   const selection = useRef(crypto.randomUUID());
   const selectedRef = useRef<string | null>(null);
   const buffers = useRef(new Map<string, BufferDraft>());
+
+  function syncOtherUnsavedDrafts(currentId: string | null = selectedRef.current): void {
+    const loadedId =
+      editorLoaded.current && latestThread.current?.event.id === currentId ? currentId : null;
+    let found = false;
+    for (const [id, entry] of buffers.current) {
+      if (id !== loadedId && entry.unsaved) {
+        found = true;
+        break;
+      }
+    }
+    setOtherUnsavedDrafts(found);
+  }
   const detailRequest = useRef(0);
   const editorLoaded = useRef(false);
   const detailElement = useRef<HTMLElement | null>(null);
@@ -121,7 +136,11 @@ export function useReplyWorkspace({
   });
 
   useEffect(() => {
-    if (dialogOpen && !dialogElement.current?.open) dialogElement.current?.showModal();
+    if (dialogOpen && !dialogElement.current?.open) {
+      dialogElement.current?.showModal();
+      const input = dialogElement.current?.querySelector<HTMLTextAreaElement>("textarea:not([readonly])");
+      if (input) requestAnimationFrame(() => input.focus());
+    }
     if (!dialogOpen && dialogElement.current?.open) dialogElement.current.close();
   }, [dialogOpen]);
 
@@ -139,11 +158,21 @@ export function useReplyWorkspace({
           saved?.submitted ?? (send?.eventId === thread.event.id ? send.submitted : undefined),
       };
       if (editor.eventId === thread.event.id && matchesSentDraft(thread, editor)) {
-        if (saved && matchesSentDraft(thread, saved)) buffers.current.delete(thread.event.id);
+        if (saved && matchesSentDraft(thread, saved)) {
+          buffers.current.delete(thread.event.id);
+          syncOtherUnsavedDrafts();
+        }
         setText("");
         setSuggestionId(null);
       } else if (editor.submitted) {
-        buffers.current.set(thread.event.id, { ...editor, version: thread.draft?.version ?? 0 });
+        buffers.current.set(thread.event.id, {
+          ...editor,
+          version: thread.draft?.version ?? 0,
+          unsaved:
+            editor.text !== editor.submitted.text ||
+            editor.suggestionId !== editor.submitted.suggestionId,
+        });
+        syncOtherUnsavedDrafts();
       }
     }
     if (
@@ -166,7 +195,9 @@ export function useReplyWorkspace({
     if (!connected || !selected) return;
     let ignore = false;
     setThread(null);
+    latestThread.current = null;
     editorLoaded.current = false;
+    syncOtherUnsavedDrafts(selected);
     setSend(null);
     setText("");
     const selectionId = crypto.randomUUID();
@@ -187,6 +218,7 @@ export function useReplyWorkspace({
           latestThread.current = detail;
           setThread(detail);
           editorLoaded.current = true;
+          syncOtherUnsavedDrafts(selected);
           const editor = replyEditorDraft(detail, buffers.current.get(selected));
           latestEditor.current = {
             eventId: selected,
@@ -350,6 +382,7 @@ export function useReplyWorkspace({
         }
         if (!editorLoaded.current) {
           editorLoaded.current = true;
+          syncOtherUnsavedDrafts(eventId);
           const saved = buffers.current.get(eventId);
           const editor = replyEditorDraft(detail, saved);
           latestEditor.current = {
@@ -382,7 +415,9 @@ export function useReplyWorkspace({
         buffers.current.set(next.event.id, {
           ...latestEditor.current,
           version: previous?.draft?.version ?? 0,
+          unsaved: true,
         });
+        syncOtherUnsavedDrafts();
         setError(reasons.MCP_DRAFT_VERSION_CHANGED!);
       }
       return;
@@ -390,6 +425,7 @@ export function useReplyWorkspace({
     const buffered = buffers.current.get(next.event.id);
     if (buffered?.text === before.text && buffered.suggestionId === before.suggestionId) {
       buffers.current.delete(next.event.id);
+      syncOtherUnsavedDrafts();
     }
     latestEditor.current = changed;
     setText(changed.text);
@@ -399,6 +435,7 @@ export function useReplyWorkspace({
   function select(id: string): void {
     detailRequest.current++;
     selectedRef.current = id;
+    syncOtherUnsavedDrafts(id);
     setSelected(id);
     setError("");
     setNotice("");
@@ -414,7 +451,9 @@ export function useReplyWorkspace({
         suggestionId,
         editVersion: latestEditor.current.editVersion,
         submitted: buffers.current.get(thread.event.id)?.submitted,
+        unsaved: true,
       });
+      syncOtherUnsavedDrafts();
     }
     const leaving =
       thread &&
@@ -478,8 +517,9 @@ export function useReplyWorkspace({
       if (buffered.text === submittedText && buffered.suggestionId === submittedSuggestion) {
         buffers.current.delete(eventId);
       } else {
-        buffers.current.set(eventId, { ...buffered, version: saved.version });
+        buffers.current.set(eventId, { ...buffered, version: saved.version, unsaved: true });
       }
+      syncOtherUnsavedDrafts();
     }
     const current = latestEditor.current;
     if (
@@ -490,7 +530,6 @@ export function useReplyWorkspace({
       setSuggestionId(null);
     }
     await refreshThread(eventId);
-    setNotice("草稿已保存，旧审批已失效");
   }
 
   async function reconnect(): Promise<void> {
@@ -726,10 +765,12 @@ export function useReplyWorkspace({
     selected,
     thread,
     text,
+    suggestionId,
     send,
     saving,
     dirty,
     localDraft,
+    hasUnsavedDraft: dirty || otherUnsavedDrafts,
     devRecovery,
     detailElement,
     dialogElement,

@@ -3,6 +3,7 @@ import type * as React from 'react';
 import { FileTextIcon, SlidersHorizontalIcon, SparklesIcon } from 'lucide-react';
 import { AutomationSettings } from '@/AutomationSettings';
 import { SettingsDialog } from '@/SettingsDialog';
+import { AutoReplySwitch } from '@/components/AutoReplySwitch';
 import { PageHeader } from '@/components/PageHeader';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -62,6 +63,16 @@ export function AutomationView({
 
   const autoOn =
     status.configuredMode === 'LIMITED_AUTO' && Boolean(status.automation?.replyPolicy);
+  const hasReplyPolicy = Boolean(status.automation?.replyPolicy);
+  const emergencyStopped = Boolean(status.automation?.emergencyStopped || status.paused);
+  const switchDisabled = pendingAutoReply !== null || !!busy || !hasReplyPolicy;
+  const switchHint = !hasReplyPolicy
+    ? '请先在下方保存并启用自动回复策略'
+    : emergencyStopped
+      ? '当前处于急停状态，恢复运行后可继续'
+      : autoOn
+        ? '点击暂停自动回复（保留策略配置）'
+        : '点击按已保存策略开启自动回复';
 
   return (
     <div className="settings mx-auto max-w-[1200px] space-y-5 px-6 py-5">
@@ -69,24 +80,26 @@ export function AutomationView({
         title="自动化规则"
         description="统一管理自动回复总开关、工作模式、后台收取范围、持续授权额度与业务提示词"
         actions={
-          <label className="check inline-flex cursor-pointer items-center gap-2.5 rounded-xl border border-border bg-card px-3.5 py-2 text-xs font-medium text-foreground shadow-xs/5 select-none">
-            <input
-              type="checkbox"
-              role="switch"
-              aria-label="设置中的自动回复"
-              className="size-4 shrink-0 cursor-pointer accent-primary disabled:cursor-not-allowed disabled:opacity-55"
-              disabled={pendingAutoReply !== null || !!busy || !status.automation?.replyPolicy}
+          <label
+            title={switchHint}
+            className="check inline-flex cursor-pointer items-center gap-2.5 rounded-xl border border-border bg-card px-3.5 py-2 text-xs font-medium text-foreground shadow-xs/5 select-none has-[:disabled]:cursor-not-allowed"
+          >
+            <AutoReplySwitch
               checked={pendingAutoReply ?? autoOn}
-              onChange={e => {
-                const enabled = e.target.checked;
+              disabled={switchDisabled}
+              ariaLabel="设置中的自动回复"
+              title={switchHint}
+              onChange={enabled => {
                 void act('更新自动回复', () => toggleAuto(enabled));
               }}
             />
-            {pendingAutoReply !== null
-              ? pendingAutoReply
-                ? '正在开启自动回复…'
-                : '正在关闭自动回复…'
-              : `自动回复：${autoOn ? '开' : '关'}`}
+            <span>
+              {pendingAutoReply !== null
+                ? pendingAutoReply
+                  ? '正在开启自动回复…'
+                  : '正在关闭自动回复…'
+                : `自动回复：${autoOn ? '开' : '关'}`}
+            </span>
           </label>
         }
       />

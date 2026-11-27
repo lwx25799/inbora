@@ -389,10 +389,12 @@ test('P16 saves a draft, manages Key and catalogs, tests once, applies and delet
       confirmed: true, expectedSelectionRevision: 1, commandId: expect.stringMatching(/^[a-f0-9-]{36}$/u)});
     expect(await button(page, '删除 路由备用').isDisabled()).toBe(true);
     await button(page, '删除 原连接').click();
+    await button(page, '确认删除').click();
     await text(page, '已删除「原连接」。').waitFor();
     expect(status.modelProviders!.connections.some(item => item.id === firstId)).toBe(false);
     expect(status.budgets[0]!.used).toBe(1);
     await button(page, '清除 Key').click();
+    await button(page, '确认清除 Key').click();
     await text(page, '这条连接的 Key 已吊销。').waitFor();
     await current.getByRole('definition').filter({hasText: '未配置'}).waitFor();
     expect(calls.at(-1)).toMatchObject({action: 'setKey', storage: 'DELETE'});
@@ -503,6 +505,7 @@ test.each(['https://alternate.example.com/v1', 'https://api.deepseek.com/v2'])(
       const cleanupFailed = baseUrl.endsWith('/v2');
       if (cleanupFailed) status.keyStorageError = 'MODEL_CREDENTIAL_CLEANUP_FAILED';
       await button(page, '清除 Key').click();
+      await button(page, '确认清除 Key').click();
       await text(page, '这条连接的 Key 已吊销。').waitFor();
       if (cleanupFailed) await text(page, errorMessages.MODEL_CREDENTIAL_CLEANUP_FAILED!).waitFor();
       expect(status.modelProviders!.connections[0]!.applied!.keyPresent).toBe(false);
@@ -552,6 +555,7 @@ test.each(['https://alternate.example.com/v1', 'https://api.deepseek.com/v2'])(
 
         const confirmation = fixture.hold('list', true, beyondFirstPage);
         await button(page, '清除 Key').click();
+        await button(page, '确认清除 Key').click();
         await expect.poll(() => confirmation.entered).toBe(true);
         status.modelAuthorized = false;
         await fixture.emit('status_updated');

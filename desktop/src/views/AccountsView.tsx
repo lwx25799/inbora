@@ -94,10 +94,10 @@ export function AccountsView({
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1.5 font-medium">
               <ShieldCheckIcon className="size-3.5 text-primary" />
-              账号结构与最近同步
+              最近同步状态
             </span>
-            <Badge variant="outline" size="sm" className="font-mono">
-              schema{status.schema}
+            <Badge variant={status.lastSync.length > 0 ? 'success' : 'secondary'} size="sm">
+              {status.lastSync.length > 0 ? '已同步' : '待同步'}
             </Badge>
           </div>
           <div className="mt-2 space-y-1 text-xs text-foreground tabular-nums">

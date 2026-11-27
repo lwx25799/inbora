@@ -15,7 +15,7 @@ import {
 } from './api';
 import { explainSafe, extractErrorCode } from './error-messages';
 
-const title = '账号与平台（单库多账号）';
+const title = '已接入账号';
 const defaultDisplayLabel = '合成验证账号';
 const accountStatusNames: Record<AccountSummary['status'], string> = {
   ACTIVE: '活跃',
@@ -258,45 +258,53 @@ function ConnectedAccounts({ status, busy }: { status: Status; busy: string }) {
         </dl>
       )}
 
-      <div className="flex flex-col gap-3 rounded-xl border border-border/75 bg-muted/30 p-3.5">
-        <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground">
-          展示名（可选）
-          <input
-            type="text"
-            className={inputCls}
-            value={displayLabel}
-            placeholder={defaultDisplayLabel}
-            maxLength={128}
-            disabled={disabled || !!registration}
-            onChange={event => setDisplayLabel(event.target.value)}
-          />
-        </label>
-        <div className="row flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            className={btnPrimaryCls}
-            disabled={disabled || !!registration}
-            onClick={() =>
-              register({
-                commandId: crypto.randomUUID(),
-                displayLabel: displayLabel.trim() || defaultDisplayLabel,
-              })
-            }
-          >
-            注册合成验证账号 (Mock)
-          </button>
-          {registration && (
+      <details
+        className="rounded-xl border border-border/75 bg-muted/30 px-3.5 py-2.5"
+        open={Boolean(registration)}
+      >
+        <summary className="cursor-pointer text-xs font-medium text-muted-foreground select-none hover:text-foreground">
+          测试用合成账号（可选）
+        </summary>
+        <div className="mt-3 flex flex-col gap-3">
+          <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground">
+            展示名（可选）
+            <input
+              type="text"
+              className={inputCls}
+              value={displayLabel}
+              placeholder={defaultDisplayLabel}
+              maxLength={128}
+              disabled={disabled || !!registration}
+              onChange={event => setDisplayLabel(event.target.value)}
+            />
+          </label>
+          <div className="row flex flex-wrap items-center gap-2">
             <button
               type="button"
-              className={btnOutlineCls}
-              disabled={disabled}
-              onClick={() => register(registration)}
+              className={btnPrimaryCls}
+              disabled={disabled || !!registration}
+              onClick={() =>
+                register({
+                  commandId: crypto.randomUUID(),
+                  displayLabel: displayLabel.trim() || defaultDisplayLabel,
+                })
+              }
             >
-              重试同一次注册
+              注册合成验证账号 (Mock)
             </button>
-          )}
+            {registration && (
+              <button
+                type="button"
+                className={btnOutlineCls}
+                disabled={disabled}
+                onClick={() => register(registration)}
+              >
+                重试同一次注册
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      </details>
     </div>
   );
 }

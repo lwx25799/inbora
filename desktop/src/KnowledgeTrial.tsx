@@ -46,8 +46,37 @@ export function KnowledgeTrial({ overview, busy, perform }: KnowledgePanelProps)
   const selectableSources = overview.sources.filter(
     source => source.kind === 'KNOWLEDGE' || source.kind === 'MANUAL',
   );
+  const missingSelectedIds = sourceIds.filter(
+    selectedId => !selectableSources.some(source => source.id === selectedId),
+  );
+  const singleSourcePage = overview.totals.sources <= overview.sources.length;
+  const confirmedMissingSelected = singleSourcePage && missingSelectedIds.length > 0;
   const id = (value: string) =>
     value === 'current' ? overview.activePersonaId : value === 'baseline' ? null : value;
+  const samePersona = comparison !== 'none' && id(comparison) === id(persona);
+  const canSubmit =
+    Boolean(message.trim()) && consent && !busy && !samePersona && !confirmedMissingSelected;
+  const submitTrial = () => {
+    if (!canSubmit) return;
+    const text = message;
+    void perform<TrialResult>(
+      '生成试聊回复',
+      {
+        action: 'tryReply',
+        channel,
+        message: text,
+        sourceIds,
+        personaVersionId: id(persona),
+        ...(comparison !== 'none' ? { comparePersonaVersionId: id(comparison) } : {}),
+        confirmed: true,
+      },
+      value => {
+        setResult(value);
+        setSubmitted(text);
+      },
+      false,
+    );
+  };
 
   return (
     <div className="knowledge-trial flex flex-col gap-4">
@@ -64,25 +93,7 @@ export function KnowledgeTrial({ overview, busy, perform }: KnowledgePanelProps)
         className="flex flex-col gap-3.5 rounded-xl border border-border/80 bg-background p-4"
         onSubmit={event => {
           event.preventDefault();
-          if (!message.trim() || !consent || busy) return;
-          const text = message;
-          void perform<TrialResult>(
-            '生成试聊回复',
-            {
-              action: 'tryReply',
-              channel,
-              message: text,
-              sourceIds,
-              personaVersionId: id(persona),
-              ...(comparison !== 'none' ? { comparePersonaVersionId: id(comparison) } : {}),
-              confirmed: true,
-            },
-            value => {
-              setResult(value);
-              setSubmitted(text);
-            },
-            false,
-          );
+          submitTrial();
         }}
       >
         <div className="knowledge-fields grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -138,37 +149,61 @@ export function KnowledgeTrial({ overview, busy, perform }: KnowledgePanelProps)
           </label>
         </div>
 
-        <details className="rounded-xl border border-border/75 bg-muted/30 px-3.5 py-2.5 text-xs">
-          <summary className="cursor-pointer font-medium text-foreground select-none">
-            本次知识来源 · {sourceIds.length ? `指定 ${sourceIds.length} 个` : '全部已启用知识'}
-          </summary>
-          <div className="mt-2.5 flex flex-col gap-2">
-            <p className={hintCls}>
-              未勾选时使用本账号全部已启用且当前有效的知识；指定来源仍只检索已启用条目。
-            </p>
-            {selectableSources.map(source => (
-              <label
-                className="check inline-flex cursor-pointer items-center gap-2 text-xs text-foreground select-none"
-                key={source.id}
-              >
-                <input
-                  type="checkbox"
-                  className="size-4 cursor-pointer accent-primary"
-                  checked={sourceIds.includes(source.id)}
-                  disabled={busy}
-                  onChange={event =>
-                    setSourceIds(previous =>
-                      event.target.checked
-                        ? [...previous, source.id]
-                        : previous.filter(value => value !== source.id),
-                    )
-                  }
-                />
-                {source.title}
-              </label>
-            ))}
-          </div>
-        </details>
+        {(selectableSources.length > 0 || sourceIds.length > 0) && (
+          <details
+            open={missingSelectedIds.length > 0 ? true : undefined}
+            className="rounded-xl border border-border/75 bg-muted/30 px-3.5 py-2.5 text-xs"
+          >
+            <summary className="cursor-pointer font-medium text-foreground select-none">
+              本次知识来源 · {sourceIds.length ? `指定 ${sourceIds.length} 个` : '全部已启用知识'}
+            </summary>
+            <div className="mt-2.5 flex flex-col gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className={hintCls}>
+                  未勾选时使用本账号全部已启用且当前有效的知识；指定来源仍只检索已启用条目。
+                </p>
+                {sourceIds.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setSourceIds([])}
+                    className="shrink-0 cursor-pointer text-xs font-medium text-primary hover:underline disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    清除已选来源
+                  </button>
+                )}
+              </div>
+              {missingSelectedIds.length > 0 && (
+                <p className="rounded-lg border border-warning/35 bg-warning/8 px-3 py-1.5 text-xs text-warning-foreground">
+                  {singleSourcePage
+                    ? `有 ${missingSelectedIds.length} 个已选来源已删除或不再可选，请点击上方「清除已选来源」重新选择，避免检索结果为空。`
+                    : `有 ${missingSelectedIds.length} 个已选来源不在当前页列表中；如需恢复检索全部已启用知识，请点击「清除已选来源」。`}
+                </p>
+              )}
+              {selectableSources.map(source => (
+                <label
+                  className="check inline-flex cursor-pointer items-center gap-2 text-xs text-foreground select-none"
+                  key={source.id}
+                >
+                  <input
+                    type="checkbox"
+                    className="size-4 cursor-pointer accent-primary"
+                    checked={sourceIds.includes(source.id)}
+                    disabled={busy}
+                    onChange={event =>
+                      setSourceIds(previous =>
+                        event.target.checked
+                          ? [...previous, source.id]
+                          : previous.filter(value => value !== source.id),
+                      )
+                    }
+                  />
+                  {source.title}
+                </label>
+              ))}
+            </div>
+          </details>
+        )}
 
         <label className={labelCls}>
           模拟来信
@@ -177,9 +212,17 @@ export function KnowledgeTrial({ overview, busy, perform }: KnowledgePanelProps)
             aria-label="模拟来信"
             rows={4}
             maxLength={4000}
+            placeholder="输入想测试的客户提问（Ctrl+Enter 快捷生成）"
             value={message}
             disabled={busy}
             onChange={event => setMessage(event.target.value)}
+            onKeyDown={event => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && canSubmit) {
+                event.preventDefault();
+                submitTrial();
+              }
+            }}
           />
         </label>
 
@@ -194,21 +237,19 @@ export function KnowledgeTrial({ overview, busy, perform }: KnowledgePanelProps)
           我同意将这条模拟来信、所选人格及必要知识和样本片段发送给当前模型，并计入已有模型额度。
         </label>
 
-        <div className={submitWrapCls}>
+        <div className={`${submitWrapCls} flex flex-wrap items-center gap-3`}>
           <button
             className="primary"
             type="submit"
-            disabled={
-              busy ||
-              !message.trim() ||
-              !consent ||
-              (comparison !== 'none' && id(comparison) === id(persona))
-            }
+            disabled={!canSubmit}
           >
             生成试聊回复{comparison !== 'none' ? '并对比' : ''}
           </button>
+          {message.trim() && !consent && !samePersona && (
+            <span className="text-[11.5px] text-muted-foreground">勾选上方确认后即可试聊</span>
+          )}
         </div>
-        {comparison !== 'none' && id(comparison) === id(persona) && (
+        {samePersona && (
           <p className="hint text-xs text-warning-foreground">请选择两个不同的人格进行对比。</p>
         )}
       </form>

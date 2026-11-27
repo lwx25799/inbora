@@ -58,6 +58,66 @@ const btnOutlineCls =
 const btnPrimaryCls =
   'primary inline-flex h-8 shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-primary bg-primary px-3 text-xs font-medium text-primary-foreground shadow-xs transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-55';
 
+function matchColumn(columns: string[], candidates: string[], exclude?: string): string | undefined {
+  const pool = columns.filter(col => col !== exclude);
+  for (const candidate of candidates) {
+    const exact = pool.find(col => col.trim().toLowerCase() === candidate);
+    if (exact) return exact;
+  }
+  for (const candidate of candidates) {
+    const partial = pool.find(col => col.trim().toLowerCase().includes(candidate));
+    if (partial) return partial;
+  }
+  return undefined;
+}
+
+function matchExactColumn(columns: string[], candidates: string[], exclude?: string[]): string | undefined {
+  const excluded = new Set(exclude ?? []);
+  const normalize = (value: string) => value.trim().toLowerCase().replace(/[\s_-]+/gu, '');
+  const pool = columns.filter(col => !excluded.has(col));
+  for (const candidate of candidates) {
+    const normalizedCandidate = normalize(candidate);
+    const exact = pool.find(col => normalize(col) === normalizedCandidate);
+    if (exact) return exact;
+  }
+  return undefined;
+}
+
+function detectChatColumns(columns: string[]) {
+  const speakerColumn =
+    matchColumn(columns, ['speaker', '发言人', '发送人', '发送者', '昵称', '用户', 'sender', 'author', 'role', 'from']) ??
+    columns[0] ??
+    '';
+  const textColumn =
+    matchColumn(
+      columns,
+      ['text', '正文', '内容', '消息内容', '发言内容', '消息', 'content', 'message', 'body'],
+      speakerColumn,
+    ) ??
+    columns.find(col => col !== speakerColumn) ??
+    '';
+  const conversationColumn = matchExactColumn(
+    columns,
+    ['conversation_id', 'thread_id', 'session_id', 'chat_id', 'group_id', '会话id', '对话id', '群id', '会话编号'],
+    [speakerColumn, textColumn],
+  );
+  return {
+    speakerColumn,
+    textColumn,
+    conversationColumn,
+    timeColumn: undefined,
+  };
+}
+
+function findAmbiguousConversationColumn(columns: string[], exclude: (string | undefined)[]): string | undefined {
+  const excluded = new Set(exclude.filter(Boolean));
+  return columns.find(col => {
+    if (excluded.has(col)) return false;
+    const normalized = col.trim().toLowerCase();
+    return /(?:conversation|session|thread|chat|group|会话|群|对话)/u.test(normalized);
+  });
+}
+
 export function KnowledgeImport({
   kind,
   busy,
@@ -163,14 +223,13 @@ export function KnowledgeImport({
                         setPreview(result);
                         setPairs(null);
                         setMappingSignature('');
+                        const detected = detectChatColumns(result.columns);
                         setMapping(previous => ({
                           ...previous,
-                          speakerColumn: result.columns.includes('speaker')
-                            ? 'speaker'
-                            : (result.columns[0] ?? ''),
-                          textColumn: result.columns.includes('text')
-                            ? 'text'
-                            : (result.columns[1] ?? ''),
+                          speakerColumn: detected.speakerColumn,
+                          textColumn: detected.textColumn,
+                          conversationColumn: detected.conversationColumn,
+                          timeColumn: detected.timeColumn,
                         }));
                       },
                       false,
@@ -262,6 +321,19 @@ export function KnowledgeImport({
                 <p className={hintCls}>
                   时间列接受 ISO 日期时间或 Unix 时间戳；不选择时间列时按文件顺序配对。
                 </p>
+                {!mapping.conversationColumn &&
+                  (() => {
+                    const ambiguous = findAmbiguousConversationColumn(preview.columns, [
+                      mapping.speakerColumn,
+                      mapping.textColumn,
+                      mapping.timeColumn,
+                    ]);
+                    return ambiguous ? (
+                      <p className="rounded-lg border border-warning/35 bg-warning/8 px-3 py-1.5 text-xs text-warning-foreground">
+                        检测到可能的会话列「{ambiguous}」，因无法确认其为唯一会话 ID 未自动选中；若文件包含多个独立会话，请在上方「会话列（可选）」中手动确认，单会话文件保持「不使用」即可。
+                      </p>
+                    ) : null;
+                  })()}
                 <p className={hintCls}>
                   只学习与本人准确匹配的回复；其他发言人用于还原来信上下文，不能成为本人人格。
                 </p>

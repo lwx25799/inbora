@@ -37,6 +37,32 @@ export interface RuntimeViewProps {
   onTabChange?: (tab: RuntimeTabId) => void;
 }
 
+const AUDIT_EVENT_LABELS: Record<string, string> = {
+  EMERGENCY_STOPPED: '触发全局急停',
+  EMERGENCY_RESUMED: '恢复后台运行',
+  PERSISTENT_GRANT_ENABLED: '启用持续授权',
+  PERSISTENT_GRANT_REVOKED: '撤销持续授权',
+  BUDGET_POLICY_CHANGED: '更新额度上限',
+  COLLECTION_CONFIGURED: '更新后台收取范围',
+  SECURITY_CHANNEL_HELD: '通道触发安全待核验',
+  SECURITY_CHANNEL_RESOLVED: '通道解除安全待核验',
+  SECURITY_INCIDENT_RECORDED: '记录安全验证现场',
+  CLICK_INTENT_RECORDED: '记录外发意图',
+  SUBMISSION_PROOF: '记录提交因果证明',
+  CONFIRMED: '回复确认送达',
+  UNCERTAIN: '发送结果待核验',
+  FOLLOWUP_DELIVERY_VERIFIED: '追问回复确认送达',
+  FOLLOWUP_PROOF_INCOMPLETE: '追问送达证据未完整',
+  LOCAL_ASSISTANT_GRANTED: '启用本机助手连接',
+  LOCAL_ASSISTANT_REVOKED: '停用本机助手连接',
+  SINGLE_ACCOUNT_ONLINE_RESTORED: '恢复单账号在线状态',
+  SCHEMA4_UPGRADED: '完成多账号库升级',
+};
+
+function auditEventLabel(eventType: string): string {
+  return AUDIT_EVENT_LABELS[eventType] ?? eventType;
+}
+
 function auditBadgeVariant(eventType: string): 'error' | 'warning' | 'success' | 'secondary' {
   const upper = eventType.toUpperCase();
   if (upper.includes('STOP') || upper.includes('FREEZE') || upper.includes('FAIL') || upper.includes('ERROR')) {
@@ -297,8 +323,12 @@ export function RuntimeView({
                           {time(a.time)}
                         </TableCell>
                         <TableCell>
-                          <Badge variant={auditBadgeVariant(a.event_type)} size="sm">
-                            {a.event_type}
+                          <Badge
+                            variant={auditBadgeVariant(a.event_type)}
+                            size="sm"
+                            title={a.event_type}
+                          >
+                            {auditEventLabel(a.event_type)}
                           </Badge>
                         </TableCell>
                         <TableCell className="font-mono text-xs text-foreground">

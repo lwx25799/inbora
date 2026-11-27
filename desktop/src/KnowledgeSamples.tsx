@@ -35,6 +35,8 @@ export function KnowledgeSamples({ overview, busy, perform }: KnowledgePanelProp
       checked ? [...new Set([...previous, id])] : previous.filter(value => value !== id),
     );
 
+  const chatSources = overview.sources.filter(source => source.kind === 'CHAT');
+
   return (
     <div className="knowledge-samples flex flex-col gap-4">
       <div className="knowledge-toolbar flex flex-wrap items-center justify-between gap-3">
@@ -59,14 +61,13 @@ export function KnowledgeSamples({ overview, busy, perform }: KnowledgePanelProp
 
       <KnowledgeImport kind="CHAT" busy={busy} perform={perform} />
 
-      <details className="knowledge-history rounded-xl border border-border/80 bg-muted/30 px-4 py-3 text-[13px]">
-        <summary className="cursor-pointer font-medium text-[13px] text-foreground select-none">
-          管理聊天来源
-        </summary>
-        <div className="mt-3 flex flex-col gap-2.5">
-          {overview.sources
-            .filter(source => source.kind === 'CHAT')
-            .map(source => (
+      {chatSources.length > 0 && (
+        <details className="knowledge-history rounded-xl border border-border/80 bg-muted/30 px-4 py-3 text-[13px]">
+          <summary className="cursor-pointer font-medium text-[13px] text-foreground select-none">
+            管理聊天来源 · {chatSources.length} 个
+          </summary>
+          <div className="mt-3 flex flex-col gap-2.5">
+            {chatSources.map(source => (
               <article
                 key={source.id}
                 className="knowledge-entry flex flex-col gap-2 rounded-lg border border-border/75 bg-card p-3"
@@ -112,8 +113,9 @@ export function KnowledgeSamples({ overview, busy, perform }: KnowledgePanelProp
                 )}
               </article>
             ))}
-        </div>
-      </details>
+          </div>
+        </details>
+      )}
 
       <div className="knowledge-toolbar flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/75 bg-muted/30 px-3.5 py-2.5">
         <label className="knowledge-filter inline-flex items-center gap-2 text-xs font-medium text-foreground">

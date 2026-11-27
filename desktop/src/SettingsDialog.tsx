@@ -29,6 +29,9 @@ export function SettingsDialog({
       ref={element}
       className="settings-dialog m-auto max-h-[86vh] w-[min(640px,calc(100vw-2rem))] overflow-y-auto rounded-2xl border border-border bg-card p-0 text-card-foreground shadow-xl backdrop:bg-foreground/30 backdrop:backdrop-blur-[2px] open:flex open:flex-col"
       aria-label={title}
+      onClick={event => {
+        if (event.target === element.current) onClose();
+      }}
       onCancel={event => {
         event.preventDefault();
         onClose();

@@ -107,10 +107,21 @@ export class AutomationStore {
     requireSafe(result.changes===1,'BUDGET_POLICY_UNAVAILABLE');
     if(maximum!==global.maximum)this.store.audit('BUDGET_POLICY_CHANGED',kind,{unlimited:maximum===null,...(maximum===null?{}:{maximum})});
   }
-  revoke(kind: "MODEL" | "AUTO_REPLY"): void {
-    const {sql, args} = this.grantFilter();
-    this.store.db.prepare(`UPDATE automation_grants SET revoked_at=? WHERE kind=? AND revoked_at IS NULL${sql}`).run(this.now(), kind, ...args);
-    this.store.audit("PERSISTENT_GRANT_REVOKED", kind);
+  revoke(kind: "MODEL" | "AUTO_REPLY", expected?: { version?: number; ownId?: string }): void {
+    this.store.db.transaction(() => {
+      if (expected?.version !== undefined || expected?.ownId !== undefined) {
+        const current = this.active(kind);
+        requireSafe(
+          current &&
+            (expected.version === undefined || current.version === expected.version) &&
+            (expected.ownId === undefined || current.scope.ownId === expected.ownId),
+          "GRANT_VERSION_CONFLICT",
+        );
+      }
+      const {sql, args} = this.grantFilter();
+      this.store.db.prepare(`UPDATE automation_grants SET revoked_at=? WHERE kind=? AND revoked_at IS NULL${sql}`).run(this.now(), kind, ...args);
+      this.store.audit("PERSISTENT_GRANT_REVOKED", kind);
+    }).immediate();
   }
   readGrantScope(kind: Grant["kind"], row: { scope_json: string; scope_digest: string; grant_version?: number }): Grant["scope"] {
     if (row.grant_version !== undefined && this.store.schemaVersion() >= 4) {

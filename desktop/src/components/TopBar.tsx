@@ -3,6 +3,7 @@ import {
   CpuIcon,
   MoonIcon,
   RefreshCwIcon,
+  SearchIcon,
   ShieldCheckIcon,
   SunIcon,
 } from "lucide-react";
@@ -10,12 +11,7 @@ import type { Status } from "@/api";
 import { DESKTOP_PAGE_CRUMBS, type DesktopPageId } from "@/components/AppSidebar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { modes } from "@/presentation";
-
-const SYNC_SOURCE_NAMES: Record<"works" | "dm", string> = {
-  works: "评论",
-  dm: "私信",
-};
+import { formatSyncLabel, modes } from "@/presentation";
 
 export interface TopBarProps {
   page: DesktopPageId;
@@ -24,14 +20,8 @@ export interface TopBarProps {
   busy: string;
   onSync: () => void;
   onToggleTheme: () => void;
+  onOpenPalette: () => void;
   onNavigate: (page: DesktopPageId) => void;
-}
-
-function formatSyncLabel(sync: Status["sync"]): string {
-  if (!sync.running) return "同步收件箱";
-  if (sync.cancelled) return "正在结束同步…";
-  if (sync.source) return `正在同步${SYNC_SOURCE_NAMES[sync.source]}…`;
-  return "正在启动同步…";
 }
 
 function resolveActiveModel(status: Status): { label: string; configured: boolean } {
@@ -57,6 +47,7 @@ export function TopBar({
   busy,
   onSync,
   onToggleTheme,
+  onOpenPalette,
   onNavigate,
 }: TopBarProps): React.ReactElement {
   const crumb = DESKTOP_PAGE_CRUMBS[page];
@@ -132,6 +123,20 @@ export function TopBar({
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onOpenPalette}
+          aria-label="快速跳转与操作"
+          title="快速跳转与操作 (Ctrl+K)"
+          className="hidden h-7 cursor-pointer items-center gap-1.5 rounded-lg border border-border/80 bg-background px-2 text-[11.5px] text-muted-foreground outline-none transition-colors hover:border-input hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring md:inline-flex"
+        >
+          <SearchIcon aria-hidden="true" className="size-3 shrink-0" />
+          <span>快速跳转</span>
+          <kbd className="rounded border border-border/80 bg-muted px-1 py-0 font-mono text-[10px] text-muted-foreground">
+            Ctrl+K
+          </kbd>
+        </button>
+
         <Button
           variant="outline"
           size="xs"
@@ -149,7 +154,7 @@ export function TopBar({
           variant="ghost"
           size="icon-xs"
           aria-label="切换浅色/深色主题"
-          title={theme === "dark" ? "切换浅色模式" : "切换深色模式"}
+          title={theme === "dark" ? "切换为暖白纸感（浅色）" : "切换为深松夜览（深色）"}
           onClick={onToggleTheme}
         >
           {theme === "dark" ? (
@@ -159,16 +164,18 @@ export function TopBar({
           )}
         </Button>
 
-        <div
-          title={`操作员：${status.operator.id} · ${modeLabel}`}
-          className="ml-1 hidden items-center gap-2 rounded-lg border border-border/75 bg-background px-2 py-1 sm:flex"
+        <button
+          type="button"
+          onClick={() => onNavigate("automation")}
+          title={`当前工作模式：${modeLabel}（点击调整）`}
+          className="ml-1 hidden cursor-pointer items-center gap-2 rounded-lg border border-border/75 bg-background px-2 py-1 outline-none transition-colors hover:border-input focus-visible:ring-2 focus-visible:ring-ring sm:flex"
         >
           <span className="inline-flex size-5 items-center justify-center rounded-md bg-primary/15 text-[11px] font-semibold text-primary">
             本
           </span>
           <span className="text-[11.5px] font-medium text-foreground">{modeLabel}</span>
           <ShieldCheckIcon aria-hidden="true" className="size-3 text-primary" />
-        </div>
+        </button>
       </div>
     </header>
   );
