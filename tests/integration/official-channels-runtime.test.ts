@@ -513,7 +513,8 @@ test('WeChat KF validates credentials on connect, uses account creation boundary
     expect(await request({ command: 'observe', source: 'dm' }, kfScope, randomUUID())).toMatchObject({ ok: true });
     expect(observedCursors).toEqual([undefined, 'cursor-page-2']);
 
-    // Disconnect + reactivate must still enforce original bound corpId (immutable across disconnect cycles)
+    // Simulate legacy pre-profile_ref WeChat KF row: clearing profile_ref before disconnect must still backfill and lock corpId
+    f.store.db.prepare("UPDATE accounts SET profile_ref='' WHERE id=?").run(kfId);
     expect(await request({
       command: 'accounts', action: 'disconnectAccount', commandId: randomUUID(), accountRef: kfId, confirmed: true,
     }, kfScope)).toMatchObject({ ok: true, result: { status: 'DISCONNECTED' } });

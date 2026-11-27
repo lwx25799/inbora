@@ -192,6 +192,7 @@ export class ChannelCredentialStore {
   private readonly root: string;
   private readonly queueKey: string;
   private readonly memory = new Map<string, Readonly<OfficialChannelSecretPayload>>();
+  private readonly pendingCacheClears = new Map<AccountId, Set<string>>();
 
   constructor(
     root: string,
@@ -307,12 +308,27 @@ export class ChannelCredentialStore {
     }
   }
 
-  private async removeSecretFile(file: string, confirmCache = true, strict = false): Promise<void> {
+  private async removeSecretFile(
+    file: string,
+    confirmCache = true,
+    strict = false,
+    accountId?: AccountId,
+  ): Promise<void> {
     if (statIfPresent(file)) removePrivateFile(file);
     if (confirmCache) {
       try {
         await clearDeletedDpapiCache(file);
+        if (accountId) {
+          const pending = this.pendingCacheClears.get(accountId);
+          pending?.delete(file);
+          if (pending && pending.size === 0) this.pendingCacheClears.delete(accountId);
+        }
       } catch {
+        if (accountId) {
+          const pending = this.pendingCacheClears.get(accountId) ?? new Set<string>();
+          pending.add(file);
+          this.pendingCacheClears.set(accountId, pending);
+        }
         invalidateDeletedKey(this.root, file);
         if (strict) throw new Blocked('CHANNEL_CREDENTIAL_CLEANUP_FAILED');
       }
@@ -321,13 +337,34 @@ export class ChannelCredentialStore {
     }
   }
 
-  private async pruneStaleSecretFiles(dir: string, activeFileName: string | null, confirmCache: boolean, strict = false): Promise<void> {
+  private async pruneStaleSecretFiles(
+    dir: string,
+    activeFileName: string | null,
+    confirmCache: boolean,
+    strict = false,
+    accountId?: AccountId,
+  ): Promise<void> {
     for (const name of readdirSync(dir)) {
       if (name === activeFileName) continue;
       if (name === 'secret.dpapi' || (name.startsWith('secret.') && (name.endsWith('.dpapi') || name.endsWith('.tmp')))) {
-        await this.removeSecretFile(join(dir, name), confirmCache, strict);
+        await this.removeSecretFile(join(dir, name), confirmCache, strict, accountId);
       }
     }
+  }
+
+  private async flushPendingCacheClears(accountId: AccountId, strict: boolean): Promise<void> {
+    const pending = this.pendingCacheClears.get(accountId);
+    if (!pending || pending.size === 0) return;
+    for (const file of [...pending]) {
+      try {
+        await clearDeletedDpapiCache(file);
+        pending.delete(file);
+      } catch {
+        invalidateDeletedKey(this.root, file);
+        if (strict) throw new Blocked('CHANNEL_CREDENTIAL_CLEANUP_FAILED');
+      }
+    }
+    if (pending.size === 0) this.pendingCacheClears.delete(accountId);
   }
 
   private buildPublicConfig(
@@ -525,13 +562,14 @@ export class ChannelCredentialStore {
       // on an obsolete file never makes an already-committed rotation report failure.
       if (nextStorage === 'DPAPI') {
         this.memory.delete(memKey);
-        await this.pruneStaleSecretFiles(dir, secretFileName(nextRevision), true, false).catch(() => {});
+        await this.pruneStaleSecretFiles(dir, secretFileName(nextRevision), true, false, accountId).catch(() => {});
       } else if (nextStorage === 'MEMORY' && nextSecret) {
         this.memory.set(memKey, nextSecret);
-        await this.pruneStaleSecretFiles(dir, null, true, false).catch(() => {});
+        await this.pruneStaleSecretFiles(dir, null, true, false, accountId).catch(() => {});
       } else {
         this.memory.delete(memKey);
-        await this.pruneStaleSecretFiles(dir, null, true, true);
+        await this.pruneStaleSecretFiles(dir, null, true, true, accountId);
+        await this.flushPendingCacheClears(accountId, true);
       }
 
       return {
@@ -561,11 +599,13 @@ export class ChannelCredentialStore {
       this.memory.delete(this.memoryKey(accountId, WECOM_AIBOT_PLATFORM_ID));
       this.memory.delete(this.memoryKey(accountId, WECHAT_KF_PLATFORM_ID));
       const dir = this.accountDir(accountId, false);
-      if (!dir) return;
-      await this.pruneStaleSecretFiles(dir, null, true, strict);
-      const configFile = join(dir, 'config.json');
-      if (statIfPresent(configFile)) removePrivateFile(configFile);
-      try { rmdirSync(dir); } catch { /* ignore non-empty or already removed */ }
+      if (dir) {
+        await this.pruneStaleSecretFiles(dir, null, true, strict, accountId);
+        const configFile = join(dir, 'config.json');
+        if (statIfPresent(configFile)) removePrivateFile(configFile);
+        try { rmdirSync(dir); } catch { /* ignore non-empty or already removed */ }
+      }
+      await this.flushPendingCacheClears(accountId, strict);
     });
   }
 

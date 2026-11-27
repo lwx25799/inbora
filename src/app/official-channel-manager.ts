@@ -347,6 +347,16 @@ export class OfficialChannelManager {
       if (runtime) {
         await this.closeRuntime(accountId, runtime);
       }
+      // Preserve bound WeChat KF corpId in accounts.profile_ref for legacy configs before deleting config.json.
+      const row = this.deps.events.db.prepare('SELECT platform, profile_ref FROM accounts WHERE id=?')
+        .get(accountId) as { platform: string; profile_ref: string } | undefined;
+      if (row?.platform === WECHAT_KF_PLATFORM_ID && !parseBoundWechatCorpId(row.profile_ref)) {
+        const stored = await this.credentials.readStoredConfig(accountId, WECHAT_KF_PLATFORM_ID).catch(() => null);
+        if (stored?.platform === WECHAT_KF_PLATFORM_ID && stored.corpId) {
+          this.deps.events.db.prepare('UPDATE accounts SET profile_ref=? WHERE id=? AND profile_ref=?')
+            .run(`${WECHAT_KF_CORP_PROFILE_PREFIX}${stored.corpId}`, accountId, row.profile_ref);
+        }
+      }
       await this.credentials.deleteAccount(accountId, true);
     });
   }

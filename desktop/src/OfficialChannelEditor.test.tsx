@@ -280,13 +280,14 @@ test('setActiveWorkbenchAccount routes everyday reads and writes via Protocol V2
   await request({ command: 'emergencyStop' });
   expect(invokeMock).toHaveBeenLastCalledWith('client_request', { body: { command: 'emergencyStop' } });
 
-  // Returning to primary immediately routes subsequent writes back to account_001, never stale secondary
+  // Returning to primary and even refreshing accounts with a stale secondary Status snapshot
+  // must NEVER overwrite default routing back to the secondary account!
   invokeMock.mockReset();
   invokeMock.mockResolvedValueOnce({ accounts: [{ ...wecomAccount, id: 'account_001', accountRef: 'account_001', platform: 'douyin', connector: 'douyin' }, wecomAccount], schemaVersion: 4 })
     .mockResolvedValue({ ok: true });
   const { listAccountsV2 } = await import('./api');
-  await listAccountsV2(secondaryStatus as never);
   setActiveWorkbenchAccount(null);
+  await listAccountsV2(secondaryStatus as never);
   await request({ command: 'markInboxRead' });
   expect(invokeMock).toHaveBeenLastCalledWith('client_request_v2', expect.objectContaining({
     scope: { kind: 'ACCOUNT', accountRef: 'account_001' },

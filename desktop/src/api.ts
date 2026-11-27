@@ -262,11 +262,12 @@ function observeRoutingStatus(status: Status): void {
     return;
   }
   const session = runtimeSession(status);
-  // Only update default primary routing accountRef from primary status snapshots; never overwrite
-  // it with a secondary account ID while viewing a secondary official channel.
-  const accountRef = activeWorkbenchAccount
-    ? (accountRouting?.accountRef ?? DEFAULT_ACCOUNT_ID)
-    : (status.account?.id ?? DEFAULT_ACCOUNT_ID);
+  // Default primary routing must never be overwritten by a secondary account Status snapshot
+  // (for example when AccountPlatformPanel passes stale React status during switch-back).
+  const isPrimaryStatus = !status.account?.id || status.account.id === DEFAULT_ACCOUNT_ID;
+  const accountRef = !activeWorkbenchAccount && isPrimaryStatus
+    ? (status.account?.id ?? DEFAULT_ACCOUNT_ID)
+    : (accountRouting?.accountRef ?? DEFAULT_ACCOUNT_ID);
   if (accountRouting?.session === session) accountRouting.accountRef = accountRef;
   else accountRouting = { session, accountRef, active: null, loading: null };
 }
