@@ -23,10 +23,36 @@ export interface ReplySample {id:string;sourceId:string;channel:Channel;prompt:s
   group:string;accepted:boolean;excluded:boolean;holdout:boolean;reason:string|null;createdAt:number}
 export interface PersonaVersion {id:string;text:string;sampleIds:string[];state:'DRAFT'|'PUBLISHED'|'ARCHIVED'|'INVALID';createdAt:number}
 export interface KnowledgeSource {id:string;title:string;kind:'KNOWLEDGE'|'CHAT'|'MANUAL';createdAt:number}
-export interface KnowledgeHit {id:string;sourceId:string;title:string;topic:string;text:string;version:number;chunkId:string}
+export interface KnowledgeHit {
+  id:string;sourceId:string;title:string;topic:string;text:string;version:number;chunkId:string;
+  score?:number;lexicalScore?:number;vectorScore?:number;matchedTerms?:string[];exactMatch?:boolean;
+}
+export type RetrievalEngineMode='FTS5_ENHANCED'|'HYBRID_ONNX';
+export type OnnxEmbeddingState='REUSED_LOCAL'|'DOWNLOAD_READY'|'MISSING_NEEDS_DOWNLOAD'|'FALLBACK_FTS5';
+export interface OnnxEmbeddingStatus {
+  state:OnnxEmbeddingState;engineMode:RetrievalEngineMode;modelId:string;modelPath:string|null;
+  expectedSha256:string|null;actualSha256:string|null;sizeBytes:number|null;dims:number;
+  checkedPaths:string[];reason:string;checkedAt:number;
+}
+export interface ExactFaqMatch {
+  id:string;sourceId:string;title:string;topic:string;text:string;version:number;chunkId:string;
+  matchType:'EXACT_TITLE'|'EXACT_ALIAS'|'HIGH_CONFIDENCE';score:number;
+}
+export interface RetrievalDebugHit {
+  id:string;sourceId:string;title:string;topic:string;version:number;chunkId:string;textPreview:string;
+  score:number;lexicalScore:number;vectorScore:number;matchedTerms:string[];exactMatch:boolean;
+}
+export interface RetrievalRejectedCandidate {id:string;title:string;score:number;reason:string}
+export interface RetrievalDebugResult {
+  engineMode:RetrievalEngineMode;query:string;channel:Channel;queryTerms:string[];wordTerms:string[];
+  filteredStopTerms:string[];minScore:number;hits:RetrievalDebugHit[];
+  rejectedBelowThreshold:RetrievalRejectedCandidate[];conflicts:string[];
+  exactFaqHit:ExactFaqMatch|null;onnxStatus:OnnxEmbeddingStatus;
+}
 export interface StyleExample {id:string;prompt:string;response:string;channel:Channel}
 export interface ReplyKnowledgeContext {accountId:string;channel:Channel;query:string;sourceIds?:string[];accountPersonaOnly?:boolean;personaPinned?:boolean;persona:string;personaId:string|null;
-  examples:StyleExample[];knowledge:KnowledgeHit[];fingerprint:string;conflicts:string[]}
+  examples:StyleExample[];knowledge:KnowledgeHit[];fingerprint:string;conflicts:string[];
+  exactFaqMatch?:ExactFaqMatch|null;engineMode?:RetrievalEngineMode}
 export interface KnowledgeOverview {available:boolean;sources:KnowledgeSource[];knowledge:KnowledgeEntry[];samples:ReplySample[];
   personas:PersonaVersion[];activePersonaId:string|null;activePersona:PersonaVersion|null;totals:{sources:number;knowledge:number;samples:number;accepted:number;holdout:number;personas:number};
   learningTasks:{id:string;state:string;personaId:string|null;completed:number}[];page:number;pageSize:number}

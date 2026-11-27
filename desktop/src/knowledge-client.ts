@@ -1,7 +1,14 @@
-import type {KnowledgeInput,KnowledgeOverview} from '../../src/contracts/knowledge.js';
+import type {
+  KnowledgeInput,
+  KnowledgeOverview,
+  OnnxEmbeddingStatus,
+  RetrievalDebugResult,
+} from '../../src/contracts/knowledge.js';
 import type {Channel} from '../../src/contracts/events.js';
 import {request,desktopInfo} from './api.js';
 import {explainSafe} from './error-messages.js';
+
+export type {OnnxEmbeddingStatus,RetrievalDebugResult};
 
 export interface ChatImportMapping {
   speakerColumn:string;
@@ -27,6 +34,8 @@ export type KnowledgeAction=
   | {action:'analyze';sampleIds:string[];taskId?:string;confirmed:true}
   | {action:'tryReply';channel:Channel;message:string;sourceIds:string[];personaVersionId:string|null;
       comparePersonaVersionId?:string|null;confirmed:true}
+  | {action:'debugRetrieval';channel:Channel;query:string;sourceIds?:string[];minScore?:number}
+  | {action:'embeddingStatus'}
   | {action:'importStart';name:string;bytes:number;kind:'KNOWLEDGE'|'CHAT'}
   | {action:'importChunk';id:string;index:number;data:string}
   | {action:'importFinish';id:string}

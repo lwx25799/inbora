@@ -1,20 +1,42 @@
 import { useState } from 'react';
 import type { Channel } from '../../src/contracts/events.js';
 import { formatDate, type KnowledgePanelProps } from './knowledge-client';
+import { describeEngineMode, KnowledgeRetrievalDebugger } from './KnowledgeRetrievalDebugger';
+
+interface TrialKnowledgeBasis {
+  id: string;
+  title: string;
+  topic?: string;
+  version: number;
+  chunkId?: string;
+  textPreview?: string;
+  score?: number;
+  lexicalScore?: number;
+  vectorScore?: number;
+  matchedTerms?: string[];
+  exactMatch?: boolean;
+}
 
 interface TrialReply {
   text: string;
   model: string;
   personaId: string | null;
   fingerprint: string;
-  knowledge?: { id: string; title: string; version: number }[];
+  engineMode?: 'FTS5_ENHANCED' | 'HYBRID_ONNX';
+  exactFaqMatch?: {
+    id: string;
+    title: string;
+    matchType: 'EXACT_TITLE' | 'EXACT_ALIAS' | 'HIGH_CONFIDENCE';
+    score: number;
+  } | null;
+  knowledge?: TrialKnowledgeBasis[];
   conflicts?: string[];
 }
 interface TrialResult {
   current: TrialReply;
   comparison?: TrialReply;
   currentContext?: {
-    knowledge?: { id: string; title: string; version: number }[];
+    knowledge?: TrialKnowledgeBasis[];
     conflicts?: string[];
   };
 }
@@ -80,6 +102,13 @@ export function KnowledgeTrial({ overview, busy, perform }: KnowledgePanelProps)
 
   return (
     <div className="knowledge-trial flex flex-col gap-4">
+      <KnowledgeRetrievalDebugger
+        channel={channel}
+        sourceIds={sourceIds}
+        draftMessage={message}
+        busy={busy}
+      />
+
       <div className="space-y-1">
         <h3 className="font-heading text-[14px] font-semibold text-foreground">
           先试聊，再用于日常回复
@@ -293,15 +322,58 @@ export function KnowledgeTrial({ overview, busy, perform }: KnowledgePanelProps)
             )}
           </div>
           {!!(result.current.knowledge ?? result.currentContext?.knowledge)?.length && (
-            <details className="rounded-lg border border-border/75 bg-muted/30 px-3 py-2 text-xs">
+            <details
+              open
+              className="rounded-lg border border-border/75 bg-muted/30 px-3 py-2.5 text-xs"
+            >
               <summary className="cursor-pointer font-medium text-foreground select-none">
-                本次引用知识
+                本次回复依据（{(result.current.knowledge ?? result.currentContext?.knowledge ?? []).length}{' '}
+                条 · {describeEngineMode(result.current.engineMode)}）
               </summary>
-              <div className="mt-2 flex flex-col gap-1 text-muted-foreground">
-                {(result.current.knowledge ?? result.currentContext?.knowledge ?? []).map(value => (
-                  <p key={value.id}>
-                    {value.title} · v{value.version}
+              <div className="mt-2.5 flex flex-col gap-2 text-muted-foreground">
+                {result.current.exactFaqMatch && (
+                  <p className="rounded-md border border-primary/25 bg-primary/[0.045] px-2.5 py-1.5 text-[11.5px] font-medium text-primary">
+                    高置信标准问答已命中：{result.current.exactFaqMatch.title}（匹配度{' '}
+                    {Math.round(result.current.exactFaqMatch.score * 100)}%）
                   </p>
+                )}
+                {(result.current.knowledge ?? result.currentContext?.knowledge ?? []).map(value => (
+                  <div
+                    key={value.chunkId ?? value.id}
+                    className="flex flex-col gap-1 rounded-lg border border-border/70 bg-background px-2.5 py-2"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium text-foreground">
+                        {value.title} · v{value.version}
+                        {value.exactMatch && (
+                          <span className="ml-1.5 rounded bg-primary/12 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+                            精确命中
+                          </span>
+                        )}
+                      </span>
+                      {typeof value.score === 'number' && (
+                        <span className="text-[11.5px] font-medium text-foreground tabular-nums">
+                          匹配度 {Math.round(Math.max(0, Math.min(1, value.score)) * 100)}%
+                        </span>
+                      )}
+                    </div>
+                    {value.textPreview && (
+                      <p className="leading-relaxed text-muted-foreground">{value.textPreview}</p>
+                    )}
+                    {!!value.matchedTerms?.length && (
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span className="text-[11px] text-muted-foreground">命中词：</span>
+                        {value.matchedTerms.slice(0, 6).map(term => (
+                          <span
+                            key={term}
+                            className="rounded border border-border/80 bg-muted/40 px-1.5 py-0.5 text-[11px] text-foreground"
+                          >
+                            {term}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             </details>

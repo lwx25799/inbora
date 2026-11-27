@@ -4,15 +4,18 @@ import {digest,requireSafe,type Channel} from '../core/contracts.js';
 import type {EventStore} from '../storage/store.js';
 import {knowledgeInputSchema,sampleInputSchema,knowledgeLimits,type KnowledgeInput,type KnowledgeEntry,type KnowledgeState,
   type KnowledgeOverview,type KnowledgeSource,type SourceInput,type PersonaVersion,type SampleInput,type ReplySample,
-  type ReplyKnowledgeContext,type StyleExample} from './contracts.js';
-import {chunkText,lexicalTerms,normalized,retrieveKnowledge} from './retrieval.js';
+  type ReplyKnowledgeContext,type StyleExample,type RetrievalDebugResult,type OnnxEmbeddingStatus} from './contracts.js';
+import {chunkText,debugRetrieveKnowledge,indexKnowledgeTerms,lexicalTerms,normalized,retrieveKnowledge} from './retrieval.js';
+import {OnnxEmbeddingManager} from './embedding-engine.js';
+import {deleteChunkVectorsByEntry,deleteChunkVectorsBySource,upsertChunkVector} from './vector-store.js';
 import {assignHoldout,learningSelection,nativeCandidates,redactSampleText,safeStyleExample,sampleBlock,sampleDigest,sampleFromRow,snapshotHoldoutBaseline,type SampleRow} from './samples.js';
 
 interface SourceRow {id:string;kind:KnowledgeSource['kind'];title:string;created_at:number}
 interface EntryRow {id:string;source_id:string;title:string;topic:string;text:string;aliases_json:string;channels_json:string;
   effective_at:number|null;expires_at:number|null;state:KnowledgeState;version:number;updated_at:number}
 interface PersonaRow {id:string;text:string;sample_ids_json:string;state:PersonaVersion['state'];created_at:number}
-export interface ContextOptions {personaId?:string|null;sourceIds?:string[]}
+export interface ContextOptions {personaId?:string|null;sourceIds?:string[];minScore?:number}
+export interface DebugRetrievalOptions {sourceIds?:string[];minScore?:number}
 export type ContextWitness=Pick<ReplyKnowledgeContext,'accountId'|'channel'|'query'|'personaId'|'fingerprint'|'sourceIds'|'accountPersonaOnly'|'personaPinned'>;
 const entry=(row:EntryRow):KnowledgeEntry=>({id:row.id,sourceId:row.source_id,title:row.title,topic:row.topic,text:row.text,
   aliases:JSON.parse(row.aliases_json) as string[],channels:JSON.parse(row.channels_json) as Channel[],effectiveAt:row.effective_at,
@@ -24,7 +27,12 @@ const source=(row:SourceRow):KnowledgeSource=>({id:row.id,kind:row.kind,title:ro
 export class ReplyKnowledgeStore {
   private readonly now:()=>number;
   private readonly measure:()=>number;
-  constructor(readonly store:EventStore,options:{now?:()=>number;measure?:()=>number}={}){this.now=options.now??Date.now;this.measure=options.measure??(()=>performance.now());}
+  readonly embeddingManager:OnnxEmbeddingManager;
+  constructor(readonly store:EventStore,options:{now?:()=>number;measure?:()=>number;embeddingManager?:OnnxEmbeddingManager}={}){
+    this.now=options.now??Date.now;
+    this.measure=options.measure??(()=>performance.now());
+    this.embeddingManager=options.embeddingManager??new OnnxEmbeddingManager({now:this.now});
+  }
   available():boolean{return !!this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='k_schema'").get();}
   private own(accountId:string):string{
     requireSafe(this.available(),'KNOWLEDGE_MIGRATION_REQUIRED');
@@ -97,15 +105,26 @@ export class ReplyKnowledgeStore {
       if (this.store.schemaVersion() >= 4) this.store.db.prepare(`INSERT INTO account_knowledge_scopes
         (entry_id,owner_account_id,visibility,updated_at) VALUES (?,?,'PRIVATE',?)
         ON CONFLICT(entry_id) DO UPDATE SET updated_at=excluded.updated_at`).run(id,accountId,now);
+      deleteChunkVectorsByEntry(this.store.db,id);
       this.store.db.prepare('DELETE FROM k_search WHERE chunk_id IN (SELECT id FROM k_chunks WHERE entry_id=?)').run(id);
       this.store.db.prepare('DELETE FROM k_terms WHERE chunk_id IN (SELECT id FROM k_chunks WHERE entry_id=?)').run(id);
       this.store.db.prepare('DELETE FROM k_chunks WHERE entry_id=?').run(id);
+      const vectorRuntime=this.embeddingManager.getRuntime();
       chunkText(parsed.text).forEach((text,ordinal)=>{
         const chunkId=digest([id,version,ordinal,text]);
-        const terms=lexicalTerms([parsed.title,...parsed.aliases,text].join(' '),2000).join(' ');
+        const terms=indexKnowledgeTerms(parsed.title,parsed.aliases,text,2000).join(' ');
+        const fullText=[parsed.title,...parsed.aliases,text].join('\n');
         this.store.db.prepare('INSERT INTO k_chunks VALUES(?,?,?,?,?)').run(chunkId,id,ordinal,text,terms);
         this.store.db.prepare('INSERT INTO k_terms(chunk_id,terms) VALUES(?,?)').run(chunkId,terms);
-        this.store.db.prepare('INSERT INTO k_search(chunk_id,text) VALUES(?,?)').run(chunkId,[parsed.title,...parsed.aliases,text].join('\n'));
+        this.store.db.prepare('INSERT INTO k_search(chunk_id,text) VALUES(?,?)').run(chunkId,fullText);
+        if(vectorRuntime?.embedSync){
+          try{
+            const vec=vectorRuntime.embedSync(fullText);
+            if(vec.length===vectorRuntime.dims){
+              upsertChunkVector(this.store.db,{chunkId,modelId:vectorRuntime.modelId,vector:vec,updatedAt:now});
+            }
+          }catch{/* fallback silently to FTS5 without blocking saveKnowledge */}
+        }
       });
       this.store.audit('KNOWLEDGE_SAVED',id,{version});
       return entry(this.store.db.prepare('SELECT * FROM k_knowledge WHERE id=?').get(id) as EntryRow);
@@ -210,6 +229,7 @@ export class ReplyKnowledgeStore {
       const relatedTasks=this.store.db.prepare(`SELECT t.id FROM k_learning_tasks t WHERE t.account_id=? AND EXISTS(
         SELECT 1 FROM k_generation_contexts g,json_each(json_extract(g.snapshot_json,'$.sourceIds')) s
         WHERE g.kind='learning' AND g.entity_id=t.id AND s.value=?)`).all(accountId,sourceId) as {id:string}[];
+      deleteChunkVectorsBySource(this.store.db,sourceId);
       this.store.db.prepare('DELETE FROM k_search WHERE chunk_id IN (SELECT c.id FROM k_chunks c JOIN k_knowledge k ON k.id=c.entry_id WHERE k.source_id=?)').run(sourceId);
       this.store.db.prepare('DELETE FROM k_terms WHERE chunk_id IN (SELECT c.id FROM k_chunks c JOIN k_knowledge k ON k.id=c.entry_id WHERE k.source_id=?)').run(sourceId);
       if (this.store.schemaVersion() >= 4) this.store.db.prepare(`DELETE FROM account_knowledge_scopes
@@ -240,7 +260,13 @@ export class ReplyKnowledgeStore {
     const started=this.measure(),ownId=this.own(accountId);requireSafe(query.length<=20000,'KNOWLEDGE_QUERY_TOO_LARGE');
     if(options.sourceIds){requireSafe(options.sourceIds.length<=1000&&new Set(options.sourceIds).size===options.sourceIds.length,'KNOWLEDGE_SOURCE_SELECTION_INVALID');
       for(const id of options.sourceIds)this.requireSource(accountId,id);}
-    const result=retrieveKnowledge(this.store.db,accountId,channel,query,{now:this.now(),ownId,...(options.sourceIds?{sourceIds:options.sourceIds}:{})});
+    const result=retrieveKnowledge(this.store.db,accountId,channel,query,{
+      now:this.now(),
+      ownId,
+      ...(options.sourceIds?{sourceIds:options.sourceIds}:{}),
+      ...(options.minScore!==undefined?{minScore:options.minScore}:{}),
+      embeddingManager:this.embeddingManager,
+    });
     let selected:PersonaVersion|null=options.personaId===null?null:this.activePersona(accountId,ownId);
     if(options.personaId){
       const row=this.store.db.prepare("SELECT * FROM k_personas WHERE id=? AND account_id=? AND own_id=? AND state IN ('DRAFT','PUBLISHED','ARCHIVED')")
@@ -259,11 +285,34 @@ export class ReplyKnowledgeStore {
       const length=Array.from(row.prompt+row.response).length;if(length>budget)continue;budget-=length;
       examples.push({id:row.id,prompt:row.prompt,response:row.response,channel:row.channel});
     }
-    const value={accountId,channel,query,...(options.sourceIds?{sourceIds:[...options.sourceIds].sort()}:{}),
+    // Keep fingerprint corpus-invariant to unrelated inserts (exclude floating bm25 scores from digest).
+    const stableKnowledge=result.knowledge.map(({id,sourceId,title,topic,text,version,chunkId})=>({id,sourceId,title,topic,text,version,chunkId}));
+    const stableValue={accountId,channel,query,...(options.sourceIds?{sourceIds:[...options.sourceIds].sort()}:{}),
       ...(options.personaId===null?{accountPersonaOnly:true}:{}),...(options.personaId?{personaPinned:true}:{}),persona:selected?.text??'',personaId:selected?.id??null,
-      examples,knowledge:result.knowledge,conflicts:result.conflicts};
-    const fingerprint=digest([ownId,value,result.relevant]);requireSafe(this.measure()-started<=500,'KNOWLEDGE_RETRIEVAL_TIMEOUT');
-    return {...value,fingerprint};
+      examples,knowledge:stableKnowledge,conflicts:result.conflicts};
+    const fingerprint=digest([ownId,stableValue,result.relevant]);requireSafe(this.measure()-started<=500,'KNOWLEDGE_RETRIEVAL_TIMEOUT');
+    return {...stableValue,knowledge:result.knowledge,exactFaqMatch:result.exactFaqMatch,engineMode:result.engineMode,fingerprint};
+  }
+  debugRetrieval(accountId:string,channel:Channel,query:string,options:DebugRetrievalOptions={}):RetrievalDebugResult{
+    const ownId=this.own(accountId);
+    requireSafe(query.trim().length>0&&query.length<=20000,'KNOWLEDGE_QUERY_TOO_LARGE');
+    if(options.sourceIds){
+      requireSafe(options.sourceIds.length<=1000&&new Set(options.sourceIds).size===options.sourceIds.length,'KNOWLEDGE_SOURCE_SELECTION_INVALID');
+      for(const id of options.sourceIds)this.requireSource(accountId,id);
+    }
+    if(options.minScore!==undefined){
+      requireSafe(Number.isFinite(options.minScore)&&options.minScore>=0&&options.minScore<=1,'INVALID_COMMAND');
+    }
+    return debugRetrieveKnowledge(this.store.db,accountId,channel,query,{
+      now:this.now(),
+      ownId,
+      ...(options.sourceIds?.length?{sourceIds:options.sourceIds}:{}),
+      ...(options.minScore!==undefined?{minScore:options.minScore}:{}),
+      embeddingManager:this.embeddingManager,
+    });
+  }
+  embeddingStatus():OnnxEmbeddingStatus{
+    return this.embeddingManager.inspectStatus();
   }
   isCurrent(snapshot:ContextWitness):boolean{
     try{return this.context(snapshot.accountId,snapshot.channel,snapshot.query,{...(snapshot.accountPersonaOnly?{personaId:null}:snapshot.personaPinned&&snapshot.personaId?{personaId:snapshot.personaId}:{}),

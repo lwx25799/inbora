@@ -6,12 +6,14 @@ import type {EventStore} from '../storage/store.js';
 import {callBusinessModel,modelCallFailureReason,type BoundModelCall} from '../ai/business-model-call.js';
 import {buildReplySystemPrompt,classifyModelFailure} from '../ai/reply-style.js';
 import {ReplyKnowledgeStore} from './store.js';
+import type {OnnxEmbeddingManager} from './embedding-engine.js';
 import {assertKnowledgePromptSafe,knowledgePromptData,replySettingsFingerprint,privateModelText,unsafeModelOutput} from './generation-context.js';
 import type {PersonaVersion,ReplySample} from './contracts.js';
 
 export type LearningPurpose='PERSONA_ANALYSIS'|'PERSONA_MERGE'|'SANDBOX_REPLY'|'SANDBOX_COMPARE';
 export interface LearningModelContext {
   store:EventStore;settings:AiSettings;key:string;accountId:string;allowedChannels:readonly Channel[];signal?:AbortSignal;
+  embeddingManager?:OnnxEmbeddingManager;
   route?(purpose:LearningPurpose):BoundModelCall;
   check(requiredCalls?:number):void;reserve(callId:string,purpose:LearningPurpose):void;
 }
@@ -162,14 +164,22 @@ export class LearningModelService {
     const variants=[input.personaVersionId,...(input.comparePersonaVersionId===undefined?[]:[input.comparePersonaVersionId])];
     requireAllowance(context,variants.length);
     requireSafe(input.message.trim().length>0&&input.message.length<=4000&&!privateModelText(input.message),'SENSITIVE_MANUAL_HANDLING');
-    const knowledge=new ReplyKnowledgeStore(context.store);
+    const knowledge=new ReplyKnowledgeStore(context.store,context.embeddingManager?{embeddingManager:context.embeddingManager}:{});
     const selections=variants.map(personaId=>knowledge.context(context.accountId,input.channel,input.message,
       {personaId,...(input.sourceIds.length?{sourceIds:input.sourceIds}:{})}));
     for(const snapshot of selections){assertKnowledgePromptSafe(snapshot);
       requireSafe(!privateModelText([snapshot.persona||context.settings.persona,context.settings.business,context.settings.rules].join('\n')),
         'SENSITIVE_MANUAL_HANDLING');}
-    const results:{text:string;model:string;personaId:string|null;fingerprint:string;
-      knowledge:{id:string;title:string;version:number}[];conflicts:string[]}[]=[];
+    const results:{
+      text:string;model:string;personaId:string|null;fingerprint:string;
+      engineMode:'FTS5_ENHANCED'|'HYBRID_ONNX';
+      exactFaqMatch:{id:string;title:string;matchType:'EXACT_TITLE'|'EXACT_ALIAS'|'HIGH_CONFIDENCE';score:number}|null;
+      knowledge:{
+        id:string;title:string;topic:string;version:number;chunkId:string;textPreview:string;
+        score:number;lexicalScore:number;vectorScore:number;matchedTerms:string[];exactMatch:boolean;
+      }[];
+      conflicts:string[];
+    }[]=[];
     for(const [index,snapshot] of selections.entries()){
       const check=()=>{context.check(0);requireSafe(knowledge.isCurrent(snapshot),'KNOWLEDGE_CONTEXT_CHANGED');};check();
       const result=await this.call({...context,check:(count)=>{context.check(count);check();}},
@@ -177,8 +187,34 @@ export class LearningModelService {
           system:buildReplySystemPrompt({sandbox:true,settings:{...context.settings,persona:snapshot.persona||context.settings.persona}}),
           data:{channel:input.channel,message:input.message,history:[],...knowledgePromptData(snapshot)}},text=>{
             const clean=validText(text);requireSafe(!unsafeModelOutput(clean),'MODEL_SENSITIVE_OUTPUT');return clean;
-          });check();results.push({text:result.text,model:result.model,personaId:snapshot.personaId,fingerprint:snapshot.fingerprint,
-            knowledge:snapshot.knowledge.map(item=>({id:item.id,title:item.title,version:item.version})),conflicts:[...snapshot.conflicts]});
+          });check();
+      results.push({
+        text:result.text,
+        model:result.model,
+        personaId:snapshot.personaId,
+        fingerprint:snapshot.fingerprint,
+        engineMode:snapshot.engineMode??'FTS5_ENHANCED',
+        exactFaqMatch:snapshot.exactFaqMatch
+          ?{id:snapshot.exactFaqMatch.id,title:snapshot.exactFaqMatch.title,matchType:snapshot.exactFaqMatch.matchType,score:snapshot.exactFaqMatch.score}
+          :null,
+        knowledge:snapshot.knowledge.map(item=>{
+          const chars=Array.from(item.text.trim());
+          return {
+            id:item.id,
+            title:item.title,
+            topic:item.topic,
+            version:item.version,
+            chunkId:item.chunkId,
+            textPreview:chars.length<=140?chars.join(''):chars.slice(0,140).join('')+'…',
+            score:item.score??0,
+            lexicalScore:item.lexicalScore??item.score??0,
+            vectorScore:item.vectorScore??0,
+            matchedTerms:item.matchedTerms??[],
+            exactMatch:item.exactMatch??false,
+          };
+        }),
+        conflicts:[...snapshot.conflicts],
+      });
     }
     context.check(0);for(const snapshot of selections)requireSafe(knowledge.isCurrent(snapshot),'KNOWLEDGE_CONTEXT_CHANGED');
     return{current:results[0]!,...(results[1]?{comparison:results[1]}:{})};
