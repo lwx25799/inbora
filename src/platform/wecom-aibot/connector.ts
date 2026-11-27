@@ -2,7 +2,7 @@ import { inspect } from 'node:util';
 import { AccountActor } from '../../browser/account-actor.js';
 import { accountIdSchema, DEFAULT_ACCOUNT_ID, type AccountId } from '../../contracts/account.js';
 import type { BrowserMode, BrowserResourceIdentity, BrowserStatus } from '../../contracts/browser-resources.js';
-import { eventSchema, type Channel } from '../../contracts/events.js';
+import type { Channel } from '../../contracts/events.js';
 import {
   Blocked,
   digest,
@@ -32,6 +32,12 @@ import type {
   VerificationResult,
 } from '../platform-connector.js';
 import {
+  addBoundedSet,
+  normalizeWecomInboundFrame,
+  parseFirstRunAt,
+  setBoundedMap,
+} from './inbound-normalizer.js';
+import {
   WECOM_AIBOT_PLATFORM_ID,
   WECOM_DEFAULT_REQ_ID_TTL_MS,
   WECOM_REPLY_MAX_UTF8_BYTES,
@@ -49,7 +55,6 @@ const MAX_REQ_ID_MAPPINGS = 2_048;
 const MAX_PENDING_INBOUND = 2_048;
 const MAX_DISPATCHED_INTENTS = 4_096;
 const MAX_CONFIRMED_PROOFS_PER_TARGET = 256;
-const MAX_EVENT_TEXT_CHARS = 10_000;
 
 export const wecomAibotCapabilities: WecomAibotCapabilities = {
   channels: ['DIRECT_MESSAGE'],
@@ -66,98 +71,6 @@ interface InboundReplyRoute {
   reqId: string;
   conversationId: string;
   receivedAt: number;
-}
-
-interface NormalizedContent {
-  text: string;
-  contentType?: 'IMAGE' | 'VIDEO' | 'AUDIO' | 'MIXED';
-  observationIssue?: 'DM_CONTENT_UNVERIFIED';
-}
-
-function setBoundedMap<K, V>(map: Map<K, V>, key: K, value: V, limit: number): void {
-  if (map.has(key)) {
-    map.delete(key);
-  } else if (map.size >= limit) {
-    const oldest = map.keys().next().value;
-    if (oldest !== undefined) map.delete(oldest);
-  }
-  map.set(key, value);
-}
-
-function addBoundedSet<T>(set: Set<T>, value: T, limit: number): void {
-  if (set.has(value)) return;
-  if (set.size >= limit) {
-    const oldest = set.values().next().value;
-    if (oldest !== undefined) set.delete(oldest);
-  }
-  set.add(value);
-}
-
-function truncateText(value: string): string {
-  return value.length <= MAX_EVENT_TEXT_CHARS ? value : value.slice(0, MAX_EVENT_TEXT_CHARS);
-}
-
-function parseFirstRunAt(value: number | string | undefined, fallbackMs: number): number {
-  if (value === undefined) return fallbackMs;
-  const parsed = typeof value === 'number' ? value : Date.parse(value);
-  requireSafe(Number.isSafeInteger(parsed) && parsed > 0, 'WECOM_FIRST_RUN_AT_INVALID');
-  return parsed;
-}
-
-function normalizeCreateTime(createTime: number | undefined, fallbackMs: number): string {
-  if (typeof createTime === 'number' && Number.isFinite(createTime) && createTime > 0) {
-    const ms = createTime > 1e12 ? Math.trunc(createTime) : Math.trunc(createTime * 1000);
-    if (ms >= Date.UTC(2000, 0, 1) && ms <= Date.UTC(2100, 0, 1)) {
-      return new Date(ms).toISOString();
-    }
-  }
-  return new Date(fallbackMs).toISOString();
-}
-
-function normalizeMessageContent(body: WecomInboundMessageBody): NormalizedContent {
-  const msgType = typeof body.msgtype === 'string' ? body.msgtype.toLowerCase() : '';
-  if (msgType === 'text') {
-    const textObj = body.text && typeof body.text === 'object' ? body.text : undefined;
-    const raw = typeof textObj?.content === 'string' ? textObj.content.trim() : '';
-    if (raw) {
-      return { text: truncateText(raw) };
-    }
-    return { text: '[空文本消息]', observationIssue: 'DM_CONTENT_UNVERIFIED' };
-  }
-  if (msgType === 'image') {
-    return { text: '[图片消息]', contentType: 'IMAGE', observationIssue: 'DM_CONTENT_UNVERIFIED' };
-  }
-  if (msgType === 'video') {
-    return { text: '[视频消息]', contentType: 'VIDEO', observationIssue: 'DM_CONTENT_UNVERIFIED' };
-  }
-  if (msgType === 'voice') {
-    const voiceObj = body.voice && typeof body.voice === 'object' ? body.voice : undefined;
-    const transcript = typeof voiceObj?.content === 'string' ? voiceObj.content.trim() : '';
-    const text = transcript ? truncateText(`[语音消息] ${transcript}`) : '[语音消息]';
-    return { text, contentType: 'AUDIO', observationIssue: 'DM_CONTENT_UNVERIFIED' };
-  }
-  if (msgType === 'file') {
-    return { text: '[文件消息]', contentType: 'MIXED', observationIssue: 'DM_CONTENT_UNVERIFIED' };
-  }
-  if (msgType === 'mixed') {
-    const rawItems = body.mixed && typeof body.mixed === 'object' && Array.isArray(body.mixed.msg_item)
-      ? body.mixed.msg_item
-      : [];
-    const textParts: string[] = [];
-    for (const item of rawItems) {
-      if (!item || typeof item !== 'object') continue;
-      if (item.msgtype !== 'text') continue;
-      const itemText = item.text && typeof item.text === 'object' ? item.text.content : undefined;
-      if (typeof itemText === 'string' && itemText.trim()) {
-        textParts.push(itemText.trim());
-      }
-    }
-    const text = textParts.length > 0
-      ? truncateText(`[图文混合消息] ${textParts.join(' ')}`)
-      : '[图文混合消息]';
-    return { text, contentType: 'MIXED', observationIssue: 'DM_CONTENT_UNVERIFIED' };
-  }
-  return { text: '[非文本消息]', contentType: 'MIXED', observationIssue: 'DM_CONTENT_UNVERIFIED' };
 }
 
 export class WecomAibotPlatformConnector implements PlatformConnector {
@@ -180,6 +93,7 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
   private readonly now: () => number;
   private readonly onWsError: ((error: Error) => void) | undefined;
   private readonly onInboundDrop: ((info: WecomInboundDropInfo) => void) | undefined;
+  private readonly explicitFirstRunAtMs: number | undefined;
   private firstRunAtMs: number;
 
   private store: EventStore | undefined;
@@ -207,7 +121,8 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
     this.autoPersistInbound = options.autoPersistInbound ?? true;
     this.maxReplyBytes = options.maxReplyBytes ?? WECOM_REPLY_MAX_UTF8_BYTES;
     this.now = options.now ?? (() => Date.now());
-    this.firstRunAtMs = parseFirstRunAt(options.firstRunAt, this.now());
+    this.explicitFirstRunAtMs = parseFirstRunAt(options.firstRunAt);
+    this.firstRunAtMs = this.explicitFirstRunAtMs ?? this.now();
     const reqIdTtlMs = options.reqIdTtlMs ?? WECOM_DEFAULT_REQ_ID_TTL_MS;
     requireSafe(Number.isSafeInteger(reqIdTtlMs) && reqIdTtlMs > 0, 'WECOM_WS_CONFIG_INVALID');
     this.reqIdTtlMs = reqIdTtlMs;
@@ -334,6 +249,7 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
     this.assertAccount(store, false);
     store.bindAccount(this.accountId, this.ownId);
     this.store = store;
+    this.syncPersistedFirstRunBoundary(store);
     if (scheduleFlush && this.autoPersistInbound && this.pendingInbound.length > 0) {
       void this.actor.run(async () => {
         if (this.store === store && this.pendingInbound.length > 0) {
@@ -362,6 +278,9 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
 
   async collect(data: AutomationStore, source: CollectionSource, signal: AbortSignal): Promise<void> {
     const startedAt = data.state().startedAt;
+    if (this.explicitFirstRunAtMs === undefined && Number.isSafeInteger(startedAt) && startedAt > 0) {
+      this.firstRunAtMs = startedAt;
+    }
     await this.observeWithBoundary(data.store, source, signal, startedAt);
   }
 
@@ -589,74 +508,22 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
   }
 
   private handleInboundFrame(frame: WecomWsFrame<WecomInboundMessageBody>): void {
-    const body = frame.body;
-    if (!body || typeof body !== 'object') {
-      this.onWsError?.(new Blocked('WECOM_WS_FRAME_INVALID'));
-      return;
-    }
-
-    // Strongly require aibotid matching this connector's bot identity.
-    if (typeof body.aibotid !== 'string' || body.aibotid.trim() !== this.ownId) {
-      return;
-    }
-
-    const msgId = typeof body.msgid === 'string' ? body.msgid.trim() : '';
-    const fromObj = body.from && typeof body.from === 'object' ? body.from : undefined;
-    const fromUserId = typeof fromObj?.userid === 'string' ? fromObj.userid.trim() : '';
-    if (!msgId || !fromUserId) {
-      this.onWsError?.(new Blocked('WECOM_WS_FRAME_INVALID'));
-      return;
-    }
-
-    // Ignore bot self-echoes.
-    if (fromUserId === this.ownId) {
-      return;
-    }
-
-    let conversationId: string;
-    if (body.chattype === 'group') {
-      if (!this.allowGroupMessages) return;
-      const trimmedChatId = typeof body.chatid === 'string' ? body.chatid.trim() : '';
-      if (!trimmedChatId) return;
-      conversationId = `group:${trimmedChatId}`;
-    } else if (body.chattype === 'single') {
-      conversationId = `single:${fromUserId}`;
-    } else {
-      return;
-    }
-
-    const receivedAt = this.now();
-    const occurredAt = normalizeCreateTime(body.create_time, receivedAt);
-    const content = normalizeMessageContent(body);
-    const actorName = typeof fromObj?.name === 'string' && fromObj.name.trim()
-      ? fromObj.name.trim()
-      : null;
-
-    const parsed = eventSchema.safeParse({
+    const normalized = normalizeWecomInboundFrame(frame, {
       accountId: this.accountId,
-      channel: 'DIRECT_MESSAGE',
-      platformEventId: msgId,
-      actorId: fromUserId,
-      actorName,
-      text: content.text,
-      occurredAt,
-      videoId: null,
-      commentId: null,
-      conversationId,
-      direction: 'INCOMING',
-      kind: 'DM',
-      evidenceId: `wecom-ws:${digest([this.accountId, msgId, frame.headers.req_id]).slice(0, 16)}`,
-      discovery: 'DIRECT_MESSAGE',
-      ...(content.contentType ? { contentType: content.contentType } : {}),
-      ...(content.observationIssue ? { observationIssue: content.observationIssue } : {}),
+      ownId: this.ownId,
+      allowGroupMessages: this.allowGroupMessages,
     });
-
-    if (!parsed.success) {
-      this.onWsError?.(new Blocked('WECOM_WS_FRAME_INVALID'));
+    if (normalized.kind === 'ignore') return;
+    if (normalized.kind === 'invalid') {
+      try {
+        this.onWsError?.(new Blocked('WECOM_WS_FRAME_INVALID'));
+      } catch {
+        // Isolate user listener errors.
+      }
       return;
     }
 
-    const inboundEvent = parsed.data;
+    const { event: inboundEvent, msgId, conversationId } = normalized;
     const binding = eventBinding(inboundEvent);
     const priorBinding = this.seenMsgBindings.get(msgId);
     if (priorBinding === binding) {
@@ -664,6 +531,7 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
       return;
     }
 
+    const receivedAt = this.now();
     // Differing bindings for the same msgid are forwarded to EventStore.observe
     // so SOURCE_COLLISION auditing and approval revocation fire cleanly.
     setBoundedMap(this.seenMsgBindings, msgId, binding, MAX_TRACKED_MSG_IDS);
@@ -697,12 +565,45 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
     if (!this.pendingInbound.some(item => item.platformEventId === droppedMsgId)) {
       this.seenMsgBindings.delete(droppedMsgId);
     }
-    this.onInboundDrop?.({ droppedMsgId, reason: 'BUFFER_OVERFLOW' });
+    try {
+      this.onInboundDrop?.({ droppedMsgId, reason: 'BUFFER_OVERFLOW' });
+    } catch {
+      // Isolate callback errors.
+    }
     try {
       this.store?.audit('WECOM_INBOUND_BUFFER_OVERFLOW', droppedMsgId);
     } catch {
       // Best-effort audit when store is closed or read-only.
     }
+  }
+
+  private syncPersistedFirstRunBoundary(store: EventStore): void {
+    if (this.explicitFirstRunAtMs !== undefined) return;
+    const hasTable = store.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_state'")
+      .get();
+    if (!hasTable) return;
+    const row = store.db.prepare('SELECT started_at FROM automation_state WHERE id=1').get() as
+      | { started_at: number }
+      | undefined;
+    if (row && Number.isSafeInteger(row.started_at) && row.started_at > 0) {
+      this.firstRunAtMs = row.started_at;
+    }
+  }
+
+  private resolveFirstBoundaryMs(store: EventStore, boundaryOverrideMs?: number): number {
+    if (boundaryOverrideMs !== undefined) {
+      const parsed = parseFirstRunAt(boundaryOverrideMs)!;
+      if (this.explicitFirstRunAtMs === undefined) {
+        this.firstRunAtMs = parsed;
+      }
+      return parsed;
+    }
+    if (this.explicitFirstRunAtMs !== undefined) {
+      return this.explicitFirstRunAtMs;
+    }
+    this.syncPersistedFirstRunBoundary(store);
+    return this.firstRunAtMs;
   }
 
   private flushPendingInbound(store: EventStore, boundaryOverrideMs?: number): string[] {
@@ -712,9 +613,7 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
     const batch = this.pendingInbound.splice(0, this.pendingInbound.length);
     const entries = [...Map.groupBy(batch, event => event.conversationId!).entries()];
     const newEventIds: string[] = [];
-    const boundaryMs = boundaryOverrideMs !== undefined
-      ? parseFirstRunAt(boundaryOverrideMs, this.firstRunAtMs)
-      : this.firstRunAtMs;
+    const boundaryMs = this.resolveFirstBoundaryMs(store, boundaryOverrideMs);
 
     for (let index = 0; index < entries.length; index++) {
       const [scope, events] = entries[index]!;
@@ -749,9 +648,8 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
       const row = store.db
         .prepare('SELECT platform FROM accounts WHERE id=?')
         .get(this.accountId) as { platform: string } | undefined;
-      if (row) {
-        requireSafe(row.platform === this.platformId, 'ACCOUNT_PLATFORM_MISMATCH');
-      }
+      requireSafe(row !== undefined, 'ACCOUNT_NOT_FOUND');
+      requireSafe(row.platform === this.platformId, 'ACCOUNT_PLATFORM_MISMATCH');
     }
     const ownId = store.accountOwnId(this.accountId);
     requireSafe(ownId === this.ownId || (!bound && !ownId), 'NATIVE_REPLY_ACCOUNT_CHANGED');

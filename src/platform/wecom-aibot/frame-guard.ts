@@ -155,7 +155,12 @@ export function resolveWecomWsConfig(options: WecomWsClientOptions): ResolvedWec
   };
 }
 
-export async function decodeWecomWsMessageData(data: unknown): Promise<string | null> {
+/**
+ * Synchronous decode for string/Uint8Array/ArrayBuffer payloads so frames arriving
+ * in the same TCP/TLS chunk before a CLOSE frame are processed without yielding a microtask.
+ * Returns undefined only when async Blob decoding is required.
+ */
+export function decodeWecomWsMessageDataSync(data: unknown): string | null | undefined {
   if (typeof data === 'string') {
     if (Buffer.byteLength(data, 'utf8') > WECOM_MAX_INBOUND_FRAME_BYTES) {
       throw new Blocked('WECOM_WS_FRAME_TOO_LARGE');
@@ -175,13 +180,21 @@ export async function decodeWecomWsMessageData(data: unknown): Promise<string | 
     return Buffer.from(data).toString('utf8');
   }
   if (data && typeof data === 'object' && 'arrayBuffer' in data && typeof data.arrayBuffer === 'function') {
-    const buffer = await (data as Blob).arrayBuffer();
-    if (buffer.byteLength > WECOM_MAX_INBOUND_FRAME_BYTES) {
-      throw new Blocked('WECOM_WS_FRAME_TOO_LARGE');
-    }
-    return Buffer.from(buffer).toString('utf8');
+    return undefined;
   }
   return null;
+}
+
+export async function decodeWecomWsMessageData(data: unknown): Promise<string | null> {
+  const syncResult = decodeWecomWsMessageDataSync(data);
+  if (syncResult !== undefined) {
+    return syncResult;
+  }
+  const buffer = await (data as Blob).arrayBuffer();
+  if (buffer.byteLength > WECOM_MAX_INBOUND_FRAME_BYTES) {
+    throw new Blocked('WECOM_WS_FRAME_TOO_LARGE');
+  }
+  return Buffer.from(buffer).toString('utf8');
 }
 
 export function parseWecomWsFrame(raw: string): WecomWsFrame {

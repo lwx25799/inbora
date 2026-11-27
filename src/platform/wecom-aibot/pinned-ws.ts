@@ -27,6 +27,9 @@ const OPCODE_PONG = 0xa;
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_CONTROL_PAYLOAD = 125;
+const MAX_FRAGMENT_COUNT = 256;
+
+const strictUtf8Decoder = new TextDecoder('utf-8', { fatal: true });
 
 type SocketEventType = 'open' | 'message' | 'error' | 'close';
 
@@ -54,6 +57,13 @@ function buildPinnedLookup(validated: ValidatedOfficialApiEndpoint): LookupFunct
       callback(null, filtered[0]!.address, filtered[0]!.family);
     }
   };
+}
+
+/** RFC 6455 §7.4.1 wire-valid status codes (never 1004/1005/1006/1015 or reserved ranges). */
+export function isWireValidCloseCode(code: number): boolean {
+  if (!Number.isSafeInteger(code)) return false;
+  if (code >= 3000 && code <= 4999) return true;
+  return (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1011);
 }
 
 export function encodeClientWsFrame(opcode: number, payload: Buffer): Buffer {
@@ -86,12 +96,21 @@ export function encodeClientWsFrame(opcode: number, payload: Buffer): Buffer {
   return frame;
 }
 
-function buildClosePayload(code: number, reason: string): Buffer {
+function buildClosePayload(code: number | null, reason: string): Buffer {
+  if (code === null || !isWireValidCloseCode(code)) {
+    return Buffer.alloc(0);
+  }
   const reasonBuf = reason ? Buffer.from(reason, 'utf8').subarray(0, MAX_CONTROL_PAYLOAD - 2) : Buffer.alloc(0);
   const buf = Buffer.allocUnsafe(2 + reasonBuf.length);
   buf.writeUInt16BE(code, 0);
   reasonBuf.copy(buf, 2);
   return buf;
+}
+
+function hasHeaderValue(value: string | string[] | undefined): boolean {
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some(item => item.trim().length > 0);
+  return false;
 }
 
 function verifyAcceptHeader(expected: string, actualHeader: string | string[] | undefined): boolean {
@@ -128,6 +147,7 @@ export class PinnedWebSocket implements WecomWebSocketLike {
   private fragmentOpcode: number | null = null;
   private fragmentChunks: Buffer[] = [];
   private fragmentTotalBytes = 0;
+  private fragmentFrameCount = 0;
 
   private readonly signal: AbortSignal | undefined;
   private readonly onSignalAbort: (() => void) | undefined;
@@ -191,9 +211,12 @@ export class PinnedWebSocket implements WecomWebSocketLike {
 
       const upgrade = typeof res.headers.upgrade === 'string' ? res.headers.upgrade.toLowerCase() : '';
       const connection = typeof res.headers.connection === 'string' ? res.headers.connection.toLowerCase() : '';
+      const hasUnsolicitedNegotiation = hasHeaderValue(res.headers['sec-websocket-extensions'])
+        || hasHeaderValue(res.headers['sec-websocket-protocol']);
       const validUpgrade = res.statusCode === 101
         && upgrade === 'websocket'
         && connection.split(',').some(part => part.trim() === 'upgrade')
+        && !hasUnsolicitedNegotiation
         && verifyAcceptHeader(expectedAccept, res.headers['sec-websocket-accept']);
 
       if (!validUpgrade) {
@@ -248,7 +271,8 @@ export class PinnedWebSocket implements WecomWebSocketLike {
     if (!this.closeSent && this.socket && !this.socket.destroyed) {
       this.closeSent = true;
       try {
-        this.socket.write(encodeClientWsFrame(OPCODE_CLOSE, buildClosePayload(code, reason)));
+        const wireCode = isWireValidCloseCode(code) ? code : null;
+        this.socket.write(encodeClientWsFrame(OPCODE_CLOSE, buildClosePayload(wireCode, wireCode ? reason : '')));
       } catch {
         // Proceed to destroy below.
       }
@@ -291,10 +315,22 @@ export class PinnedWebSocket implements WecomWebSocketLike {
       if (payloadLen === 126) {
         if (this.buffer.length < 4) return;
         payloadLen = this.buffer.readUInt16BE(2);
+        if (payloadLen < 126) {
+          this.protocolClose(1002, 'non_minimal_length');
+          return;
+        }
         offset = 4;
       } else if (payloadLen === 127) {
         if (this.buffer.length < 10) return;
+        if ((this.buffer[2]! & 0x80) !== 0) {
+          this.protocolClose(1002, 'invalid_64bit_length');
+          return;
+        }
         const bigLen = this.buffer.readBigUInt64BE(2);
+        if (bigLen < 65_536n) {
+          this.protocolClose(1002, 'non_minimal_length');
+          return;
+        }
         if (bigLen > BigInt(this.maxFrameBytes)) {
           this.protocolClose(1009, 'frame_too_large', new Blocked('WECOM_WS_FRAME_TOO_LARGE'));
           return;
@@ -332,7 +368,11 @@ export class PinnedWebSocket implements WecomWebSocketLike {
   private handleControlFrame(opcode: number, payload: Buffer): void {
     if (opcode === OPCODE_PING) {
       if (this.readyState === WS_OPEN && this.socket && !this.socket.destroyed) {
-        this.socket.write(encodeClientWsFrame(OPCODE_PONG, Buffer.from(payload)));
+        try {
+          this.socket.write(encodeClientWsFrame(OPCODE_PONG, Buffer.from(payload)));
+        } catch {
+          this.failAndClose(1006, 'pong_write_failed', new Blocked('WECOM_WS_SOCKET_ERROR'));
+        }
       }
       return;
     }
@@ -340,20 +380,44 @@ export class PinnedWebSocket implements WecomWebSocketLike {
       return;
     }
     if (opcode === OPCODE_CLOSE) {
-      const code = payload.length >= 2 ? payload.readUInt16BE(0) : 1005;
-      const reason = payload.length > 2 ? payload.subarray(2).toString('utf8') : '';
-      this.closeCode = code;
+      if (payload.length === 1) {
+        this.protocolClose(1002, 'invalid_close_payload');
+        return;
+      }
+      let reportedCode = 1005;
+      let replyCode: number | null = null;
+      let reason = '';
+      if (payload.length >= 2) {
+        const parsedCode = payload.readUInt16BE(0);
+        if (!isWireValidCloseCode(parsedCode)) {
+          this.protocolClose(1002, 'invalid_close_code');
+          return;
+        }
+        if (payload.length > 2) {
+          try {
+            reason = strictUtf8Decoder.decode(payload.subarray(2));
+          } catch {
+            this.protocolClose(1007, 'invalid_close_reason');
+            return;
+          }
+        }
+        reportedCode = parsedCode;
+        replyCode = parsedCode;
+      }
+
+      this.closeCode = reportedCode;
       this.closeReason = reason;
       if (!this.closeSent && this.socket && !this.socket.destroyed) {
         this.closeSent = true;
         try {
-          this.socket.write(encodeClientWsFrame(OPCODE_CLOSE, buildClosePayload(code, '')));
+          // Reply empty CLOSE payload when peer sent empty CLOSE (never transmit 1005 on the wire).
+          this.socket.write(encodeClientWsFrame(OPCODE_CLOSE, buildClosePayload(replyCode, '')));
         } catch {
           // Ignore write errors during peer-initiated close.
         }
       }
       this.socket?.destroy();
-      this.finishClosed(code, reason);
+      this.finishClosed(reportedCode, reason);
       return;
     }
     this.protocolClose(1002, 'unknown_control_opcode');
@@ -370,8 +434,9 @@ export class PinnedWebSocket implements WecomWebSocketLike {
         return;
       }
       this.fragmentOpcode = opcode;
-      this.fragmentChunks = [Buffer.from(payload)];
+      this.fragmentChunks = payload.length > 0 ? [Buffer.from(payload)] : [];
       this.fragmentTotalBytes = payload.length;
+      this.fragmentFrameCount = 1;
       return;
     }
 
@@ -380,18 +445,26 @@ export class PinnedWebSocket implements WecomWebSocketLike {
         this.protocolClose(1002, 'unexpected_continuation');
         return;
       }
+      this.fragmentFrameCount++;
+      if (this.fragmentFrameCount > MAX_FRAGMENT_COUNT) {
+        this.protocolClose(1009, 'too_many_fragments', new Blocked('WECOM_WS_FRAME_TOO_LARGE'));
+        return;
+      }
       this.fragmentTotalBytes += payload.length;
       if (this.fragmentTotalBytes > this.maxFrameBytes) {
         this.protocolClose(1009, 'frame_too_large', new Blocked('WECOM_WS_FRAME_TOO_LARGE'));
         return;
       }
-      this.fragmentChunks.push(Buffer.from(payload));
+      if (payload.length > 0) {
+        this.fragmentChunks.push(Buffer.from(payload));
+      }
       if (fin) {
         const merged = Buffer.concat(this.fragmentChunks, this.fragmentTotalBytes);
         const completedOpcode = this.fragmentOpcode;
         this.fragmentOpcode = null;
         this.fragmentChunks = [];
         this.fragmentTotalBytes = 0;
+        this.fragmentFrameCount = 0;
         this.dispatchMessage(completedOpcode, merged);
       }
       return;
@@ -401,8 +474,18 @@ export class PinnedWebSocket implements WecomWebSocketLike {
   }
 
   private dispatchMessage(opcode: number, payload: Buffer): void {
-    const data = opcode === OPCODE_TEXT ? payload.toString('utf8') : Buffer.from(payload);
-    this.emit('message', { data });
+    if (opcode === OPCODE_TEXT) {
+      let text: string;
+      try {
+        text = strictUtf8Decoder.decode(payload);
+      } catch {
+        this.protocolClose(1007, 'invalid_utf8');
+        return;
+      }
+      this.emit('message', { data: text });
+      return;
+    }
+    this.emit('message', { data: Buffer.from(payload) });
   }
 
   private protocolClose(code: number, reason: string, error?: Error): void {
@@ -439,6 +522,7 @@ export class PinnedWebSocket implements WecomWebSocketLike {
     this.fragmentOpcode = null;
     this.fragmentChunks = [];
     this.fragmentTotalBytes = 0;
+    this.fragmentFrameCount = 0;
     this.socket = null;
     this.request = null;
     if (error) {

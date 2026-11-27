@@ -8,6 +8,7 @@ import {
   buildActiveSendFrame,
   buildStreamReplyFrame,
   decodeWecomWsMessageData,
+  decodeWecomWsMessageDataSync,
   parseWecomWsFrame,
   raceWithAbort,
   resolveWecomWsConfig,
@@ -157,35 +158,29 @@ export class WecomWsClient {
     this.reconnectAttempts = 0;
     this.consecutiveAuthFailures = 0;
     this.clearReconnectTimer();
-
-    let tracked!: Promise<void>;
-    tracked = this.openConnection(signal).finally(() => {
-      if (this.connectPromise === tracked) {
-        this.connectPromise = null;
-      }
-    });
-    this.connectPromise = tracked;
-    return tracked;
+    return this.startTrackedConnection(signal);
   }
 
   disconnect(): void {
     this.manuallyClosed = true;
+    this.connectPromise = null;
     this.clearReconnectTimer();
     this.stopHeartbeat();
     this.clearConnectTimer();
     this.clearAuthTimer();
-    const connectAbort = this.activeConnectAbort;
-    this.activeConnectAbort = null;
-    connectAbort?.abort(new Blocked('WECOM_WS_CLOSED'));
+    this.connectionGen++;
     const rejectAuth = this.authReject;
     this.authResolve = null;
     this.authReject = null;
     this.authReqId = null;
     this.authenticated = false;
-    this.connectionGen++;
     this.pendingPingIds.clear();
     this.outboundQueue.failAllOnDisconnect();
+    // Detach socket listeners before aborting/closing so synchronous close events cannot race.
     this.teardownSocket(true);
+    const connectAbort = this.activeConnectAbort;
+    this.activeConnectAbort = null;
+    connectAbort?.abort(new Blocked('WECOM_WS_CLOSED'));
     this.setState('DISCONNECTED');
     rejectAuth?.(new Blocked('WECOM_WS_CLOSED'));
   }
@@ -216,6 +211,17 @@ export class WecomWsClient {
     }
   }
 
+  private startTrackedConnection(externalSignal?: AbortSignal): Promise<void> {
+    let tracked!: Promise<void>;
+    tracked = this.openConnection(externalSignal).finally(() => {
+      if (this.connectPromise === tracked) {
+        this.connectPromise = null;
+      }
+    });
+    this.connectPromise = tracked;
+    return tracked;
+  }
+
   private async openConnection(externalSignal?: AbortSignal): Promise<void> {
     const gen = ++this.connectionGen;
     this.authenticated = false;
@@ -224,17 +230,24 @@ export class WecomWsClient {
     this.clearAuthTimer();
     this.clearConnectTimer();
     this.stopHeartbeat();
-    this.teardownSocket(false);
+    this.teardownSocket(true);
+
+    // Abort any superseded in-flight upgrade/DNS attempt before starting a new one.
+    const previousAbort = this.activeConnectAbort;
+    this.activeConnectAbort = null;
+    previousAbort?.abort(new Blocked('WECOM_WS_SUPERSEDED'));
+
     this.setState('CONNECTING');
 
     const connectAbort = new AbortController();
     this.activeConnectAbort = connectAbort;
 
     const onExternalAbort = () => {
-      connectAbort.abort(new Blocked('WECOM_WS_CLOSED'));
+      // Advance generation and detach listeners BEFORE aborting the underlying socket.
       if (gen === this.connectionGen && !this.authenticated) {
         this.abortPendingConnect(gen, 'WECOM_WS_CLOSED', false);
       }
+      connectAbort.abort(new Blocked('WECOM_WS_CLOSED'));
     };
     if (externalSignal) {
       if (externalSignal.aborted) {
@@ -248,11 +261,11 @@ export class WecomWsClient {
     this.connectTimer = setTimeout(() => {
       if (gen !== this.connectionGen || this.authenticated || this.manuallyClosed) return;
       if (this.authReqId !== null) {
-        connectAbort.abort(new Blocked('WECOM_WS_AUTH_TIMEOUT'));
         this.handleAuthFailure(gen, 'WECOM_WS_AUTH_TIMEOUT', false);
+        connectAbort.abort(new Blocked('WECOM_WS_AUTH_TIMEOUT'));
       } else {
-        connectAbort.abort(new Blocked('WECOM_WS_CONNECT_TIMEOUT'));
         this.abortPendingConnect(gen, 'WECOM_WS_CONNECT_TIMEOUT', true);
+        connectAbort.abort(new Blocked('WECOM_WS_CONNECT_TIMEOUT'));
       }
     }, this.config.connectTimeoutMs);
 
@@ -322,11 +335,7 @@ export class WecomWsClient {
 
         const onMessage = (event: WecomWebSocketEvent) => {
           if (gen !== this.connectionGen || this.manuallyClosed) return;
-          void this.handleRawMessage(event.data, gen).catch(() => {
-            if (gen !== this.connectionGen) return;
-            this.lastErrorCode = 'WECOM_WS_FRAME_INVALID';
-            this.emitError(new Blocked('WECOM_WS_FRAME_INVALID'));
-          });
+          this.handleRawMessage(event.data, gen);
         };
 
         const onError = (event: WecomWebSocketEvent) => {
@@ -424,11 +433,34 @@ export class WecomWsClient {
     }
   }
 
-  private async handleRawMessage(data: unknown, gen: number): Promise<void> {
+  private handleRawMessage(data: unknown, gen: number): void {
     try {
-      const raw = await decodeWecomWsMessageData(data);
-      if (gen !== this.connectionGen || raw === null) return;
+      const syncRaw = decodeWecomWsMessageDataSync(data);
+      if (syncRaw === null) return;
+      if (syncRaw !== undefined) {
+        // Synchronous decode & dispatch prevents same-packet [TEXT(ACK)][CLOSE] races.
+        this.dispatchDecodedFrame(syncRaw, gen);
+        return;
+      }
+    } catch (error) {
+      this.reportFrameError(gen, error);
+      return;
+    }
 
+    void decodeWecomWsMessageData(data).then(
+      raw => {
+        if (gen !== this.connectionGen || raw === null) return;
+        this.dispatchDecodedFrame(raw, gen);
+      },
+      error => {
+        this.reportFrameError(gen, error);
+      },
+    );
+  }
+
+  private dispatchDecodedFrame(raw: string, gen: number): void {
+    if (gen !== this.connectionGen) return;
+    try {
       const frame = parseWecomWsFrame(raw);
 
       if (frame.cmd === WsCmd.CALLBACK) {
@@ -436,7 +468,7 @@ export class WecomWsClient {
           this.outboundQueue.recordIgnoredFrame();
           return;
         }
-        this.options.onMessage?.(frame as WecomWsFrame<WecomInboundMessageBody>);
+        this.invokeCallback(gen, () => this.options.onMessage?.(frame as WecomWsFrame<WecomInboundMessageBody>));
         return;
       }
       if (frame.cmd === WsCmd.EVENT_CALLBACK) {
@@ -444,30 +476,50 @@ export class WecomWsClient {
           this.outboundQueue.recordIgnoredFrame();
           return;
         }
-        this.options.onEvent?.(frame as WecomWsFrame<WecomInboundEventBody>);
+        this.invokeCallback(gen, () => this.options.onEvent?.(frame as WecomWsFrame<WecomInboundEventBody>));
         return;
       }
 
-      const reqId = frame.headers.req_id;
-      if (this.authReqId && frame.cmd === undefined && reqId === this.authReqId) {
-        this.handleAuthAck(frame, gen);
-        return;
-      }
-      if (this.authenticated && frame.cmd === undefined && this.pendingPingIds.has(reqId)) {
-        this.handlePongAck(frame, reqId);
-        return;
-      }
-      if (this.authenticated && frame.cmd === undefined && typeof frame.errcode === 'number') {
-        this.outboundQueue.handleAck(frame, gen);
-        return;
+      // Unified strict ACK gate across auth, heartbeat, and outbound reply acknowledgements.
+      if (frame.cmd === undefined && typeof frame.errcode === 'number') {
+        const reqId = frame.headers.req_id;
+        if (this.authReqId && reqId === this.authReqId) {
+          this.handleAuthAck(frame, gen);
+          return;
+        }
+        if (this.authenticated && this.pendingPingIds.has(reqId)) {
+          this.handlePongAck(frame, reqId);
+          return;
+        }
+        if (this.authenticated) {
+          this.outboundQueue.handleAck(frame, gen);
+          return;
+        }
       }
       this.outboundQueue.recordIgnoredFrame();
     } catch (error) {
-      if (gen !== this.connectionGen) return;
-      const safeErr = error instanceof Blocked ? error : new Blocked('WECOM_WS_FRAME_INVALID');
-      this.lastErrorCode = safeErr.code;
-      this.emitError(safeErr);
+      this.reportFrameError(gen, error);
     }
+  }
+
+  private invokeCallback(gen: number, fn: () => unknown): void {
+    try {
+      const result = fn();
+      if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+        void (result as PromiseLike<unknown>).then(undefined, error => {
+          this.reportFrameError(gen, error);
+        });
+      }
+    } catch (error) {
+      this.reportFrameError(gen, error);
+    }
+  }
+
+  private reportFrameError(gen: number, error: unknown): void {
+    if (gen !== this.connectionGen) return;
+    const safeErr = error instanceof Blocked ? error : new Blocked('WECOM_WS_FRAME_INVALID');
+    this.lastErrorCode = safeErr.code;
+    this.emitError(safeErr);
   }
 
   private handleAuthAck(frame: WecomWsFrame, gen: number): void {
@@ -575,7 +627,7 @@ export class WecomWsClient {
 
   private handlePongAck(frame: WecomWsFrame, reqId: string): void {
     this.pendingPingIds.delete(reqId);
-    if (frame.errcode === undefined || frame.errcode === 0) {
+    if (frame.errcode === 0) {
       this.pendingPingIds.clear();
       this.missedPongCount = 0;
       this.lastHeartbeatAt = this.now();
@@ -666,8 +718,8 @@ export class WecomWsClient {
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (this.manuallyClosed || this.authFailureExhausted) return;
-      void this.openConnection().catch(() => {
+      if (this.manuallyClosed || this.authFailureExhausted || this.connectPromise) return;
+      void this.startTrackedConnection().catch(() => {
         // Errors are already surfaced through onError and state transitions.
       });
     }, delayMs);
@@ -719,10 +771,18 @@ export class WecomWsClient {
   private setState(next: WecomWsConnectionState): void {
     if (this.state === next) return;
     this.state = next;
-    this.options.onStateChange?.(next);
+    try {
+      this.options.onStateChange?.(next);
+    } catch {
+      // Isolate user listener errors from connection state transitions.
+    }
   }
 
   private emitError(error: Error): void {
-    this.options.onError?.(error);
+    try {
+      this.options.onError?.(error);
+    } catch {
+      // Isolate throwing onError handlers so internal state/reconnect logic never breaks.
+    }
   }
 }

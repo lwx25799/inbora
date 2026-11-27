@@ -37,26 +37,21 @@ class DeterministicWs implements WecomWebSocketLike {
   };
 
   constructor(readonly url: string) {}
-
   addEventListener(type: SocketEventType, listener: WecomWebSocketListener): void {
     this.listeners[type].add(listener);
   }
-
   removeEventListener(type: SocketEventType, listener: WecomWebSocketListener): void {
     this.listeners[type].delete(listener);
   }
-
   send(data: string): void {
     if (this.readyState !== 1) throw new Error('closed');
     this.sentFrames.push(JSON.parse(data) as WecomWsFrame);
   }
-
   close(code = 1000, reason = ''): void {
     if (this.readyState === 3) return;
     this.readyState = 3;
     this.emit('close', { code, reason });
   }
-
   openAndAuth(): void {
     this.readyState = 1;
     this.emit('open', {});
@@ -64,16 +59,13 @@ class DeterministicWs implements WecomWebSocketLike {
     if (!sub) throw new Error('missing subscribe frame');
     this.emitFrame({ headers: { req_id: sub.headers.req_id }, errcode: 0, errmsg: 'ok' });
   }
-
   emitFrame(frame: WecomWsFrame): void {
     this.emit('message', { data: JSON.stringify(frame) });
   }
-
   drop(code = 1006): void {
     this.readyState = 3;
     this.emit('close', { code, reason: 'dropped' });
   }
-
   private emit(type: SocketEventType, event: WecomWebSocketEvent): void {
     for (const listener of [...this.listeners[type]]) listener(event);
   }
@@ -97,6 +89,7 @@ function createConnectedConnector(options: {
   botId?: string;
   secret?: string;
   ackMode: 'auto_ok' | 'drop_on_send' | 'hang_open';
+  autoPersistInbound?: boolean;
   firstRunAt?: number;
   reqIdTtlMs?: number;
   now?: () => number;
@@ -110,7 +103,7 @@ function createConnectedConnector(options: {
     accountId: options.accountId,
     botId,
     secret,
-    autoPersistInbound: false,
+    autoPersistInbound: options.autoPersistInbound ?? false,
     firstRunAt: options.firstRunAt,
     reqIdTtlMs: options.reqIdTtlMs,
     now: options.now,
@@ -157,13 +150,15 @@ afterEach(async () => {
 });
 
 describe('WecomAibotPlatformConnector integration with EventStore and SendCoordinator', () => {
-  test('aligns transportStatus/capabilities, guards firstRunAt baseline, isolates malformed frames & missing aibotid, and confirms single-shot reply', async () => {
+  test('aligns transportStatus/capabilities, guards firstRunAt baseline, preserves null create_time determinism, isolates malformed frames & confirms single-shot reply', async () => {
     const { store } = createTestStore();
     const startMs = Date.now() - 10_000;
     const wsErrors: string[] = [];
+    let clockOffsetMs = -6_000;
     const { connector, sockets, secret, botId } = createConnectedConnector({
       ackMode: 'auto_ok',
       firstRunAt: startMs,
+      now: () => Date.now() + clockOffsetMs,
       onWsError: err => wsErrors.push(err.message),
     });
 
@@ -190,7 +185,6 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
     const afterStartSec = Math.floor((startMs + 3_000) / 1000);
     const beforeStartSec = Math.floor((startMs - 60_000) / 1000);
 
-    // 0. Historical message before firstRunAt -> must become BASELINE, never AWAITING_DRAFT.
     ws.emitFrame({
       cmd: WsCmd.CALLBACK,
       headers: { req_id: 'inbound-req-old' },
@@ -204,7 +198,6 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         text: { content: '很久之前的历史消息' },
       },
     });
-    // 1. Missing or blank aibotid -> must be rejected.
     ws.emitFrame({
       cmd: WsCmd.CALLBACK,
       headers: { req_id: 'inbound-req-no-aibotid' },
@@ -218,7 +211,6 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         text: { content: 'missing bot id' },
       },
     });
-    // 2. Malformed mixed.msg_item (non-array / null elements) -> handled safely without crashing.
     ws.emitFrame({
       cmd: WsCmd.CALLBACK,
       headers: { req_id: 'inbound-req-malformed-mixed' },
@@ -232,7 +224,6 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         mixed: { msg_item: 'not-an-array' as unknown as [] },
       },
     });
-    // 3. Single chat text message after firstRunAt
     ws.emitFrame({
       cmd: WsCmd.CALLBACK,
       headers: { req_id: 'inbound-req-001' },
@@ -246,7 +237,6 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         text: { content: '请问发货时间是多久？' },
       },
     });
-    // 4. Exact duplicate msgid -> ignored
     ws.emitFrame({
       cmd: WsCmd.CALLBACK,
       headers: { req_id: 'inbound-req-001-dup' },
@@ -260,7 +250,6 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         text: { content: '请问发货时间是多久？' },
       },
     });
-    // 5. Self echo -> ignored
     ws.emitFrame({
       cmd: WsCmd.CALLBACK,
       headers: { req_id: 'inbound-req-self' },
@@ -274,7 +263,35 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         text: { content: 'self echo' },
       },
     });
-    // 6. Image media message with sensitive aeskey that must NEVER leak
+    // Missing create_time redelivered at a later clock tick -> occurredAt must be null with identical deterministic binding (no false SOURCE_COLLISION).
+    ws.emitFrame({
+      cmd: WsCmd.CALLBACK,
+      headers: { req_id: 'inbound-req-notime-1' },
+      body: {
+        msgid: 'msg-no-time',
+        aibotid: botId,
+        chattype: 'single',
+        from: { userid: 'customer-notime' },
+        msgtype: 'text',
+        text: { content: '无时间戳消息' },
+      },
+    });
+    await connector.observe(store, 'dm');
+    clockOffsetMs += 5_000;
+    ws.emitFrame({
+      cmd: WsCmd.CALLBACK,
+      headers: { req_id: 'inbound-req-notime-2' },
+      body: {
+        msgid: 'msg-no-time',
+        aibotid: botId,
+        chattype: 'single',
+        from: { userid: 'customer-notime' },
+        msgtype: 'text',
+        text: { content: '无时间戳消息' },
+      },
+    });
+    await connector.observe(store, 'dm');
+
     const mediaAesKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
     ws.emitFrame({
       cmd: WsCmd.CALLBACK,
@@ -289,15 +306,18 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         image: { url: 'https://example.invalid/private-image?token=secret-img', aeskey: mediaAesKey },
       },
     });
-
-    await new Promise(resolve => setTimeout(resolve, 10));
-    const observed = await connector.observe(store, 'dm');
-    expect(observed.newEventIds).toHaveLength(1);
+    await connector.observe(store, 'dm');
 
     const events = store.events();
     expect(events.find(e => e.payload.platformEventId === 'msg-no-aibotid')).toBeUndefined();
     expect(events.find(e => e.payload.platformEventId === 'msg-history-old')?.status).toBe('BASELINE');
     expect(events.find(e => e.payload.platformEventId === 'msg-malformed-mixed')?.payload.text).toBe('[图文混合消息]');
+
+    const noTimeEvent = events.find(e => e.payload.platformEventId === 'msg-no-time')!;
+    expect(noTimeEvent.payload.occurredAt).toBeNull();
+    expect(
+      store.db.prepare("SELECT 1 FROM audit_events WHERE entity_id=? AND event_type='SOURCE_COLLISION'").get(noTimeEvent.id),
+    ).toBeUndefined();
 
     const singleEvent = events.find(e => e.payload.platformEventId === 'msg-single-1')!;
     expect(singleEvent.payload.conversationId).toBe('single:customer-alice');
@@ -309,6 +329,8 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
     expect(imageEvent.payload.text).not.toContain(mediaAesKey);
     expect(imageEvent.status).toBe('MANUAL_REVIEW');
 
+    // Sync test clock back to wall clock before SendCoordinator proofTimeValid check.
+    clockOffsetMs = 0;
     const draft = store.saveDraft(singleEvent.id, '工作日 24 小时内发出，请放心。', 'manual');
     const handle = await connector.adapter(singleEvent.payload, store);
     try {
@@ -366,8 +388,6 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         text: { content: '在吗？帮查下订单' },
       },
     });
-    await new Promise(resolve => setTimeout(resolve, 10));
-
     const observed = await connector.observe(store, 'dm');
     const event = store.event(observed.newEventIds[0]!);
     const draft = store.saveDraft(event.id, '好的，请提供订单号。', 'manual');
@@ -393,7 +413,6 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
     expect((store.receiptForEvent(event.id) as { proof_ref: string }).proof_ref).toBe('NO_UNIQUE_BOUND_PROOF');
     expect(JSON.stringify(store.db.prepare('SELECT * FROM audit_events').all())).not.toContain(secret);
 
-    // close() must interrupt a hung open() handshake immediately without deadlocking AccountActor.
     const hung = createConnectedConnector({ ackMode: 'hang_open' });
     const hungOpen = hung.connector.open();
     await new Promise(resolve => setTimeout(resolve, 10));
@@ -403,14 +422,18 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
     expect(hung.connector.status().state).toBe('CLOSED');
   });
 
-  test('propagates SOURCE_COLLISION for differing bindings, blocks expired group req_id without proactive fallback, and honors collect(startedAt) + schema4 platform isolation', async () => {
+  test('enforces schema4 existing account row & platform match, shares persisted automation_state.started_at across restarts/autoPersistInbound, propagates SOURCE_COLLISION, and blocks expired group req_id', async () => {
     const { dir, file, store } = createTestStore();
     await migrateClient(store, join(dir, 'bak-client.sqlite'));
     await migrateAutomation(store, join(dir, 'bak-auto.sqlite'));
     await migrateToSchema4(store, join(dir, 'bak-s4.sqlite'));
 
+    // 1. schema4 default account_001 has no row yet -> bindStore MUST reject ACCOUNT_NOT_FOUND rather than creating default 'douyin' row.
+    const defaultNoRow = createConnectedConnector({ botId: 'aibot-default-norow', ackMode: 'auto_ok' });
+    expect(() => defaultNoRow.connector.bindStore(store)).toThrow('ACCOUNT_NOT_FOUND');
+    expect(store.db.prepare('SELECT 1 FROM accounts WHERE id=?').get('account_001')).toBeUndefined();
+
     const accounts = new AccountStore(store.db);
-    // Register an unbound Douyin account and a bound-ready WeCom account on schema4.
     const douyinAcct = accounts.registerAccount({
       commandId: '11111111-1111-4111-8111-111111111111',
       platform: 'douyin',
@@ -425,7 +448,7 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
     });
     store.close();
 
-    // 1. Cross-platform isolation: binding WeCom connector to Douyin schema4 account must throw ACCOUNT_PLATFORM_MISMATCH.
+    // 2. Cross-platform isolation on schema4.
     const douyinStore = new EventStore(file, false, undefined, douyinAcct.id);
     openStores.push(douyinStore);
     const wrongPlatformConn = createConnectedConnector({
@@ -436,12 +459,12 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
     expect(() => wrongPlatformConn.connector.bindStore(douyinStore)).toThrow('ACCOUNT_PLATFORM_MISMATCH');
     expect(douyinStore.accountOwnId(douyinAcct.id)).toBe('');
 
-    // 2. Proper WeCom schema4 account + collect(AutomationStore) startedAt boundary + SOURCE_COLLISION + group req_id TTL.
+    // 3. Proper WeCom schema4 account + persisted automation_state.started_at + SOURCE_COLLISION + group req_id TTL.
     const wecomStore = new EventStore(file, false, undefined, wecomAcct.id);
     openStores.push(wecomStore);
     let clockMs = Date.now();
     const autoStore = new AutomationStore(wecomStore, () => clockMs, wecomAcct.id);
-    const startedAt = clockMs - 5_000;
+    const startedAt = clockMs - 30_000;
     autoStore.initialize(startedAt);
 
     const { connector, sockets, botId } = createConnectedConnector({
@@ -454,7 +477,6 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
     await connector.open();
 
     const ws = sockets[0]!;
-    // Message older than AutomationStore.startedAt -> BASELINE via collect()
     ws.emitFrame({
       cmd: WsCmd.CALLBACK,
       headers: { req_id: 'req-pre-auto' },
@@ -468,7 +490,6 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         text: { content: '自动化开启前旧消息' },
       },
     });
-    // Group message after startedAt -> AWAITING_DRAFT
     const groupTimeSec = Math.floor((startedAt + 2_000) / 1000);
     ws.emitFrame({
       cmd: WsCmd.CALLBACK,
@@ -484,14 +505,13 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         text: { content: '原始群消息' },
       },
     });
-    await new Promise(resolve => setTimeout(resolve, 10));
     await connector.collect(autoStore, 'dm', new AbortController().signal);
 
     expect(wecomStore.events().find(e => e.payload.platformEventId === 'msg-pre-auto')?.status).toBe('BASELINE');
     const grpEvent = wecomStore.events().find(e => e.payload.platformEventId === 'msg-grp-1')!;
     expect(grpEvent.status).toBe('AWAITING_DRAFT');
 
-    // Expire req_id TTL: group reply MUST fail closed with WECOM_WS_REPLY_ROUTE_MISSING (never fall back to aibot_send_msg).
+    // Expire req_id TTL -> group reply MUST fail closed without aibot_send_msg fallback.
     clockMs += 2_000;
     const expiredHandle = await connector.adapter(grpEvent.payload, wecomStore);
     try {
@@ -501,7 +521,7 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
     }
     expect(ws.sentFrames.filter(f => f.cmd === WsCmd.SEND_MSG)).toHaveLength(0);
 
-    // Same msgid with mutated text must NOT be masked by seenMsgBindings -> triggers SOURCE_COLLISION & MANUAL_REVIEW.
+    // Mutated redelivery triggers SOURCE_COLLISION & MANUAL_REVIEW.
     ws.emitFrame({
       cmd: WsCmd.CALLBACK,
       headers: { req_id: 'req-grp-1-mut' },
@@ -516,12 +536,40 @@ describe('WecomAibotPlatformConnector integration with EventStore and SendCoordi
         text: { content: '被篡改后的群消息' },
       },
     });
-    await new Promise(resolve => setTimeout(resolve, 10));
     await connector.observe(wecomStore, 'dm');
     expect(wecomStore.event(grpEvent.id).status).toBe('MANUAL_REVIEW');
-    const collisionAudit = wecomStore.db
-      .prepare("SELECT event_type FROM audit_events WHERE entity_id=? AND event_type='SOURCE_COLLISION'")
-      .get(grpEvent.id);
-    expect(collisionAudit).toBeDefined();
+    expect(
+      wecomStore.db.prepare("SELECT event_type FROM audit_events WHERE entity_id=? AND event_type='SOURCE_COLLISION'").get(grpEvent.id),
+    ).toBeDefined();
+
+    // 4. Simulated restart: new connector with autoPersistInbound=true (no explicit firstRunAt, before collect())
+    //    reads persisted automation_state.started_at so messages between startedAt and restart become AWAITING_DRAFT.
+    await connector.close();
+    const restarted = createConnectedConnector({
+      accountId: wecomAcct.id,
+      botId,
+      ackMode: 'auto_ok',
+      autoPersistInbound: true,
+      now: () => clockMs + 10_000,
+    });
+    await restarted.connector.open();
+    restarted.connector.bindStore(wecomStore);
+    restarted.sockets[0]!.emitFrame({
+      cmd: WsCmd.CALLBACK,
+      headers: { req_id: 'req-between-restart' },
+      body: {
+        msgid: 'msg-between-restart',
+        aibotid: botId,
+        chattype: 'single',
+        from: { userid: 'u-new-after-restart' },
+        create_time: Math.floor((startedAt + 10_000) / 1000),
+        msgtype: 'text',
+        text: { content: '重启间隙发来的新咨询' },
+      },
+    });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(wecomStore.events().find(e => e.payload.platformEventId === 'msg-between-restart')?.status).toBe(
+      'AWAITING_DRAFT',
+    );
   });
 });
