@@ -66,7 +66,7 @@ test('registry resolves by the exact platform and account pair', () => {
   expect(() => registry.resolve(douyin.platformId, second.accountId)).toThrow('PLATFORM_CONNECTOR_NOT_FOUND');
   expect(() => registry.register(new MockPlatformConnector())).toThrow('PLATFORM_CONNECTOR_ALREADY_REGISTERED');
   expect(mock.capabilities).toEqual({ channels: ['COMMENT_NOTIFICATION', 'DIRECT_MESSAGE'], loginRecovery: false,
-    manualSecurityRecovery: false, preview: false, readback: true });
+    manualSecurityRecovery: false, preview: false, readback: true, transport: 'browser' });
 });
 
 test('mock inbound DM and comment each produce a persisted intent and a confirmed receipt through Core', async () => {

@@ -1,13 +1,15 @@
 import type { BrowserService } from '../app/browser-service.js';
-import type { PlatformCapabilities, PlatformConnector } from './platform-connector.js';
+import { DOUYIN_PLATFORM_ID } from '../contracts/account.js';
+import type { BrowserTransportStatus, PlatformCapabilities, PlatformConnector } from './platform-connector.js';
 
-export const DOUYIN_PLATFORM_ID = 'douyin';
+export { DOUYIN_PLATFORM_ID };
 export const douyinCapabilities: PlatformCapabilities = Object.freeze({
   channels: Object.freeze(['COMMENT_NOTIFICATION', 'DIRECT_MESSAGE'] as const),
   loginRecovery: true,
   manualSecurityRecovery: true,
   preview: true,
   readback: true,
+  transport: 'browser',
 });
 
 /** Keeps the browser owner, its safety state and its actor in the original service. */
@@ -23,6 +25,16 @@ export class DouyinPlatformConnector implements PlatformConnector {
   get loginRecovery() { return this.browser.loginRecovery; }
   get actor() { return this.browser.actor; }
   status() { return this.browser.status(); }
+  transportStatus(): BrowserTransportStatus {
+    const current = this.browser.status();
+    return {
+      transport: 'browser',
+      state: current.state,
+      mode: current.mode,
+      version: current.version,
+      ...(current.loginRecovery !== undefined ? { loginRecovery: current.loginRecovery } : {}),
+    };
+  }
   resourceIdentity() { return this.browser.resourceIdentity(); }
   isIdle() { return this.browser.isIdle(); }
   open(...args: Parameters<PlatformConnector['open']>) { return this.browser.open(...args); }

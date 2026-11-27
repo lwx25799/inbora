@@ -6,8 +6,13 @@ export type AccountId = z.infer<typeof accountIdSchema>;
 
 export const DOUYIN_PLATFORM_ID = 'douyin';
 export const MOCK_PLATFORM_ID = 'mock-platform';
+export const WECOM_AIBOT_PLATFORM_ID = 'wecom-aibot';
+export const WECHAT_KF_PLATFORM_ID = 'wechat-kf';
 export const platformIdSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u);
 export type PlatformId = z.infer<typeof platformIdSchema>;
+
+export const platformTransportSchema = z.enum(['browser', 'official_api', 'desktop_uia', 'copilot_webview']);
+export type PlatformTransport = z.infer<typeof platformTransportSchema>;
 
 export const accountRefSchema = accountIdSchema;
 export type AccountRef = z.infer<typeof accountRefSchema>;
@@ -37,6 +42,7 @@ export const accountSummarySchema = z.object({
     manualSecurityRecovery: z.boolean(),
     preview: z.boolean(),
     readback: z.boolean(),
+    transport: platformTransportSchema.optional(),
   }).strict(),
   autoReplyEnabled: z.boolean(),
   createdAt: z.string(),

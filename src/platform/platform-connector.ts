@@ -1,4 +1,4 @@
-import type { AccountId } from '../contracts/account.js';
+import type { AccountId, PlatformTransport } from '../contracts/account.js';
 import type { BrowserMode, BrowserResourceIdentity, BrowserStatus } from '../contracts/browser-resources.js';
 import type { Channel, InboundEvent, ReplyAdapter, SendProof, TargetSnapshot } from '../contracts/events.js';
 import type { ManualRecoveryCommand, ManualRecoveryResult, ManualRecoveryStatus } from '../contracts/manual-recovery.js';
@@ -11,9 +11,51 @@ export interface PlatformCapabilities {
   readonly manualSecurityRecovery: boolean;
   readonly preview: boolean;
   readonly readback: boolean;
+  readonly transport?: PlatformTransport | undefined;
 }
 
 export type PlatformStatus = BrowserStatus;
+
+export interface BrowserTransportStatus {
+  readonly transport: 'browser';
+  readonly state: string;
+  readonly mode: BrowserMode;
+  readonly version: string | null;
+  readonly loginRecovery?: boolean | undefined;
+}
+
+export type OfficialApiTransportState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'DEGRADED' | 'ERROR';
+export type OfficialApiProtocol = 'wecom_ws' | 'wechat_kf_http';
+
+export interface OfficialApiTransportStatus {
+  readonly transport: 'official_api';
+  readonly state: OfficialApiTransportState;
+  readonly endpointDigest: string | null;
+  readonly protocol: OfficialApiProtocol;
+  readonly lastHeartbeatAt?: number | null | undefined;
+  readonly lastSyncAt?: number | null | undefined;
+  readonly errorCode?: string | null | undefined;
+}
+
+export interface DesktopUiaTransportStatus {
+  readonly transport: 'desktop_uia';
+  readonly state: string;
+  readonly windowAvailable: boolean;
+  readonly accessibilityVisible: boolean;
+}
+
+export interface CopilotWebviewTransportStatus {
+  readonly transport: 'copilot_webview';
+  readonly state: string;
+  readonly targetUrlOrigin: string | null;
+}
+
+export type ConnectorTransportStatus =
+  | BrowserTransportStatus
+  | OfficialApiTransportStatus
+  | DesktopUiaTransportStatus
+  | CopilotWebviewTransportStatus;
+
 export type CollectionSource = 'works' | 'dm';
 export type ObservationSource = 'notifications' | CollectionSource;
 export type ObservationResult = { newEventIds: string[] } |
@@ -26,6 +68,38 @@ export interface CapabilityIdentity {
   browserVersion: string;
   browserMode: BrowserMode;
 }
+
+export interface BrowserCapabilityIdentity extends CapabilityIdentity {
+  readonly transport: 'browser';
+}
+
+export interface OfficialApiCapabilityIdentity {
+  readonly transport: 'official_api';
+  readonly identityDigest: string;
+  readonly mappingDigest: string;
+  readonly protocol: OfficialApiProtocol;
+  readonly endpointDigest: string;
+}
+
+export interface DesktopUiaCapabilityIdentity {
+  readonly transport: 'desktop_uia';
+  readonly identityDigest: string;
+  readonly mappingDigest: string;
+  readonly windowDigest: string;
+}
+
+export interface CopilotWebviewCapabilityIdentity {
+  readonly transport: 'copilot_webview';
+  readonly identityDigest: string;
+  readonly mappingDigest: string;
+  readonly targetUrlOrigin: string;
+}
+
+export type ConnectorCapabilityIdentity =
+  | BrowserCapabilityIdentity
+  | OfficialApiCapabilityIdentity
+  | DesktopUiaCapabilityIdentity
+  | CopilotWebviewCapabilityIdentity;
 
 export interface AccountSerialExecutor {
   run<T>(operation: () => Promise<T>, priority?: 'interactive' | 'background'): Promise<T>;
@@ -58,6 +132,7 @@ export interface PlatformConnector {
   readonly ownerEpoch: number;
   readonly loginRecovery: boolean;
   status(): PlatformStatus;
+  transportStatus?(): ConnectorTransportStatus;
   resourceIdentity(): BrowserResourceIdentity;
   isIdle(): boolean;
   open(mode?: BrowserMode, signal?: AbortSignal): Promise<void>;

@@ -52,6 +52,8 @@
 | [TeamBreakerr/douyin-chat-export](https://github.com/TeamBreakerr/douyin-chat-export) | `9e39afa980945737270ee88f8e33da470742cd9b` | 仅结构核对（未复制源码） | 抖音私信消息结构与类型字段核对 | 批量导出或绕过平台边界的脚本 |
 | [Johnserf-Seed/f2](https://github.com/Johnserf-Seed/f2) | `f6be8c0ffba9a127075bbeafe4838716650b6325` | Apache-2.0（仅结构核对） | 分享链接作品类型与引用格式核对 | 下载器、签名算法或反爬模块 |
 | [ZeZhizhan/Fathom](https://github.com/ZeZhizhan/Fathom) | `24d223de611c451deeeeea90c53705aa4f348175` | MIT（`third_party/Fathom-MIT.txt`） | 中文对话停用 bigram 过滤、双向覆盖率门槛与预算统计思路 | 睡眠/情绪状态机与 3D 星图面板 |
+| [pawastation/wechat-kf](https://github.com/pawastation/wechat-kf) | `68b7d367f6cf` | MIT（`third_party/pawastation-wechat-kf-MIT.txt`） | 零依赖 WXBizMsgCrypt 加解密、防惊群 Token 缓存、`sync_msg` 游标、95026 会话窗口识别与 2048B 限长校验 | OpenClaw 插件壳与外发重试/自动拆条 |
+| [WecomTeam/aibot-node-sdk](https://github.com/WecomTeam/aibot-node-sdk) | `80615b987ef6` | 仅结构核对（零外部运行时依赖独立实现） | 公开 WebSocket 帧契约与附件 32B PKCS#7 解密结构核对，零外部运行时依赖独立实现 | 自动重试与流式增量多次发送 |
 
 ---
 

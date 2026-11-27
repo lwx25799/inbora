@@ -7,15 +7,19 @@ import { eventSchema, type Channel } from '../contracts/events.js';
 import type { AutomationStore } from '../storage/automation-store.js';
 import type { EventStore } from '../storage/store.js';
 import type {
-  AdapterHandle, AdapterOptions, CapabilityIdentity, CollectionSource, FollowupVerificationResult,
+  AdapterHandle, AdapterOptions, BrowserTransportStatus, CapabilityIdentity, CollectionSource, FollowupVerificationResult,
   ObservationResult, ObservationSource, PlatformCapabilities, PlatformConnector, PlatformReplyAdapter,
   PreviewDisplayTarget, VerificationOptions, VerificationResult,
 } from './platform-connector.js';
 
-export const mockCapabilities: PlatformCapabilities = {
-  channels: ['COMMENT_NOTIFICATION', 'DIRECT_MESSAGE'], loginRecovery: false,
-  manualSecurityRecovery: false, preview: false, readback: true,
-};
+export const mockCapabilities: PlatformCapabilities = Object.freeze({
+  channels: Object.freeze(['COMMENT_NOTIFICATION', 'DIRECT_MESSAGE'] as const),
+  loginRecovery: false,
+  manualSecurityRecovery: false,
+  preview: false,
+  readback: true,
+  transport: 'browser',
+});
 
 export interface MockPlatformOptions {
   accountId?: AccountId;
@@ -57,6 +61,16 @@ export class MockPlatformConnector implements PlatformConnector {
   onManualRecoveryClosed = () => {};
   status(): BrowserStatus {
     return { state: this.drifted ? 'ACCOUNT_CHANGED' : this.opened ? 'OPEN' : 'CLOSED', mode: 'headless', version: null };
+  }
+  transportStatus(): BrowserTransportStatus {
+    const current = this.status();
+    return {
+      transport: 'browser',
+      state: current.state,
+      mode: current.mode,
+      version: current.version,
+      loginRecovery: this.loginRecovery,
+    };
   }
   resourceIdentity(): BrowserResourceIdentity { return { open: this.opened, epoch: this.ownerEpoch, mode: 'headless', pageCount: 0 }; }
   isIdle() { return this.actor.idle; }
