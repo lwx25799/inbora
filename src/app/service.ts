@@ -49,6 +49,7 @@ import {
 } from "./service-delivery.js";
 import { bootstrapAutomationRuntime, bootstrapModelProviders, loadClientSettings } from "./service-bootstrap.js";
 import { AccountController, auditPage, isAccountWrite } from "./account-controller.js";
+import { handleAiRuntimeCommand } from "./ai-runtime-commands.js";
 import { CredentialStore } from "./credentials.js";
 import type { AccountsCommand } from "../contracts/account.js";
 
@@ -713,6 +714,10 @@ export class ClientService {
         this.emit("suggestion_updated");
         return result;
       }
+      case "accountAiFeatures":
+      case "mediaAssets":
+      case "businessTools":
+        return handleAiRuntimeCommand({ store: this.store, authority: this.authority, root: this.browser.root, onUpdated: () => this.emit("status_updated") }, token, c);
     }
   }
   private result(token: string, id: string) {

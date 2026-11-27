@@ -24,6 +24,7 @@ const shadowTables = [
 const statisticsTables = ['sqlite_stat1', 'sqlite_stat4'];
 const lazyExtensionTables = [
   'k_chunk_vectors', 'rhythm_account_state', 'handoff_attributions', 'faq_suggestion_candidates', 'reply_pipeline_settings',
+  'model_slot_routes', 'account_ai_features', 'local_media_assets',
 ] as const;
 const sourceTables = new Set<string>([
   ...coreTables,

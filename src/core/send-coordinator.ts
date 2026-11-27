@@ -1,7 +1,12 @@
 import type { AccountSerialExecutor } from '../platform/platform-connector.js';
 import {assertSecurityRevision,securityRevision} from '../storage/security-holds.js';
 import type { EventStore } from '../storage/store.js';
-import { Blocked, digest, requireSafe, proofTimeValid, type ReplyAdapter } from './contracts.js';
+import { Blocked, digest, requireSafe, proofTimeValid, type PreparedMediaAsset, type ReplyAdapter } from './contracts.js';
+
+export interface SendMediaAttachment {
+  asset: PreparedMediaAsset;
+  verify(): void;
+}
 
 // Only fixed internal codes may enter a receipt; arbitrary browser errors can contain private text.
 const postIntentCodes=new Set(['NATIVE_REPLY_CLICK_BLOCKED','NATIVE_REPLY_NOT_PREPARED','NATIVE_REPLY_ACK_REVOKED',
@@ -25,7 +30,8 @@ export class SendCoordinator {
     requireSafe(accountId === store.accountId, 'ACCOUNT_CHANGED');
   }
   send(draftId: string, adapter: ReplyAdapter, real: boolean,
-    authority?: { check(): void; committed(intentId: string): void;manualMedia?():void;beforeSubmit?(intentId:string):void }): Promise<'CONFIRMED' | 'UNCERTAIN'> {
+    authority?: { check(): void; committed(intentId: string): void;manualMedia?():void;beforeSubmit?(intentId:string):void },
+    media?: SendMediaAttachment): Promise<'CONFIRMED' | 'UNCERTAIN'> {
     return this.actor.run(async () => {
       authority?.check();
       const draft = this.store.draft(draftId);
@@ -50,6 +56,16 @@ export class SendCoordinator {
         const before = await adapter.inspect(event.payload);
         requireSafe(unchanged(before,'INSPECT'), 'TARGET_CHANGED_REAPPROVE');
         await adapter.prepare(event.payload, draft.text);
+        if (media) {
+          media.verify();
+          if (typeof adapter.prepareMedia !== 'function') {
+            throw new Blocked('MEDIA_SEND_NOT_SUPPORTED');
+          }
+          const supported = await adapter.prepareMedia(event.payload, media.asset);
+          if (!supported) {
+            throw new Blocked('MEDIA_SEND_NOT_SUPPORTED');
+          }
+        }
         const prepared = await adapter.verifyPrepared(event.payload, draft.text);
         requireSafe(unchanged(prepared,'PREPARED'), 'TARGET_CHANGED_REAPPROVE');
         baseline = await adapter.baseline(event.payload);

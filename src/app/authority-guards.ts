@@ -10,6 +10,7 @@ import {
 } from "../core/contracts.js";
 import { assertDraftLearningCurrent } from "../knowledge/generation-context.js";
 import { AutomationStore } from "../storage/automation-store.js";
+import { AccountAiFeaturesStore } from "../storage/account-ai-features.js";
 import { assertSecurityChannelClear } from "../storage/security-holds.js";
 import type { CapabilityIdentity } from "./channel-authority.js";
 import type { SendParams } from "./contracts.js";
@@ -148,6 +149,9 @@ export function assertCanSendImpl(
   const { store } = authority;
   authority.operator(token, "APPROVE");
   authority.operator(token, "SEND");
+  if (p.mediaAssetId) {
+    requireSafe(new AccountAiFeaturesStore(store.db, store.accountId).get().mediaReplyEnabled, "MEDIA_REPLY_DISABLED");
+  }
   const e = store.event(p.eventId);
   assertSecurityChannelClear(store, e.payload.channel);
   authority.assistant.requireSend(authority.operator(token).id, e);

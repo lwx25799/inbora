@@ -7,6 +7,7 @@ import {humanReplySchema,type SendParams} from './contracts.js';
 import type {z} from 'zod';
 import {captureHumanQueueContext,recordHumanQueueContext} from './human-queue-context.js';
 import {assertDraftLearningCurrent} from '../knowledge/generation-context.js';
+import {prepareSendMediaAttachment} from './ai-runtime-commands.js';
 
 /** One explicit human request, durable latest text, backend qualification, then the shared send coordinator. */
 export class HumanReplyWorkflow {
@@ -46,6 +47,7 @@ export class HumanReplyWorkflow {
     let dispose:()=>void|Promise<void>=()=>{};
     try {
       requireSafe(!this.browser.loginRecovery,'LOGIN_RECOVERY_IN_PROGRESS');
+      prepareSendMediaAttachment(this.store,this.browser.root,params);
       const manualMedia=isManualMediaCandidate(event.payload)&&!!this.store.db.prepare('SELECT command_id FROM manual_send_inputs WHERE command_id=?').get(id)&&
         !this.store.db.prepare('SELECT command_id FROM policy_commands WHERE command_id=?').get(id);
       const handle=await this.browser.adapter(event.payload,this.store,undefined,{manualMedia});dispose=handle.dispose;

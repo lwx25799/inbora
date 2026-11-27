@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import type * as React from 'react';
 import {
   BellIcon,
@@ -26,12 +27,20 @@ import {
   platformNames,
   reasons,
   request,
+  requestV2,
   WECOM_AIBOT_PLATFORM_ID,
   type AccountSummary,
   type ActiveWorkbenchAccount,
+  type OfficialChannelPublicConfig,
   type Status,
 } from '@/api';
 import { browserState, time } from '@/presentation';
+
+export interface OfficialAccountStatusSnapshot {
+  connected: boolean;
+  connectorState?: string;
+  transportStatus?: OfficialChannelPublicConfig['transportStatus'];
+}
 
 export interface AccountsViewProps {
   status: Status;
@@ -41,6 +50,95 @@ export interface AccountsViewProps {
   activeAccount?: ActiveWorkbenchAccount | null | undefined;
   activeAccountRef?: string | undefined;
   onSelectWorkbenchAccount?: ((account: AccountSummary | null) => void) | undefined;
+  officialAccountStatus?: OfficialAccountStatusSnapshot | null | undefined;
+}
+
+const officialStateLabels: Record<string, string> = {
+  CONNECTED: '已连接',
+  CONNECTING: '连接中',
+  DEGRADED: '连接降级',
+  ERROR: '连接异常',
+  DISCONNECTED: '未连接',
+};
+
+function resolveOfficialTransportPresentation(
+  emergencyStopped: boolean,
+  isWecomOfficial: boolean,
+  officialStatus: OfficialAccountStatusSnapshot | null,
+  statusReadError: boolean,
+): {
+  badgeVariant: 'success' | 'warning' | 'error' | 'secondary';
+  stateLabel: string;
+  summaryText: string;
+} {
+  if (emergencyStopped) {
+    return {
+      badgeVariant: 'error',
+      stateLabel: '已急停',
+      summaryText: '全局急停生效中，官方通道已暂停',
+    };
+  }
+  const transportState =
+    officialStatus?.transportStatus?.state ??
+    officialStatus?.connectorState ??
+    (officialStatus ? (officialStatus.connected ? 'CONNECTED' : 'DISCONNECTED') : null);
+  if (transportState === 'CONNECTED' && officialStatus?.connected !== false) {
+    return {
+      badgeVariant: 'success',
+      stateLabel: officialStateLabels.CONNECTED!,
+      summaryText: isWecomOfficial ? '官方长连接已连接，免浏览器运行中' : '官方 API 已连接，免浏览器运行中',
+    };
+  }
+  if (transportState === 'CONNECTING') {
+    return {
+      badgeVariant: 'warning',
+      stateLabel: officialStateLabels.CONNECTING!,
+      summaryText: '正在建立官方通道连接…',
+    };
+  }
+  if (transportState === 'DEGRADED') {
+    return {
+      badgeVariant: 'warning',
+      stateLabel: officialStateLabels.DEGRADED!,
+      summaryText: '官方通道连接降级，请检查网络或配置',
+    };
+  }
+  if (transportState === 'ERROR') {
+    return {
+      badgeVariant: 'error',
+      stateLabel: officialStateLabels.ERROR!,
+      summaryText: '官方通道连接异常，请在左侧「管理接入」核对凭据或状态',
+    };
+  }
+  if (transportState === 'DISCONNECTED' || transportState === 'UNAVAILABLE') {
+    return {
+      badgeVariant: 'secondary',
+      stateLabel: officialStateLabels.DISCONNECTED!,
+      summaryText:
+        transportState === 'UNAVAILABLE'
+          ? '官方通道尚未建立连接，请在左侧「管理接入」中连接通道'
+          : '官方通道未连接，请在左侧「已接入账号」连接通道',
+    };
+  }
+  if (officialStatus) {
+    return {
+      badgeVariant: 'warning',
+      stateLabel: '未就绪',
+      summaryText: '官方通道当前未处于已连接状态，请展开「管理接入」核对连接状态',
+    };
+  }
+  if (statusReadError) {
+    return {
+      badgeVariant: 'warning',
+      stateLabel: '状态待核验',
+      summaryText: '暂未能读取官方通道实时连接状态，请稍后刷新',
+    };
+  }
+  return {
+    badgeVariant: 'secondary',
+    stateLabel: '读取中',
+    summaryText: '正在读取官方通道连接状态…',
+  };
 }
 
 export function AccountsView({
@@ -51,6 +149,7 @@ export function AccountsView({
   activeAccount,
   activeAccountRef,
   onSelectWorkbenchAccount,
+  officialAccountStatus,
 }: AccountsViewProps): React.ReactElement {
   const resolvedActiveRef = activeAccount?.accountRef ?? activeAccountRef;
   const isOfficialChannel = Boolean(activeAccount && isOfficialApiPlatform(activeAccount.platform));
@@ -61,6 +160,50 @@ export function AccountsView({
   const browserConnected = status.browser.state.startsWith('OPEN');
   const isHeaded = status.browser.loginRecovery || status.browser.mode === 'headed';
   const holds = status.securityHolds ?? [];
+  const [fetchedOfficialStatus, setFetchedOfficialStatus] =
+    useState<OfficialAccountStatusSnapshot | null>(null);
+  const [officialStatusError, setOfficialStatusError] = useState(false);
+
+  const officialAccountRef = isOfficialChannel ? activeAccount?.accountRef : undefined;
+  const emergencyStopped = Boolean(status.automation?.emergencyStopped);
+  const statusFetchSeq = useRef(0);
+
+  useEffect(() => {
+    if (!officialAccountRef || officialAccountStatus !== undefined) {
+      statusFetchSeq.current += 1;
+      setFetchedOfficialStatus(null);
+      setOfficialStatusError(false);
+      return;
+    }
+    let active = true;
+    const seq = ++statusFetchSeq.current;
+    void requestV2<OfficialAccountStatusSnapshot>(
+      { kind: 'ACCOUNT', accountRef: officialAccountRef },
+      { command: 'accounts', action: 'getAccountStatus', accountRef: officialAccountRef },
+    )
+      .then(result => {
+        if (!active || statusFetchSeq.current !== seq) return;
+        setFetchedOfficialStatus(result);
+        setOfficialStatusError(false);
+      })
+      .catch(() => {
+        if (!active || statusFetchSeq.current !== seq) return;
+        setFetchedOfficialStatus(null);
+        setOfficialStatusError(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [officialAccountRef, officialAccountStatus, status]);
+
+  const effectiveOfficialStatus =
+    officialAccountStatus !== undefined ? officialAccountStatus : fetchedOfficialStatus;
+  const officialPresentation = resolveOfficialTransportPresentation(
+    emergencyStopped,
+    isWecomOfficial,
+    effectiveOfficialStatus,
+    officialStatusError,
+  );
 
   return (
     <div className="mx-auto max-w-[1200px] space-y-5 px-6 py-5">
@@ -123,19 +266,17 @@ export function AccountsView({
                 官方通道状态
               </span>
               <Badge
-                variant={status.automation?.emergencyStopped ? 'error' : 'success'}
+                variant={officialPresentation.badgeVariant}
                 size="sm"
               >
-                {isWecomOfficial ? '官方长连接' : '官方 API'}
+                {isWecomOfficial ? '官方长连接' : '官方 API'} · {officialPresentation.stateLabel}
               </Badge>
             </div>
             <div className="mt-2 text-[13.5px] font-semibold text-foreground">
               免浏览器后台运行
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              {status.automation?.emergencyStopped
-                ? '全局急停生效中，官方通道已暂停'
-                : '官方长连接或 API 运行中'}
+              {officialPresentation.summaryText}
             </p>
           </Card>
         ) : (
@@ -263,6 +404,10 @@ export function AccountsView({
                     <span className="font-medium text-foreground">
                       {isWecomOfficial ? '官方长连接（免浏览器）' : '官方 API（免浏览器）'}
                     </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span>连接状态</span>
+                    <span className="font-medium text-foreground">{officialPresentation.stateLabel}</span>
                   </div>
                   <p className="pt-1 leading-relaxed">
                     通道能力与模型密钥分别生效；如需调整凭据或连接状态，请在左侧「已接入账号」展开对应账号的「管理接入」。

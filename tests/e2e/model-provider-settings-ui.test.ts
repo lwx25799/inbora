@@ -74,6 +74,9 @@ function publicState(state: PublicModelState, offset = 0, limit = CONNECTION_PAG
 
 function dispatchModel(state: PublicModelState, command: ModelProvidersCommand) {
   const advanceListRevision = () => { state.listRevision = (state.listRevision ?? 0) + 1; };
+  if (command.action === 'getSlots' || command.action === 'setSlot') {
+    return { primary: state.selection, vision: null, utility: null, embedding: null };
+  }
   if (command.action === 'list' && !command.connectionId) {
     if (command.expectedListRevision !== undefined && command.expectedListRevision !== state.listRevision) {
       throw Error('MODEL_CONNECTION_CONFLICT');
@@ -224,9 +227,30 @@ async function openSettings(status: Status, viewport = {width: 1240, height: 800
         prompts.push(body);
         Object.assign(status.settings, body.settings);
         return {...status, modelProviders: initialModels};
+      case 'accountAiFeatures':
+        return {
+          visionEnabled: false,
+          mediaReplyEnabled: false,
+          enabledBusinessTools: [],
+          toolEndpoints: {},
+          syncCustomerAvatars: false,
+        };
+      case 'mediaAssets':
+        return { assets: [] };
+      case 'businessTools':
+        return {
+          tools: [
+            { id: 'query_order_status', enabled: false, endpointConfigured: false },
+            { id: 'query_logistics_trace', enabled: false, endpointConfigured: false },
+            { id: 'query_inventory_stock', enabled: false, endpointConfigured: false },
+          ],
+        };
       case 'modelProviders': {
         if (!status.modelProviders || status.modelProvidersAvailable !== true) throw Error('UNEXPECTED_MODEL_PROVIDERS_COMMAND');
         const command = modelProvidersCommandSchema.parse(body);
+        if (command.action === 'getSlots') {
+          return { primary: status.modelProviders.selection, vision: null, utility: null, embedding: null };
+        }
         calls.push(command);
         const held = holds.find(item => !item.entered && item.action === command.action && item.matches(command));
         const wait = async (hold: NonNullable<typeof held>) => {

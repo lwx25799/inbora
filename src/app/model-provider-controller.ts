@@ -10,6 +10,7 @@ import { publicModelError, testModelProvider } from "./model-provider-test.js";
 import { onEmergencyStop } from "../storage/emergency-stop.js";
 import { LEGACY_KEY_WARNING } from "../storage/model-provider-migration.js";
 import { inlineModelEntries } from "../storage/model-provider-store.js";
+import { ModelSlotStore } from "../storage/model-slot-store.js";
 
 export class ModelProviderController {
   private business = new AbortController();
@@ -19,9 +20,12 @@ export class ModelProviderController {
   private stagedCleanupFailed = false;
   private closed = false;
   private detachEmergency?: () => void;
+  readonly slots: ModelSlotStore;
 
   constructor(readonly guard: ModelRouteGuard, readonly credentials: ModelCredentialStore,
-    readonly transport: typeof fetch, readonly updated: () => void) {}
+    readonly transport: typeof fetch, readonly updated: () => void) {
+    this.slots = new ModelSlotStore(guard.models, guard.automation.now);
+  }
 
   get models() { return this.guard.models; }
   get signal() { return this.business.signal; }
@@ -176,6 +180,18 @@ export class ModelProviderController {
       case "list": return c.connectionId
         ? this.models.listModelsPage(c.connectionId, c.offset ?? 0, c.limit ?? MODEL_PAGE_LIMIT)
         : this.state(c.offset, c.limit, c.expectedListRevision);
+      case "getSlots":
+        return this.slots.getSlots();
+      case "setSlot": {
+        if (c.connectionId !== null) {
+          const route = this.requireRoute(c.connectionId, c.routeRevision!);
+          await this.loadKey(route);
+        }
+        authorize();
+        const slots = this.slots.setSlot(c);
+        this.updated();
+        return slots;
+      }
       case "save":
         this.models.saveConnection(c);
         break;

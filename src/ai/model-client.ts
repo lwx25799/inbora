@@ -1,4 +1,4 @@
-import { generateText, isStepCount } from "ai";
+import { generateText, isStepCount, type ModelMessage } from "ai";
 import {
   isValidModelId, modelRouteSnapshotSchema,
   type ConnectionRevision, type ModelProtocol, type ModelResult, type ModelRouteSnapshot, type ModelUsageDetails,
@@ -6,17 +6,43 @@ import {
 import { createModelTransport, ModelError, requireModelKey, withModelDeadline, type ModelFetchOptions } from "./model-transport.js";
 import { createModelProvider } from "./provider-factory.js";
 import { endpointDigest, normalizeBaseUrl, previewGenerationUrl } from "./provider-presets.js";
+import {
+  buildValidatedVisionInput,
+  isValidatedVisionImagePart,
+  type ValidatedVisionImagePart,
+} from "./vision-input.js";
+import type { MediaAssetMimeType } from "../contracts/ai-runtime.js";
+import { Blocked } from "../core/contracts.js";
 
 export interface ModelTextMessage {
   role: "system" | "user" | "assistant";
   content: string;
 }
 
+export type ModelVisionPartInput =
+  | ValidatedVisionImagePart
+  | {
+      type: "image";
+      sourceKind: "CUSTOMER_MESSAGE_IMAGE";
+      imageDataUrl?: string;
+      bytes?: Uint8Array;
+      mimeType: MediaAssetMimeType;
+    };
+
+export type ModelMessageContentPart =
+  | { type: "text"; text: string }
+  | ModelVisionPartInput;
+
+export type ModelGenerationMessage =
+  | ModelTextMessage
+  | { role: "user"; content: readonly ModelMessageContentPart[] };
+
 export interface ModelGenerationInput extends ModelFetchOptions {
   revision: Readonly<ConnectionRevision>;
   snapshot: Readonly<ModelRouteSnapshot>;
   apiKey?: string | null | undefined;
-  messages?: readonly ModelTextMessage[];
+  messages?: readonly ModelGenerationMessage[];
+  allowVision?: boolean;
   beforeRequest?: () => void;
   onTelemetry?: (telemetry: ModelResponseTelemetry) => void;
 }
@@ -27,14 +53,52 @@ export function makeProviderTestMessages(): ModelTextMessage[] {
   return [{ role: "user", content: "Reply only with OK." }];
 }
 
-function readTextMessages(messages: ModelGenerationInput["messages"]): ModelTextMessage[] {
+function decodeDataUrlBytes(imageDataUrl: string): Uint8Array {
+  const match = /^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/=\s]+)$/iu.exec(imageDataUrl.trim());
+  if (!match) throw new Blocked("VISION_INPUT_FORBIDDEN");
+  return new Uint8Array(Buffer.from(match[1]!.replace(/\s+/gu, ""), "base64"));
+}
+
+function readGenerationMessages(messages: ModelGenerationInput["messages"], allowVision: boolean): ModelMessage[] {
   if (!Array.isArray(messages) || messages.length === 0) throw new ModelError("MODEL_REQUEST_UNSUPPORTED");
   return messages.map(message => {
     const { role, content } = message ?? {};
-    if ((role !== "user" && role !== "assistant" && role !== "system") || typeof content !== "string") {
+    if (role !== "user" && role !== "assistant" && role !== "system") {
       throw new ModelError("MODEL_REQUEST_UNSUPPORTED");
     }
-    return { role, content };
+    if (typeof content === "string") {
+      return { role, content };
+    }
+    if (role !== "user" || !Array.isArray(content) || content.length === 0) {
+      throw new ModelError("MODEL_REQUEST_UNSUPPORTED");
+    }
+    const parts = content.map(part => {
+      if (part && typeof part === "object" && "type" in part && part.type === "text") {
+        if (typeof part.text !== "string") throw new ModelError("MODEL_REQUEST_UNSUPPORTED");
+        return { type: "text" as const, text: part.text };
+      }
+      if (!allowVision) throw new Blocked("VISION_INPUT_FORBIDDEN");
+      if (isValidatedVisionImagePart(part)) {
+        return { type: "file" as const, data: part.bytes, mediaType: part.mimeType };
+      }
+      if (part && typeof part === "object" && "type" in part && part.type === "image") {
+        const raw = part as { sourceKind?: unknown; bytes?: unknown; imageDataUrl?: unknown; mimeType?: unknown };
+        const bytes = raw.bytes instanceof Uint8Array
+          ? raw.bytes
+          : typeof raw.imageDataUrl === "string"
+            ? decodeDataUrlBytes(raw.imageDataUrl)
+            : new Uint8Array(0);
+        const validated = buildValidatedVisionInput({
+          accountFeatures: { visionEnabled: true },
+          sourceKind: typeof raw.sourceKind === "string" ? raw.sourceKind : "",
+          bytes,
+          mimeType: typeof raw.mimeType === "string" ? raw.mimeType : "",
+        });
+        return { type: "file" as const, data: validated.bytes, mediaType: validated.mimeType };
+      }
+      throw new Blocked("VISION_INPUT_FORBIDDEN");
+    });
+    return { role: "user" as const, content: parts };
   });
 }
 
@@ -153,7 +217,10 @@ export async function generateModelText(input: ModelGenerationInput): Promise<Mo
   }
 
   const { modelId, protocol, purpose } = snapshot;
-  const messages = purpose === "PROVIDER_TEST" ? makeProviderTestMessages() : readTextMessages(input.messages);
+  const allowVision = Boolean(input.allowVision && purpose !== "PROVIDER_TEST");
+  const messages = purpose === "PROVIDER_TEST"
+    ? makeProviderTestMessages()
+    : readGenerationMessages(input.messages, allowVision);
   const url = previewGenerationUrl(baseUrl, protocol, modelId);
   return withModelDeadline("generation", input.signal, async signal => {
     const transport = createModelTransport(url, "POST", signal, input.transport, input.beforeRequest, input.lookup);
@@ -190,7 +257,7 @@ export async function generateModelText(input: ModelGenerationInput): Promise<Mo
     } catch (error) {
       signal.throwIfAborted();
       if (transport.failure) throw transport.failure;
-      if (error instanceof ModelError) throw error;
+      if (error instanceof Blocked) throw error;
       throw new ModelError("MODEL_RESPONSE_INVALID");
     }
   });

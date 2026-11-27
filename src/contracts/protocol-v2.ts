@@ -90,7 +90,13 @@ export function isMutatingClientCommand(body: unknown): boolean {
     case 'replyPipeline':
       return command.action === 'saveConfig';
     case 'modelProviders':
+      return command.action !== 'list' && command.action !== 'getSlots';
+    case 'accountAiFeatures':
+      return command.action !== 'get';
+    case 'mediaAssets':
       return command.action !== 'list';
+    case 'businessTools':
+      return false;
     case 'accounts':
       return command.action !== 'listAccounts'
         && command.action !== 'getAccountStatus'

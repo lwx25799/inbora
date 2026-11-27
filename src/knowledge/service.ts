@@ -12,6 +12,7 @@ import {KnowledgeImports} from './imports.js';
 import {OnnxEmbeddingManager,sanitizeEmbeddingStatus} from './embedding-engine.js';
 import {LearningModelService,recoverLearningTasks,type LearningModelContext} from './model-service.js';
 import type {ModelProviderController} from '../app/model-provider-controller.js';
+import {resolveSlotRoute} from '../ai/slot-router.js';
 import {replySettingsFingerprint} from './generation-context.js';
 import {handleFaqSuggestionCommand} from './faq-suggestion-commands.js';
 import type {KnowledgeCommand} from './commands.js';
@@ -63,9 +64,21 @@ export class ReplyKnowledgeService {
           ...(command.sourceIds?{sourceIds:command.sourceIds}:{}),
           ...(command.minScore!==undefined?{minScore:command.minScore}:{}),
         });
-        return {...debug,onnxStatus:sanitizeEmbeddingStatus(debug.onnxStatus)};
+        const embeddingSlot=this.state().models?.slots?.getSlot('embedding')??null;
+        return {
+          ...debug,
+          onnxStatus:sanitizeEmbeddingStatus(debug.onnxStatus),
+          cloudEmbeddingConfigured:Boolean(embeddingSlot),
+        };
       }
-      case 'embeddingStatus':return sanitizeEmbeddingStatus(this.data.embeddingStatus());
+      case 'embeddingStatus':{
+        const status=this.data.embeddingStatus();
+        const embeddingSlot=this.state().models?.slots?.getSlot('embedding')??null;
+        return {
+          ...sanitizeEmbeddingStatus(status),
+          cloudEmbeddingConfigured:Boolean(embeddingSlot),
+        };
+      }
       case 'listFaqSuggestions':
       case 'generateFaqSuggestions':
       case 'adoptFaqSuggestion':
@@ -77,12 +90,42 @@ export class ReplyKnowledgeService {
         requireSafe(auto&&controller,before.modelUnavailable??'REAL_MODEL_AUTHORIZATION_REQUIRED');
         const grant=controller.guard.eligibleGrant('MODEL')??controller.guard.eligibleGrant('AUTO_REPLY');
         requireSafe(grant,'REAL_MODEL_AUTHORIZATION_REQUIRED');
-        const snapshot=controller.guard.snapshot(grant,command.action==='analyze'?'PERSONA_ANALYSIS':'SANDBOX_REPLY');
+        const primarySnapshot=controller.guard.snapshot(grant,command.action==='analyze'?'PERSONA_ANALYSIS':'SANDBOX_REPLY');
+        const utilityResolution=command.action==='analyze'&&controller.slots
+          ?resolveSlotRoute(this.store,controller.slots,controller,grant,'PERSONA_ANALYSIS')
+          :null;
+        const snapshot=utilityResolution?.mode==='utility_slot'
+          ?Object.freeze({
+            purpose:'PERSONA_ANALYSIS' as const,
+            connectionId:utilityResolution.route.connectionId,
+            routeRevision:utilityResolution.route.routeRevision,
+            credentialRevision:utilityResolution.route.credentialRevision,
+            protocol:utilityResolution.route.protocol,
+            endpointDigest:utilityResolution.route.endpointDigest,
+            presetId:utilityResolution.route.presetId,
+            modelId:utilityResolution.route.modelId,
+            selectionRevision:1,
+            grantVersion:grant.version,
+          })
+          :primarySnapshot;
+        const slotOverride=utilityResolution?.mode==='utility_slot'?('utility' as const):undefined;
         const settingsDigest=replySettingsFingerprint(before.settings,undefined);
         const channels=command.action==='tryReply'?[command.channel]:grant.scope.channels;
         const security=channels.map(channel=>({channel,revision:securityRevision(this.store,channel)}));
         const modelCheck=(requiredCalls=0)=>{
-          check();controller.guard.assertCurrent(snapshot,grant.kind);
+          check();
+          if(slotOverride==='utility'){
+            const currentSlot=controller.slots.getSlot('utility');
+            requireSafe(
+              currentSlot&&currentSlot.connectionId===snapshot.connectionId&&
+                currentSlot.routeRevision===snapshot.routeRevision&&currentSlot.modelId===snapshot.modelId,
+              'MODEL_ROUTE_CHANGED',
+            );
+            controller.assertKeyed(controller.requireRoute(snapshot.connectionId,snapshot.routeRevision));
+            requireSafe(!auto.state().emergencyStopped,'EMERGENCY_STOPPED');
+          }else{
+            controller.guard.assertCurrent(snapshot,grant.kind);
+          }
           const current=controller.guard.eligibleGrant('MODEL')??controller.guard.eligibleGrant('AUTO_REPLY');
           requireSafe(current?.version===grant.version,'GRANT_REVOKED');
           const fresh=this.state();requireSafe(!before.signal.aborted&&
@@ -97,7 +140,11 @@ export class ReplyKnowledgeService {
             assertSecurityRevision(this.store,channel,revision);
           }
         };modelCheck();
-        const context:LearningModelContext={store:this.store,settings:before.settings,key:'',accountId,allowedChannels:grant.scope.channels,signal:before.signal,embeddingManager:this.embeddings,check:modelCheck,route:purpose=>({controller,kind:grant.kind,snapshot:Object.freeze({...snapshot,purpose})}),
+        const context:LearningModelContext={store:this.store,settings:before.settings,key:'',accountId,allowedChannels:grant.scope.channels,signal:before.signal,embeddingManager:this.embeddings,check:modelCheck,
+          route:purpose=>{
+            const useUtility=purpose==='PERSONA_ANALYSIS'&&slotOverride==='utility';
+            return{controller,kind:grant.kind,...(useUtility?{slot:'utility' as const}:{}),snapshot:Object.freeze({...(useUtility?snapshot:primarySnapshot),purpose})};
+          },
           reserve:(callId)=>{modelCheck();auto.reserve(grant.version,'MODEL',callId);}};
         this.modelBusy=true;
         try{return command.action==='analyze'?await this.model.analyze(context,command):await this.model.tryReply(context,command);}

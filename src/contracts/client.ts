@@ -5,6 +5,11 @@ import { collectionSchema, modelGrantInputSchema, replyPolicyInputSchema } from 
 import {manualRecoveryCommandSchema} from './manual-recovery.js';
 import { modelIdSchema, modelProvidersCommandSchema, type PublicModelState } from "./model-providers.js";
 import { replyPipelineCommandSchema } from "./reply-pipeline.js";
+import {
+  accountAiFeaturesCommandSchema,
+  businessToolsCommandSchema,
+  mediaAssetsCommandSchema,
+} from "./ai-runtime.js";
 
 export const protocolVersion = 1;
 export const protocolVersionV2 = 2;
@@ -46,8 +51,14 @@ export const sendParamsSchema = z
     text: z.string().min(1).max(2000),
     contextVersion: z.string().regex(/^[a-f0-9]{64}$/),
     selectionId: z.uuid(),
+    mediaAssetId: z.uuid().optional(),
+    mediaAssetDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    value => (value.mediaAssetId !== undefined) === (value.mediaAssetDigest !== undefined),
+    { path: ["mediaAssetId"], message: "MEDIA_ASSET_INVALID" },
+  );
 export type SendParams = z.infer<typeof sendParamsSchema>;
 export const humanReplySchema=z.object({...owned,expectedVersion:z.number().int().nonnegative(),text:z.string().min(1).max(2000),
   contextVersion:z.string().regex(/^[a-f0-9]{64}$/),selectionId:z.uuid(),suggestionId:z.uuid().nullable()}).strict();
@@ -188,6 +199,7 @@ const ordinaryCommandSchema = z.discriminatedUnion("command", [
 export const commandSchema = z.union([
   ordinaryCommandSchema, browserCommandSchema, manualRecoveryCommandSchema,
   knowledgeCommandSchema, modelProvidersCommandSchema, accountsCommandSchema, replyPipelineCommandSchema,
+  accountAiFeaturesCommandSchema, mediaAssetsCommandSchema, businessToolsCommandSchema,
 ]);
 export type ClientCommand = z.infer<typeof commandSchema>;
 export interface ModelProviderStatusFields {

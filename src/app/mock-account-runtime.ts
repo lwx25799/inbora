@@ -1,3 +1,4 @@
+import { dirname } from 'node:path';
 import type { DeepSeekProvider } from '../ai/deepseek.js';
 import { Blocked, requireSafe, type Channel } from '../core/contracts.js';
 import { SendCoordinator } from '../core/send-coordinator.js';
@@ -15,7 +16,8 @@ import { ModelProviderController } from './model-provider-controller.js';
 import { ModelRouteGuard } from './model-route-guard.js';
 import { previewSendCommand, reconcileUncertainCommand, sendResultCommand, type DeliveryContext } from './service-delivery.js';
 import { clientError, dismissSuggestion, isReadOnlySidecarCommand, updateModelGrant } from './service-guards.js';
-import { handleReplyPipelineCommand } from './reply-pipeline-commands.js';
+import { handleReplyPipelineCommand, assertPolicyCommandOutboundSafe } from './reply-pipeline-commands.js';
+import { handleAiRuntimeCommand, prepareSendMediaAttachment } from './ai-runtime-commands.js';
 import type { SuggestionState } from './suggestion-eligibility.js';
 import { generateSuggestion } from './suggestion-generation.js';
 import { WorkbenchQueries } from './workbench-queries.js';
@@ -46,10 +48,12 @@ export class MockAccountRuntime {
   private session?: { parentId: string; token: string; expiresAt: number };
   private closing = false;
   private inboxRevision = 0;
+  private readonly runtimeRoot: string;
 
   constructor(file: string, private readonly browser: MockPlatformConnector, now: () => number,
     private readonly sharedModels: () => SharedMockModels, private readonly emit: (event: string) => void,
     private readonly readAudit: (store: EventStore, page: number) => unknown) {
+    this.runtimeRoot = dirname(file);
     const store = this.store = new EventStore(file, false, undefined, browser.accountId);
     try {
       this.authority = new WorkbenchAuthority(store, now);
@@ -266,6 +270,13 @@ export class MockAccountRuntime {
           },
           onConfigSaved: () => this.emit('status_updated'),
         }, token, c);
+      case 'accountAiFeatures':
+      case 'mediaAssets':
+      case 'businessTools':
+        return handleAiRuntimeCommand({
+          store, authority, root: this.runtimeRoot, now: authority.now,
+          onUpdated: () => this.emit('status_updated'),
+        }, token, c);
       default:
         throw new Blocked('ACCOUNT_COMMAND_NOT_SUPPORTED');
     }
@@ -277,6 +288,7 @@ export class MockAccountRuntime {
     const epoch = browser.ownerEpoch;
     let dispose: (() => void | Promise<void>) | undefined;
     try {
+      const media = prepareSendMediaAttachment(store, this.runtimeRoot, p);
       const handle = await browser.adapter(payload, store);
       dispose = handle.dispose;
       const guard = authority.dispatchGuard(token, id, () => browser.identity(payload.channel));
@@ -286,9 +298,9 @@ export class MockAccountRuntime {
         requireSafe(browser.ownerEpoch === epoch, 'BROWSER_CLOSED');
       };
       const outcome = await this.coordinator.send(p.draftId, handle.adapter, true, {
-        ...guard, check: () => { active(); guard.check(); },
+        ...guard, check: () => { active(); assertPolicyCommandOutboundSafe(store, id, store.event(p.eventId), p.text, authority.now); guard.check(); },
         beforeSubmit: intentId => { active(); guard.beforeSubmit(intentId); },
-      });
+      }, media);
       const receipt = store.receiptForEvent(p.eventId) as { proof_ref: string } | undefined;
       authority.finish(id, outcome, outcome === 'UNCERTAIN' ? receipt?.proof_ref ?? null : null);
     } catch (error) {

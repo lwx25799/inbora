@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+export const MODEL_SLOTS = ["primary", "vision", "utility", "embedding"] as const;
+export const modelSlotSchema = z.enum(MODEL_SLOTS);
+export type ModelSlot = z.infer<typeof modelSlotSchema>;
+
+export const OPTIONAL_MODEL_SLOTS = ["vision", "utility", "embedding"] as const;
+export const optionalModelSlotSchema = z.enum(OPTIONAL_MODEL_SLOTS);
+export type OptionalModelSlot = z.infer<typeof optionalModelSlotSchema>;
+
 export const MODEL_PROTOCOLS = [
   "OPENAI_CHAT", "OPENAI_RESPONSES", "ANTHROPIC_MESSAGES", "GEMINI_GENERATE_CONTENT",
 ] as const;
@@ -143,10 +151,28 @@ export const modelSelectionSchema = z.union([
   }).strict(),
 ]);
 export type ModelSelection = z.infer<typeof modelSelectionSchema>;
-const publicModelSelectionSchema = z.union([
+export const publicModelSelectionSchema = z.union([
   modelSelectionSchema.options[0].extend({ modelDisplayName: displayName.nullable().optional() }),
   modelSelectionSchema.options[1],
 ]);
+
+export const modelSlotRouteSchema = z.object({
+  slot: optionalModelSlotSchema,
+  connectionId,
+  routeRevision: revision,
+  modelId: modelIdSchema,
+  revision,
+  updatedAt: timestamp,
+}).strict();
+export type ModelSlotRoute = z.infer<typeof modelSlotRouteSchema>;
+
+export const publicModelSlotsSchema = z.object({
+  primary: publicModelSelectionSchema,
+  vision: modelSlotRouteSchema.nullable(),
+  utility: modelSlotRouteSchema.nullable(),
+  embedding: modelSlotRouteSchema.nullable(),
+}).strict();
+export type PublicModelSlots = z.infer<typeof publicModelSlotsSchema>;
 
 export const modelBindingSchema = z.object({
   ...route,
@@ -306,12 +332,27 @@ const setModelKeySchema = z.discriminatedUnion("storage", [
   z.object({ ...writeKey, storage: z.literal("DELETE") }).strict(),
 ]);
 const confirmedModelCommand = { ...route, command, commandId: z.uuid(), modelId: modelIdSchema, confirmed: z.literal(true) };
+const setModelSlotSchema = z.object({
+  command,
+  action: z.literal("setSlot"),
+  commandId: z.uuid(),
+  slot: optionalModelSlotSchema,
+  connectionId: connectionId.nullable(),
+  routeRevision: revision.nullable(),
+  modelId: modelIdSchema.nullable(),
+  confirmed: z.literal(true),
+}).strict().refine(
+  value => (value.connectionId === null) === (value.routeRevision === null)
+    && (value.connectionId === null) === (value.modelId === null),
+  { path: ["connectionId"], message: "MODEL_SLOT_INVALID" },
+);
 export const modelProvidersCommandSchema = z.discriminatedUnion("action", [
   z.object({
     command, action: z.literal("list"), connectionId: connectionId.optional(),
     offset: pageOffset.optional(), limit: z.int().min(1).max(MODEL_PAGE_LIMIT).optional(),
     expectedListRevision: pageOffset.optional(),
   }).strict(),
+  z.object({ command, action: z.literal("getSlots") }).strict(),
   saveModelConnectionSchema,
   setModelKeySchema,
   z.object({ command, action: z.literal("discover"), ...route }).strict(),
@@ -321,6 +362,7 @@ export const modelProvidersCommandSchema = z.discriminatedUnion("action", [
     action: z.literal("apply"),
     expectedSelectionRevision: z.int().nonnegative(),
   }).strict(),
+  setModelSlotSchema,
   z.object({ command, action: z.literal("delete"), connectionId, expectedVersion: revision }).strict(),
 ]);
 export type ModelProvidersCommand = z.infer<typeof modelProvidersCommandSchema>;

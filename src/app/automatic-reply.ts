@@ -1,5 +1,6 @@
 import {randomUUID} from 'node:crypto';
-import {digest,requireSafe,targetKey,validText,type StoredEvent,type InboundEvent} from '../core/contracts.js';
+import {join} from 'node:path';
+import {digest,isManualMediaCandidate,isStrong,requireSafe,targetKey,validText,type StoredEvent,type InboundEvent} from '../core/contracts.js';
 import {decodeEventRow,type EventRow,type EventStore} from '../storage/store.js';
 import type {AutomationStore} from '../storage/automation-store.js';
 import type {ModelProviderController} from './model-provider-controller.js';
@@ -20,6 +21,12 @@ import {runtimePerformance} from '../observability/runtime-performance.js';
 import type {ReplyKnowledgeContext} from '../knowledge/contracts.js';
 import {assertReplyKnowledgeCurrent,bindReplyKnowledge,replySettingsFingerprint} from '../knowledge/generation-context.js';
 import {loadEffectivePipelineConfig} from './reply-pipeline-commands.js';
+import {AccountAiFeaturesStore} from '../storage/account-ai-features.js';
+import {MessagePreviewStore} from '../storage/message-previews.js';
+import {resolveMediaStoreRoot} from './ai-runtime-commands.js';
+import {resolveSlotRoute} from '../ai/slot-router.js';
+import {buildValidatedVisionInput,type ValidatedVisionImagePart} from '../ai/vision-input.js';
+import type {AccountAiFeatures} from '../contracts/ai-runtime.js';
 import {
   HandoffAttributionStore,
   PersistentRhythmGate,
@@ -51,7 +58,7 @@ export async function runServiceAutomaticReply(host:ServiceAutomaticReplyHost):P
   await runAutomaticReply({
     store:host.store,authority:host.authority,automation:host.automation,browser:host.browser,
     knowledgeContext:host.knowledgeContext,
-    pipelineConfig,
+    ...(host.pipelineConfig?{pipelineConfig:host.pipelineConfig}:{}),
     provider:host.provider,humanReplies:host.humanReplies,
     settings:host.settings(),currentSettings:host.settings,
     models:host.models,modelPending:host.modelPending,
@@ -82,26 +89,82 @@ const recoverableBeforeClickReasons=new Set([
   'COMMENT_REPLY_CLOCK_UNVERIFIED',
 ]);
 
-function resolveEffectivePipelineConfig(c:AutomaticReplyContext,rhythmGate:PersistentRhythmGate):ResolvedReplyPipelineConfig{
-  const base=resolvePipelineConfig(c.pipelineConfig);
-  if(c.pipelineConfig?.rhythm)return base;
-  const storedProfile=rhythmGate.getStoredProfile(c.store.accountId,base.rhythm.scope??'ALL');
-  if(!storedProfile||storedProfile==='off')return base;
-  return {...base,rhythm:{...base.rhythm,profile:storedProfile}};
+function isVisionSlotReady(store:EventStore,models:ModelProviderController):boolean{
+  const vision=models.slots?.getSlots().vision;
+  if(!vision)return false;
+  try{
+    const grant=models.guard?.automation?.active('AUTO_REPLY')??null;
+    if(grant&&models.slots){
+      return resolveSlotRoute(store,models.slots,models,grant,'vision').decision==='use_model';
+    }
+    models.assertKeyed(models.requireRoute(vision.connectionId,vision.routeRevision));
+    return true;
+  }catch{return false;}
 }
 
-function listAutomaticCandidates(c:AutomaticReplyContext,grant:Grant<ReplyPolicy>):StoredEvent[]{
+export function resolveEffectivePipelineConfig(c:Pick<AutomaticReplyContext,'store'|'models'|'pipelineConfig'>,rhythmGate:PersistentRhythmGate):ResolvedReplyPipelineConfig{
+  const base=resolvePipelineConfig(c.pipelineConfig??loadEffectivePipelineConfig(c.store));
+  const features=new AccountAiFeaturesStore(c.store.db,c.store.accountId).get();
+  const allowVisionModel=Boolean(features.visionEnabled&&isVisionSlotReady(c.store,c.models)&&c.pipelineConfig?.handoff?.allowVisionModel!==false);
+  const withVision:ResolvedReplyPipelineConfig={...base,handoff:{...base.handoff,allowVisionModel}};
+  if(c.pipelineConfig?.rhythm)return withVision;
+  const storedProfile=rhythmGate.getStoredProfile(c.store.accountId,withVision.rhythm.scope??'ALL');
+  if(!storedProfile||storedProfile==='off')return withVision;
+  return {...withVision,rhythm:{...withVision.rhythm,profile:storedProfile}};
+}
+
+function loadCustomerVisionInput(
+  store:EventStore,
+  browserRoot:string,
+  features:Pick<AccountAiFeatures,'visionEnabled'>,
+  event:InboundEvent,
+  ownId:string,
+):ValidatedVisionImagePart|null{
+  if(!features.visionEnabled||!isManualMediaCandidate(event)||event.contentType!=='IMAGE')return null;
+  try{
+    const mediaRoot=resolveMediaStoreRoot(store,browserRoot);
+    const previews=new MessagePreviewStore(mediaRoot);
+    const ready=previews.list(event,ownId).find(item=>item.state==='READY'&&item.previewId);
+    if(!ready?.previewId)return null;
+    const data=previews.read(event,ownId,ready.previewId);
+    const prefix='data:image/png;base64,';
+    if(!data.dataUrl.startsWith(prefix))return null;
+    const bytes=new Uint8Array(Buffer.from(data.dataUrl.slice(prefix.length),'base64'));
+    return buildValidatedVisionInput({
+      accountFeatures:features,
+      sourceKind:'CUSTOMER_MESSAGE_IMAGE',
+      filePath:join(mediaRoot,'evidence','message-previews',`${ready.previewId}.png`),
+      bytes,
+      mimeType:'image/png',
+    });
+  }catch{
+    return null;
+  }
+}
+
+function listAutomaticCandidates(c:AutomaticReplyContext,grant:Grant<ReplyPolicy>,allowVisionImage=false):StoredEvent[]{
   const channels=grant.scope.channels;
+  const statuses=allowVisionImage?"('AWAITING_DRAFT','MANUAL_REVIEW')":"('AWAITING_DRAFT')";
   const rows=c.store.db.prepare(`SELECT e.id,e.payload,e.binding,e.status FROM inbound_events e
-    WHERE e.account_id=? AND e.status='AWAITING_DRAFT' AND e.channel IN (${channels.map(()=>'?').join(',')})
+    WHERE e.account_id=? AND e.status IN ${statuses} AND e.channel IN (${channels.map(()=>'?').join(',')})
     AND NOT EXISTS(SELECT 1 FROM automation_jobs j WHERE j.event_id=e.id)
     AND NOT EXISTS(SELECT 1 FROM reply_drafts d WHERE d.event_id=e.id)
     AND NOT EXISTS(SELECT 1 FROM send_intents i WHERE i.event_id=e.id) ORDER BY e.rowid`)
     .all(c.store.accountId,...channels) as EventRow[];
+  const features=allowVisionImage?new AccountAiFeaturesStore(c.store.db,c.store.accountId).get():null;
   const eligible:StoredEvent[]=[];
   for(const row of rows){
     const event=decodeEventRow(row,c.store.accountId);
-    if(c.automation.policyMatches(grant,event))eligible.push(event);
+    if(isStrong(event.payload)){
+      if(event.status==='AWAITING_DRAFT'&&c.automation.policyMatches(grant,event))eligible.push(event);
+      continue;
+    }
+    if(allowVisionImage&&features&&isManualMediaCandidate(event.payload)&&event.payload.contentType==='IMAGE'){
+      if(!c.automation.policyMatches(grant,event,'NEW',{allowVisionImage:true}))continue;
+      if(event.status==='AWAITING_DRAFT'||loadCustomerVisionInput(c.store,c.browser.root,features,event.payload,grant.scope.ownId)!==null){
+        eligible.push(event);
+      }
+    }
   }
   return eligible;
 }
@@ -214,10 +277,10 @@ function finalizePreparedCommand(
   }
 }
 
-async function qualifyPolicyTarget(c:AutomaticReplyContext,grant:Grant<ReplyPolicy>,event:StoredEvent,signal:AbortSignal):Promise<void>{
-  const handle=await c.browser.adapter(event.payload,c.store,signal);
+async function qualifyPolicyTarget(c:AutomaticReplyContext,grant:Grant<ReplyPolicy>,event:StoredEvent,signal:AbortSignal,allowVisionImage=false):Promise<void>{
+  const handle=await c.browser.adapter(event.payload,c.store,signal,allowVisionImage?{manualMedia:true}:undefined);
   try{await c.browser.actor.run(async()=>{
-    requireSafe(!signal.aborted&&c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
+    requireSafe(!signal.aborted&&c.automation.policyMatches(grant,c.store.event(event.id),'NEW',{allowVisionImage}),'POLICY_NO_LONGER_AUTHORIZED');
     const prior=await c.browser.refreshIdentity(event.payload.channel),proof=await handle.adapter.inspect(event.payload),identity=await c.browser.refreshIdentity(event.payload.channel);
     requireSafe(!signal.aborted&&prior&&identity&&digest(prior)===digest(identity),'CAPABILITY_CHANGED_DURING_CHECK');
     requireSafe(proof.ownId===grant.scope.ownId&&identity.identityDigest===digest(proof.ownId),'ACCOUNT_CHANGED');
@@ -329,7 +392,8 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
     if(!c.automation.allowance(grant.version,'SEND'))return;
     const hasModelAllowance=c.automation.allowance(grant.version,'MODEL');
     if(!hasModelAllowance&&!pipelineConfig.handoff.exactFaqDirectReply)return;
-    const candidates=listAutomaticCandidates(c,grant);
+    const allowVisionImage=Boolean(pipelineConfig.handoff.allowVisionModel);
+    const candidates=listAutomaticCandidates(c,grant,allowVisionImage);
     if(!candidates.length)return;
     let selectedPre:PipelinePreGenerationResult|null=null;
     for(const candidate of candidates){
@@ -390,23 +454,25 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
     const automaticSignal=c.automaticSignal,routeSignal=c.models.signal,signal=AbortSignal.any([c.modelSignal,automaticSignal,routeSignal]);
     let callId:string|undefined;
     try {
-      await qualifyPolicyTarget(c,grant,event,signal);
-      requireSafe(!signal.aborted&&c.automation.policyMatches(grant,c.store.event(event.id))&&c.authority.contextVersion(event)===context&&c.authority.ownership(event).generation===generation,'AUTO_RESULT_STALE');
+      const isCustomerImage=!isStrong(event.payload)&&isManualMediaCandidate(event.payload)&&event.payload.contentType==='IMAGE';
+      await qualifyPolicyTarget(c,grant,event,signal,isCustomerImage&&allowVisionImage);
+      requireSafe(!signal.aborted&&c.automation.policyMatches(grant,c.store.event(event.id),'NEW',{allowVisionImage:isCustomerImage&&allowVisionImage})&&c.authority.contextVersion(event)===context&&c.authority.ownership(event).generation===generation,'AUTO_RESULT_STALE');
       assertBatchFragmentsCurrent(c.store,event.id,selectedPre.fragmentBindings);
       const effectiveQuery=selectedPre.mergedEventIds.length>1?selectedPre.mergedText:event.payload.text;
       const knowledge=selectedPre.knowledge??c.knowledgeContext?.(event.payload,effectiveQuery)??null;
       const settings={...c.settings,rules:grant.scope.instructions},settingsFingerprint=replySettingsFingerprint(settings,knowledge?.persona);
       const checkSettings=()=>requireSafe(replySettingsFingerprint(c.currentSettings?.()??c.settings,knowledge?.persona,grant.scope.instructions)===settingsFingerprint,'AI_SETTINGS_CHANGED');
 
-      // 高置信 FAQ 确定性免模型直出分支：零模型调用、零 MODEL 预占，完整经安全校验与唯一 SendCoordinator 单次提交
+      // 高置信 FAQ 确定性免模型直出分支：零模型调用、零 MODEL 预占，完整经安全校验与唯一 SendCoordinator 单次提交（出站前重读最新策略）
       if(pipelineConfig.handoff.exactFaqDirectReply&&selectedPre.directFaqReply&&knowledge){
+        const latestFaqConfig=resolveEffectivePipelineConfig({store:c.store,models:c.models,...(c.pipelineConfig?{pipelineConfig:c.pipelineConfig}:{})},rhythmGate);
         const faqOutbound=evaluateOutboundStage({
-          store:c.store,event,replyText:selectedPre.directFaqReply.text,config:pipelineConfig,now:c.authority.now,
+          store:c.store,event,replyText:selectedPre.directFaqReply.text,config:latestFaqConfig,now:c.authority.now,
         });
         if(faqOutbound.decision!=='continue'){
           recordHandoffStop(
             c,grant,event,selectedPre.mergedEventIds,context,generation,
-            'outbound_safety_and_loop_check',faqOutbound.reasonCode,attributionStore,pipelineConfig.recordAttribution,
+            'outbound_safety_and_loop_check',faqOutbound.reasonCode,attributionStore,latestFaqConfig.recordAttribution,
           );
           return;
         }
@@ -439,16 +505,58 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
             c.store.audit('AUTO_PIPELINE_EXACT_FAQ_MATCHED',event.id,{entryId:selectedPre.directFaqReply!.entryId,direct:true});
           }).immediate();
           await c.humanReplies.prepare(token,commandId);
-          finalizePreparedCommand(c,event.id,commandId,rhythmGate,pipelineConfig);
+          finalizePreparedCommand(c,event.id,commandId,rhythmGate,latestFaqConfig);
         }finally{c.authority.revoke(token);}
         return;
       }
 
       c.store.db.prepare("UPDATE automation_jobs SET state='GENERATING',updated_at=? WHERE event_id=?").run(c.authority.now(),event.id);
-      const binding={controller:c.models,kind:grant.kind,snapshot:c.models.guard.snapshot(grant,'REPLY_GENERATION')};
+      const primarySelection=c.models.models.getSelection();
+      let binding:{controller:ModelProviderController;kind:Grant['kind'];snapshot:ReturnType<ModelProviderController['guard']['snapshot']>;slot?:'vision'}={
+        controller:c.models,kind:grant.kind,snapshot:c.models.guard.snapshot(grant,'REPLY_GENERATION'),
+      };
+      let visionInput:ValidatedVisionImagePart|undefined;
+      if(isCustomerImage||event.payload.contentType||event.payload.observationIssue==='DM_CONTENT_UNVERIFIED'){
+        if(!c.models.slots){
+          recordHandoffStop(c,grant,event,selectedPre.mergedEventIds,context,generation,'handoff_rules_and_knowledge','VISION_DISABLED_OR_UNCONFIGURED',attributionStore,pipelineConfig.recordAttribution);
+          return;
+        }
+        const visionResolution=resolveSlotRoute(c.store,c.models.slots,c.models,grant,'vision');
+        if(visionResolution.slot!=='vision'||visionResolution.decision!=='use_model'){
+          const reason=visionResolution.slot==='vision'&&visionResolution.decision==='handoff_human'?visionResolution.reason:'VISION_DISABLED_OR_UNCONFIGURED';
+          recordHandoffStop(c,grant,event,selectedPre.mergedEventIds,context,generation,'handoff_rules_and_knowledge',reason,attributionStore,pipelineConfig.recordAttribution);
+          return;
+        }
+        const loadedVision=loadCustomerVisionInput(c.store,c.browser.root,new AccountAiFeaturesStore(c.store.db,c.store.accountId).get(),event.payload,grant.scope.ownId);
+        if(!loadedVision){
+          recordHandoffStop(c,grant,event,selectedPre.mergedEventIds,context,generation,'handoff_rules_and_knowledge','DM_CONTENT_UNVERIFIED',attributionStore,pipelineConfig.recordAttribution);
+          return;
+        }
+        visionInput=loadedVision;
+        const vr=visionResolution.route;
+        if(vr.connectionId!==primarySelection.connectionId||vr.routeRevision!==primarySelection.routeRevision||vr.modelId!==primarySelection.modelId){
+          binding={
+            controller:c.models,kind:grant.kind,slot:'vision',
+            snapshot:Object.freeze({
+              purpose:'REPLY_GENERATION',connectionId:vr.connectionId,routeRevision:vr.routeRevision,
+              credentialRevision:vr.credentialRevision,protocol:vr.protocol,endpointDigest:vr.endpointDigest,
+              presetId:vr.presetId,modelId:vr.modelId,selectionRevision:1,grantVersion:grant.version,
+            }),
+          };
+        }
+      }
       const validate=()=>{
         checkSettings();
-        requireSafe(c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
+        if(visionInput){
+          requireSafe(new AccountAiFeaturesStore(c.store.db,c.store.accountId).get().visionEnabled,'VISION_DISABLED_OR_UNCONFIGURED');
+          const currentSlot=c.models.slots?.getSlot('vision');
+          requireSafe(
+            currentSlot&&currentSlot.connectionId===binding.snapshot.connectionId&&
+              currentSlot.routeRevision===binding.snapshot.routeRevision&&currentSlot.modelId===binding.snapshot.modelId,
+            'VISION_DISABLED_OR_UNCONFIGURED',
+          );
+        }
+        requireSafe(c.automation.policyMatches(grant,c.store.event(event.id),'NEW',{allowVisionImage:Boolean(visionInput)}),'POLICY_NO_LONGER_AUTHORIZED');
         requireSafe(c.authority.ownership(event).generation===generation&&c.authority.contextVersion(event)===context&&!c.authority.draftFor(event.id),'AUTO_RESULT_STALE');
         assertBatchFragmentsCurrent(c.store,event.id,selectedPre.fragmentBindings);
       };
@@ -460,21 +568,22 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
       const result=await c.provider.generate(c.store,modelEvent,buildModelHistory(c,event,selectedPre.mergedEventIds),
         settings,'',true,signal,()=>{
           requireSafe(!signal.aborted,'MODEL_CANCELLED');
-          c.models.guard.assertCurrent(binding.snapshot,'AUTO_REPLY');
+          if(!binding.slot)c.models.guard.assertCurrent(binding.snapshot,'AUTO_REPLY');
           checkSettings();
           assertReplyKnowledgeCurrent(c.store,knowledge);
           assertBatchFragmentsCurrent(c.store,event.id,selectedPre.fragmentBindings);
-          requireSafe(c.automation.policyMatches(grant,c.store.event(event.id)),'POLICY_NO_LONGER_AUTHORIZED');
+          requireSafe(c.automation.policyMatches(grant,c.store.event(event.id),'NEW',{allowVisionImage:Boolean(visionInput)}),'POLICY_NO_LONGER_AUTHORIZED');
           requireSafe(c.automation.allowance(grant.version,'SEND'),'SEND_GRANT_EXHAUSTED');
           c.automation.reserve(grant.version,'MODEL',event.id);
-        },undefined,knowledge,binding,validate).then(result=>{modelEnd();return result;},error=>{modelEnd(signal.aborted?'CANCELLED':'FAILED');throw error;});
+        },undefined,knowledge,binding,validate,visionInput).then(result=>{modelEnd();return result;},error=>{modelEnd(signal.aborted?'CANCELLED':'FAILED');throw error;});
       callId=result.callId;
       if(signal.aborted)throw signal.reason;
       checkSettings();
       assertSecurityRevision(c.store,event.payload.channel,security);
-      // 阶段 8：出站双层敏感词终审 + 同句死循环保护（放行后仍必须经现有唯一 SendCoordinator 单次提交）
+      // 阶段 8：出站双层敏感词终审 + 同句死循环保护（放行前重读最新持久化策略，确保生效期间新加屏蔽词实时拦截）
+      const latestPipelineConfig=resolveEffectivePipelineConfig({store:c.store,models:c.models,...(c.pipelineConfig?{pipelineConfig:c.pipelineConfig}:{})},rhythmGate);
       const outbound=evaluateOutboundStage({
-        store:c.store,event,replyText:result.text,config:pipelineConfig,now:c.authority.now,
+        store:c.store,event,replyText:result.text,config:latestPipelineConfig,now:c.authority.now,
       });
       if(outbound.decision!=='continue'){
         c.models.models.discardUnpublishedCall(
@@ -484,8 +593,27 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
         callId=undefined;
         recordHandoffStop(
           c,grant,event,selectedPre.mergedEventIds,context,generation,
-          'outbound_safety_and_loop_check',outbound.reasonCode,attributionStore,pipelineConfig.recordAttribution,
+          'outbound_safety_and_loop_check',outbound.reasonCode,attributionStore,latestPipelineConfig.recordAttribution,
         );
+        return;
+      }
+      if(!isStrong(event.payload)){
+        c.store.db.transaction(()=>{
+          checkSettings();
+          assertReplyKnowledgeCurrent(c.store,knowledge);
+          assertSecurityRevision(c.store,event.payload.channel,security);
+          requireSafe(new AccountAiFeaturesStore(c.store.db,c.store.accountId).get().visionEnabled,'VISION_DISABLED_OR_UNCONFIGURED');
+          requireSafe(!c.isClosing()&&c.automation.policyMatches(grant,c.store.event(event.id),'NEW',{allowVisionImage:true}),'POLICY_NO_LONGER_AUTHORIZED');
+          requireSafe(c.authority.ownership(event).generation===generation&&c.authority.contextVersion(event)===context&&!c.authority.draftFor(event.id),'AUTO_RESULT_STALE');
+          const draftId=randomUUID(),ts=c.authority.now();
+          c.store.db.prepare("INSERT INTO reply_drafts VALUES(?,?,?,?,1,'DRAFT',NULL,NULL)").run(draftId,event.id,result.text,result.model);
+          c.store.db.prepare("INSERT INTO draft_revisions VALUES(?,1,'AUTO_POLICY',?,?,?)").run(draftId,result.text,`policy:${grant.version}`,ts);
+          bindReplyKnowledge(c.store,'DRAFT',draftId,1,knowledge);
+          c.store.db.prepare("UPDATE inbound_events SET status='AWAITING_APPROVAL' WHERE id=?").run(event.id);
+          c.store.db.prepare("UPDATE automation_jobs SET state='REVIEW',draft_version=1,reason='VISION_DRAFT_AWAITING_APPROVAL',updated_at=? WHERE event_id=?").run(ts,event.id);
+          c.store.audit('VISION_AUTO_DRAFT_SAVED',draftId,{eventId:event.id});
+        }).immediate();
+        callId=undefined;
         return;
       }
       const commandId=randomUUID(),selectionId=randomUUID();
@@ -514,7 +642,7 @@ export async function runAutomaticReply(c:AutomaticReplyContext):Promise<void> {
         }).immediate();
         callId=undefined;
         await c.humanReplies.prepare(token,commandId);
-        finalizePreparedCommand(c,event.id,commandId,rhythmGate,pipelineConfig);
+        finalizePreparedCommand(c,event.id,commandId,rhythmGate,latestPipelineConfig);
       }finally{c.authority.revoke(token);}
     }catch(error){
       const code=c.errorCode(routeSignal.aborted?routeSignal.reason:error);

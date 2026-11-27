@@ -1,4 +1,4 @@
-import { Blocked, DEFAULT_ACCOUNT_ID, digest, isStrong, requireSafe, targetKey, type StoredEvent } from "../core/contracts.js";
+import { Blocked, DEFAULT_ACCOUNT_ID, digest, isManualMediaCandidate, isStrong, requireSafe, targetKey, type StoredEvent } from "../core/contracts.js";
 import { collectionSchema, type CollectionSettings, type Grant, type ModelGrant, type ReplyPolicy } from "../app/automation-contracts.js";
 import { currentModelGrantScope, parseStoredModelGrant } from "./model-grant-binding.js";
 import type { EventStore } from "./store.js";
@@ -177,11 +177,12 @@ export class AutomationStore {
       this.store.db.prepare("INSERT INTO grant_reservations VALUES(?,?,?,?)").run(version, kind, jobKey, this.now());
     }).immediate();
   }
-  policyMatches(grant: Grant<ReplyPolicy>, e: StoredEvent, status: 'NEW'|'DRAFT'='NEW'): boolean {
+  policyMatches(grant: Grant<ReplyPolicy>, e: StoredEvent, status: 'NEW'|'DRAFT'='NEW', options?: { allowVisionImage?: boolean }): boolean {
     if(e.payload.accountId!==this.accountId||readSecurityHold(this.store,e.payload.channel))return false;
     const active = this.active("AUTO_REPLY");
-    if (active?.version !== grant.version || this.state().emergencyStopped || !isStrong(e.payload) ||
-      !(status==='NEW'?['AWAITING_DRAFT']:['AWAITING_APPROVAL','APPROVED']).includes(e.status)) return false;
+    const visionImage = Boolean(options?.allowVisionImage && isManualMediaCandidate(e.payload) && e.payload.contentType === 'IMAGE');
+    if (active?.version !== grant.version || this.state().emergencyStopped || (!isStrong(e.payload) && !visionImage) ||
+      !(status==='NEW'?(visionImage?['AWAITING_DRAFT','MANUAL_REVIEW']:['AWAITING_DRAFT']):['AWAITING_APPROVAL','APPROVED']).includes(e.status)) return false;
     const p = active.scope as ReplyPolicy;
     if(e.payload.channel==='COMMENT_NOTIFICATION'&&e.payload.kind==='REPLY'&&p.replyToNestedComments===false)return false;
     this.requireAccount(p.ownId);
@@ -193,13 +194,14 @@ export class AutomationStore {
     const owner = this.store.db.prepare("SELECT operator_id,lease_expires_at FROM thread_ownership WHERE account_id=? AND channel=? AND target_key=?")
       .get(this.accountId,e.payload.channel,targetKey(e.payload)) as {operator_id: string | null;lease_expires_at:number} | undefined;
     if (this.store.targetPaused(targetKey(e.payload)) || owner?.operator_id&&owner.lease_expires_at>this.now()) return false;
-    return this.policyScopeMatches(grant,e);
+    return this.policyScopeMatches(grant,e,options);
   }
   /** Authorization scope only; explicit human suggestions do not inherit automatic scheduling gates. */
-  policyScopeMatches(grant:Grant<ReplyPolicy>,e:StoredEvent):boolean {
+  policyScopeMatches(grant:Grant<ReplyPolicy>,e:StoredEvent, options?: { allowVisionImage?: boolean }):boolean {
     if(e.payload.accountId!==this.accountId||readSecurityHold(this.store,e.payload.channel))return false;
     const active=this.active('AUTO_REPLY');
-    if(active?.version!==grant.version||this.state().emergencyStopped||!isStrong(e.payload))return false;
+    const visionImage = Boolean(options?.allowVisionImage && isManualMediaCandidate(e.payload) && e.payload.contentType === 'IMAGE');
+    if(active?.version!==grant.version||this.state().emergencyStopped||(!isStrong(e.payload)&&!visionImage))return false;
     const p=active.scope as ReplyPolicy;this.requireAccount(p.ownId);
     if(!p.channels.includes(e.payload.channel)||e.payload.direction!=='INCOMING'||e.payload.actorId===p.ownId)return false;
     if(e.payload.channel==='COMMENT_NOTIFICATION'&&e.payload.kind==='REPLY'&&p.replyToNestedComments===false)return false;

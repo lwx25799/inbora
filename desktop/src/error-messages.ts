@@ -200,6 +200,17 @@ export const errorMessages: Record<string, string> = {
   MODEL_CANCELLED: '本次模型任务已取消，已完成的分析批次保留。',
   MODEL_FAILED_NO_RETRY: '模型请求失败，未自动重试，可继续人工编辑',
   SENSITIVE_MANUAL_HANDLING: '检测到敏感内容，保留人工处理',
+  MODEL_SLOT_INVALID: '模型路由槽位参数无效，请核对所选槽位、连接与模型后重试。',
+  VISION_INPUT_FORBIDDEN: '仅客户发来的截图或图片在开启多模态看图后允许送入视觉模型；头像、固定说明等不可送入模型。',
+  VISION_DISABLED_OR_UNCONFIGURED: '多模态看图未开启，或尚未配置可用的视觉模型，含图片消息将转由人工处理。',
+  MEDIA_REPLY_DISABLED: '素材库图片回复开关未开启，当前不会自动附带本地素材图片。',
+  MEDIA_SEND_NOT_SUPPORTED: '当前账号或通道暂不支持直接发送图片素材，请改为文字回复或人工处理。',
+  MEDIA_ASSET_INVALID: '素材图片格式或内容无效，仅支持 PNG、JPEG、WEBP 图片文件。',
+  MEDIA_ASSET_NOT_FOUND: '未找到指定的本地素材图片，可能已被删除，请刷新素材列表后重试。',
+  MEDIA_ASSET_TOO_LARGE: '素材图片体积超过 5 MiB 上限，请压缩或裁剪后再上传。',
+  BUSINESS_TOOL_FORBIDDEN: '只读业务工具调用被拒绝：仅允许白名单内的只读查询与公网 HTTPS 地址，严禁写操作或绕过统一发送通道。',
+  BUSINESS_TOOL_NOT_CONFIGURED: '该只读业务工具尚未启用或未配置有效的公网 HTTPS 查询地址。',
+  BUSINESS_TOOL_FAILED: '只读业务工具查询失败或返回异常，本次未自动重试，请按人工流程核对。',
 
   // Draft, takeover, followup & send
   PREPARING: '正在后台准备与核验',

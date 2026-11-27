@@ -8,6 +8,8 @@ import type { PlatformConnector } from "../platform/platform-connector.js";
 import type { VerificationScheduler } from "./verification-scheduler.js";
 import type { SendParams } from "./contracts.js";
 import { findUncertainFollowupForEvent, reconcileUncertainFollowup } from "./followup-verification.js";
+import { prepareSendMediaAttachment } from "./ai-runtime-commands.js";
+import { assertPolicyCommandOutboundSafe } from "./reply-pipeline-commands.js";
 
 export interface DeliveryContext {
   store: EventStore;
@@ -35,6 +37,7 @@ export async function deliverCommand(
   const end = runtimePerformance.start("DELIVERY", ctx.store.event(p.eventId).payload.channel);
   try {
     const e = ctx.store.event(p.eventId);
+    const media = prepareSendMediaAttachment(ctx.store, ctx.browser.root, p);
     const epoch = ctx.browser.ownerEpoch;
     const handle = await ctx.browser.adapter(e.payload, ctx.store, signal, {
       manualMedia: !!ctx.store.draft(p.draftId).approval?.snapshot.manualObservation,
@@ -55,8 +58,10 @@ export async function deliverCommand(
       }, check: () => {
         requireSafe(!ctx.isClosing(), 'CLIENT_CLOSING');
         requireSafe(ctx.browser.ownerEpoch === epoch, "BROWSER_CLOSED");
+        assertPolicyCommandOutboundSafe(ctx.store, id, e, p.text, ctx.authority.now);
         guard.check();
       } },
+      media,
     );
     const receipt = ctx.store.receiptForEvent(e.id) as { proof_ref: string } | undefined;
     ctx.authority.finish(id, outcome, outcome === "UNCERTAIN" ? (receipt?.proof_ref ?? null) : null);
@@ -140,6 +145,7 @@ export async function previewSendCommand(
   params: SendParams,
 ): Promise<unknown> {
   ctx.authority.operator(token, "SEND");
+  prepareSendMediaAttachment(ctx.store, ctx.browser.root, params);
   const e = ctx.store.event(params.eventId);
   const handle = await ctx.browser.adapter(e.payload, ctx.store);
   try {

@@ -241,6 +241,10 @@ fn validate_command(body: &Value) -> Result<(), String> {
     const ALLOWED: &[&str] = &[
         "accounts",
         "replyKnowledge",
+        "replyPipeline",
+        "accountAiFeatures",
+        "mediaAssets",
+        "businessTools",
         "modelProviders",
         "connect",
         "disconnect",

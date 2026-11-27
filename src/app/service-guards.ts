@@ -58,7 +58,10 @@ export function isReadOnlySidecarCommand(raw: unknown): boolean {
   if (body.command === "replyPipeline") {
     return body.action === "getConfig" || body.action === "dryRun";
   }
-  if (body.command === "modelProviders") return body.action === "list";
+  if (body.command === "modelProviders") return body.action === "list" || body.action === "getSlots";
+  if (body.command === "accountAiFeatures") return body.action === "get";
+  if (body.command === "mediaAssets") return body.action === "list";
+  if (body.command === "businessTools") return body.action === "list" || body.action === "invokeReadonly";
   if (body.command === "accounts") {
     return body.action === "listAccounts"
       || body.action === "getAccountStatus"

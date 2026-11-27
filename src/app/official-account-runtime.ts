@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { dirname } from 'node:path';
 import {
   type AccountId, type AccountSummary,
 } from '../contracts/account.js';
@@ -23,7 +24,11 @@ import {
   previewSendCommand, reconcileUncertainCommand, sendResultCommand, type DeliveryContext,
 } from './service-delivery.js';
 import { clientError, dismissSuggestion, isReadOnlySidecarCommand, updateModelGrant } from './service-guards.js';
-import { handleReplyPipelineCommand } from './reply-pipeline-commands.js';
+import { handleReplyPipelineCommand, assertPolicyCommandOutboundSafe } from './reply-pipeline-commands.js';
+import { handleAiRuntimeCommand, prepareSendMediaAttachment } from './ai-runtime-commands.js';
+import { AccountAiFeaturesStore } from '../storage/account-ai-features.js';
+import { MediaAssetStore } from '../storage/media-asset-store.js';
+import { BUSINESS_TOOL_IDS } from '../contracts/ai-runtime.js';
 import type { SuggestionState } from './suggestion-eligibility.js';
 import { generateSuggestion } from './suggestion-generation.js';
 import { WorkbenchQueries } from './workbench-queries.js';
@@ -69,7 +74,10 @@ export function dispatchOfflineOfficialRead(
     || command.command === 'getThread'
     || command.command === 'getAudit'
     || command.command === 'getSendResult'
-    || (command.command === 'replyPipeline' && (command.action === 'getConfig' || command.action === 'dryRun'));
+    || (command.command === 'replyPipeline' && (command.action === 'getConfig' || command.action === 'dryRun'))
+    || (command.command === 'accountAiFeatures' && command.action === 'get')
+    || (command.command === 'mediaAssets' && command.action === 'list')
+    || (command.command === 'businessTools' && command.action === 'list');
   requireSafe(supported, 'OFFICIAL_CHANNEL_NOT_CONNECTED');
 
   const store = new EventStore(dbPath, false, undefined, account.id);
@@ -141,6 +149,21 @@ export function dispatchOfflineOfficialRead(
           },
           now,
         }, token, command);
+      case 'accountAiFeatures':
+        return new AccountAiFeaturesStore(store.db, store.accountId, now).get();
+      case 'mediaAssets': {
+        return { assets: new MediaAssetStore(store.db, store.accountId, dirname(dbPath), now).list() };
+      }
+      case 'businessTools': {
+        const features = new AccountAiFeaturesStore(store.db, store.accountId, now).get();
+        return {
+          tools: BUSINESS_TOOL_IDS.map(id => ({
+            id,
+            enabled: features.enabledBusinessTools.includes(id),
+            endpointConfigured: Boolean(features.toolEndpoints[id]),
+          })),
+        };
+      }
     }
   } finally {
     store.close();
@@ -167,6 +190,7 @@ export class OfficialAccountRuntime {
   private session?: { parentId: string; token: string; expiresAt: number };
   private closing = false;
   private inboxRevision = 0;
+  private readonly runtimeRoot: string;
 
   constructor(
     file: string,
@@ -176,6 +200,7 @@ export class OfficialAccountRuntime {
     private readonly emit: (event: string) => void,
     private readonly readAudit: (store: EventStore, page: number) => unknown,
   ) {
+    this.runtimeRoot = dirname(file);
     const store = this.store = new EventStore(file, false, undefined, connector.accountId);
     try {
       this.authority = new WorkbenchAuthority(store, now, connector.accountId);
@@ -505,6 +530,13 @@ export class OfficialAccountRuntime {
           },
           onConfigSaved: () => this.emit('status_updated'),
         }, token, c);
+      case 'accountAiFeatures':
+      case 'mediaAssets':
+      case 'businessTools':
+        return handleAiRuntimeCommand({
+          store, authority, root: this.runtimeRoot, now: authority.now,
+          onUpdated: () => this.emit('status_updated'),
+        }, token, c);
       default:
         throw new Blocked('ACCOUNT_COMMAND_NOT_SUPPORTED');
     }
@@ -516,6 +548,7 @@ export class OfficialAccountRuntime {
     const epoch = connector.ownerEpoch;
     let dispose: (() => void | Promise<void>) | undefined;
     try {
+      const media = prepareSendMediaAttachment(store, this.runtimeRoot, p);
       const handle = await connector.adapter(payload, store, this.stopAbort.signal);
       dispose = handle.dispose;
       const guard = authority.dispatchGuard(token, id, () => connector.identity(payload.channel));
@@ -527,9 +560,9 @@ export class OfficialAccountRuntime {
       };
       const outcome = await this.coordinator.send(p.draftId, handle.adapter, true, {
         ...guard,
-        check: () => { active(); guard.check(); },
+        check: () => { active(); assertPolicyCommandOutboundSafe(store, id, store.event(p.eventId), p.text, authority.now); guard.check(); },
         beforeSubmit: intentId => { active(); guard.beforeSubmit(intentId); },
-      });
+      }, media);
       const receipt = store.receiptForEvent(p.eventId) as { proof_ref: string } | undefined;
       authority.finish(id, outcome, outcome === 'UNCERTAIN' ? receipt?.proof_ref ?? null : null);
     } catch (error) {

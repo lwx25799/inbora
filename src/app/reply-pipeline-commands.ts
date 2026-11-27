@@ -5,7 +5,7 @@ import {
   type ReplyPipelinePersistedConfig,
   type ReplyPipelineStatusView,
 } from '../contracts/reply-pipeline.js';
-import { Blocked, type InboundEvent } from '../core/contracts.js';
+import { Blocked, type InboundEvent, type StoredEvent } from '../core/contracts.js';
 import type { AutomationStore } from '../storage/automation-store.js';
 import { isEmergencyStopped } from '../storage/emergency-stop.js';
 import type { EventStore } from '../storage/store.js';
@@ -15,6 +15,8 @@ import {
   HandoffAttributionStore,
   PersistentRhythmGate,
   dryRunReplyPipeline as executeDryRunReplyPipeline,
+  evaluateOutboundStage,
+  resolvePipelineConfig,
   type PipelineKnowledgeContext,
   type PipelineTrace,
   type ReplyPipelineConfig,
@@ -288,5 +290,27 @@ export function handleReplyPipelineCommand(
         eventId: command.eventId,
         ...(command.candidateReplyText !== undefined ? { candidateReplyText: command.candidateReplyText } : {}),
       });
+  }
+}
+
+export function assertPolicyCommandOutboundSafe(
+  store: EventStore,
+  commandId: string,
+  event: StoredEvent,
+  replyText: string,
+  now: () => number,
+): void {
+  const hasPolicyTable = Boolean(
+    store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='policy_commands'").get(),
+  );
+  if (!hasPolicyTable) return;
+  const isPolicy = Boolean(
+    store.db.prepare('SELECT 1 FROM policy_commands WHERE command_id=?').get(commandId),
+  );
+  if (!isPolicy) return;
+  const config = resolvePipelineConfig(loadEffectivePipelineConfig(store));
+  const outbound = evaluateOutboundStage({ store, event, replyText, config, now });
+  if (outbound.decision !== 'continue') {
+    throw new Blocked(outbound.reasonCode);
   }
 }

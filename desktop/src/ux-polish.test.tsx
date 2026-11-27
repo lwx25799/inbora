@@ -1,8 +1,110 @@
-import { createElement } from 'react';
+import { createElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { DEFAULT_ACCOUNT_ID, WECHAT_KF_PLATFORM_ID, WECOM_AIBOT_PLATFORM_ID } from '../../src/contracts/account.js';
 import type { PublicModelConnection } from '../../src/contracts/model-providers.js';
+
+interface HookDispatcher {
+  useState: <T>(initial: T | (() => T)) => [T, (next: T | ((prev: T) => T)) => void];
+  useRef: <T>(initial: T) => { current: T };
+  useEffect: (fn: () => (() => void) | void, deps?: readonly unknown[]) => void;
+}
+let activeHooks: HookDispatcher | null = null;
+const invokeMock = vi.fn<(command: string, args: unknown) => Promise<unknown>>();
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (command: string, args: unknown) => invokeMock(command, args),
+}));
+
+vi.mock('react', async () => {
+  const actual = await vi.importActual<typeof import('react')>('react');
+  return {
+    ...actual,
+    useState: <T,>(initial: T | (() => T)) =>
+      activeHooks ? activeHooks.useState(initial) : actual.useState(initial),
+    useRef: <T,>(initial: T) =>
+      activeHooks ? activeHooks.useRef(initial) : actual.useRef(initial),
+    useEffect: (fn: () => (() => void) | void, deps?: readonly unknown[]) =>
+      activeHooks ? activeHooks.useEffect(fn, deps) : actual.useEffect(fn, deps),
+  };
+});
+
+function mountView<P>(Component: (props: P) => ReactNode, initialProps: P) {
+  let props = initialProps;
+  const states: unknown[] = [];
+  const refs: { current: unknown }[] = [];
+  const effects: { deps?: readonly unknown[]; cleanup?: (() => void) | void }[] = [];
+  let tree: ReactNode = null;
+  let rendering = false;
+  let needsRerender = false;
+  const sameDeps = (a?: readonly unknown[], b?: readonly unknown[]) =>
+    !!a && !!b && a.length === b.length && a.every((item, index) => Object.is(item, b[index]));
+
+  const render = () => {
+    if (rendering) {
+      needsRerender = true;
+      return;
+    }
+    rendering = true;
+    try {
+      for (let pass = 0; pass < 10; pass++) {
+        needsRerender = false;
+        let sIdx = 0;
+        let rIdx = 0;
+        let eIdx = 0;
+        const pending: { idx: number; fn: () => (() => void) | void; deps?: readonly unknown[] }[] = [];
+        activeHooks = {
+          useState: <T,>(initial: T | (() => T)) => {
+            const idx = sIdx++;
+            if (idx >= states.length) states.push(typeof initial === 'function' ? (initial as () => T)() : initial);
+            return [states[idx] as T, (next: T | ((prev: T) => T)) => {
+              const prev = states[idx] as T;
+              const value = typeof next === 'function' ? (next as (p: T) => T)(prev) : next;
+              if (!Object.is(prev, value)) {
+                states[idx] = value;
+                render();
+              }
+            }];
+          },
+          useRef: <T,>(initial: T) => {
+            const idx = rIdx++;
+            if (idx >= refs.length) refs.push({ current: initial });
+            return refs[idx] as { current: T };
+          },
+          useEffect: (fn, deps) => {
+            pending.push({ idx: eIdx++, fn, deps });
+          },
+        };
+        try {
+          tree = Component(props);
+        } finally {
+          activeHooks = null;
+        }
+        for (const item of pending) {
+          const prev = effects[item.idx];
+          if (!prev || !item.deps || !sameDeps(prev.deps, item.deps)) {
+            prev?.cleanup?.();
+            effects[item.idx] = { deps: item.deps, cleanup: item.fn() };
+          }
+        }
+        if (!needsRerender) break;
+      }
+    } finally {
+      rendering = false;
+    }
+  };
+  render();
+  return {
+    markup: () => renderToStaticMarkup(tree),
+    updateProps: (nextProps: P) => {
+      props = nextProps;
+      render();
+    },
+    unmount: () => {
+      for (const eff of effects) eff?.cleanup?.();
+    },
+  };
+}
 import type { Inbox, Status, Thread } from './api';
 import { errorMessages as reasons } from './error-messages';
 import { InboxList } from './InboxList';
@@ -103,6 +205,12 @@ function baseThread(overrides: Partial<Thread> = {}): Thread {
 }
 
 describe('UX polish invariants across the 8 usability principles', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+  afterEach(() => {
+    activeHooks = null;
+  });
   test('error messages point to current Stage 5 pages and never reference removed AI 与设置 page', () => {
     for (const [code, text] of Object.entries(reasons)) {
       expect(text, code).not.toContain('AI 与设置');
@@ -534,5 +642,141 @@ describe('UX polish invariants across the 8 usability principles', () => {
     expect(wechatKfHtml).toContain('官方 API');
     expect(wechatKfHtml).not.toContain('浏览器运行窗口切换');
     expect(wechatKfHtml).not.toContain('同步顶部通知（独立来源）');
+  });
+
+  test('AccountsView queries getAccountStatus for official channels and never shows green badge when disconnected/degraded/error', async () => {
+    const extractOfficialCard = (html: string) => {
+      const start = html.indexOf('官方通道状态');
+      const end = html.indexOf('最近同步状态');
+      return html.slice(start, end);
+    };
+
+    const wecomActive = {
+      accountRef: 'account_wecom',
+      displayLabel: '企微售前机器人',
+      platform: WECOM_AIBOT_PLATFORM_ID,
+    };
+
+    for (const scenario of [
+      {
+        label: 'disconnected',
+        response: {
+          connected: false,
+          connectorState: 'DISCONNECTED',
+          transportStatus: { transport: 'official_api', state: 'DISCONNECTED', protocol: 'wecom_ws', endpointDigest: null },
+        },
+        expectText: '未连接',
+        expectSuccessBadge: false,
+      },
+      {
+        label: 'degraded',
+        response: {
+          connected: false,
+          connectorState: 'DEGRADED',
+          transportStatus: { transport: 'official_api', state: 'DEGRADED', protocol: 'wecom_ws', endpointDigest: null },
+        },
+        expectText: '连接降级',
+        expectSuccessBadge: false,
+      },
+      {
+        label: 'error',
+        response: {
+          connected: false,
+          connectorState: 'ERROR',
+          transportStatus: { transport: 'official_api', state: 'ERROR', protocol: 'wecom_ws', endpointDigest: null },
+        },
+        expectText: '连接异常',
+        expectSuccessBadge: false,
+      },
+      {
+        label: 'unavailable',
+        response: {
+          connected: false,
+          connectorState: 'UNAVAILABLE',
+        },
+        expectText: '未连接',
+        expectSuccessBadge: false,
+      },
+      {
+        label: 'connected',
+        response: {
+          connected: true,
+          connectorState: 'CONNECTED',
+          transportStatus: { transport: 'official_api', state: 'CONNECTED', protocol: 'wecom_ws', endpointDigest: null },
+        },
+        expectText: '已连接',
+        expectSuccessBadge: true,
+      },
+    ]) {
+      invokeMock.mockReset();
+      invokeMock.mockImplementation(async (_cmd, args) => {
+        const action = (args as { body?: { action?: string } })?.body?.action;
+        if (action === 'getAccountStatus') return scenario.response;
+        if (action === 'listAccounts') return { accounts: [] };
+        return scenario.response;
+      });
+      const view = mountView(AccountsView, {
+        status: baseStatus({ account: { id: 'account_wecom', identity: 'bot-1' } }),
+        busy: '',
+        act: async () => {},
+        update: () => {},
+        activeAccount: wecomActive,
+      });
+      try {
+        await vi.waitFor(() => {
+          expect(extractOfficialCard(view.markup())).toContain(scenario.expectText);
+        });
+        const cardHtml = extractOfficialCard(view.markup());
+        if (scenario.expectSuccessBadge) {
+          expect(cardHtml, scenario.label).toContain('bg-success');
+        } else {
+          expect(cardHtml, scenario.label).not.toContain('bg-success');
+        }
+      } finally {
+        view.unmount();
+      }
+    }
+
+    // Re-fetches getAccountStatus when status updates (e.g. after disconnect without inboxRevision change)
+    let statusResp: Record<string, unknown> = {
+      connected: true,
+      connectorState: 'CONNECTED',
+      transportStatus: { transport: 'official_api', state: 'CONNECTED', protocol: 'wecom_ws', endpointDigest: null },
+    };
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(async (_cmd, args) => {
+      const action = (args as { body?: { action?: string } })?.body?.action;
+      if (action === 'getAccountStatus') return statusResp;
+      if (action === 'listAccounts') return { accounts: [] };
+      return statusResp;
+    });
+    const liveView = mountView(AccountsView, {
+      status: baseStatus({ account: { id: 'account_wecom', identity: 'bot-1' } }),
+      busy: '',
+      act: async () => {},
+      update: () => {},
+      activeAccount: wecomActive,
+    });
+    try {
+      await vi.waitFor(() => expect(extractOfficialCard(liveView.markup())).toContain('已连接'));
+      expect(extractOfficialCard(liveView.markup())).toContain('bg-success');
+
+      statusResp = {
+        connected: false,
+        connectorState: 'DISCONNECTED',
+        transportStatus: { transport: 'official_api', state: 'DISCONNECTED', protocol: 'wecom_ws', endpointDigest: null },
+      };
+      liveView.updateProps({
+        status: baseStatus({ account: { id: 'account_wecom', identity: 'bot-1' } }),
+        busy: '',
+        act: async () => {},
+        update: () => {},
+        activeAccount: wecomActive,
+      });
+      await vi.waitFor(() => expect(extractOfficialCard(liveView.markup())).toContain('未连接'));
+      expect(extractOfficialCard(liveView.markup())).not.toContain('bg-success');
+    } finally {
+      liveView.unmount();
+    }
   });
 });

@@ -9,7 +9,9 @@ import {
   ShieldCheckIcon,
 } from 'lucide-react';
 import type { PublicModelState } from '../../../src/contracts/model-providers.js';
+import { AiRuntimeFeaturesPanel } from '@/AiRuntimeFeaturesPanel';
 import { ModelProviderSettings } from '@/ModelProviderSettings';
+import { ModelSlotPanel } from '@/ModelSlotPanel';
 import { PageHeader } from '@/components/PageHeader';
 import { Badge } from '@/components/ui/badge';
 import { modelPresetNames, type Status } from '@/api';
@@ -170,7 +172,23 @@ export function ModelsPageView({
         onDirectoryStateChange={handleDirectoryStateChange}
       />
 
-      {/* Row 3: Static Safety Guardrail Summary */}
+      {/* Row 3: Progressive 4-Slot Routing & Per-Account AI Runtime Features */}
+      <ModelSlotPanel
+        state={providerState}
+        available={Boolean(
+          status.modelProvidersSupported &&
+            status.modelProvidersAvailable === true &&
+            status.modelProviders,
+        )}
+        refreshing={loadingMoreConnections || hasMoreConnections}
+      />
+      <AiRuntimeFeaturesPanel
+        key={status.account?.id ?? 'default'}
+        accountId={status.account?.id ?? null}
+        accountLabel={status.account?.identity ?? null}
+      />
+
+      {/* Row 4: Static Safety Guardrail Summary */}
       <div className="grid grid-cols-1 gap-3.5 md:grid-cols-3">
         <div className="flex items-start gap-3 rounded-xl border border-border/75 bg-muted/30 p-3.5">
           <ShieldCheckIcon className="mt-0.5 size-4 shrink-0 text-primary" />
@@ -184,9 +202,9 @@ export function ModelsPageView({
         <div className="flex items-start gap-3 rounded-xl border border-border/75 bg-muted/30 p-3.5">
           <LockIcon className="mt-0.5 size-4 shrink-0 text-primary" />
           <div className="space-y-0.5 text-xs">
-            <div className="font-semibold text-foreground">单一全局生效模型</div>
+            <div className="font-semibold text-foreground">主对话优先与按需分流</div>
             <p className="text-muted-foreground">
-              人工 AI 建议、自动回复、知识库人格学习与试聊统一使用当前已应用的全局模型。
+              人工建议、自动回复与试聊默认使用主对话模型；看图、后台辅助与云端向量槽位可按需单独绑定或自动降级。
             </p>
           </div>
         </div>
@@ -195,7 +213,7 @@ export function ModelsPageView({
           <div className="space-y-0.5 text-xs">
             <div className="font-semibold text-foreground">媒体与登录态隔离</div>
             <p className="text-muted-foreground">
-              模型仅接收必要文字上下文，不接触浏览器登录态，也不会接收买家图片或头像。
+              多模态看图按账号默认关闭，仅在显式开启后才允许将客户发来的截图或图片送入视觉模型；浏览器登录态、真实缓存头像与固定说明始终隔离。
             </p>
           </div>
         </div>

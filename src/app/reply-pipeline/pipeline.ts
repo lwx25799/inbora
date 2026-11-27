@@ -146,13 +146,18 @@ function runStage1Eligibility(input: PipelineEvaluationInput, config: ResolvedRe
   if (event.payload.direction !== 'INCOMING' || event.payload.actorId === grant.scope.ownId) {
     return { stage, decision: 'skip', reasonCode: 'NOT_INCOMING_CUSTOMER_EVENT' };
   }
-  if (!dryRun && event.status !== 'AWAITING_DRAFT') {
+  const mediaCandidate = isManualMediaCandidate(event.payload) || isMediaPayload(event.payload);
+  const visionImageAllowed = Boolean(
+    config.handoff.allowVisionModel &&
+      isManualMediaCandidate(event.payload) &&
+      event.payload.contentType === 'IMAGE',
+  );
+  if (!dryRun && event.status !== 'AWAITING_DRAFT' && !(visionImageAllowed && event.status === 'MANUAL_REVIEW')) {
     return { stage, decision: 'skip', reasonCode: 'EVENT_STATUS_NOT_ELIGIBLE', detail: { status: event.status } };
   }
-  const mediaCandidate = isManualMediaCandidate(event.payload) || isMediaPayload(event.payload);
   if (!isStrong(event.payload)) {
-    // 合法媒体消息放行至阶段 7，由精细转人工规则统一输出 MEDIA_MESSAGE_HANDOFF 与归因
-    if (mediaCandidate && config.handoff.mediaMessageHandoff) {
+    // 合法媒体消息放行至阶段 7，由精细转人工规则统一输出 MEDIA_MESSAGE_HANDOFF 与归因（开启 vision 时继续走看图分支）
+    if (mediaCandidate && (config.handoff.mediaMessageHandoff || visionImageAllowed)) {
       return {
         stage,
         decision: 'continue',

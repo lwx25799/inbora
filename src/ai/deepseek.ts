@@ -12,6 +12,7 @@ import { callBusinessModel, type BoundModelCall } from './business-model-call.js
 import {buildReplySystemPrompt,classifyModelFailure} from './reply-style.js';
 import {knowledgePromptData,assertKnowledgePromptSafe,assertReplyKnowledgeCurrent,privateModelText,unsafeModelOutput} from '../knowledge/generation-context.js';
 import type {ReplyKnowledgeContext} from '../knowledge/contracts.js';
+import {isValidatedVisionImagePart,type ValidatedVisionImagePart} from './vision-input.js';
 
 // Existing cross-module security-hold tests expect DeepSeekProvider in-flight security revision changes to surface as MODEL_FAILED_NO_RETRY.
 const deepSeekExcludedFailureCodes = new Set<string>(['SECURITY_STATE_CHANGED']);
@@ -31,12 +32,14 @@ export class DeepSeekProvider {
     knowledge?:ReplyKnowledgeContext|null,
     binding?: BoundModelCall,
     validateRoute?: () => void,
+    visionInput?: ValidatedVisionImagePart,
   ): Promise<{ text: string; model: string; callId: string }> {
     requireSafe(
       authorized && (binding || key.length > 0),
       "REAL_MODEL_AUTHORIZATION_REQUIRED",
     );
     requireSafe(!/[\r\n]/u.test(key), "INVALID_MODEL_KEY");
+    if(visionInput)requireSafe(isValidatedVisionImagePart(visionInput)&&event.contentType==='IMAGE','VISION_INPUT_FORBIDDEN');
     if(event.channel==='COMMENT_NOTIFICATION'&&event.kind==='REPLY')history=commentThreadModelHistory(readCommentThreadContext(store,event),event);
     validateContext?.(event,history);
     const effectiveSettings={...settings,...(knowledge?.persona?{persona:knowledge.persona}:{})};
@@ -54,18 +57,22 @@ export class DeepSeekProvider {
     const check = () => {
       assertSecurityRevision(store, event.channel, security);
       assertSecurityChannelClear(store, event.channel);
-      store.assertModelObservation(event);
+      if(!visionInput)store.assertModelObservation(event);
       for (const item of history) store.assertModelObservation(item);
       assertReplyKnowledgeCurrent(store, knowledge);
       validateRoute?.();
     };
     check();
     try {
+      const userJson=JSON.stringify({ ...context.businessData as object, ...(knowledge ? knowledgePromptData(knowledge) : {}) });
       const result = await callBusinessModel({
         store, purpose: "REPLY_GENERATION", model: settings.model, key, signal, binding, transport: this.transport,
+        allowVision: Boolean(visionInput),
         messages: [
           { role: "system", content: buildReplySystemPrompt({ baseSystem: context.system, settings: effectiveSettings }) },
-          { role: "user", content: JSON.stringify({ ...context.businessData as object, ...(knowledge ? knowledgePromptData(knowledge) : {}) }) },
+          visionInput
+            ? { role: "user", content: [{ type: "text", text: userJson }, visionInput] }
+            : { role: "user", content: userJson },
         ],
         check,
         reserve: () => reserve?.(),

@@ -65,9 +65,18 @@ export interface SendProof {
 }
 export const dmClockToleranceMs=2000;
 
+export interface PreparedMediaAsset {
+  id: string;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+  bytes: Uint8Array;
+  sha256: string;
+  filePath: string;
+}
+
 export interface ReplyAdapter {
   inspect(event: InboundEvent): Promise<TargetSnapshot>;
   prepare(event: InboundEvent, text: string): Promise<void>;
+  prepareMedia?(event: InboundEvent, asset: PreparedMediaAsset): Promise<boolean>;
   cancelPreparation?(event: InboundEvent, text: string): Promise<void>;
   verifyPrepared(event: InboundEvent, text: string): Promise<TargetSnapshot>;
   baseline(event: InboundEvent): Promise<string[]>;
