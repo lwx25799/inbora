@@ -84,7 +84,10 @@ const SAFE_METADATA_FIELD_NAME =
   /^(?:endpointDigest|identityDigest|mappingDigest|credentialDigest|lastHeartbeatAt|lastSyncAt|errorCode)$/u;
 const INLINE_QUERY_SECRET =
   /([?&](?:access_token|corpsecret|secret|token|encoding_aes_key|encodingaeskey|aeskey|msg_signature|key)=)([^&#\s]*)/giu;
-const INLINE_AUTH_SECRET = /(authorization\s*:\s*(?:bearer|basic)\s+)([^\s,;]+)/giu;
+const INLINE_AUTH_SECRET = /(authorization\s*:\s*(?:(?:bearer|basic|token)\s+)?)([^\s,;\r\n]+)/giu;
+const INLINE_COOKIE_SECRET = /((?:set-)?cookie\s*:\s*)([^\r\n]+)/giu;
+const SENSITIVE_HEADER_NAME =
+  /(?:secret|token|authorization|cookie|api[_-]?key|credential|password|aes[_-]?key|signature)/iu;
 
 function normalizeHostName(value: string): string {
   return value.trim().toLowerCase().replace(/\.+$/u, '').replace(/^\[|\]$/gu, '');
@@ -120,6 +123,7 @@ export function parseOfficialApiEndpoint(
     rawUrl.length === 0 ||
     rawUrl.length > MAX_ENDPOINT_LENGTH ||
     rawUrl !== rawUrl.trim() ||
+    rawUrl.includes('\\') ||
     /[\p{Cc}\s]/u.test(rawUrl)
   ) {
     throw new Blocked('OFFICIAL_API_ENDPOINT_INVALID');
@@ -233,8 +237,25 @@ export async function validateOfficialApiEndpoint(
     resolved.map(({ address, family: resolvedFamily }) => Object.freeze({ address, family: resolvedFamily })),
   );
   const pinnedLookup: LookupFunction = (_hostname, lookupOptions, callback) => {
-    if (lookupOptions.all) callback(null, addresses.map(entry => ({ ...entry })));
-    else callback(null, addresses[0]!.address, addresses[0]!.family);
+    const requestedFamily =
+      lookupOptions?.family === 4 || lookupOptions?.family === 'IPv4'
+        ? 4
+        : lookupOptions?.family === 6 || lookupOptions?.family === 'IPv6'
+          ? 6
+          : 0;
+    const matching = requestedFamily === 0
+      ? addresses
+      : addresses.filter(entry => entry.family === requestedFamily);
+    if (!matching.length) {
+      const error = Object.assign(
+        new Error(`getaddrinfo ENOTFOUND ${parsed.hostname}`),
+        { code: 'ENOTFOUND', hostname: parsed.hostname },
+      ) as NodeJS.ErrnoException;
+      callback(error, lookupOptions?.all ? [] : '', 0);
+      return;
+    }
+    if (lookupOptions?.all) callback(null, matching.map(entry => ({ ...entry })));
+    else callback(null, matching[0]!.address, matching[0]!.family);
   };
 
   return Object.freeze({
@@ -318,15 +339,92 @@ export function createOfficialApiSecretHolder<T extends Readonly<Record<string, 
   return Object.freeze(holder);
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+type RedactSegment = { readonly redacted: boolean; readonly text: string };
+
+function applyInlinePattern(segments: readonly RedactSegment[], pattern: RegExp): RedactSegment[] {
+  const next: RedactSegment[] = [];
+  for (const segment of segments) {
+    if (segment.redacted) {
+      next.push(segment);
+      continue;
+    }
+    const regex = new RegExp(pattern.source, pattern.flags);
+    let lastIndex = 0;
+    for (const match of segment.text.matchAll(regex)) {
+      const matchIndex = match.index ?? 0;
+      const prefix = match[1] ?? '';
+      if (matchIndex > lastIndex) {
+        next.push({ redacted: false, text: segment.text.slice(lastIndex, matchIndex) });
+      }
+      if (prefix) {
+        next.push({ redacted: false, text: prefix });
+      }
+      next.push({ redacted: true, text: '[REDACTED]' });
+      lastIndex = matchIndex + match[0].length;
+    }
+    if (lastIndex < segment.text.length) {
+      next.push({ redacted: false, text: segment.text.slice(lastIndex) });
+    }
+  }
+  return next;
+}
+
 export function redactOfficialApiText(text: string, extraSecrets: readonly string[] = []): string {
-  let result = text.replace(INLINE_QUERY_SECRET, '$1[REDACTED]').replace(INLINE_AUTH_SECRET, '$1[REDACTED]');
-  const secrets = [...new Set(extraSecrets.filter(item => typeof item === 'string' && item.length >= 4))].sort(
+  let segments: RedactSegment[] = [{ redacted: false, text }];
+  segments = applyInlinePattern(segments, INLINE_QUERY_SECRET);
+  segments = applyInlinePattern(segments, INLINE_AUTH_SECRET);
+  segments = applyInlinePattern(segments, INLINE_COOKIE_SECRET);
+
+  const secrets = [...new Set(extraSecrets.filter(item => typeof item === 'string' && item.trim().length > 0))].sort(
     (left, right) => right.length - left.length,
   );
-  for (const secret of secrets) {
-    result = result.split(secret).join('[REDACTED]');
+  if (!secrets.length) {
+    return segments.map(segment => segment.text).join('');
   }
-  return result;
+  const secretRegex = new RegExp(secrets.map(escapeRegExp).join('|'), 'gu');
+  return segments
+    .map(segment => (segment.redacted ? segment.text : segment.text.replace(secretRegex, '[REDACTED]')))
+    .join('');
+}
+
+function redactRawHeaders(
+  headers: readonly unknown[],
+  extraSecrets: readonly string[],
+  depth: number,
+  seen: WeakSet<object>,
+): unknown[] {
+  const output: unknown[] = [];
+  for (let index = 0; index < headers.length; index += 2) {
+    const rawName = headers[index];
+    output.push(redactOfficialApiValue(rawName, extraSecrets, depth + 1, seen));
+    if (index + 1 < headers.length) {
+      const isSensitive = typeof rawName === 'string' && SENSITIVE_HEADER_NAME.test(rawName);
+      output.push(
+        isSensitive ? '[REDACTED]' : redactOfficialApiValue(headers[index + 1], extraSecrets, depth + 1, seen),
+      );
+    }
+  }
+  return output;
+}
+
+function redactObjectEntry(
+  key: string,
+  entry: unknown,
+  extraSecrets: readonly string[],
+  depth: number,
+  seen: WeakSet<object>,
+): unknown {
+  if (!SAFE_METADATA_FIELD_NAME.test(key) && SENSITIVE_FIELD_NAME.test(key)) {
+    return '[REDACTED]';
+  }
+  if (/^rawheaders$/iu.test(key) && Array.isArray(entry)) {
+    return redactRawHeaders(entry, extraSecrets, depth + 1, seen);
+  }
+  return redactOfficialApiValue(entry, extraSecrets, depth + 1, seen);
 }
 
 export function redactOfficialApiValue(
@@ -340,16 +438,30 @@ export function redactOfficialApiValue(
   if (depth >= 16) return '[TRUNCATED]';
   if (seen.has(value)) return '[CIRCULAR]';
   seen.add(value);
+  if (value instanceof Error) {
+    const errorOutput: Record<string, unknown> = {
+      name: redactOfficialApiText(value.name, extraSecrets),
+      message: redactOfficialApiText(value.message, extraSecrets),
+    };
+    const errorRecord = value as unknown as Record<string, unknown>;
+    if (errorRecord.code !== undefined) {
+      errorOutput.code = redactOfficialApiValue(errorRecord.code, extraSecrets, depth + 1, seen);
+    }
+    if (value.cause !== undefined) {
+      errorOutput.cause = redactOfficialApiValue(value.cause, extraSecrets, depth + 1, seen);
+    }
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === 'name' || key === 'message' || key === 'code' || key === 'cause' || key === 'stack') continue;
+      errorOutput[key] = redactObjectEntry(key, entry, extraSecrets, depth, seen);
+    }
+    return errorOutput;
+  }
   if (Array.isArray(value)) {
     return value.map(item => redactOfficialApiValue(item, extraSecrets, depth + 1, seen));
   }
   const output: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (!SAFE_METADATA_FIELD_NAME.test(key) && SENSITIVE_FIELD_NAME.test(key)) {
-      output[key] = '[REDACTED]';
-    } else {
-      output[key] = redactOfficialApiValue(entry, extraSecrets, depth + 1, seen);
-    }
+    output[key] = redactObjectEntry(key, entry, extraSecrets, depth, seen);
   }
   return output;
 }
@@ -415,11 +527,46 @@ export class OfficialApiSerialExecutor implements AccountSerialExecutor {
     signal?: AbortSignal,
     priority: 'interactive' | 'background' = 'interactive',
   ): Promise<T> {
-    if (signal?.aborted) return Promise.reject(signal.reason ?? new Blocked('OFFICIAL_API_ABORTED'));
-    return this.run(async () => {
-      signal?.throwIfAborted();
-      return operation(signal);
-    }, priority);
+    if (this.disposed) return Promise.reject(new Blocked('OFFICIAL_API_CONNECTOR_CLOSED'));
+    if (!signal) return this.run(() => operation(undefined), priority);
+    if (signal.aborted) return Promise.reject(signal.reason ?? new Blocked('OFFICIAL_API_ABORTED'));
+
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let started = false;
+
+      const onAbort = () => {
+        if (settled || started) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        reject(signal.reason ?? new Blocked('OFFICIAL_API_ABORTED'));
+      };
+
+      signal.addEventListener('abort', onAbort, { once: true });
+
+      void this.run(async () => {
+        signal.removeEventListener('abort', onAbort);
+        if (settled) return undefined;
+        started = true;
+        signal.throwIfAborted();
+        return operation(signal);
+      }, priority).then(
+        value => {
+          signal.removeEventListener('abort', onAbort);
+          if (!settled) {
+            settled = true;
+            resolve(value as T);
+          }
+        },
+        error => {
+          signal.removeEventListener('abort', onAbort);
+          if (!settled) {
+            settled = true;
+            reject(error);
+          }
+        },
+      );
+    });
   }
 
   dispose(): void {

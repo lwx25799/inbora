@@ -239,6 +239,14 @@ describe('official-api-base SSRF guard, credential redaction, executor and ident
       { address: '2408:8711:10:10::1', family: 6 },
     ]);
 
+    const pinnedIpv6 = vi.fn();
+    kf.pinnedLookup('qyapi.weixin.qq.com', { family: 6 }, pinnedIpv6);
+    expect(pinnedIpv6).toHaveBeenCalledExactlyOnceWith(null, '2408:8711:10:10::1', 6);
+
+    const pinnedIpv4All = vi.fn();
+    kf.pinnedLookup('qyapi.weixin.qq.com', { family: 4, all: true }, pinnedIpv4All);
+    expect(pinnedIpv4All).toHaveBeenCalledExactlyOnceWith(null, [{ address: '101.226.103.106', family: 4 }]);
+
     const wecom = await validateOfficialApiEndpoint(`${WECOM_AIBOT_DEFAULT_WS_URL}:443/`, {
       allowedProtocols: ['wss:'],
       allowedHosts: WECOM_AIBOT_OFFICIAL_HOSTS,
@@ -247,6 +255,11 @@ describe('official-api-base SSRF guard, credential redaction, executor and ident
     expect(wecom.normalizedUrl).toBe('wss://openws.work.weixin.qq.com');
     expect(wecom.protocol).toBe('wss:');
     expect(wecom.endpointDigest).toBe(officialApiEndpointDigest(WECOM_AIBOT_DEFAULT_WS_URL));
+
+    const missingIpv6 = vi.fn();
+    wecom.pinnedLookup('openws.work.weixin.qq.com', { family: 6 }, missingIpv6);
+    expect(missingIpv6).toHaveBeenCalledOnce();
+    expect(missingIpv6.mock.calls[0]![0]).toMatchObject({ code: 'ENOTFOUND' });
   });
 
   test.each([
@@ -271,6 +284,8 @@ describe('official-api-base SSRF guard, credential redaction, executor and ident
     ['https://[fc00::1]/cgi-bin', 'OFFICIAL_API_ENDPOINT_PRIVATE_ADDRESS'],
     ['https://[::ffff:127.0.0.1]/cgi-bin', 'OFFICIAL_API_ENDPOINT_PRIVATE_ADDRESS'],
     ['https://qyapi.weixin.qq.com/cgi-bin/../secret', 'OFFICIAL_API_ENDPOINT_INVALID'],
+    ['https://qyapi.weixin.qq.com\\..\\secret', 'OFFICIAL_API_ENDPOINT_INVALID'],
+    ['https://qyapi.weixin.qq.com\\cgi-bin', 'OFFICIAL_API_ENDPOINT_INVALID'],
     ['https://qyapi.weixin.qq.com/cgi-bin?access_token=abc', 'OFFICIAL_API_ENDPOINT_INVALID'],
     ['https://qyapi.weixin.qq.com/cgi-bin#frag', 'OFFICIAL_API_ENDPOINT_INVALID'],
   ] as const)('rejects unsafe endpoint %s with %s', (rawUrl, expectedCode) => {
@@ -371,6 +386,53 @@ describe('official-api-base SSRF guard, credential redaction, executor and ident
     expect(JSON.stringify(safeStatus)).not.toContain(appSecret);
   });
 
+  test('redacts cookies, short secrets (<4 chars), Error objects and rawHeaders arrays', () => {
+    const shortSecret = 'k9x';
+    const headerText = `Cookie: sid=sess-123; s=${shortSecret}\r\nSet-Cookie: auth=cookie-456; HttpOnly\r\nX-Note: pin=${shortSecret}`;
+    const scrubbedHeaderText = redactOfficialApiText(headerText, [shortSecret, 'E']);
+    expect(scrubbedHeaderText).not.toContain('sess-123');
+    expect(scrubbedHeaderText).not.toContain('cookie-456');
+    expect(scrubbedHeaderText).not.toContain(shortSecret);
+    expect(scrubbedHeaderText).toContain('Cookie: [REDACTED]');
+    expect(scrubbedHeaderText).toContain('Set-Cookie: [REDACTED]');
+    expect(scrubbedHeaderText).toContain('pin=[REDACTED]');
+    expect(scrubbedHeaderText).not.toContain('[R[REDACTED]');
+
+    const err = Object.assign(new Error(`upstream failed with ${shortSecret} and Cookie: sid=secret-cookie`), {
+      code: 'ECONNRESET',
+      rawHeaders: [
+        'Content-Type', 'application/json',
+        'Set-Cookie', 'sid=raw-cookie-789; Secure',
+        'Authorization', 'Bearer raw-bearer-000',
+        'X-Custom-Info', `echo-${shortSecret}`,
+      ],
+    });
+    const redactedErr = redactOfficialApiValue(err, [shortSecret]) as Record<string, unknown>;
+    expect(redactedErr).toMatchObject({
+      name: 'Error',
+      code: 'ECONNRESET',
+      rawHeaders: [
+        'Content-Type', 'application/json',
+        'Set-Cookie', '[REDACTED]',
+        'Authorization', '[REDACTED]',
+        'X-Custom-Info', 'echo-[REDACTED]',
+      ],
+    });
+    expect(String(redactedErr.message)).toContain('[REDACTED]');
+    const serializedErr = JSON.stringify(redactedErr);
+    expect(serializedErr).not.toContain(shortSecret);
+    expect(serializedErr).not.toContain('secret-cookie');
+    expect(serializedErr).not.toContain('raw-cookie-789');
+    expect(serializedErr).not.toContain('raw-bearer-000');
+
+    const blocked = redactOfficialApiValue(new Blocked('OFFICIAL_API_ERROR')) as Record<string, unknown>;
+    expect(blocked).toEqual({
+      name: 'Error',
+      message: 'OFFICIAL_API_ERROR',
+      code: 'OFFICIAL_API_ERROR',
+    });
+  });
+
   test('serializes work via OfficialApiSerialExecutor and stops cleanly on abort or dispose', async () => {
     const executor = createOfficialApiExecutor();
     expect(executor.idle).toBe(true);
@@ -399,12 +461,15 @@ describe('official-api-base SSRF guard, credential redaction, executor and ident
     }, abortedController.signal);
     abortedController.abort(new Blocked('OFFICIAL_API_ABORTED'));
 
+    // Queued abort rejects immediately while the head task is still blocked.
+    await expect(abortedTask).rejects.toMatchObject({ code: 'OFFICIAL_API_ABORTED' });
+    expect(trace).not.toContain('first:end');
+
     expect(executor.idle).toBe(false);
     releaseFirst();
 
     expect(await first).toBe(1);
     expect(await second).toBe(2);
-    await expect(abortedTask).rejects.toMatchObject({ code: 'OFFICIAL_API_ABORTED' });
     expect(trace).toEqual(['first:start', 'first:end', 'second:run']);
     await expect.poll(() => executor.idle).toBe(true);
 
