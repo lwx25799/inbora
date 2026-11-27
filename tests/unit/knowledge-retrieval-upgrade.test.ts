@@ -10,6 +10,7 @@ import {ReplyKnowledgeStore} from '../../src/knowledge/store.js';
 import {
   analyzeQuery,
   DEFAULT_MIN_SCORE,
+  EXACT_FAQ_MAX_CHARS,
   indexKnowledgeTerms,
   singleCharAliasToken,
 } from '../../src/knowledge/retrieval.js';
@@ -241,6 +242,19 @@ test('multi-chunk entries never emit exactFaqMatch, never crowd out conflicting 
   const longExact=f.data.debugRetrieval(account,'DIRECT_MESSAGE','发货政策长文');
   expect(longExact.hits[0]?.id).toBe(longEntry.id);
   expect(longExact.exactFaqHit).toBeNull();
+
+  // Single-chunk validText 500-char boundary: 500 chars emits exactFaqMatch, 501 chars does not.
+  expect(EXACT_FAQ_MAX_CHARS).toBe(500);
+  const exact500Text='保'.repeat(500);
+  const entry500=f.enable('保修条款五百字',exact500Text,'warranty-500');
+  const hit500=f.data.debugRetrieval(account,'DIRECT_MESSAGE','保修条款五百字');
+  expect(hit500.exactFaqHit).toMatchObject({id:entry500.id,matchType:'EXACT_TITLE',text:exact500Text});
+
+  const exact501Text='保'.repeat(501);
+  const entry501=f.enable('保修条款五百零一字',exact501Text,'warranty-501');
+  const hit501=f.data.debugRetrieval(account,'DIRECT_MESSAGE','保修条款五百零一字');
+  expect(hit501.hits[0]?.id).toBe(entry501.id);
+  expect(hit501.exactFaqHit).toBeNull();
 
   // Adding a short conflicting entry under the same topic must trigger conflict even though the long entry has >20 chunks.
   f.enable('发货政策简版','所有订单统一十天后发货。','shipping-long');

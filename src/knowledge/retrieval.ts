@@ -14,7 +14,7 @@ import {fuseHybridRankings,searchChunkVectors,type VectorSearchRow} from './vect
 
 export const DEFAULT_MIN_SCORE=0.25;
 export const DEFAULT_VECTOR_MIN_SIMILARITY=0.3;
-export const EXACT_FAQ_MAX_CHARS=1000;
+export const EXACT_FAQ_MAX_CHARS=500;
 
 const zhSegmenter=new Intl.Segmenter('zh-CN',{granularity:'word'});
 const EDGE_PUNCT_RE=/^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu;
@@ -494,11 +494,11 @@ function detectExactFaqMatch(
   const top=cleanEntries[0]!;
   const second=cleanEntries[1];
   const meta=entryMetaById.get(top.row.id);
-  // Direct FAQ output requires a single unchunked entry whose complete text fits safe reply bounds.
+  // Direct FAQ output requires a single unchunked entry whose complete text passes validText (<= 500 chars).
   if(!meta||meta.chunkCount!==1)return null;
-  const fullText=meta.fullText.trim();
+  const fullText=meta.fullText.trim().replace(/\r\n?/gu,'\n');
   const fullChars=Array.from(fullText).length;
-  if(fullChars===0||fullChars>EXACT_FAQ_MAX_CHARS)return null;
+  if(fullChars===0||fullChars>EXACT_FAQ_MAX_CHARS||/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(fullText))return null;
 
   const exactEntries=cleanEntries.filter(item=>item.exactMatch);
   if(exactEntries.length===1&&exactEntries[0]!.row.id===top.row.id){
