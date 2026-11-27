@@ -1,9 +1,9 @@
-import { createDecipheriv, createHash } from 'node:crypto';
+import { createDecipheriv } from 'node:crypto';
 import { Blocked } from '../../core/contracts.js';
+import { officialApiEndpointDigest } from '../official-api-base.js';
 
 const AES_KEY_BYTES = 32;
 const AES_IV_BYTES = 16;
-const AES_CIPHER_BLOCK_BYTES = 16;
 const PKCS7_BLOCK_BYTES = 32;
 const STRICT_BASE64_44_PATTERN = /^[A-Za-z0-9+/]{43}=$/u;
 const STRICT_BASE64_43_PATTERN = /^[A-Za-z0-9+/]{43}$/u;
@@ -35,7 +35,7 @@ export function decodeWecomAesKey(aesKey: string): Buffer {
 
 /**
  * Decrypt a WeCom aibot media/file attachment using AES-256-CBC with IV = key[0..15]
- * and strict manual 32-byte PKCS#7 padding validation.
+ * and fixed-length 32-byte constant-time PKCS#7 padding validation.
  * Error messages never include key material or plaintext fragments.
  */
 export function decryptWecomAttachment(
@@ -46,8 +46,8 @@ export function decryptWecomAttachment(
     throw new Blocked('WECOM_CRYPTO_CIPHERTEXT_INVALID');
   }
   if (
-    encryptedBuffer.byteLength < AES_CIPHER_BLOCK_BYTES
-    || encryptedBuffer.byteLength % AES_CIPHER_BLOCK_BYTES !== 0
+    encryptedBuffer.byteLength < PKCS7_BLOCK_BYTES
+    || encryptedBuffer.byteLength % PKCS7_BLOCK_BYTES !== 0
   ) {
     throw new Blocked('WECOM_CRYPTO_CIPHERTEXT_INVALID');
   }
@@ -72,26 +72,31 @@ export function decryptWecomAttachment(
     head.fill(0);
     tail.fill(0);
 
-    if (decrypted.length === 0) {
+    if (decrypted.length < PKCS7_BLOCK_BYTES || decrypted.length % PKCS7_BLOCK_BYTES !== 0) {
       throw new Blocked('WECOM_CRYPTO_PADDING_INVALID');
     }
 
+    // Constant-time scan across the final 32-byte block with masked accumulation.
     const pad = decrypted[decrypted.length - 1]!;
-    if (pad < 1 || pad > PKCS7_BLOCK_BYTES || pad > decrypted.length) {
-      throw new Blocked('WECOM_CRYPTO_PADDING_INVALID');
+    const padInRange = ((pad - 1) >>> 31) ^ 1; // 1 iff pad >= 1
+    const padWithinBlock = ((PKCS7_BLOCK_BYTES - pad) >>> 31) ^ 1; // 1 iff pad <= 32
+    const padValid = padInRange & padWithinBlock;
+    const effectivePad = padValid === 1 ? pad : 0;
+
+    let diff = padValid ^ 1;
+    const tailStart = decrypted.length - PKCS7_BLOCK_BYTES;
+    for (let offset = 0; offset < PKCS7_BLOCK_BYTES; offset++) {
+      const posFromEnd = PKCS7_BLOCK_BYTES - offset;
+      const inPad = (posFromEnd - effectivePad - 1) >>> 31; // 1 iff posFromEnd <= effectivePad
+      const mask = (-inPad) & 0xff;
+      diff |= (decrypted[tailStart + offset]! ^ pad) & mask;
     }
 
-    // Constant-time byte-by-byte verification over all padding bytes.
-    let diff = 0;
-    const padStart = decrypted.length - pad;
-    for (let i = padStart; i < decrypted.length; i++) {
-      diff |= decrypted[i]! ^ pad;
-    }
     if (diff !== 0) {
       throw new Blocked('WECOM_CRYPTO_PADDING_INVALID');
     }
 
-    return Buffer.from(decrypted.subarray(0, padStart));
+    return Buffer.from(decrypted.subarray(0, decrypted.length - pad));
   } finally {
     key.fill(0);
     iv.fill(0);
@@ -100,12 +105,8 @@ export function decryptWecomAttachment(
 }
 
 /**
- * Compute an irreversible SHA-256 digest of a sanitized WSS endpoint (origin + path).
+ * Compute an irreversible SHA-256 digest aligned with official-api-base.ts.
  */
 export function computeWecomEndpointDigest(wsUrl: string): string {
-  const parsed = new URL(wsUrl);
-  const host = parsed.hostname.toLowerCase().replace(/\.$/u, '');
-  const port = parsed.port && parsed.port !== '443' ? `:${parsed.port}` : '';
-  const canonical = `${parsed.protocol}//${host}${port}${parsed.pathname || '/'}`;
-  return createHash('sha256').update(canonical).digest('hex');
+  return officialApiEndpointDigest(wsUrl, { allowedProtocols: ['wss:'] });
 }

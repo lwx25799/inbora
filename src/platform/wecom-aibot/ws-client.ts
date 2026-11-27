@@ -2,27 +2,29 @@ import { randomUUID } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { inspect } from 'node:util';
 import { Blocked } from '../../core/contracts.js';
+import type { ValidatedOfficialApiEndpoint } from '../official-api-base.js';
 import { WecomOutboundAckQueue } from './ack-queue.js';
-import { computeWecomEndpointDigest } from './crypto.js';
 import {
-  assertSafeWecomWsUrlSyntax,
+  buildActiveSendFrame,
+  buildStreamReplyFrame,
   decodeWecomWsMessageData,
   parseWecomWsFrame,
-  requirePositiveInt,
+  raceWithAbort,
+  resolveWecomWsConfig,
   validateWecomWsEndpoint,
+  type ResolvedWecomWsConfig,
 } from './frame-guard.js';
+import { createPinnedWebSocket } from './pinned-ws.js';
 import {
-  WECOM_AIBOT_DEFAULT_WS_URL,
-  WECOM_REPLY_MAX_UTF8_BYTES,
+  WECOM_MAX_INBOUND_FRAME_BYTES,
   WsCmd,
-  type WecomActiveSendBody,
   type WecomActiveSendParams,
   type WecomDnsLookup,
+  type WecomHttpsRequestImpl,
   type WecomInboundEventBody,
   type WecomInboundMessageBody,
   type WecomSendReplyParams,
   type WecomSendReplyResult,
-  type WecomStreamReplyBody,
   type WecomWebSocketEvent,
   type WecomWebSocketFactory,
   type WecomWebSocketLike,
@@ -35,41 +37,18 @@ import {
 export { assertSafeWecomWsUrlSyntax, validateWecomWsEndpoint } from './frame-guard.js';
 
 const WS_OPEN = 1;
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
-const DEFAULT_MISSED_PONG_THRESHOLD = 2;
-const DEFAULT_ACK_TIMEOUT_MS = 15_000;
-const DEFAULT_RECONNECT_BASE_DELAY_MS = 1_000;
-const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
-const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10;
-const DEFAULT_MAX_AUTH_FAILURE_ATTEMPTS = 3;
 const MAX_PENDING_PING_IDS = 8;
 
 // Keep secret accessors off instance properties so serialization/inspection never leaks credentials.
 const secretVault = new WeakMap<WecomWsClient, () => string>();
 
-function createNativeWebSocket(url: string): WecomWebSocketLike {
-  const Ctor = globalThis.WebSocket;
-  if (typeof Ctor !== 'function') {
-    throw new Blocked('WECOM_WS_RUNTIME_UNSUPPORTED');
-  }
-  return new Ctor(url) as unknown as WecomWebSocketLike;
-}
-
 export class WecomWsClient {
   readonly botId: string;
   readonly endpointDigest: string;
 
-  private readonly wsUrl: string;
-  private readonly heartbeatIntervalMs: number;
-  private readonly missedPongThreshold: number;
-  private readonly ackTimeoutMs: number;
-  private readonly reconnectBaseDelayMs: number;
-  private readonly reconnectMaxDelayMs: number;
-  private readonly maxReconnectAttempts: number;
-  private readonly maxAuthFailureAttempts: number;
-  private readonly maxReplyBytes: number;
-  private readonly webSocketFactory: WecomWebSocketFactory;
-  private readonly usesCustomFactory: boolean;
+  private readonly config: Omit<ResolvedWecomWsConfig, 'readSecret'>;
+  private readonly customWebSocketFactory: WecomWebSocketFactory | undefined;
+  private readonly httpsRequestImpl: WecomHttpsRequestImpl | undefined;
   private readonly dnsLookupFn: WecomDnsLookup | undefined;
   private readonly now: () => number;
   private readonly options: WecomWsClientOptions;
@@ -84,6 +63,8 @@ export class WecomWsClient {
   private connectionGen = 0;
 
   private connectPromise: Promise<void> | null = null;
+  private activeConnectAbort: AbortController | null = null;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private authReqId: string | null = null;
   private authTimer: ReturnType<typeof setTimeout> | null = null;
   private authHandledOnCurrentSocket = false;
@@ -101,40 +82,13 @@ export class WecomWsClient {
   private lastErrorCode: string | null = null;
 
   constructor(options: WecomWsClientOptions) {
-    const botId = typeof options.botId === 'string' ? options.botId.trim() : '';
-    if (!botId) {
-      throw new Blocked('WECOM_WS_CREDENTIAL_REQUIRED');
-    }
-    const readSecret = typeof options.secret === 'function'
-      ? options.secret
-      : () => options.secret as string;
-    const initialSecret = readSecret();
-    if (typeof initialSecret !== 'string' || !initialSecret.trim()) {
-      throw new Blocked('WECOM_WS_CREDENTIAL_REQUIRED');
-    }
-
-    const wsUrl = options.wsUrl ?? WECOM_AIBOT_DEFAULT_WS_URL;
-    assertSafeWecomWsUrlSyntax(wsUrl);
-
-    this.botId = botId;
-    this.wsUrl = wsUrl;
-    this.endpointDigest = computeWecomEndpointDigest(wsUrl);
-    this.heartbeatIntervalMs = requirePositiveInt(options.heartbeatIntervalMs, DEFAULT_HEARTBEAT_INTERVAL_MS);
-    this.missedPongThreshold = requirePositiveInt(options.missedPongThreshold, DEFAULT_MISSED_PONG_THRESHOLD);
-    this.ackTimeoutMs = requirePositiveInt(options.ackTimeoutMs, DEFAULT_ACK_TIMEOUT_MS);
-    this.reconnectBaseDelayMs = requirePositiveInt(options.reconnectBaseDelayMs, DEFAULT_RECONNECT_BASE_DELAY_MS);
-    this.reconnectMaxDelayMs = requirePositiveInt(options.reconnectMaxDelayMs, DEFAULT_RECONNECT_MAX_DELAY_MS);
-    if (this.reconnectMaxDelayMs < this.reconnectBaseDelayMs) {
-      throw new Blocked('WECOM_WS_CONFIG_INVALID');
-    }
-    this.maxReconnectAttempts = requirePositiveInt(options.maxReconnectAttempts, DEFAULT_MAX_RECONNECT_ATTEMPTS, 0);
-    this.maxAuthFailureAttempts = requirePositiveInt(options.maxAuthFailureAttempts, DEFAULT_MAX_AUTH_FAILURE_ATTEMPTS, 1);
-    this.maxReplyBytes = requirePositiveInt(options.maxReplyBytes, WECOM_REPLY_MAX_UTF8_BYTES);
-    if (this.maxReplyBytes > WECOM_REPLY_MAX_UTF8_BYTES) {
-      throw new Blocked('WECOM_WS_CONFIG_INVALID');
-    }
-    this.usesCustomFactory = typeof options.webSocketFactory === 'function';
-    this.webSocketFactory = options.webSocketFactory ?? createNativeWebSocket;
+    const resolved = resolveWecomWsConfig(options);
+    const { readSecret, ...safeConfig } = resolved;
+    this.config = safeConfig;
+    this.botId = safeConfig.botId;
+    this.endpointDigest = safeConfig.endpointDigest;
+    this.customWebSocketFactory = options.webSocketFactory;
+    this.httpsRequestImpl = options.httpsRequest;
     this.dnsLookupFn = options.dnsLookup;
     this.now = options.now ?? (() => Date.now());
     // Store callback hooks without retaining raw secret string on the instance.
@@ -158,7 +112,7 @@ export class WecomWsClient {
           this.ws.send(payload);
         },
       },
-      this.ackTimeoutMs,
+      this.config.ackTimeoutMs,
     );
   }
 
@@ -188,7 +142,10 @@ export class WecomWsClient {
     return this.getStatus();
   }
 
-  connect(): Promise<void> {
+  connect(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      return Promise.reject(new Blocked('WECOM_WS_CLOSED'));
+    }
     if (this.isConnected) {
       return Promise.resolve();
     }
@@ -200,20 +157,26 @@ export class WecomWsClient {
     this.reconnectAttempts = 0;
     this.consecutiveAuthFailures = 0;
     this.clearReconnectTimer();
-    const attempt = this.openConnection();
-    this.connectPromise = attempt.finally(() => {
-      if (this.connectPromise === attempt) {
+
+    let tracked!: Promise<void>;
+    tracked = this.openConnection(signal).finally(() => {
+      if (this.connectPromise === tracked) {
         this.connectPromise = null;
       }
     });
-    return this.connectPromise;
+    this.connectPromise = tracked;
+    return tracked;
   }
 
   disconnect(): void {
     this.manuallyClosed = true;
     this.clearReconnectTimer();
     this.stopHeartbeat();
+    this.clearConnectTimer();
     this.clearAuthTimer();
+    const connectAbort = this.activeConnectAbort;
+    this.activeConnectAbort = null;
+    connectAbort?.abort(new Blocked('WECOM_WS_CLOSED'));
     const rejectAuth = this.authReject;
     this.authResolve = null;
     this.authReject = null;
@@ -232,28 +195,12 @@ export class WecomWsClient {
    * Never splits messages and never retries after timeout, disconnect, or unknown errors.
    */
   sendReplyOnce(params: WecomSendReplyParams): Promise<WecomSendReplyResult> {
-    const reqId = typeof params.reqId === 'string' ? params.reqId.trim() : '';
-    if (!reqId) {
-      return Promise.reject(new Blocked('WECOM_WS_REQ_ID_REQUIRED'));
+    try {
+      const built = buildStreamReplyFrame(params, this.config.maxReplyBytes);
+      return this.outboundQueue.enqueue(built.reqId, built.streamId, built.payload, params.signal);
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Blocked('WECOM_WS_FRAME_INVALID'));
     }
-    const contentError = this.validateReplyContent(params.content);
-    if (contentError) {
-      return Promise.reject(contentError);
-    }
-    const streamId = params.streamId?.trim() || `stream_${randomUUID()}`;
-    const frame: WecomWsFrame<WecomStreamReplyBody> = {
-      cmd: WsCmd.RESPONSE,
-      headers: { req_id: reqId },
-      body: {
-        msgtype: 'stream',
-        stream: {
-          id: streamId,
-          finish: true,
-          content: params.content,
-        },
-      },
-    };
-    return this.outboundQueue.enqueue(reqId, streamId, JSON.stringify(frame), params.signal);
   }
 
   /**
@@ -261,127 +208,198 @@ export class WecomWsClient {
    * Never retries after timeout, disconnect, or unknown errors.
    */
   sendActiveMessageOnce(params: WecomActiveSendParams): Promise<WecomSendReplyResult> {
-    const chatId = typeof params.chatId === 'string' ? params.chatId.trim() : '';
-    if (!chatId) {
-      return Promise.reject(new Blocked('WECOM_WS_TARGET_REQUIRED'));
+    try {
+      const built = buildActiveSendFrame(params, this.config.maxReplyBytes);
+      return this.outboundQueue.enqueue(built.reqId, built.streamId, built.payload, params.signal);
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Blocked('WECOM_WS_FRAME_INVALID'));
     }
-    const contentError = this.validateReplyContent(params.content);
-    if (contentError) {
-      return Promise.reject(contentError);
-    }
-    const reqId = params.reqId?.trim() || `send_${randomUUID()}`;
-    const msgType = params.msgType ?? 'markdown';
-    const body: WecomActiveSendBody = msgType === 'text'
-      ? { chatid: chatId, msgtype: 'text', text: { content: params.content } }
-      : { chatid: chatId, msgtype: 'markdown', markdown: { content: params.content } };
-    const frame: WecomWsFrame<WecomActiveSendBody> = {
-      cmd: WsCmd.SEND_MSG,
-      headers: { req_id: reqId },
-      body,
-    };
-    return this.outboundQueue.enqueue(reqId, reqId, JSON.stringify(frame), params.signal);
   }
 
-  private validateReplyContent(content: string): Blocked | null {
-    if (typeof content !== 'string' || !content.trim()) {
-      return new Blocked('WECOM_WS_REPLY_EMPTY');
-    }
-    if (Buffer.byteLength(content, 'utf8') > this.maxReplyBytes) {
-      return new Blocked('WECOM_WS_REPLY_TOO_LONG');
-    }
-    return null;
-  }
-
-  private async openConnection(): Promise<void> {
+  private async openConnection(externalSignal?: AbortSignal): Promise<void> {
     const gen = ++this.connectionGen;
     this.authenticated = false;
     this.authHandledOnCurrentSocket = false;
     this.authReqId = null;
     this.clearAuthTimer();
+    this.clearConnectTimer();
     this.stopHeartbeat();
     this.teardownSocket(false);
     this.setState('CONNECTING');
 
-    if (!this.usesCustomFactory || this.dnsLookupFn) {
-      try {
-        await validateWecomWsEndpoint(this.wsUrl, this.dnsLookupFn ?? dnsLookup);
-      } catch (error) {
-        if (gen !== this.connectionGen || this.manuallyClosed) {
-          throw new Blocked('WECOM_WS_CLOSED');
+    const connectAbort = new AbortController();
+    this.activeConnectAbort = connectAbort;
+
+    const onExternalAbort = () => {
+      connectAbort.abort(new Blocked('WECOM_WS_CLOSED'));
+      if (gen === this.connectionGen && !this.authenticated) {
+        this.abortPendingConnect(gen, 'WECOM_WS_CLOSED', false);
+      }
+    };
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        this.activeConnectAbort = null;
+        throw new Blocked('WECOM_WS_CLOSED');
+      }
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+
+    // Overall handshake deadline spanning DNS resolution + TLS/WS upgrade + subscribe auth.
+    this.connectTimer = setTimeout(() => {
+      if (gen !== this.connectionGen || this.authenticated || this.manuallyClosed) return;
+      if (this.authReqId !== null) {
+        connectAbort.abort(new Blocked('WECOM_WS_AUTH_TIMEOUT'));
+        this.handleAuthFailure(gen, 'WECOM_WS_AUTH_TIMEOUT', false);
+      } else {
+        connectAbort.abort(new Blocked('WECOM_WS_CONNECT_TIMEOUT'));
+        this.abortPendingConnect(gen, 'WECOM_WS_CONNECT_TIMEOUT', true);
+      }
+    }, this.config.connectTimeoutMs);
+
+    try {
+      let validated: ValidatedOfficialApiEndpoint | undefined;
+      if (!this.customWebSocketFactory || this.dnsLookupFn) {
+        try {
+          validated = await raceWithAbort(
+            validateWecomWsEndpoint(this.config.wsUrl, this.dnsLookupFn ?? dnsLookup),
+            connectAbort.signal,
+          );
+        } catch (error) {
+          if (connectAbort.signal.aborted && connectAbort.signal.reason instanceof Blocked) {
+            throw connectAbort.signal.reason;
+          }
+          if (gen !== this.connectionGen || this.manuallyClosed || externalSignal?.aborted) {
+            throw new Blocked('WECOM_WS_CLOSED');
+          }
+          const safeErr = error instanceof Blocked ? error : new Blocked('WECOM_WS_ENDPOINT_SSRF_BLOCKED');
+          this.lastErrorCode = safeErr.code;
+          this.clearConnectTimer();
+          if (safeErr.code === 'WECOM_WS_DNS_FAILED' || safeErr.code === 'WECOM_WS_CONNECT_TIMEOUT') {
+            this.emitError(safeErr);
+            this.scheduleReconnect('disconnect');
+          } else {
+            // Terminal policy / private-IP SSRF rejection: never reconnect.
+            this.authFailureExhausted = true;
+            this.setState('ERROR');
+            this.emitError(safeErr);
+          }
+          throw safeErr;
         }
-        const safeErr = error instanceof Blocked ? error : new Blocked('WECOM_WS_ENDPOINT_SSRF_BLOCKED');
-        this.lastErrorCode = safeErr.code;
-        this.setState('ERROR');
-        this.emitError(safeErr);
-        throw safeErr;
+      }
+
+      if (gen !== this.connectionGen || this.manuallyClosed || connectAbort.signal.aborted) {
+        throw new Blocked('WECOM_WS_CLOSED');
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        let socket: WecomWebSocketLike;
+        try {
+          socket = this.customWebSocketFactory
+            ? this.customWebSocketFactory(this.config.wsUrl, connectAbort.signal)
+            : createPinnedWebSocket(validated!, {
+                signal: connectAbort.signal,
+                maxFrameBytes: WECOM_MAX_INBOUND_FRAME_BYTES,
+                requestImpl: this.httpsRequestImpl,
+              });
+        } catch {
+          const err = new Blocked('WECOM_WS_CONNECT_FAILED');
+          this.lastErrorCode = err.code;
+          this.clearConnectTimer();
+          this.emitError(err);
+          this.scheduleReconnect('disconnect');
+          reject(err);
+          return;
+        }
+
+        this.ws = socket;
+        this.authResolve = resolve;
+        this.authReject = reject;
+
+        const onOpen = () => {
+          if (gen !== this.connectionGen || this.manuallyClosed) return;
+          this.sendSubscribeAuth(gen);
+        };
+
+        const onMessage = (event: WecomWebSocketEvent) => {
+          if (gen !== this.connectionGen || this.manuallyClosed) return;
+          void this.handleRawMessage(event.data, gen).catch(() => {
+            if (gen !== this.connectionGen) return;
+            this.lastErrorCode = 'WECOM_WS_FRAME_INVALID';
+            this.emitError(new Blocked('WECOM_WS_FRAME_INVALID'));
+          });
+        };
+
+        const onError = (event: WecomWebSocketEvent) => {
+          if (gen !== this.connectionGen || this.manuallyClosed) return;
+          const safeErr = event.error instanceof Blocked ? event.error : new Blocked('WECOM_WS_SOCKET_ERROR');
+          this.lastErrorCode = safeErr.code;
+          this.emitError(safeErr);
+        };
+
+        const onClose = (event: WecomWebSocketEvent) => {
+          if (gen !== this.connectionGen) return;
+          const code = typeof event.code === 'number' ? event.code : 1006;
+          this.handleSocketClose(gen, code);
+        };
+
+        socket.addEventListener('open', onOpen);
+        socket.addEventListener('message', onMessage);
+        socket.addEventListener('error', onError);
+        socket.addEventListener('close', onClose);
+        this.wsCleanup = () => {
+          socket.removeEventListener('open', onOpen);
+          socket.removeEventListener('message', onMessage);
+          socket.removeEventListener('error', onError);
+          socket.removeEventListener('close', onClose);
+        };
+
+        if (socket.readyState === WS_OPEN) {
+          onOpen();
+        }
+      });
+    } finally {
+      externalSignal?.removeEventListener('abort', onExternalAbort);
+      if (this.activeConnectAbort === connectAbort) {
+        this.activeConnectAbort = null;
+      }
+      if (gen === this.connectionGen) {
+        this.clearConnectTimer();
       }
     }
+  }
 
-    if (gen !== this.connectionGen || this.manuallyClosed) {
-      throw new Blocked('WECOM_WS_CLOSED');
+  private abortPendingConnect(gen: number, code: string, shouldReconnect: boolean): void {
+    if (gen !== this.connectionGen || this.authenticated) return;
+    this.connectionGen++;
+    this.clearConnectTimer();
+    this.clearAuthTimer();
+    this.authReqId = null;
+    this.teardownSocket(true);
+    const err = new Blocked(code);
+    this.lastErrorCode = code;
+    const reject = this.authReject;
+    this.authResolve = null;
+    this.authReject = null;
+    if (shouldReconnect && !this.manuallyClosed) {
+      this.emitError(err);
+      this.scheduleReconnect('disconnect');
+    } else if (!this.manuallyClosed) {
+      this.setState('DISCONNECTED');
     }
-
-    return new Promise<void>((resolve, reject) => {
-      let socket: WecomWebSocketLike;
-      try {
-        socket = this.webSocketFactory(this.wsUrl);
-      } catch {
-        const err = new Blocked('WECOM_WS_CONNECT_FAILED');
-        this.lastErrorCode = err.code;
-        this.emitError(err);
-        this.scheduleReconnect('disconnect');
-        reject(err);
-        return;
-      }
-
-      this.ws = socket;
-      this.authResolve = resolve;
-      this.authReject = reject;
-
-      const onOpen = () => {
-        if (gen !== this.connectionGen || this.manuallyClosed) return;
-        this.sendSubscribeAuth(gen);
-      };
-
-      const onMessage = (event: WecomWebSocketEvent) => {
-        if (gen !== this.connectionGen || this.manuallyClosed) return;
-        void this.handleRawMessage(event.data, gen);
-      };
-
-      const onError = () => {
-        if (gen !== this.connectionGen || this.manuallyClosed) return;
-        this.lastErrorCode = 'WECOM_WS_SOCKET_ERROR';
-        this.emitError(new Blocked('WECOM_WS_SOCKET_ERROR'));
-      };
-
-      const onClose = (event: WecomWebSocketEvent) => {
-        if (gen !== this.connectionGen) return;
-        const code = typeof event.code === 'number' ? event.code : 1006;
-        this.handleSocketClose(gen, code);
-      };
-
-      socket.addEventListener('open', onOpen);
-      socket.addEventListener('message', onMessage);
-      socket.addEventListener('error', onError);
-      socket.addEventListener('close', onClose);
-      this.wsCleanup = () => {
-        socket.removeEventListener('open', onOpen);
-        socket.removeEventListener('message', onMessage);
-        socket.removeEventListener('error', onError);
-        socket.removeEventListener('close', onClose);
-      };
-
-      if (socket.readyState === WS_OPEN) {
-        onOpen();
-      }
-    });
+    reject?.(err);
   }
 
   private sendSubscribeAuth(gen: number): void {
     if (gen !== this.connectionGen || !this.ws) return;
     const readSecret = secretVault.get(this);
-    const secret = readSecret?.() ?? '';
-    if (!secret.trim()) {
+    let secret = '';
+    try {
+      secret = readSecret?.() ?? '';
+    } catch {
+      this.handleAuthFailure(gen, 'WECOM_WS_CREDENTIAL_REQUIRED', true);
+      return;
+    }
+    if (typeof secret !== 'string' || !secret.trim()) {
       this.handleAuthFailure(gen, 'WECOM_WS_CREDENTIAL_REQUIRED', true);
       return;
     }
@@ -392,15 +410,12 @@ export class WecomWsClient {
     this.authTimer = setTimeout(() => {
       if (gen !== this.connectionGen || this.authenticated) return;
       this.handleAuthFailure(gen, 'WECOM_WS_AUTH_TIMEOUT', false);
-    }, this.ackTimeoutMs);
+    }, this.config.ackTimeoutMs);
 
     const frame: WecomWsFrame<{ bot_id: string; secret: string }> = {
       cmd: WsCmd.SUBSCRIBE,
       headers: { req_id: reqId },
-      body: {
-        bot_id: this.botId,
-        secret,
-      },
+      body: { bot_id: this.botId, secret },
     };
     try {
       this.ws.send(JSON.stringify(frame));
@@ -410,52 +425,55 @@ export class WecomWsClient {
   }
 
   private async handleRawMessage(data: unknown, gen: number): Promise<void> {
-    let raw: string | null;
     try {
-      raw = await decodeWecomWsMessageData(data);
+      const raw = await decodeWecomWsMessageData(data);
+      if (gen !== this.connectionGen || raw === null) return;
+
+      const frame = parseWecomWsFrame(raw);
+
+      if (frame.cmd === WsCmd.CALLBACK) {
+        if (!this.authenticated) {
+          this.outboundQueue.recordIgnoredFrame();
+          return;
+        }
+        this.options.onMessage?.(frame as WecomWsFrame<WecomInboundMessageBody>);
+        return;
+      }
+      if (frame.cmd === WsCmd.EVENT_CALLBACK) {
+        if (!this.authenticated) {
+          this.outboundQueue.recordIgnoredFrame();
+          return;
+        }
+        this.options.onEvent?.(frame as WecomWsFrame<WecomInboundEventBody>);
+        return;
+      }
+
+      const reqId = frame.headers.req_id;
+      if (this.authReqId && frame.cmd === undefined && reqId === this.authReqId) {
+        this.handleAuthAck(frame, gen);
+        return;
+      }
+      if (this.authenticated && frame.cmd === undefined && this.pendingPingIds.has(reqId)) {
+        this.handlePongAck(frame, reqId);
+        return;
+      }
+      if (this.authenticated && frame.cmd === undefined && typeof frame.errcode === 'number') {
+        this.outboundQueue.handleAck(frame, gen);
+        return;
+      }
+      this.outboundQueue.recordIgnoredFrame();
     } catch (error) {
       if (gen !== this.connectionGen) return;
       const safeErr = error instanceof Blocked ? error : new Blocked('WECOM_WS_FRAME_INVALID');
       this.lastErrorCode = safeErr.code;
       this.emitError(safeErr);
-      return;
     }
-    if (gen !== this.connectionGen || raw === null) return;
-
-    let frame: WecomWsFrame;
-    try {
-      frame = parseWecomWsFrame(raw);
-    } catch (error) {
-      const safeErr = error instanceof Blocked ? error : new Blocked('WECOM_WS_FRAME_INVALID');
-      this.lastErrorCode = safeErr.code;
-      this.emitError(safeErr);
-      return;
-    }
-
-    if (frame.cmd === WsCmd.CALLBACK) {
-      this.options.onMessage?.(frame as WecomWsFrame<WecomInboundMessageBody>);
-      return;
-    }
-    if (frame.cmd === WsCmd.EVENT_CALLBACK) {
-      this.options.onEvent?.(frame as WecomWsFrame<WecomInboundEventBody>);
-      return;
-    }
-
-    const reqId = frame.headers.req_id;
-    if (this.authReqId && reqId === this.authReqId) {
-      this.handleAuthAck(frame, gen);
-      return;
-    }
-    if (this.pendingPingIds.has(reqId)) {
-      this.handlePongAck(frame, reqId);
-      return;
-    }
-    this.outboundQueue.handleAck(frame, gen);
   }
 
   private handleAuthAck(frame: WecomWsFrame, gen: number): void {
     if (gen !== this.connectionGen || this.authenticated) return;
     this.clearAuthTimer();
+    this.clearConnectTimer();
     this.authReqId = null;
 
     if (frame.errcode === 0) {
@@ -484,12 +502,17 @@ export class WecomWsClient {
     this.authHandledOnCurrentSocket = true;
     this.connectionGen++;
     this.clearAuthTimer();
+    this.clearConnectTimer();
     this.authReqId = null;
     this.authenticated = false;
     this.consecutiveAuthFailures++;
 
-    const exhausted = immediateFatal || this.consecutiveAuthFailures >= this.maxAuthFailureAttempts;
-    const errorCode = exhausted ? 'WS_AUTH_FAILURE_EXHAUSTED' : code;
+    const exhausted = immediateFatal || this.consecutiveAuthFailures >= this.config.maxAuthFailureAttempts;
+    const errorCode = immediateFatal
+      ? code
+      : exhausted
+        ? 'WS_AUTH_FAILURE_EXHAUSTED'
+        : code;
     const err = new Blocked(errorCode);
     this.lastErrorCode = errorCode;
 
@@ -523,7 +546,7 @@ export class WecomWsClient {
         this.stopHeartbeat();
         return;
       }
-      if (this.missedPongCount >= this.missedPongThreshold) {
+      if (this.missedPongCount >= this.config.missedPongThreshold) {
         this.stopHeartbeat();
         this.lastErrorCode = 'WECOM_WS_HEARTBEAT_TIMEOUT';
         this.emitError(new Blocked('WECOM_WS_HEARTBEAT_TIMEOUT'));
@@ -547,7 +570,7 @@ export class WecomWsClient {
         this.stopHeartbeat();
         this.forceDeadSocketReconnect(gen);
       }
-    }, this.heartbeatIntervalMs);
+    }, this.config.heartbeatIntervalMs);
   }
 
   private handlePongAck(frame: WecomWsFrame, reqId: string): void {
@@ -572,9 +595,18 @@ export class WecomWsClient {
 
   private handleSocketClose(gen: number, code: number): void {
     if (gen !== this.connectionGen) return;
+
+    // Closing while waiting for subscribe ACK counts toward consecutive auth failures.
+    if (!this.manuallyClosed && !this.authenticated && this.authReqId !== null && !this.authHandledOnCurrentSocket) {
+      this.options.onDisconnected?.({ code, manual: false });
+      this.handleAuthFailure(gen, 'WECOM_WS_AUTH_DISCONNECTED', false);
+      return;
+    }
+
     this.connectionGen++;
     this.stopHeartbeat();
     this.clearAuthTimer();
+    this.clearConnectTimer();
     this.authenticated = false;
     this.authReqId = null;
     this.teardownSocket(false);
@@ -592,13 +624,11 @@ export class WecomWsClient {
       rejectAuth?.(new Blocked('WECOM_WS_CLOSED'));
       return;
     }
-
     if (this.authFailureExhausted) {
       this.setState('ERROR');
       rejectAuth?.(new Blocked('WS_AUTH_FAILURE_EXHAUSTED'));
       return;
     }
-
     if (this.authHandledOnCurrentSocket) {
       return;
     }
@@ -611,29 +641,25 @@ export class WecomWsClient {
     if (this.manuallyClosed || this.authFailureExhausted || this.reconnectTimer !== null) {
       return;
     }
-    let attempt: number;
-    if (reason === 'auth_failure') {
-      if (this.consecutiveAuthFailures >= this.maxAuthFailureAttempts) {
-        this.authFailureExhausted = true;
-        this.lastErrorCode = 'WS_AUTH_FAILURE_EXHAUSTED';
-        this.setState('ERROR');
-        return;
-      }
-      attempt = this.consecutiveAuthFailures;
-    } else {
-      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-        this.lastErrorCode = 'WECOM_WS_RECONNECT_EXHAUSTED';
-        this.setState('ERROR');
-        this.emitError(new Blocked('WECOM_WS_RECONNECT_EXHAUSTED'));
-        return;
-      }
-      this.reconnectAttempts++;
-      attempt = this.reconnectAttempts;
+    if (reason === 'auth_failure' && this.consecutiveAuthFailures >= this.config.maxAuthFailureAttempts) {
+      this.authFailureExhausted = true;
+      this.lastErrorCode = 'WS_AUTH_FAILURE_EXHAUSTED';
+      this.setState('ERROR');
+      return;
+    }
+    // Enforce global reconnect budget across both regular disconnects and auth retries.
+    if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
+      this.lastErrorCode = 'WECOM_WS_RECONNECT_EXHAUSTED';
+      this.setState('ERROR');
+      this.emitError(new Blocked('WECOM_WS_RECONNECT_EXHAUSTED'));
+      return;
     }
 
+    this.reconnectAttempts++;
+    const attempt = reason === 'auth_failure' ? this.consecutiveAuthFailures : this.reconnectAttempts;
     const delayMs = Math.min(
-      this.reconnectBaseDelayMs * (2 ** Math.max(0, attempt - 1)),
-      this.reconnectMaxDelayMs,
+      this.config.reconnectBaseDelayMs * (2 ** Math.max(0, attempt - 1)),
+      this.config.reconnectMaxDelayMs,
     );
     this.setState('DEGRADED');
     this.options.onReconnecting?.({ attempt, delayMs, reason });
@@ -673,6 +699,13 @@ export class WecomWsClient {
     if (this.authTimer !== null) {
       clearTimeout(this.authTimer);
       this.authTimer = null;
+    }
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer !== null) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
     }
   }
 

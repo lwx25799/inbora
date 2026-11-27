@@ -1,6 +1,7 @@
 export {
   WECOM_AIBOT_DEFAULT_WS_URL,
   WECOM_AIBOT_PLATFORM_ID,
+  WECOM_DEFAULT_REQ_ID_TTL_MS,
   WECOM_MAX_INBOUND_FRAME_BYTES,
   WECOM_REPLY_MAX_UTF8_BYTES,
   WsCmd,
@@ -10,6 +11,8 @@ export {
   type WecomAibotConnectorOptions,
   type WecomAibotTransportStatus,
   type WecomDnsLookup,
+  type WecomHttpsRequestImpl,
+  type WecomInboundDropInfo,
   type WecomInboundEventBody,
   type WecomInboundMessageBody,
   type WecomMixedMessageItem,
@@ -33,6 +36,12 @@ export {
   decodeWecomAesKey,
   decryptWecomAttachment,
 } from './crypto.js';
+export {
+  createPinnedWebSocket,
+  encodeClientWsFrame,
+  PinnedWebSocket,
+  type PinnedWebSocketOptions,
+} from './pinned-ws.js';
 export {
   assertSafeWecomWsUrlSyntax,
   validateWecomWsEndpoint,

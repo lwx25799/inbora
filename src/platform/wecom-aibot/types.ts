@@ -1,11 +1,13 @@
 import type { LookupAddress } from 'node:dns';
-import type { AccountId } from '../../contracts/account.js';
-import type { PlatformCapabilities } from '../platform-connector.js';
+import type https from 'node:https';
+import { WECOM_AIBOT_PLATFORM_ID, type AccountId } from '../../contracts/account.js';
+import { WECOM_AIBOT_DEFAULT_WS_URL } from '../official-api-base.js';
+import type { OfficialApiTransportStatus, PlatformCapabilities } from '../platform-connector.js';
 
-export const WECOM_AIBOT_PLATFORM_ID = 'wecom-aibot' as const;
-export const WECOM_AIBOT_DEFAULT_WS_URL = 'wss://openws.work.weixin.qq.com' as const;
+export { WECOM_AIBOT_PLATFORM_ID, WECOM_AIBOT_DEFAULT_WS_URL };
 export const WECOM_REPLY_MAX_UTF8_BYTES = 20_480;
 export const WECOM_MAX_INBOUND_FRAME_BYTES = 2 * 1024 * 1024;
+export const WECOM_DEFAULT_REQ_ID_TTL_MS = 24 * 60 * 60 * 1000;
 
 export const WsCmd = {
   SUBSCRIBE: 'aibot_subscribe',
@@ -115,8 +117,9 @@ export interface WecomWebSocketLike {
   removeEventListener(type: 'open' | 'message' | 'error' | 'close', listener: WecomWebSocketListener): void;
 }
 
-export type WecomWebSocketFactory = (url: string) => WecomWebSocketLike;
+export type WecomWebSocketFactory = (url: string, signal?: AbortSignal) => WecomWebSocketLike;
 export type WecomDnsLookup = (hostname: string, options: { all: true }) => Promise<LookupAddress[]>;
+export type WecomHttpsRequestImpl = typeof https.request;
 
 export interface WecomSendReplyParams {
   reqId: string;
@@ -161,12 +164,14 @@ export interface WecomWsClientOptions {
   heartbeatIntervalMs?: number | undefined;
   missedPongThreshold?: number | undefined;
   ackTimeoutMs?: number | undefined;
+  connectTimeoutMs?: number | undefined;
   reconnectBaseDelayMs?: number | undefined;
   reconnectMaxDelayMs?: number | undefined;
   maxReconnectAttempts?: number | undefined;
   maxAuthFailureAttempts?: number | undefined;
   maxReplyBytes?: number | undefined;
   webSocketFactory?: WecomWebSocketFactory | undefined;
+  httpsRequest?: WecomHttpsRequestImpl | undefined;
   dnsLookup?: WecomDnsLookup | undefined;
   now?: (() => number) | undefined;
   onMessage?: ((frame: WecomWsFrame<WecomInboundMessageBody>) => void) | undefined;
@@ -180,16 +185,16 @@ export interface WecomWsClientOptions {
 
 export interface WecomAibotCapabilities extends PlatformCapabilities {
   readonly transport: 'official_api';
+  readonly readback: false;
 }
 
-export interface WecomAibotTransportStatus {
-  transport: 'official_api';
-  state: WecomWsConnectionState;
-  endpointDigest: string | null;
-  protocol: 'wecom_ws';
-  lastHeartbeatAt: number | null;
-  lastSyncAt: number | null;
-  errorCode: string | null;
+export type WecomAibotTransportStatus = OfficialApiTransportStatus & {
+  readonly protocol: 'wecom_ws';
+};
+
+export interface WecomInboundDropInfo {
+  readonly droppedMsgId: string;
+  readonly reason: 'BUFFER_OVERFLOW';
 }
 
 export interface WecomAibotConnectorOptions {
@@ -199,16 +204,21 @@ export interface WecomAibotConnectorOptions {
   wsUrl?: string | undefined;
   allowGroupMessages?: boolean | undefined;
   autoPersistInbound?: boolean | undefined;
+  firstRunAt?: number | string | undefined;
+  reqIdTtlMs?: number | undefined;
   heartbeatIntervalMs?: number | undefined;
   missedPongThreshold?: number | undefined;
   ackTimeoutMs?: number | undefined;
+  connectTimeoutMs?: number | undefined;
   reconnectBaseDelayMs?: number | undefined;
   reconnectMaxDelayMs?: number | undefined;
   maxReconnectAttempts?: number | undefined;
   maxAuthFailureAttempts?: number | undefined;
   maxReplyBytes?: number | undefined;
   webSocketFactory?: WecomWebSocketFactory | undefined;
+  httpsRequest?: WecomHttpsRequestImpl | undefined;
   dnsLookup?: WecomDnsLookup | undefined;
   now?: (() => number) | undefined;
   onWsError?: ((error: Error) => void) | undefined;
+  onInboundDrop?: ((info: WecomInboundDropInfo) => void) | undefined;
 }

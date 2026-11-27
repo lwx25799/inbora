@@ -16,6 +16,7 @@ import {
 } from '../../core/contracts.js';
 import type { AutomationStore } from '../../storage/automation-store.js';
 import type { EventStore } from '../../storage/store.js';
+import { createOfficialApiTransportStatus } from '../official-api-base.js';
 import type {
   AdapterHandle,
   AdapterOptions,
@@ -32,10 +33,12 @@ import type {
 } from '../platform-connector.js';
 import {
   WECOM_AIBOT_PLATFORM_ID,
+  WECOM_DEFAULT_REQ_ID_TTL_MS,
   WECOM_REPLY_MAX_UTF8_BYTES,
   type WecomAibotCapabilities,
   type WecomAibotConnectorOptions,
   type WecomAibotTransportStatus,
+  type WecomInboundDropInfo,
   type WecomInboundMessageBody,
   type WecomWsFrame,
 } from './types.js';
@@ -53,14 +56,15 @@ export const wecomAibotCapabilities: WecomAibotCapabilities = {
   loginRecovery: false,
   manualSecurityRecovery: false,
   preview: false,
-  readback: true,
+  // Long-connection protocol has no post-hoc server history fetch for readback verification;
+  // synchronous send confirmation still relies on the official per-reply ACK frame.
+  readback: false,
   transport: 'official_api',
 };
 
 interface InboundReplyRoute {
   reqId: string;
   conversationId: string;
-  chatId: string | null;
   receivedAt: number;
 }
 
@@ -93,6 +97,13 @@ function truncateText(value: string): string {
   return value.length <= MAX_EVENT_TEXT_CHARS ? value : value.slice(0, MAX_EVENT_TEXT_CHARS);
 }
 
+function parseFirstRunAt(value: number | string | undefined, fallbackMs: number): number {
+  if (value === undefined) return fallbackMs;
+  const parsed = typeof value === 'number' ? value : Date.parse(value);
+  requireSafe(Number.isSafeInteger(parsed) && parsed > 0, 'WECOM_FIRST_RUN_AT_INVALID');
+  return parsed;
+}
+
 function normalizeCreateTime(createTime: number | undefined, fallbackMs: number): string {
   if (typeof createTime === 'number' && Number.isFinite(createTime) && createTime > 0) {
     const ms = createTime > 1e12 ? Math.trunc(createTime) : Math.trunc(createTime * 1000);
@@ -106,7 +117,8 @@ function normalizeCreateTime(createTime: number | undefined, fallbackMs: number)
 function normalizeMessageContent(body: WecomInboundMessageBody): NormalizedContent {
   const msgType = typeof body.msgtype === 'string' ? body.msgtype.toLowerCase() : '';
   if (msgType === 'text') {
-    const raw = typeof body.text?.content === 'string' ? body.text.content.trim() : '';
+    const textObj = body.text && typeof body.text === 'object' ? body.text : undefined;
+    const raw = typeof textObj?.content === 'string' ? textObj.content.trim() : '';
     if (raw) {
       return { text: truncateText(raw) };
     }
@@ -119,7 +131,8 @@ function normalizeMessageContent(body: WecomInboundMessageBody): NormalizedConte
     return { text: '[视频消息]', contentType: 'VIDEO', observationIssue: 'DM_CONTENT_UNVERIFIED' };
   }
   if (msgType === 'voice') {
-    const transcript = typeof body.voice?.content === 'string' ? body.voice.content.trim() : '';
+    const voiceObj = body.voice && typeof body.voice === 'object' ? body.voice : undefined;
+    const transcript = typeof voiceObj?.content === 'string' ? voiceObj.content.trim() : '';
     const text = transcript ? truncateText(`[语音消息] ${transcript}`) : '[语音消息]';
     return { text, contentType: 'AUDIO', observationIssue: 'DM_CONTENT_UNVERIFIED' };
   }
@@ -127,10 +140,18 @@ function normalizeMessageContent(body: WecomInboundMessageBody): NormalizedConte
     return { text: '[文件消息]', contentType: 'MIXED', observationIssue: 'DM_CONTENT_UNVERIFIED' };
   }
   if (msgType === 'mixed') {
-    const textParts = (body.mixed?.msg_item ?? [])
-      .filter(item => item.msgtype === 'text' && typeof item.text?.content === 'string')
-      .map(item => item.text!.content!.trim())
-      .filter(Boolean);
+    const rawItems = body.mixed && typeof body.mixed === 'object' && Array.isArray(body.mixed.msg_item)
+      ? body.mixed.msg_item
+      : [];
+    const textParts: string[] = [];
+    for (const item of rawItems) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.msgtype !== 'text') continue;
+      const itemText = item.text && typeof item.text === 'object' ? item.text.content : undefined;
+      if (typeof itemText === 'string' && itemText.trim()) {
+        textParts.push(itemText.trim());
+      }
+    }
     const text = textParts.length > 0
       ? truncateText(`[图文混合消息] ${textParts.join(' ')}`)
       : '[图文混合消息]';
@@ -155,14 +176,19 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
   private readonly allowGroupMessages: boolean;
   private readonly autoPersistInbound: boolean;
   private readonly maxReplyBytes: number;
+  private readonly reqIdTtlMs: number;
   private readonly now: () => number;
+  private readonly onWsError: ((error: Error) => void) | undefined;
+  private readonly onInboundDrop: ((info: WecomInboundDropInfo) => void) | undefined;
+  private firstRunAtMs: number;
 
   private store: EventStore | undefined;
   private epoch = 1;
   private opened = false;
+  private closing = false;
   private lastInboundAt: number | null = null;
 
-  private readonly seenMsgIds = new Set<string>();
+  private readonly seenMsgBindings = new Map<string, string>();
   private readonly reqIdByMsgId = new Map<string, InboundReplyRoute>();
   private readonly pendingInbound: InboundEvent[] = [];
   private readonly dispatchedIntents = new Set<string>();
@@ -181,6 +207,12 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
     this.autoPersistInbound = options.autoPersistInbound ?? true;
     this.maxReplyBytes = options.maxReplyBytes ?? WECOM_REPLY_MAX_UTF8_BYTES;
     this.now = options.now ?? (() => Date.now());
+    this.firstRunAtMs = parseFirstRunAt(options.firstRunAt, this.now());
+    const reqIdTtlMs = options.reqIdTtlMs ?? WECOM_DEFAULT_REQ_ID_TTL_MS;
+    requireSafe(Number.isSafeInteger(reqIdTtlMs) && reqIdTtlMs > 0, 'WECOM_WS_CONFIG_INVALID');
+    this.reqIdTtlMs = reqIdTtlMs;
+    this.onWsError = options.onWsError;
+    this.onInboundDrop = options.onInboundDrop;
 
     this.wsClient = new WecomWsClient({
       botId: this.ownId,
@@ -189,12 +221,14 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
       heartbeatIntervalMs: options.heartbeatIntervalMs,
       missedPongThreshold: options.missedPongThreshold,
       ackTimeoutMs: options.ackTimeoutMs,
+      connectTimeoutMs: options.connectTimeoutMs,
       reconnectBaseDelayMs: options.reconnectBaseDelayMs,
       reconnectMaxDelayMs: options.reconnectMaxDelayMs,
       maxReconnectAttempts: options.maxReconnectAttempts,
       maxAuthFailureAttempts: options.maxAuthFailureAttempts,
       maxReplyBytes: options.maxReplyBytes,
       webSocketFactory: options.webSocketFactory,
+      httpsRequest: options.httpsRequest,
       dnsLookup: options.dnsLookup,
       now: this.now,
       onMessage: frame => this.handleInboundFrame(frame),
@@ -206,15 +240,14 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
 
   transportStatus(): WecomAibotTransportStatus {
     const wsStatus = this.wsClient.getStatus();
-    return {
-      transport: 'official_api',
+    return createOfficialApiTransportStatus({
       state: wsStatus.state,
-      endpointDigest: wsStatus.endpointDigest,
       protocol: 'wecom_ws',
+      endpointDigest: wsStatus.endpointDigest,
       lastHeartbeatAt: wsStatus.lastHeartbeatAt,
       lastSyncAt: this.lastInboundAt,
       errorCode: wsStatus.errorCode,
-    };
+    }) as WecomAibotTransportStatus;
   }
 
   toJSON(): WecomAibotTransportStatus {
@@ -267,19 +300,29 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
   open(_mode?: BrowserMode, signal?: AbortSignal): Promise<void> {
     return this.actor.run(async () => {
       signal?.throwIfAborted();
+      requireSafe(!this.closing, 'CLIENT_CLOSING');
       if (!this.opened) {
         this.epoch++;
       }
-      await this.wsClient.connect();
-      signal?.throwIfAborted();
+      await this.wsClient.connect(signal);
+      if (this.closing || signal?.aborted) {
+        this.wsClient.disconnect();
+        signal?.throwIfAborted();
+        throw new Blocked('CLIENT_CLOSING');
+      }
       this.opened = true;
     });
   }
 
   close(): Promise<void> {
+    // Interrupt any in-flight open()/connect() immediately before queueing actor teardown
+    // so close() can never deadlock behind a hung handshake.
+    this.closing = true;
+    this.wsClient.disconnect();
     return this.actor.run(async () => {
       this.wsClient.disconnect();
       this.opened = false;
+      this.closing = false;
     });
   }
 
@@ -318,17 +361,27 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
   }
 
   async collect(data: AutomationStore, source: CollectionSource, signal: AbortSignal): Promise<void> {
-    await this.observe(data.store, source, signal);
+    const startedAt = data.state().startedAt;
+    await this.observeWithBoundary(data.store, source, signal, startedAt);
   }
 
   observe(store: EventStore, source: ObservationSource, signal?: AbortSignal): Promise<ObservationResult> {
+    return this.observeWithBoundary(store, source, signal, undefined);
+  }
+
+  private observeWithBoundary(
+    store: EventStore,
+    source: ObservationSource,
+    signal: AbortSignal | undefined,
+    boundaryOverrideMs: number | undefined,
+  ): Promise<ObservationResult> {
     return this.actor.run(async () => {
       signal?.throwIfAborted();
       this.bindStoreInternal(store, false);
       if (source !== 'dm') {
         return { newEventIds: [] };
       }
-      const newEventIds = this.flushPendingInbound(store);
+      const newEventIds = this.flushPendingInbound(store, boundaryOverrideMs);
       return { newEventIds };
     });
   }
@@ -378,17 +431,16 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
     let preparedText: string | undefined;
     let lastAttempt: { boundary: string; proof: SendProof | null } | null = null;
 
-    const resolveRoute = (): { reqId: string | null; chatId: string | null; routeKey: string } => {
+    const resolveRoute = (): { reqId: string; routeKey: string } => {
       const mapped = event.platformEventId ? this.reqIdByMsgId.get(event.platformEventId) : undefined;
-      if (mapped && mapped.conversationId === event.conversationId) {
-        return { reqId: mapped.reqId, chatId: mapped.chatId, routeKey: `req:${mapped.reqId}` };
+      if (
+        mapped
+        && mapped.conversationId === event.conversationId
+        && this.now() - mapped.receivedAt <= this.reqIdTtlMs
+      ) {
+        return { reqId: mapped.reqId, routeKey: `req:${mapped.reqId}` };
       }
-      if (event.conversationId?.startsWith('group:')) {
-        const chatId = event.conversationId.slice('group:'.length);
-        if (chatId) {
-          return { reqId: null, chatId, routeKey: `chat:${chatId}` };
-        }
-      }
+      // Never silently downgrade single or group replies to proactive aibot_send_msg broadcasts.
       throw new Blocked('WECOM_WS_REPLY_ROUTE_MISSING');
     };
 
@@ -461,19 +513,12 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
         lastAttempt = { boundary: notBefore, proof: null };
 
         try {
-          const ack = route.reqId
-            ? await this.wsClient.sendReplyOnce({
-                reqId: route.reqId,
-                content: draft.text,
-                streamId: `inbora_${intentId}`,
-                signal,
-              })
-            : await this.wsClient.sendActiveMessageOnce({
-                chatId: route.chatId!,
-                content: draft.text,
-                reqId: `send_${intentId}`,
-                signal,
-              });
+          const ack = await this.wsClient.sendReplyOnce({
+            reqId: route.reqId,
+            content: draft.text,
+            streamId: `inbora_${intentId}`,
+            signal,
+          });
 
           const proof: SendProof = {
             id: `wecom-ack:${ack.reqId}:${ack.ackSeq}`,
@@ -545,32 +590,34 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
 
   private handleInboundFrame(frame: WecomWsFrame<WecomInboundMessageBody>): void {
     const body = frame.body;
-    if (!body || typeof body !== 'object') return;
-
-    const msgId = typeof body.msgid === 'string' ? body.msgid.trim() : '';
-    const fromUserId = typeof body.from?.userid === 'string' ? body.from.userid.trim() : '';
-    if (!msgId || !fromUserId) return;
-
-    // Ignore cross-bot payloads and bot self-echoes.
-    if (typeof body.aibotid === 'string' && body.aibotid.trim() && body.aibotid.trim() !== this.ownId) {
+    if (!body || typeof body !== 'object') {
+      this.onWsError?.(new Blocked('WECOM_WS_FRAME_INVALID'));
       return;
     }
+
+    // Strongly require aibotid matching this connector's bot identity.
+    if (typeof body.aibotid !== 'string' || body.aibotid.trim() !== this.ownId) {
+      return;
+    }
+
+    const msgId = typeof body.msgid === 'string' ? body.msgid.trim() : '';
+    const fromObj = body.from && typeof body.from === 'object' ? body.from : undefined;
+    const fromUserId = typeof fromObj?.userid === 'string' ? fromObj.userid.trim() : '';
+    if (!msgId || !fromUserId) {
+      this.onWsError?.(new Blocked('WECOM_WS_FRAME_INVALID'));
+      return;
+    }
+
+    // Ignore bot self-echoes.
     if (fromUserId === this.ownId) {
       return;
     }
 
-    // Deduplicate repeated msgid deliveries.
-    if (this.seenMsgIds.has(msgId)) {
-      return;
-    }
-
     let conversationId: string;
-    let chatId: string | null = null;
     if (body.chattype === 'group') {
       if (!this.allowGroupMessages) return;
       const trimmedChatId = typeof body.chatid === 'string' ? body.chatid.trim() : '';
       if (!trimmedChatId) return;
-      chatId = trimmedChatId;
       conversationId = `group:${trimmedChatId}`;
     } else if (body.chattype === 'single') {
       conversationId = `single:${fromUserId}`;
@@ -581,11 +628,11 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
     const receivedAt = this.now();
     const occurredAt = normalizeCreateTime(body.create_time, receivedAt);
     const content = normalizeMessageContent(body);
-    const actorName = typeof body.from.name === 'string' && body.from.name.trim()
-      ? body.from.name.trim()
+    const actorName = typeof fromObj?.name === 'string' && fromObj.name.trim()
+      ? fromObj.name.trim()
       : null;
 
-    const inboundEvent = eventSchema.parse({
+    const parsed = eventSchema.safeParse({
       accountId: this.accountId,
       channel: 'DIRECT_MESSAGE',
       platformEventId: msgId,
@@ -604,17 +651,33 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
       ...(content.observationIssue ? { observationIssue: content.observationIssue } : {}),
     });
 
-    addBoundedSet(this.seenMsgIds, msgId, MAX_TRACKED_MSG_IDS);
+    if (!parsed.success) {
+      this.onWsError?.(new Blocked('WECOM_WS_FRAME_INVALID'));
+      return;
+    }
+
+    const inboundEvent = parsed.data;
+    const binding = eventBinding(inboundEvent);
+    const priorBinding = this.seenMsgBindings.get(msgId);
+    if (priorBinding === binding) {
+      // Exact duplicate delivery of the same bound message.
+      return;
+    }
+
+    // Differing bindings for the same msgid are forwarded to EventStore.observe
+    // so SOURCE_COLLISION auditing and approval revocation fire cleanly.
+    setBoundedMap(this.seenMsgBindings, msgId, binding, MAX_TRACKED_MSG_IDS);
     setBoundedMap(
       this.reqIdByMsgId,
       msgId,
-      { reqId: frame.headers.req_id, conversationId, chatId, receivedAt },
+      { reqId: frame.headers.req_id, conversationId, receivedAt },
       MAX_REQ_ID_MAPPINGS,
     );
     this.lastInboundAt = receivedAt;
 
     if (this.pendingInbound.length >= MAX_PENDING_INBOUND) {
-      this.pendingInbound.shift();
+      const evicted = this.pendingInbound.shift();
+      this.handleBufferEviction(evicted);
     }
     this.pendingInbound.push(inboundEvent);
 
@@ -628,13 +691,30 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
     }
   }
 
-  private flushPendingInbound(store: EventStore): string[] {
+  private handleBufferEviction(evicted: InboundEvent | undefined): void {
+    const droppedMsgId = evicted?.platformEventId;
+    if (!droppedMsgId) return;
+    if (!this.pendingInbound.some(item => item.platformEventId === droppedMsgId)) {
+      this.seenMsgBindings.delete(droppedMsgId);
+    }
+    this.onInboundDrop?.({ droppedMsgId, reason: 'BUFFER_OVERFLOW' });
+    try {
+      this.store?.audit('WECOM_INBOUND_BUFFER_OVERFLOW', droppedMsgId);
+    } catch {
+      // Best-effort audit when store is closed or read-only.
+    }
+  }
+
+  private flushPendingInbound(store: EventStore, boundaryOverrideMs?: number): string[] {
     if (this.pendingInbound.length === 0) {
       return [];
     }
     const batch = this.pendingInbound.splice(0, this.pendingInbound.length);
     const entries = [...Map.groupBy(batch, event => event.conversationId!).entries()];
     const newEventIds: string[] = [];
+    const boundaryMs = boundaryOverrideMs !== undefined
+      ? parseFirstRunAt(boundaryOverrideMs, this.firstRunAtMs)
+      : this.firstRunAtMs;
 
     for (let index = 0; index < entries.length; index++) {
       const [scope, events] = entries[index]!;
@@ -642,11 +722,10 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
       const eventTimes = events
         .map(event => Date.parse(event.occurredAt ?? ''))
         .filter(ms => Number.isFinite(ms) && ms > 0);
-      const earliest = eventTimes.length > 0 ? Math.min(...eventTimes) : nowMs;
       const latest = eventTimes.length > 0 ? Math.max(...eventTimes) : nowMs;
-      const observedAtMs = Math.max(nowMs, latest);
+      const observedAtMs = Math.max(nowMs, boundaryMs, latest);
       const observedAt = new Date(observedAtMs).toISOString();
-      const firstBoundary = Math.max(1, Math.min(earliest - 1, observedAtMs));
+      const firstBoundary = Math.max(1, Math.min(boundaryMs, observedAtMs));
       try {
         newEventIds.push(
           ...store.observe('DIRECT_MESSAGE', scope, events, this.ownId, this.platformId, observedAt, firstBoundary),
@@ -654,8 +733,8 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
       } catch (error) {
         const unpersisted = entries.slice(index).flatMap(([, pending]) => pending);
         this.pendingInbound.unshift(...unpersisted);
-        if (this.pendingInbound.length > MAX_PENDING_INBOUND) {
-          this.pendingInbound.splice(0, this.pendingInbound.length - MAX_PENDING_INBOUND);
+        while (this.pendingInbound.length > MAX_PENDING_INBOUND) {
+          this.handleBufferEviction(this.pendingInbound.shift());
         }
         throw error;
       }
@@ -666,6 +745,14 @@ export class WecomAibotPlatformConnector implements PlatformConnector {
   private assertAccount(store: EventStore, bound = true): void {
     store.assertAccount(this.accountId);
     requireSafe(!this.store || this.store === store, 'WECOM_STORE_CHANGED');
+    if (store.schemaVersion() >= 4) {
+      const row = store.db
+        .prepare('SELECT platform FROM accounts WHERE id=?')
+        .get(this.accountId) as { platform: string } | undefined;
+      if (row) {
+        requireSafe(row.platform === this.platformId, 'ACCOUNT_PLATFORM_MISMATCH');
+      }
+    }
     const ownId = store.accountOwnId(this.accountId);
     requireSafe(ownId === this.ownId || (!bound && !ownId), 'NATIVE_REPLY_ACCOUNT_CHANGED');
   }

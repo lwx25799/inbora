@@ -60,6 +60,10 @@ export class WecomOutboundAckQueue {
     this.taintedReqIds.clear();
   }
 
+  recordIgnoredFrame(): void {
+    this.lateAckIgnored++;
+  }
+
   enqueue(
     reqId: string,
     streamId: string,
@@ -84,6 +88,10 @@ export class WecomOutboundAckQueue {
   }
 
   handleAck(frame: WecomWsFrame, gen: number): void {
+    if (frame.cmd !== undefined || typeof frame.errcode !== 'number') {
+      this.lateAckIgnored++;
+      return;
+    }
     const reqId = frame.headers.req_id;
     const active = this.activeByReqId.get(reqId);
     if (!active || active.settled || active.connectionGen !== gen) {
