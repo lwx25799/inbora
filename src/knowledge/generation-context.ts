@@ -12,8 +12,15 @@ export const unsafeModelOutput=(text:string)=>{
 };
 export const replySettingsFingerprint=(settings:AiSettings,persona:string|undefined,rules=settings.rules)=>
   digest({persona:persona||settings.persona,business:settings.business,rules});
-export function assertKnowledgePromptSafe(context:ReplyKnowledgeContext,event?:Pick<InboundEvent,'accountId'|'channel'|'text'>):void{
-  if(event)requireSafe(context.accountId===event.accountId&&context.channel===event.channel&&context.query===event.text,'KNOWLEDGE_CONTEXT_MISMATCH');
+export function assertKnowledgePromptSafe(
+  context:ReplyKnowledgeContext,
+  event?:Pick<InboundEvent,'accountId'|'channel'|'text'>,
+  expectedQuery?:string,
+):void{
+  if(event){
+    const targetQuery=expectedQuery??event.text;
+    requireSafe(context.accountId===event.accountId&&context.channel===event.channel&&context.query===targetQuery,'KNOWLEDGE_CONTEXT_MISMATCH');
+  }
   requireSafe(context.conflicts.length===0,'KNOWLEDGE_CONFLICT');
   requireSafe(context.knowledge.length<=knowledgeLimits.knowledgeCount&&context.examples.length<=knowledgeLimits.exampleCount&&
     Array.from(context.persona).length<=knowledgeLimits.personaCharacters&&
@@ -37,7 +44,22 @@ function hasBindings(store:EventStore):boolean{
 export function bindReplyKnowledge(store:EventStore,kind:'SUGGESTION'|'DRAFT',id:string,version:number,context:ReplyKnowledgeContext|null|undefined):void{
   if(!context)return;assertReplyKnowledgeCurrent(store,context);
   requireSafe(hasBindings(store),'KNOWLEDGE_MIGRATION_REQUIRED');
-  const snapshot={...context,persona:'',knowledge:[],examples:[],conflicts:[]};
+  // Explicit body-free witness allowlist so exactFaqMatch/knowledge text never persists past deletion.
+  const snapshot={
+    accountId:context.accountId,
+    channel:context.channel,
+    query:context.query,
+    ...(context.sourceIds?{sourceIds:[...context.sourceIds]}:{}),
+    ...(context.accountPersonaOnly?{accountPersonaOnly:true}:{}),
+    ...(context.personaPinned?{personaPinned:true}:{}),
+    ...(context.minScore!==undefined?{minScore:context.minScore}:{}),
+    persona:'',
+    personaId:context.personaId,
+    examples:[],
+    knowledge:[],
+    conflicts:[],
+    fingerprint:context.fingerprint,
+  };
   store.db.prepare('INSERT INTO k_generation_contexts VALUES(?,?,?,?)').run(kind,id,version,JSON.stringify(snapshot));
 }
 function boundContext(store:EventStore,kind:'SUGGESTION'|'DRAFT',id:string,version:number):ReplyKnowledgeContext|null{

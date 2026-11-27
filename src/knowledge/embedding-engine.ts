@@ -1,15 +1,23 @@
 import {createHash,randomUUID,timingSafeEqual} from 'node:crypto';
-import {closeSync,createReadStream,createWriteStream,lstatSync,openSync,readSync} from 'node:fs';
+import type {LookupAddress} from 'node:dns';
+import {lookup as dnsLookup} from 'node:dns/promises';
+import {closeSync,constants as fsConstants,createReadStream,createWriteStream,fstatSync,lstatSync,openSync,readSync} from 'node:fs';
 import {mkdir,rename,rm} from 'node:fs/promises';
+import https from 'node:https';
+import {isIP,type LookupFunction} from 'node:net';
 import {homedir} from 'node:os';
 import {dirname,isAbsolute,join,resolve} from 'node:path';
+import {Readable} from 'node:stream';
+import {isPublicModelAddress} from '../ai/model-transport.js';
 import type {OnnxEmbeddingState,OnnxEmbeddingStatus,RetrievalEngineMode} from './contracts.js';
+
+export type OnnxDnsLookup=(hostname:string,options:{all:true})=>Promise<LookupAddress[]>;
 
 export interface OnnxModelSpec {
   modelId:string;
   fileName:string;
   dims:number;
-  expectedSha256:string;
+  expectedSha256:string|null;
   minBytes:number;
   maxBytes:number;
   downloadUrl:string|null;
@@ -29,6 +37,7 @@ export interface OnnxEmbeddingManagerOptions {
   sharedSearchDirs?:string[];
   runtimeFactory?:(input:{modelPath:string;spec:OnnxModelSpec})=>EmbeddingRuntime|null;
   transport?:typeof fetch;
+  lookup?:OnnxDnsLookup;
   now?:()=>number;
 }
 
@@ -40,24 +49,36 @@ export interface OnnxEnsureReadyOptions {
 
 export interface FileVerificationResult {
   ok:boolean;
-  code:'OK'|'NOT_FOUND'|'NOT_REGULAR_FILE'|'SYMLINK_REJECTED'|'SIZE_OUT_OF_RANGE'|'SHA256_MISMATCH'|'INVALID_EXPECTED_SHA256'|'IO_ERROR';
+  code:
+    | 'OK'
+    | 'NOT_FOUND'
+    | 'NOT_REGULAR_FILE'
+    | 'SYMLINK_REJECTED'
+    | 'SIZE_OUT_OF_RANGE'
+    | 'SHA256_MISMATCH'
+    | 'EXPECTED_SHA256_UNCONFIGURED'
+    | 'INVALID_EXPECTED_SHA256'
+    | 'IO_ERROR';
   sizeBytes:number|null;
   actualSha256:string|null;
   mtimeMs:number|null;
 }
 
 const SHA256_HEX_RE=/^[a-f0-9]{64}$/u;
+const SAFE_REASON_RE=/^[A-Z0-9_:-]{1,96}$/u;
 const HASH_CHUNK_BYTES=65_536;
+const nativeFetch=globalThis.fetch;
 
 /**
  * Default local ONNX embedding model specification (quantized Chinese BGE small).
- * Integrity is always verified by file size bounds and SHA-256 before any reuse or activation.
+ * expectedSha256 stays null until an official binary digest is explicitly pinned, preventing
+ * unverified model reuse or self-contradictory placeholder hashes.
  */
 export const DEFAULT_ONNX_MODEL_SPEC:OnnxModelSpec={
   modelId:'bge-small-zh-v1.5-q8',
   fileName:'model_quantized.onnx',
   dims:512,
-  expectedSha256:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  expectedSha256:null,
   minBytes:1_048_576,
   maxBytes:512*1024*1024,
   downloadUrl:'https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/main/onnx/model_quantized.onnx',
@@ -79,30 +100,41 @@ export function defaultFallbackEmbeddingStatus(now:number,reason='ONNX_MANAGER_N
   };
 }
 
-function isPrivateOrLoopbackHost(hostname:string):boolean{
-  const host=hostname.trim().toLowerCase().replace(/^\[|\]$/gu,'');
-  if(!host||host==='localhost'||host.endsWith('.localhost')||host.endsWith('.local')||host.endsWith('.internal'))return true;
-  if(host==='::1'||host==='::'||host.startsWith('fc')||host.startsWith('fd')||host.startsWith('fe80')||host.startsWith('::ffff:'))return true;
-  const ipv4=/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host);
-  if(ipv4){
-    const [a,b]=[Number(ipv4[1]),Number(ipv4[2])];
-    if(a===0||a===10||a===127)return true;
-    if(a===169&&b===254)return true;
-    if(a===172&&b>=16&&b<=31)return true;
-    if(a===192&&b===168)return true;
-    if(a===100&&b>=64&&b<=127)return true;
-  }
-  return false;
+/**
+ * Strips absolute local filesystem paths and any non-enum reason strings before returning
+ * ONNX status over IPC to the desktop UI.
+ */
+export function sanitizeEmbeddingStatus(status:OnnxEmbeddingStatus):OnnxEmbeddingStatus{
+  const safeReason=SAFE_REASON_RE.test(status.reason)?status.reason:'ONNX_FALLBACK_FTS5';
+  return {
+    ...status,
+    modelPath:null,
+    checkedPaths:[],
+    reason:safeReason,
+  };
 }
 
-/** Restricts model downloads to public HTTPS endpoints, preserving SSRF boundaries. */
+function isLocalOnlyHostname(hostname:string):boolean{
+  const host=hostname.trim().toLowerCase().replace(/^\[|\]$/gu,'').replace(/\.$/u,'');
+  return !host||host==='localhost'||host.endsWith('.localhost')||host.endsWith('.local')||host.endsWith('.internal');
+}
+
+/**
+ * Restricts model downloads to public HTTPS endpoints on default port 443,
+ * reusing the shared IPv4/IPv6 public address policy from src/ai/model-transport.ts.
+ */
 export function isSafePublicHttpsUrl(rawUrl:string|null|undefined):boolean{
   if(!rawUrl)return false;
   try{
     const parsed=new URL(rawUrl);
     if(parsed.protocol!=='https:')return false;
     if(parsed.username||parsed.password)return false;
-    return !isPrivateOrLoopbackHost(parsed.hostname);
+    if(parsed.port!==''&&parsed.port!=='443')return false;
+    const hostname=parsed.hostname.replace(/^\[|\]$/gu,'');
+    if(isLocalOnlyHostname(hostname))return false;
+    const family=isIP(hostname);
+    if(family)return isPublicModelAddress(hostname);
+    return true;
   }catch{
     return false;
   }
@@ -115,44 +147,79 @@ function sha256Equal(expectedHex:string,actualHex:string):boolean{
   return expected.length===actual.length&&timingSafeEqual(expected,actual);
 }
 
-/** Verifies an ONNX model file synchronously with bounded streaming reads (no full-file RAM spike). */
+/**
+ * Verifies an ONNX model file synchronously using an open file descriptor (openSync + fstatSync)
+ * with strict bounded reads and symlink rejection to avoid lstat->open TOCTOU races.
+ */
 export function verifyOnnxModelFileSync(filePath:string,spec:OnnxModelSpec):FileVerificationResult{
+  if(spec.expectedSha256===null){
+    // Still report NOT_FOUND vs unpinned hash accurately without trusting unverified files.
+    try{
+      lstatSync(filePath);
+    }catch(error){
+      const code=(error as NodeJS.ErrnoException|undefined)?.code;
+      if(code==='ENOENT'||code==='ENOTDIR')return {ok:false,code:'NOT_FOUND',sizeBytes:null,actualSha256:null,mtimeMs:null};
+    }
+    return {ok:false,code:'EXPECTED_SHA256_UNCONFIGURED',sizeBytes:null,actualSha256:null,mtimeMs:null};
+  }
   if(!SHA256_HEX_RE.test(spec.expectedSha256)){
     return {ok:false,code:'INVALID_EXPECTED_SHA256',sizeBytes:null,actualSha256:null,mtimeMs:null};
   }
-  let stat;
+
   try{
-    stat=lstatSync(filePath);
+    const linkStat=lstatSync(filePath);
+    if(linkStat.isSymbolicLink()){
+      return {ok:false,code:'SYMLINK_REJECTED',sizeBytes:linkStat.size,actualSha256:null,mtimeMs:linkStat.mtimeMs};
+    }
   }catch(error){
     const code=(error as NodeJS.ErrnoException|undefined)?.code;
     if(code==='ENOENT'||code==='ENOTDIR')return {ok:false,code:'NOT_FOUND',sizeBytes:null,actualSha256:null,mtimeMs:null};
     return {ok:false,code:'IO_ERROR',sizeBytes:null,actualSha256:null,mtimeMs:null};
   }
-  if(stat.isSymbolicLink())return {ok:false,code:'SYMLINK_REJECTED',sizeBytes:stat.size,actualSha256:null,mtimeMs:stat.mtimeMs};
-  if(!stat.isFile())return {ok:false,code:'NOT_REGULAR_FILE',sizeBytes:stat.size,actualSha256:null,mtimeMs:stat.mtimeMs};
-  if(stat.size<spec.minBytes||stat.size>spec.maxBytes){
-    return {ok:false,code:'SIZE_OUT_OF_RANGE',sizeBytes:stat.size,actualSha256:null,mtimeMs:stat.mtimeMs};
-  }
-  const hash=createHash('sha256');
-  const buffer=Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+
+  const openFlags=fsConstants.O_RDONLY|(fsConstants.O_NOFOLLOW??0);
   let fd:number|undefined;
+  let sizeBytes:number|null=null;
+  let mtimeMs:number|null=null;
   try{
-    fd=openSync(filePath,'r');
+    fd=openSync(filePath,openFlags);
+    const stat=fstatSync(fd);
+    sizeBytes=stat.size;
+    mtimeMs=stat.mtimeMs;
+    if(!stat.isFile())return {ok:false,code:'NOT_REGULAR_FILE',sizeBytes,actualSha256:null,mtimeMs};
+    if(stat.size<spec.minBytes||stat.size>spec.maxBytes){
+      return {ok:false,code:'SIZE_OUT_OF_RANGE',sizeBytes,actualSha256:null,mtimeMs};
+    }
+    const hash=createHash('sha256');
+    const buffer=Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+    let totalRead=0;
     for(;;){
-      const bytesRead=readSync(fd,buffer,0,HASH_CHUNK_BYTES,null);
+      const remaining=spec.maxBytes-totalRead;
+      const toRead=Math.min(HASH_CHUNK_BYTES,remaining+1);
+      const bytesRead=readSync(fd,buffer,0,toRead,null);
       if(bytesRead<=0)break;
+      totalRead+=bytesRead;
+      if(totalRead>spec.maxBytes){
+        return {ok:false,code:'SIZE_OUT_OF_RANGE',sizeBytes:totalRead,actualSha256:null,mtimeMs};
+      }
       hash.update(buffer.subarray(0,bytesRead));
     }
-  }catch{
-    return {ok:false,code:'IO_ERROR',sizeBytes:stat.size,actualSha256:null,mtimeMs:stat.mtimeMs};
+    if(totalRead<spec.minBytes||totalRead>spec.maxBytes){
+      return {ok:false,code:'SIZE_OUT_OF_RANGE',sizeBytes:totalRead,actualSha256:null,mtimeMs};
+    }
+    const actualSha256=hash.digest('hex');
+    if(!sha256Equal(spec.expectedSha256,actualSha256)){
+      return {ok:false,code:'SHA256_MISMATCH',sizeBytes:totalRead,actualSha256,mtimeMs};
+    }
+    return {ok:true,code:'OK',sizeBytes:totalRead,actualSha256,mtimeMs};
+  }catch(error){
+    const code=(error as NodeJS.ErrnoException|undefined)?.code;
+    if(code==='ENOENT'||code==='ENOTDIR')return {ok:false,code:'NOT_FOUND',sizeBytes:null,actualSha256:null,mtimeMs:null};
+    if(code==='ELOOP')return {ok:false,code:'SYMLINK_REJECTED',sizeBytes:null,actualSha256:null,mtimeMs:null};
+    return {ok:false,code:'IO_ERROR',sizeBytes,actualSha256:null,mtimeMs};
   }finally{
     if(fd!==undefined){try{closeSync(fd);}catch{/* ignore close error */}}
   }
-  const actualSha256=hash.digest('hex');
-  if(!sha256Equal(spec.expectedSha256,actualSha256)){
-    return {ok:false,code:'SHA256_MISMATCH',sizeBytes:stat.size,actualSha256,mtimeMs:stat.mtimeMs};
-  }
-  return {ok:true,code:'OK',sizeBytes:stat.size,actualSha256,mtimeMs:stat.mtimeMs};
 }
 
 export async function sha256FileAsync(filePath:string):Promise<string>{
@@ -183,6 +250,61 @@ function isValidVector(vector:Float32Array,dims:number):boolean{
   return true;
 }
 
+async function resolvePublicAddresses(url:URL,lookup:OnnxDnsLookup):Promise<LookupAddress[]>{
+  const hostname=url.hostname.replace(/^\[|\]$/gu,'');
+  const family=isIP(hostname);
+  const resolved=family?[{address:hostname,family}]:await lookup(hostname,{all:true});
+  if(!resolved.length||resolved.some(({address,family:f})=>isIP(address)!==f||!isPublicModelAddress(address))){
+    throw new Error('ONNX_DOWNLOAD_DNS_REJECTED');
+  }
+  return resolved.map(({address,family:f})=>({address,family:f}));
+}
+
+async function pinnedHttpsGet(url:URL,addresses:readonly LookupAddress[],signal:AbortSignal):Promise<Response>{
+  const hostname=url.hostname.replace(/^\[|\]$/gu,'');
+  const family=isIP(hostname);
+  const pinnedLookup:LookupFunction=(_host,options,callback)=>{
+    if(options.all)callback(null,[...addresses]);
+    else callback(null,addresses[0]!.address,addresses[0]!.family);
+  };
+  return await new Promise<Response>((resolveResponse,reject)=>{
+    const req=https.request(url,{
+      method:'GET',
+      port:443,
+      headers:{'accept-encoding':'identity'},
+      signal,
+      agent:false,
+      lookup:pinnedLookup,
+      rejectUnauthorized:true,
+      ...(family?{}:{servername:hostname.replace(/\.$/u,'')}),
+    },incoming=>{
+      const status=incoming.statusCode??500;
+      if(status>=300&&status<400){
+        incoming.destroy();
+        reject(new Error('ONNX_DOWNLOAD_REDIRECT_REJECTED'));
+        return;
+      }
+      if(status<200||status>=300){
+        incoming.destroy();
+        resolveResponse(new Response(null,{status}));
+        return;
+      }
+      const stream=Readable.toWeb(incoming,{
+        strategy:{highWaterMark:incoming.readableHighWaterMark,size:(chunk:Uint8Array)=>chunk.byteLength},
+      });
+      resolveResponse(new Response(stream as unknown as ReadableStream<Uint8Array>,{status}));
+    });
+    req.once('error',()=>reject(new Error(signal.aborted?'ONNX_DOWNLOAD_ABORTED':'ONNX_DOWNLOAD_NETWORK_ERROR')));
+    req.end();
+  });
+}
+
+function classifyDownloadError(error:unknown,signal:AbortSignal):string{
+  if(signal.aborted)return 'ONNX_DOWNLOAD_ABORTED';
+  if(error instanceof Error&&SAFE_REASON_RE.test(error.message))return error.message;
+  return 'ONNX_DOWNLOAD_FAILED';
+}
+
 interface VerifiedCacheEntry {
   path:string;
   sizeBytes:number;
@@ -201,7 +323,9 @@ export class OnnxEmbeddingManager {
   private readonly cacheRoot:string|null;
   private readonly sharedSearchDirs:string[];
   private readonly runtimeFactory?:(input:{modelPath:string;spec:OnnxModelSpec})=>EmbeddingRuntime|null;
-  private readonly transport:typeof fetch;
+  private readonly transport?:typeof fetch;
+  private readonly lookup:OnnxDnsLookup;
+  private readonly hasCustomLookup:boolean;
   private readonly now:()=>number;
   private verifiedCache:VerifiedCacheEntry|null=null;
   private runtime:EmbeddingRuntime|null=null;
@@ -215,7 +339,9 @@ export class OnnxEmbeddingManager {
     this.cacheRoot=options.cacheRoot?resolve(options.cacheRoot):null;
     this.sharedSearchDirs=(options.sharedSearchDirs??defaultSharedSearchDirs()).map(dir=>resolve(dir));
     if(options.runtimeFactory)this.runtimeFactory=options.runtimeFactory;
-    this.transport=options.transport??fetch;
+    if(options.transport)this.transport=options.transport;
+    this.hasCustomLookup=Boolean(options.lookup);
+    this.lookup=options.lookup??dnsLookup;
     this.now=options.now??Date.now;
   }
 
@@ -314,16 +440,13 @@ export class OnnxEmbeddingManager {
     this.runtime=null;
     this.runtimeModelPath=null;
 
-    let corruptionFailure:{path:string;code:FileVerificationResult['code'];sizeBytes:number|null;actualSha256:string|null}|null=null;
+    let integrityFailure:{path:string;code:FileVerificationResult['code'];sizeBytes:number|null;actualSha256:string|null}|null=null;
     for(const candidate of checkedPaths){
       const verified=verifyOnnxModelFileSync(candidate,this.spec);
       if(verified.ok&&verified.actualSha256!==null&&verified.sizeBytes!==null&&verified.mtimeMs!==null){
         this.verifiedCache={
-          path:candidate,
-          sizeBytes:verified.sizeBytes,
-          mtimeMs:verified.mtimeMs,
-          actualSha256:verified.actualSha256,
-          origin:'REUSED_LOCAL',
+          path:candidate,sizeBytes:verified.sizeBytes,mtimeMs:verified.mtimeMs,
+          actualSha256:verified.actualSha256,origin:'REUSED_LOCAL',
         };
         this.lastFallbackReason=null;
         const runtimeState=this.activateRuntime(candidate);
@@ -337,32 +460,27 @@ export class OnnxEmbeddingManager {
           reason:runtimeState.ready?'LOCAL_MODEL_VERIFIED_AND_REUSED':runtimeState.reason,
         });
       }
-      if(verified.code!=='NOT_FOUND'&&!corruptionFailure){
-        corruptionFailure={path:candidate,code:verified.code,sizeBytes:verified.sizeBytes,actualSha256:verified.actualSha256};
+      if(verified.code!=='NOT_FOUND'&&!integrityFailure){
+        integrityFailure={path:candidate,code:verified.code,sizeBytes:verified.sizeBytes,actualSha256:verified.actualSha256};
       }
     }
 
-    if(corruptionFailure){
+    if(integrityFailure){
       return this.buildStatus({
         state:'FALLBACK_FTS5',
         engineMode:'FTS5_ENHANCED',
-        modelPath:corruptionFailure.path,
-        actualSha256:corruptionFailure.actualSha256,
-        sizeBytes:corruptionFailure.sizeBytes,
+        modelPath:integrityFailure.path,
+        actualSha256:integrityFailure.actualSha256,
+        sizeBytes:integrityFailure.sizeBytes,
         checkedPaths,
-        reason:`LOCAL_MODEL_INTEGRITY_REJECTED:${corruptionFailure.code}`,
+        reason:`LOCAL_MODEL_INTEGRITY_REJECTED:${integrityFailure.code}`,
       });
     }
 
     if(this.lastFallbackReason){
       return this.buildStatus({
-        state:'FALLBACK_FTS5',
-        engineMode:'FTS5_ENHANCED',
-        modelPath:null,
-        actualSha256:null,
-        sizeBytes:null,
-        checkedPaths,
-        reason:this.lastFallbackReason,
+        state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelPath:null,
+        actualSha256:null,sizeBytes:null,checkedPaths,reason:this.lastFallbackReason,
       });
     }
 
@@ -373,13 +491,14 @@ export class OnnxEmbeddingManager {
       actualSha256:null,
       sizeBytes:null,
       checkedPaths,
-      reason:'LOCAL_ONNX_MODEL_NOT_FOUND',
+      reason:this.spec.expectedSha256===null?'ONNX_MODEL_SHA256_NOT_PINNED':'LOCAL_ONNX_MODEL_NOT_FOUND',
     });
   }
 
   /**
-   * Checks local verified models first; if missing and allowDownload=true, performs a safe HTTPS download
-   * with streaming size cap + SHA-256 verification. Any error degrades cleanly to FALLBACK_FTS5.
+   * Checks local verified models first; if missing and allowDownload=true, performs a safe DNS-pinned
+   * public HTTPS (port 443) download with streaming size cap + SHA-256 verification.
+   * Any failure cleans up temporary files and degrades cleanly to FALLBACK_FTS5.
    */
   async ensureReady(options:OnnxEnsureReadyOptions={}):Promise<OnnxEmbeddingStatus>{
     const current=this.inspectStatus();
@@ -387,19 +506,16 @@ export class OnnxEmbeddingManager {
     if(!options.allowDownload)return current;
 
     const checkedPaths=this.candidateModelPaths();
-    if(!this.cacheRoot){
-      this.lastFallbackReason='ONNX_CACHE_ROOT_NOT_CONFIGURED';
-      return this.buildStatus({state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelPath:null,actualSha256:null,sizeBytes:null,checkedPaths,reason:this.lastFallbackReason});
-    }
-    if(!isSafePublicHttpsUrl(this.spec.downloadUrl)){
-      this.lastFallbackReason='ONNX_DOWNLOAD_URL_UNSAFE';
-      return this.buildStatus({state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelPath:null,actualSha256:null,sizeBytes:null,checkedPaths,reason:this.lastFallbackReason});
-    }
-    if(!SHA256_HEX_RE.test(this.spec.expectedSha256)){
-      this.lastFallbackReason='ONNX_EXPECTED_SHA256_INVALID';
-      return this.buildStatus({state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelPath:null,actualSha256:null,sizeBytes:null,checkedPaths,reason:this.lastFallbackReason});
-    }
+    const fail=(reason:string,actualSha256:string|null=null,sizeBytes:number|null=null)=>{
+      this.lastFallbackReason=reason;
+      return this.buildStatus({state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelPath:null,actualSha256,sizeBytes,checkedPaths,reason});
+    };
 
+    if(!this.cacheRoot)return fail('ONNX_CACHE_ROOT_NOT_CONFIGURED');
+    if(!isSafePublicHttpsUrl(this.spec.downloadUrl))return fail('ONNX_DOWNLOAD_URL_UNSAFE');
+    if(!this.spec.expectedSha256||!SHA256_HEX_RE.test(this.spec.expectedSha256))return fail('ONNX_EXPECTED_SHA256_UNCONFIGURED');
+
+    const url=new URL(this.spec.downloadUrl!);
     const targetPath=join(this.cacheRoot,this.spec.modelId,this.spec.fileName);
     const tempPath=`${targetPath}.part-${randomUUID()}`;
     const timeoutMs=options.timeoutMs??60_000;
@@ -408,59 +524,84 @@ export class OnnxEmbeddingManager {
       :AbortSignal.timeout(timeoutMs);
 
     try{
-      await mkdir(dirname(targetPath),{recursive:true});
-      const response=await this.transport(this.spec.downloadUrl!,{method:'GET',redirect:'error',signal});
-      if(!response.ok||!response.body){
-        this.lastFallbackReason=`ONNX_DOWNLOAD_HTTP_${response.status}`;
-        return this.buildStatus({state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelPath:null,actualSha256:null,sizeBytes:null,checkedPaths,reason:this.lastFallbackReason});
+      const usePinnedHttps=!this.transport||this.transport===nativeFetch||this.transport===globalThis.fetch;
+      let addresses:LookupAddress[]|null=null;
+      if(usePinnedHttps||this.hasCustomLookup){
+        addresses=await resolvePublicAddresses(url,this.lookup);
       }
+      await mkdir(dirname(targetPath),{recursive:true});
+
+      const response=usePinnedHttps
+        ?await pinnedHttpsGet(url,addresses!,signal)
+        :await this.transport!(url.toString(),{method:'GET',redirect:'error',signal});
+
+      if(response.redirected||response.type==='opaqueredirect'||(response.status>=300&&response.status<400)){
+        await response.body?.cancel().catch(()=>{/* ignore cancel */});
+        return fail('ONNX_DOWNLOAD_REDIRECT_REJECTED');
+      }
+      if(!response.ok||!response.body){
+        await response.body?.cancel().catch(()=>{/* ignore cancel */});
+        return fail(`ONNX_DOWNLOAD_HTTP_${response.status}`);
+      }
+
       const reader=response.body.getReader();
       const writer=createWriteStream(tempPath,{flags:'wx'});
+      let writerError:Error|null=null;
+      const writerClosed=new Promise<void>(resolveClose=>{writer.once('close',()=>resolveClose());});
+      // Attach error handler immediately so open/write failures never escape as uncaught stream errors.
+      writer.on('error',err=>{writerError=err;});
+
       const hash=createHash('sha256');
       let totalBytes=0;
       try{
         for(;;){
+          if(writerError)throw new Error('ONNX_DOWNLOAD_WRITE_FAILED');
           const {done,value}=await reader.read();
           if(done)break;
+          if(writerError)throw new Error('ONNX_DOWNLOAD_WRITE_FAILED');
           totalBytes+=value.byteLength;
           if(totalBytes>this.spec.maxBytes)throw new Error('ONNX_DOWNLOAD_TOO_LARGE');
           hash.update(value);
           if(!writer.write(value)){
             await new Promise<void>((resolveDrain,rejectDrain)=>{
-              writer.once('drain',resolveDrain);
-              writer.once('error',rejectDrain);
+              if(writerError){rejectDrain(new Error('ONNX_DOWNLOAD_WRITE_FAILED'));return;}
+              const onDrain=()=>{writer.off('error',onErr);resolveDrain();};
+              const onErr=()=>{writer.off('drain',onDrain);rejectDrain(new Error('ONNX_DOWNLOAD_WRITE_FAILED'));};
+              writer.once('drain',onDrain);
+              writer.once('error',onErr);
             });
           }
         }
+        if(writerError)throw new Error('ONNX_DOWNLOAD_WRITE_FAILED');
         await new Promise<void>((resolveEnd,rejectEnd)=>{
-          writer.once('error',rejectEnd);
-          writer.end(()=>resolveEnd());
+          const onErr=()=>rejectEnd(new Error('ONNX_DOWNLOAD_WRITE_FAILED'));
+          writer.once('error',onErr);
+          writer.end(()=>{writer.off('error',onErr);resolveEnd();});
         });
+        if(!writer.closed)await writerClosed;
       }catch(error){
+        await reader.cancel().catch(()=>{/* ignore reader cancel */});
         writer.destroy();
+        if(!writer.closed)await writerClosed;
         throw error;
+      }finally{
+        reader.releaseLock();
       }
 
       const actualSha256=hash.digest('hex');
       if(totalBytes<this.spec.minBytes||totalBytes>this.spec.maxBytes){
         await rm(tempPath,{force:true});
-        this.lastFallbackReason='ONNX_DOWNLOAD_SIZE_OUT_OF_RANGE';
-        return this.buildStatus({state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelPath:null,actualSha256,sizeBytes:totalBytes,checkedPaths,reason:this.lastFallbackReason});
+        return fail('ONNX_DOWNLOAD_SIZE_OUT_OF_RANGE',actualSha256,totalBytes);
       }
       if(!sha256Equal(this.spec.expectedSha256,actualSha256)){
         await rm(tempPath,{force:true});
-        this.lastFallbackReason='ONNX_DOWNLOAD_SHA256_MISMATCH';
-        return this.buildStatus({state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelPath:null,actualSha256,sizeBytes:totalBytes,checkedPaths,reason:this.lastFallbackReason});
+        return fail('ONNX_DOWNLOAD_SHA256_MISMATCH',actualSha256,totalBytes);
       }
 
       await rename(tempPath,targetPath);
       const stat=lstatSync(targetPath);
       this.verifiedCache={
-        path:targetPath,
-        sizeBytes:stat.size,
-        mtimeMs:stat.mtimeMs,
-        actualSha256,
-        origin:'DOWNLOAD_READY',
+        path:targetPath,sizeBytes:stat.size,mtimeMs:stat.mtimeMs,actualSha256,origin:'DOWNLOAD_READY',
       };
       this.lastFallbackReason=null;
       const runtimeState=this.activateRuntime(targetPath);
@@ -475,17 +616,7 @@ export class OnnxEmbeddingManager {
       });
     }catch(error){
       await rm(tempPath,{force:true}).catch(()=>{/* ignore cleanup error */});
-      const tag=error instanceof Error&&error.message?error.message:'ONNX_DOWNLOAD_FAILED';
-      this.lastFallbackReason=`FALLBACK_AFTER_DOWNLOAD_ERROR:${tag}`;
-      return this.buildStatus({
-        state:'FALLBACK_FTS5',
-        engineMode:'FTS5_ENHANCED',
-        modelPath:null,
-        actualSha256:null,
-        sizeBytes:null,
-        checkedPaths,
-        reason:this.lastFallbackReason,
-      });
+      return fail(classifyDownloadError(error,signal));
     }
   }
 

@@ -50,7 +50,7 @@ export interface RetrievalDebugResult {
   exactFaqHit:ExactFaqMatch|null;onnxStatus:OnnxEmbeddingStatus;
 }
 export interface StyleExample {id:string;prompt:string;response:string;channel:Channel}
-export interface ReplyKnowledgeContext {accountId:string;channel:Channel;query:string;sourceIds?:string[];accountPersonaOnly?:boolean;personaPinned?:boolean;persona:string;personaId:string|null;
+export interface ReplyKnowledgeContext {accountId:string;channel:Channel;query:string;sourceIds?:string[];accountPersonaOnly?:boolean;personaPinned?:boolean;minScore?:number;persona:string;personaId:string|null;
   examples:StyleExample[];knowledge:KnowledgeHit[];fingerprint:string;conflicts:string[];
   exactFaqMatch?:ExactFaqMatch|null;engineMode?:RetrievalEngineMode}
 export interface KnowledgeOverview {available:boolean;sources:KnowledgeSource[];knowledge:KnowledgeEntry[];samples:ReplySample[];

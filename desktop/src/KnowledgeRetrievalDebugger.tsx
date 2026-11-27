@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Channel } from '../../src/contracts/events.js';
 import {
   channelName,
@@ -55,6 +55,81 @@ export function describeEmbeddingBadge(status: OnnxEmbeddingStatus): {
   return { label: '已自动切换为关键词增强检索', tone: 'warning' };
 }
 
+/** Pure state controller shared by the component and unit tests to guard async ordering and scope changes. */
+export interface DebuggerViewState {
+  scopeKey: string;
+  debugSeq: number;
+  statusEpoch: number;
+  appliedStatusEpoch: number;
+  debugResult: RetrievalDebugResult | null;
+  embeddingStatus: OnnxEmbeddingStatus | null;
+  error: string;
+}
+
+export function buildDebuggerScopeKey(channel: Channel, sourceIds: readonly string[]): string {
+  return `${channel}|${[...sourceIds].sort().join(',')}`;
+}
+
+export function createInitialDebuggerState(scopeKey: string): DebuggerViewState {
+  return {
+    scopeKey,
+    debugSeq: 0,
+    statusEpoch: 0,
+    appliedStatusEpoch: 0,
+    debugResult: null,
+    embeddingStatus: null,
+    error: '',
+  };
+}
+
+export function invalidateDebuggerScope(
+  prev: DebuggerViewState,
+  nextScopeKey: string,
+): DebuggerViewState {
+  if (prev.scopeKey === nextScopeKey) return prev;
+  return {
+    ...prev,
+    scopeKey: nextScopeKey,
+    debugSeq: prev.debugSeq + 1,
+    debugResult: null,
+    error: '',
+  };
+}
+
+export function applyDebugResponse(
+  current: DebuggerViewState,
+  req: { seq: number; scopeKey: string; statusEpoch: number },
+  response: RetrievalDebugResult,
+): DebuggerViewState {
+  if (req.seq !== current.debugSeq || req.scopeKey !== current.scopeKey) return current;
+  const shouldUpdateStatus = req.statusEpoch >= current.appliedStatusEpoch;
+  return {
+    ...current,
+    debugResult: response,
+    embeddingStatus: shouldUpdateStatus ? response.onnxStatus : current.embeddingStatus,
+    appliedStatusEpoch: shouldUpdateStatus ? req.statusEpoch : current.appliedStatusEpoch,
+    error: '',
+  };
+}
+
+export function applyEmbeddingStatusResponse(
+  current: DebuggerViewState,
+  reqEpoch: number,
+  status: OnnxEmbeddingStatus,
+): DebuggerViewState {
+  if (reqEpoch < current.appliedStatusEpoch) return current;
+  return {
+    ...current,
+    embeddingStatus: status,
+    appliedStatusEpoch: reqEpoch,
+    error: '',
+  };
+}
+
+export function resolveLatestEmbeddingStatus(state: DebuggerViewState): OnnxEmbeddingStatus | null {
+  return state.embeddingStatus ?? state.debugResult?.onnxStatus ?? null;
+}
+
 function describeExactMatchType(type: 'EXACT_TITLE' | 'EXACT_ALIAS' | 'HIGH_CONFIDENCE'): string {
   if (type === 'EXACT_TITLE') return '标题精确一致';
   if (type === 'EXACT_ALIAS') return '别名精确一致';
@@ -77,54 +152,103 @@ export function KnowledgeRetrievalDebugger({
   draftMessage,
   busy,
 }: KnowledgeRetrievalDebuggerProps) {
+  const scopeKey = buildDebuggerScopeKey(channel, sourceIds);
   const [query, setQuery] = useState('');
   const [minScore, setMinScore] = useState('0.25');
   const [running, setRunning] = useState(false);
   const [checkingStatus, setCheckingStatus] = useState(false);
-  const [error, setError] = useState('');
-  const [debugResult, setDebugResult] = useState<RetrievalDebugResult | null>(null);
-  const [embeddingStatus, setEmbeddingStatus] = useState<OnnxEmbeddingStatus | null>(null);
+  const [view, setView] = useState<DebuggerViewState>(() => createInitialDebuggerState(scopeKey));
 
-  const effectiveStatus = debugResult?.onnxStatus ?? embeddingStatus;
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (viewRef.current.scopeKey === scopeKey) return;
+    const next = invalidateDebuggerScope(viewRef.current, scopeKey);
+    viewRef.current = next;
+    setView(next);
+    setRunning(false);
+  }, [scopeKey]);
+
+  const effectiveStatus = resolveLatestEmbeddingStatus(view);
   const badge = effectiveStatus ? describeEmbeddingBadge(effectiveStatus) : null;
   const disabled = busy || running;
 
   const inspectEmbedding = async () => {
     if (disabled || checkingStatus) return;
+    const reqEpoch = viewRef.current.statusEpoch + 1;
+    viewRef.current = { ...viewRef.current, statusEpoch: reqEpoch, error: '' };
+    setView(viewRef.current);
     setCheckingStatus(true);
-    setError('');
     try {
       const status = await knowledgeRequest<OnnxEmbeddingStatus>({ action: 'embeddingStatus' });
-      setEmbeddingStatus(status);
+      if (!aliveRef.current) return;
+      const next = applyEmbeddingStatusResponse(viewRef.current, reqEpoch, status);
+      viewRef.current = next;
+      setView(next);
     } catch (failure) {
-      setError(describeKnowledgeError(failure));
+      if (!aliveRef.current || reqEpoch < viewRef.current.appliedStatusEpoch) return;
+      const next = { ...viewRef.current, error: describeKnowledgeError(failure) };
+      viewRef.current = next;
+      setView(next);
     } finally {
-      setCheckingStatus(false);
+      if (aliveRef.current) setCheckingStatus(false);
     }
   };
 
   const runPreview = async (overrideQuery?: string) => {
     const targetQuery = (overrideQuery ?? query).trim();
     if (!targetQuery || disabled) return;
+    const reqSeq = viewRef.current.debugSeq + 1;
+    const reqEpoch = viewRef.current.statusEpoch + 1;
+    const reqScope = scopeKey;
+    const reqSourceIds = [...sourceIds];
+    viewRef.current = { ...viewRef.current, debugSeq: reqSeq, statusEpoch: reqEpoch, error: '' };
+    setView(viewRef.current);
     setRunning(true);
-    setError('');
     try {
       const parsedMin = Number(minScore);
       const response = await knowledgeRequest<RetrievalDebugResult>({
         action: 'debugRetrieval',
         channel,
         query: targetQuery,
-        ...(sourceIds.length ? { sourceIds } : {}),
+        ...(reqSourceIds.length ? { sourceIds: reqSourceIds } : {}),
         ...(Number.isFinite(parsedMin) ? { minScore: parsedMin } : {}),
       });
-      setDebugResult(response);
-      setEmbeddingStatus(response.onnxStatus);
+      if (!aliveRef.current) return;
+      const next = applyDebugResponse(
+        viewRef.current,
+        { seq: reqSeq, scopeKey: reqScope, statusEpoch: reqEpoch },
+        response,
+      );
+      viewRef.current = next;
+      setView(next);
     } catch (failure) {
-      setError(describeKnowledgeError(failure));
+      if (
+        !aliveRef.current ||
+        reqSeq !== viewRef.current.debugSeq ||
+        reqScope !== viewRef.current.scopeKey
+      ) {
+        return;
+      }
+      const next = { ...viewRef.current, error: describeKnowledgeError(failure) };
+      viewRef.current = next;
+      setView(next);
     } finally {
-      setRunning(false);
+      if (aliveRef.current && reqSeq === viewRef.current.debugSeq) {
+        setRunning(false);
+      }
     }
   };
+
+  const { debugResult, error } = view;
 
   return (
     <section
@@ -351,7 +475,8 @@ export function KnowledgeRetrievalDebugger({
                 当前门槛值：{debugResult.minScore} · 检索模式代码：{debugResult.engineMode}
               </p>
               <p>
-                语义索引状态：{debugResult.onnxStatus.state}（{debugResult.onnxStatus.reason}）
+                语义索引状态：{(effectiveStatus ?? debugResult.onnxStatus).state}（
+                {(effectiveStatus ?? debugResult.onnxStatus).reason}）
               </p>
             </div>
           </details>

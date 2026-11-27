@@ -83,7 +83,9 @@ export function isMutatingClientCommand(body: unknown): boolean {
     case 'getMessagePreview':
       return command.refresh === true;
     case 'replyKnowledge':
-      return command.action !== 'overview';
+      return command.action !== 'overview'
+        && command.action !== 'debugRetrieval'
+        && command.action !== 'embeddingStatus';
     case 'modelProviders':
       return command.action !== 'list';
     case 'accounts':

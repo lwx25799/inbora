@@ -13,6 +13,7 @@ import {
   indexKnowledgeTerms,
   singleCharAliasToken,
 } from '../../src/knowledge/retrieval.js';
+import {assertKnowledgePromptSafe,bindReplyKnowledge} from '../../src/knowledge/generation-context.js';
 import {
   cosineSimilarity,
   decodeFloat32Vector,
@@ -20,9 +21,11 @@ import {
   fuseHybridRankings,
 } from '../../src/knowledge/vector-store.js';
 import {OnnxEmbeddingManager} from '../../src/knowledge/embedding-engine.js';
+import {isMutatingClientCommand} from '../../src/contracts/protocol-v2.js';
+import {isReadOnlySidecarCommand} from '../../src/app/service-guards.js';
 import type {KnowledgeOverview,OnnxEmbeddingStatus} from '../../src/contracts/knowledge.js';
 import type {Channel} from '../../src/contracts/events.js';
-import {pending,privateTemp} from '../helpers.js';
+import {candidate,pending,privateTemp} from '../helpers.js';
 
 const debuggerPath='../../desktop/src/KnowledgeRetrievalDebugger.tsx';
 const trialPath='../../desktop/src/KnowledgeTrial.tsx';
@@ -208,4 +211,95 @@ test('debugger and trial UI follow plain business language without raw engineeri
     state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelId:'m',modelPath:null,
     expectedSha256:null,actualSha256:null,sizeBytes:null,dims:4,checkedPaths:[],reason:'ERR',checkedAt:0,
   }).tone).toBe('warning');
+});
+
+test('negation phrases never flip affirmative FAQs into HIGH_CONFIDENCE and pure greetings score zero on non-exact entries',async()=>{
+  const f=await createKnowledgeFixture();
+  f.enable('自提说明','本店提供门店自提服务，下单后可到店取货。','pickup',['自提']);
+  f.enable('你好流程','这是普通客服接待流程说明文档。','sop');
+
+  const negAnalysis=analyzeQuery('不能自提');
+  expect(negAnalysis.filteredStopTerms).not.toContain('不能');
+  expect(negAnalysis.hasNegationOrPolarityShift).toBe(true);
+  const negDebug=f.data.debugRetrieval(account,'DIRECT_MESSAGE','不能自提');
+  expect(negDebug.exactFaqHit).toBeNull();
+
+  // "你好" on non-exact title "你好流程" must score 0 and be blocked.
+  const helloDebug=f.data.debugRetrieval(account,'DIRECT_MESSAGE','你好');
+  expect(helloDebug.hits).toEqual([]);
+  expect(helloDebug.rejectedBelowThreshold.some(
+    item=>item.title==='你好流程'&&item.score===0&&item.reason==='STOPWORD_ONLY_WEAK_MATCH',
+  )).toBe(true);
+});
+
+test('multi-chunk entries never emit exactFaqMatch, never crowd out conflicting short entries, and preserve mixed tokens & legacy punctuated single aliases',async()=>{
+  const f=await createKnowledgeFixture();
+  // Create a 22-chunk long entry (>11,000 chars) and a short conflicting entry under the same topic.
+  const longText=('快递发货规则说明：普通订单需按批次安排。').repeat(620);
+  const longEntry=f.enable('发货政策长文',longText,'shipping-long',['发货政策']);
+  // Single-entry multi-chunk exact title match must NOT emit exactFaqMatch.
+  const longExact=f.data.debugRetrieval(account,'DIRECT_MESSAGE','发货政策长文');
+  expect(longExact.hits[0]?.id).toBe(longEntry.id);
+  expect(longExact.exactFaqHit).toBeNull();
+
+  // Adding a short conflicting entry under the same topic must trigger conflict even though the long entry has >20 chunks.
+  f.enable('发货政策简版','所有订单统一十天后发货。','shipping-long');
+  const conflicted=f.data.debugRetrieval(account,'DIRECT_MESSAGE','发货政策');
+  expect(conflicted.conflicts).toEqual(['shipping-long']);
+  expect(conflicted.hits).toEqual([]);
+  expect(conflicted.exactFaqHit).toBeNull();
+
+  // Compact mixed Latin/digit-Han tokens ("S码", "3C", "XL号") must be tokenized and recalled.
+  const sizeEntry=f.enable('尺码与认证说明','本款提供S码与XL号，已通过3C认证。','specs');
+  expect(f.data.context(account,'DIRECT_MESSAGE','S码').knowledge[0]?.id).toBe(sizeEntry.id);
+  expect(f.data.context(account,'DIRECT_MESSAGE','3C').knowledge[0]?.id).toBe(sizeEntry.id);
+  expect(f.data.context(account,'DIRECT_MESSAGE','XL号').knowledge[0]?.id).toBe(sizeEntry.id);
+
+  // Legacy entry with punctuated single-char alias ("（配）") must match single-char "配" even if k_terms lacks al1x token.
+  const legacy=f.enable('旧版配送','旧版配送正文。','legacy-delivery',['（配）']);
+  f.store.db.prepare('DELETE FROM k_terms WHERE chunk_id IN (SELECT id FROM k_chunks WHERE entry_id=?)').run(legacy.id);
+  const legacyHit=f.data.context(account,'DIRECT_MESSAGE','配');
+  expect(legacyHit.knowledge).toHaveLength(1);
+  expect(legacyHit.knowledge[0]?.id).toBe(legacy.id);
+  expect(legacyHit.exactFaqMatch).toMatchObject({id:legacy.id,matchType:'EXACT_ALIAS'});
+});
+
+test('context witness preserves minScore, resists unrelated corpus inserts, binds body-free snapshots, and validates expectedQuery',async()=>{
+  const f=await createKnowledgeFixture();
+  const faq=f.enable('退货规则','七天无理由支持原包装退货。','refund',['退货']);
+  const strictCtx=f.data.context(account,'DIRECT_MESSAGE','退货规则',{minScore:0.9});
+  expect(strictCtx.minScore).toBe(0.9);
+  expect(strictCtx.exactFaqMatch?.text).toBe('七天无理由支持原包装退货。');
+  expect(f.data.isCurrent(strictCtx)).toBe(true);
+
+  // Adding many unrelated entries must not perturb scores or break isCurrent().
+  for(let i=0;i<25;i++){
+    f.enable(`无关商品说明${i}`,`这是第${i}条关于颜色尺码与材质的无关说明。`,`unrelated-${i}`);
+  }
+  expect(f.data.isCurrent(strictCtx)).toBe(true);
+
+  // bindReplyKnowledge must never persist exactFaqMatch or entry text in k_generation_contexts.
+  bindReplyKnowledge(f.store,'DRAFT','draft-body-free',1,strictCtx);
+  const rawRow=f.store.db.prepare(
+    "SELECT snapshot_json FROM k_generation_contexts WHERE kind='DRAFT' AND entity_id='draft-body-free'",
+  ).get() as {snapshot_json:string};
+  expect(rawRow.snapshot_json).not.toContain('七天无理由');
+  expect(rawRow.snapshot_json).not.toContain('exactFaqMatch');
+  expect(JSON.parse(rawRow.snapshot_json)).toMatchObject({minScore:0.9,fingerprint:strictCtx.fingerprint});
+
+  // assertKnowledgePromptSafe supports optional aggregated expectedQuery while preserving event.text default.
+  const event=candidate({text:'末条短句'});
+  const mergedCtx=f.data.context(account,'DIRECT_MESSAGE','退货规则 末条短句');
+  expect(()=>assertKnowledgePromptSafe(mergedCtx,event)).toThrow('KNOWLEDGE_CONTEXT_MISMATCH');
+  expect(()=>assertKnowledgePromptSafe(mergedCtx,event,'退货规则 末条短句')).not.toThrow();
+
+  // Read-only classification covers debugRetrieval & embeddingStatus in both protocol-v2 and sidecar guards.
+  const debugCmd={command:'replyKnowledge',action:'debugRetrieval',channel:'DIRECT_MESSAGE',query:'退货'} as const;
+  const statusCmd={command:'replyKnowledge',action:'embeddingStatus'} as const;
+  expect(isMutatingClientCommand(debugCmd)).toBe(false);
+  expect(isMutatingClientCommand(statusCmd)).toBe(false);
+  expect(isReadOnlySidecarCommand(debugCmd)).toBe(true);
+  expect(isReadOnlySidecarCommand(statusCmd)).toBe(true);
+  f.data.deleteSource(account,faq.sourceId);
+  expect(f.data.isCurrent(strictCtx)).toBe(false);
 });

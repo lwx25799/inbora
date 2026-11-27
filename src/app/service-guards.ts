@@ -45,7 +45,9 @@ export function isReadOnlySidecarCommand(raw: unknown): boolean {
   if (typeof body.command !== "string") return false;
   if (readOnlyCommands.has(body.command)) return true;
   if (body.command === "getMessagePreview") return body.refresh !== true;
-  if (body.command === "replyKnowledge") return body.action === "overview";
+  if (body.command === "replyKnowledge") {
+    return body.action === "overview" || body.action === "debugRetrieval" || body.action === "embeddingStatus";
+  }
   if (body.command === "modelProviders") return body.action === "list";
   if (body.command === "accounts") return body.action === "listAccounts" || body.action === "getAccountStatus";
   return false;

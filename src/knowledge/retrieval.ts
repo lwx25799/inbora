@@ -14,31 +14,35 @@ import {fuseHybridRankings,searchChunkVectors,type VectorSearchRow} from './vect
 
 export const DEFAULT_MIN_SCORE=0.25;
 export const DEFAULT_VECTOR_MIN_SIMILARITY=0.3;
+export const EXACT_FAQ_MAX_CHARS=1000;
 
 const zhSegmenter=new Intl.Segmenter('zh-CN',{granularity:'word'});
 const EDGE_PUNCT_RE=/^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu;
 const HAN_RE=/\p{Script=Han}/u;
 const WORD_CHAR_RE=/[\p{L}\p{N}]/u;
+const LATIN_HAN_SHORT_RE=/[a-z0-9]{1,6}\p{Script=Han}/gu;
+const HAN_LATIN_SHORT_RE=/\p{Script=Han}[a-z0-9]{1,6}/gu;
+const NEGATION_OR_REVERSAL_RE=/(?:不能|能不|不可|不行|行不|好不|可不|是不是|是不|有没有|有没|不要|不用|没法|无法|不是|没有|不给|不发|不退|不换|不包|不支持|未收到|没收到)/u;
 
 /**
  * Chinese customer-service filler words and colloquial stop bigrams (inspired by ZeZhizhan/Fathom, MIT).
- * Filtering these prevents conversational openers from causing spurious FTS5 matches.
+ * Negation, restriction and polarity-flipping phrases are intentionally excluded so queries like
+ * "不能自提" never collapse into their affirmative opposite.
  */
 const CHINESE_STOP_WORDS=new Set<string>([
   '在吗','在嘛','你好','您好','哈喽','嗨','请问','请问下','请问一下','请教','一下','一下子',
-  '能不能','能不','不能','可以','可以吗','可以不','可不','行不行','行不','好不好','好不',
-  '这个','那个','这些','那些','帮我','帮忙','麻烦','谢谢','感谢','好的','好哒','嗯嗯','哦哦','啊啊',
-  '想问','想问下','想问一下','问下','问一下','咨询','咨询下','咨询一下','看看','看下','看一下','了解','了解一下',
-  '怎么','怎样','如何','什么','啥','有没有','有没','是不是','是不','我想','我要','我们','你们','咱们','他们',
-  '客服','亲','亲亲','宝子','老板','小二','就是','然后','因为','所以','但是','如果','还是','或者',
-  '呢','吗','啊','呀','哦','吧','哈','啦','嘛','的','了','着','过','么',
+  '可以','可以吗','这个','那个','这些','那些','帮我','帮忙','麻烦','谢谢','感谢','好的','好哒',
+  '嗯嗯','哦哦','啊啊','想问','想问下','想问一下','问下','问一下','咨询','咨询下','咨询一下',
+  '看看','看下','看一下','了解','了解一下','怎么','怎样','如何','什么','啥','我想','我要',
+  '我们','你们','咱们','他们','客服','亲','亲亲','宝子','老板','小二','就是','然后','因为',
+  '所以','但是','如果','还是','或者','呢','吗','啊','呀','哦','吧','哈','啦','嘛','的','了','着','过','么',
 ]);
 
 const CHINESE_STOP_BIGRAMS=new Set<string>([
-  '在吗','在嘛','你好','您好','请问','一下','能不','不能','可以','以吗','可不','行不','好不',
-  '这个','那个','这些','那些','帮我','帮忙','麻烦','谢谢','感谢','好的','怎么','怎样','什么',
-  '有没','是不是','是不','我想','我要','我们','你们','咨询','问下','问一','看下','看一','了解',
-  '吗请','好请','的吗','了吗','呢请','就是','还是','或者','以及','客服','亲亲','老板',
+  '在吗','在嘛','你好','您好','请问','一下','可以','以吗','这个','那个','这些','那些',
+  '帮我','帮忙','麻烦','谢谢','感谢','好的','怎么','怎样','什么','我想','我要','我们','你们',
+  '咨询','问下','问一','看下','看一','了解','吗请','好请','的吗','了吗','呢请','就是','还是',
+  '或者','以及','客服','亲亲','老板',
 ]);
 
 export interface QueryAnalysis {
@@ -49,6 +53,7 @@ export interface QueryAnalysis {
   bigramTerms:string[];
   filteredStopTerms:string[];
   usedStopwordFallback:boolean;
+  hasNegationOrPolarityShift:boolean;
   singleCharQuery:string|null;
   singleAliasToken:string|null;
 }
@@ -73,6 +78,7 @@ interface ScoredCandidate {
   exactMatch:boolean;exactTitleMatch:boolean;exactAliasMatch:boolean;
   queryCoverage:number;targetCoverage:number;rejectReason:string|null;
 }
+interface EntryFullMeta {id:string;fullText:string;version:number;topic:string;chunkCount:number}
 interface RetrievalOutcome {
   knowledge:KnowledgeHit[];conflicts:string[];relevant:string[];
   exactFaqMatch:ExactFaqMatch|null;engineMode:RetrievalEngineMode;debug:RetrievalDebugResult;
@@ -100,6 +106,11 @@ function addHanBigrams(value:string,target:Set<string>):void{
   }
 }
 
+function addMixedShortTokens(clean:string,target:Set<string>):void{
+  for(const match of clean.matchAll(LATIN_HAN_SHORT_RE))target.add(match[0]);
+  for(const match of clean.matchAll(HAN_LATIN_SHORT_RE))target.add(match[0]);
+}
+
 function addSubBigrams(
   chars:readonly string[],
   filterStopwords:boolean,
@@ -119,8 +130,9 @@ function addSubBigrams(
 
 /**
  * Segments Chinese/alphanumeric text using Node's native Intl.Segmenter('zh-CN') while
- * fusing contiguous single Han characters (e.g. ["发","货"] -> "发货", ["退","换","货"] -> "退换货")
- * and stripping stopword tokens before forming 2-grams so cross-stopword garbage bigrams never form.
+ * fusing contiguous single Han characters (e.g. ["发","货"] -> "发货"), preserving compact
+ * mixed Latin/digit-Han tokens (e.g. "S码", "3C", "XL号"), and stripping stopwords before
+ * forming 2-grams so cross-stopword garbage bigrams never form.
  */
 function segmentTextStructured(
   text:string,
@@ -130,6 +142,8 @@ function segmentTextStructured(
   const words=new Set<string>();
   const bigrams=new Set<string>();
   const filteredStopTerms=new Set<string>();
+
+  addMixedShortTokens(clean,words);
 
   const pieces:{text:string;wordLike:boolean;isSingleHan:boolean}[]=[];
   for(const part of zhSegmenter.segment(clean)){
@@ -197,6 +211,7 @@ function segmentTextStructured(
 export function analyzeQuery(value:string,maximum=40):QueryAnalysis{
   const needle=normalized(value);
   const cleanNeedle=stripEdgePunctuation(value);
+  const hasNegationOrPolarityShift=NEGATION_OR_REVERSAL_RE.test(cleanNeedle);
   const cleanChars=Array.from(cleanNeedle);
   const singleCharQuery=cleanChars.length===1&&WORD_CHAR_RE.test(cleanChars[0]!)
     ?cleanChars[0]!
@@ -206,7 +221,8 @@ export function analyzeQuery(value:string,maximum=40):QueryAnalysis{
   if(singleCharQuery){
     return {
       needle,cleanNeedle,queryTerms:[],wordTerms:[],bigramTerms:[],
-      filteredStopTerms:[],usedStopwordFallback:false,singleCharQuery,singleAliasToken,
+      filteredStopTerms:[],usedStopwordFallback:false,hasNegationOrPolarityShift,
+      singleCharQuery,singleAliasToken,
     };
   }
 
@@ -237,6 +253,7 @@ export function analyzeQuery(value:string,maximum=40):QueryAnalysis{
     bigramTerms:finalBigrams.slice(0,maximum),
     filteredStopTerms:filtered.filteredStopTerms,
     usedStopwordFallback,
+    hasNegationOrPolarityShift,
     singleCharQuery:null,
     singleAliasToken:null,
   };
@@ -249,8 +266,9 @@ export function lexicalTerms(value:string,maximum=40):string[]{
 
 /**
  * Document-side index terms written into existing k_terms.terms (schema v3 unchanged).
- * Combines Intl.Segmenter word tokens, fused Han runs, Han 2-grams, alphanumeric words (>=2 chars),
- * and dedicated exact-alias tokens ONLY for explicitly declared single-character aliases.
+ * Combines Intl.Segmenter word tokens, fused Han runs, compact mixed Latin/digit-Han tokens,
+ * Han 2-grams, alphanumeric words (>=2 chars), and dedicated exact-alias tokens ONLY for
+ * explicitly declared single-character aliases.
  */
 export function indexKnowledgeTerms(
   title:string,
@@ -285,11 +303,6 @@ export function chunkText(text:string):string[]{
 }
 
 const ftsQuote=(term:string)=>'"'+term.replaceAll('"','""')+'"';
-const normalizeBm25=(raw:number|null|undefined):number=>{
-  if(raw===null||raw===undefined||!Number.isFinite(raw))return 0;
-  const strength=Math.max(0,-raw);
-  return strength/(strength+2.5);
-};
 const previewText=(text:string,maxChars=140):string=>{
   const chars=Array.from(text.trim());
   return chars.length<=maxChars?chars.join(''):chars.slice(0,maxChars).join('')+'…';
@@ -310,6 +323,44 @@ function extractTargetTerms(text:string):string[]{
   if(structured.bigrams.length>0)return structured.bigrams;
   const raw=segmentTextStructured(text,false);
   return [...new Set([...raw.words,...raw.bigrams])];
+}
+
+function countOccurrences(haystack:string,needle:string):number{
+  if(!needle)return 0;
+  let count=0,pos=0;
+  for(;;){
+    const idx=haystack.indexOf(needle,pos);
+    if(idx===-1)break;
+    count++;
+    pos=idx+needle.length;
+    if(count>=8)break;
+  }
+  return count;
+}
+
+/**
+ * Corpus-invariant local BM25-style TF saturation score computed strictly within the matched
+ * chunk and its title/aliases. Avoids global FTS5 IDF drift across unrelated entries or accounts.
+ */
+function localBm25Saturation(
+  matchedTerms:readonly string[],
+  titleNorm:string,
+  aliasesJoined:string,
+  bodyNorm:string,
+):number{
+  if(!matchedTerms.length)return 0;
+  const docLen=Math.max(1,Array.from(titleNorm).length+Array.from(aliasesJoined).length+Array.from(bodyNorm).length);
+  const k1=1.2,b=0.75,avgLen=180;
+  const denomBase=k1*(1-b+b*(docLen/avgLen));
+  let sum=0;
+  for(const term of matchedTerms){
+    const tf=countOccurrences(titleNorm,term)*2.5
+      +countOccurrences(aliasesJoined,term)*2
+      +countOccurrences(bodyNorm,term);
+    if(tf>0)sum+=(tf*(k1+1))/(tf+denomBase);
+  }
+  const avgSaturation=sum/matchedTerms.length;
+  return Math.max(0,Math.min(1,avgSaturation/(k1+1)));
 }
 
 function scoreLexicalCandidate(meta:CandidateMeta,analysis:QueryAnalysis):ScoredCandidate{
@@ -340,6 +391,16 @@ function scoreLexicalCandidate(meta:CandidateMeta,analysis:QueryAnalysis):Scored
   const exactTitleMatch=cleanNeedle.length>0&&titleClean===cleanNeedle;
   const exactAliasMatch=cleanNeedle.length>0&&aliasesClean.includes(cleanNeedle);
   const exactMatch=exactTitleMatch||exactAliasMatch;
+
+  if(analysis.usedStopwordFallback&&!exactMatch){
+    // Queries composed solely of greetings/fillers are rejected unless exact title/alias matches.
+    return {
+      row,score:0,lexicalScore:0,vectorScore:meta.vectorScore,matchedTerms:[],
+      exactMatch:false,exactTitleMatch:false,exactAliasMatch:false,
+      queryCoverage:0,targetCoverage:0,rejectReason:'STOPWORD_ONLY_WEAK_MATCH',
+    };
+  }
+
   const strongPhraseMatch=!exactMatch&&cleanNeedle.length>=2&&(
     titleClean.includes(cleanNeedle)
     ||aliasesClean.some(alias=>Array.from(alias).length>=2&&(cleanNeedle.includes(alias)||alias.includes(cleanNeedle)))
@@ -385,16 +446,12 @@ function scoreLexicalCandidate(meta:CandidateMeta,analysis:QueryAnalysis):Scored
   }
   const targetCoverage=exactMatch?1:Math.max(titleTargetCov,bestAliasTargetCov);
 
-  const bm25Norm=Math.max(normalizeBm25(meta.termsBm25),normalizeBm25(meta.searchBm25)*0.9);
+  const localTfNorm=localBm25Saturation(matchedTerms,titleNorm,aliasesNorm.join(' '),bodyNorm);
   const exactBoost=exactMatch?0.36:strongPhraseMatch?0.22:0;
   const fieldBonus=titleRatio*0.16+aliasRatio*0.12+bodyRatio*0.08;
 
-  let lexicalScore=0.52*queryCoverage+0.18*targetCoverage+fieldBonus+exactBoost+0.16*bm25Norm;
+  let lexicalScore=0.52*queryCoverage+0.18*targetCoverage+fieldBonus+exactBoost+0.16*localTfNorm;
   if(exactMatch)lexicalScore=Math.max(lexicalScore,0.95);
-  if(analysis.usedStopwordFallback&&!exactMatch){
-    // Queries composed solely of greetings/fillers require an exact title or alias match.
-    lexicalScore*=0.3;
-  }
   lexicalScore=Number(Math.max(0,Math.min(1,lexicalScore)).toFixed(4));
 
   return {
@@ -406,47 +463,59 @@ function scoreLexicalCandidate(meta:CandidateMeta,analysis:QueryAnalysis):Scored
   };
 }
 
-function toExactFaqMatch(item:ScoredCandidate,matchType:ExactFaqMatch['matchType']):ExactFaqMatch{
+function compareCandidates(a:ScoredCandidate,b:ScoredCandidate):number{
+  // Exact literal title/alias match always outranks non-exact hybrid candidates.
+  return Number(b.exactMatch)-Number(a.exactMatch)
+    ||b.score-a.score
+    ||a.row.id.localeCompare(b.row.id)
+    ||a.row.chunk_id.localeCompare(b.row.chunk_id);
+}
+
+function toExactFaqMatch(
+  item:ScoredCandidate,
+  fullText:string,
+  matchType:ExactFaqMatch['matchType'],
+):ExactFaqMatch{
   return {
     id:item.row.id,sourceId:item.row.source_id,title:item.row.title,topic:item.row.topic,
-    text:item.row.text,version:item.row.version,chunkId:item.row.chunk_id,matchType,score:item.score,
+    text:fullText,version:item.row.version,chunkId:item.row.chunk_id,matchType,score:item.score,
   };
 }
 
 function detectExactFaqMatch(
-  accepted:readonly ScoredCandidate[],
+  acceptedEntries:readonly ScoredCandidate[],
   conflicts:readonly string[],
   analysis:QueryAnalysis,
+  entryMetaById:ReadonlyMap<string,EntryFullMeta>,
 ):ExactFaqMatch|null{
-  const cleanCandidates=accepted.filter(item=>!conflicts.includes(item.row.topic));
-  if(!cleanCandidates.length)return null;
+  const cleanEntries=acceptedEntries.filter(item=>!conflicts.includes(item.row.topic));
+  if(!cleanEntries.length)return null;
 
-  const byEntry=new Map<string,ScoredCandidate>();
-  for(const item of cleanCandidates){
-    const prev=byEntry.get(item.row.id);
-    if(!prev||item.score>prev.score)byEntry.set(item.row.id,item);
-  }
-  const uniqueEntries=[...byEntry.values()].sort(
-    (a,b)=>b.score-a.score||a.row.id.localeCompare(b.row.id),
-  );
-  const top=uniqueEntries[0]!;
-  const second=uniqueEntries[1];
-  const exactEntries=uniqueEntries.filter(item=>item.exactMatch);
+  const top=cleanEntries[0]!;
+  const second=cleanEntries[1];
+  const meta=entryMetaById.get(top.row.id);
+  // Direct FAQ output requires a single unchunked entry whose complete text fits safe reply bounds.
+  if(!meta||meta.chunkCount!==1)return null;
+  const fullText=meta.fullText.trim();
+  const fullChars=Array.from(fullText).length;
+  if(fullChars===0||fullChars>EXACT_FAQ_MAX_CHARS)return null;
 
+  const exactEntries=cleanEntries.filter(item=>item.exactMatch);
   if(exactEntries.length===1&&exactEntries[0]!.row.id===top.row.id){
-    return toExactFaqMatch(top,top.exactTitleMatch?'EXACT_TITLE':'EXACT_ALIAS');
+    return toExactFaqMatch(top,fullText,top.exactTitleMatch?'EXACT_TITLE':'EXACT_ALIAS');
   }
   if(exactEntries.length>1)return null;
 
   if(
     !analysis.usedStopwordFallback
+    &&!analysis.hasNegationOrPolarityShift
     &&!analysis.singleCharQuery
     &&top.score>=0.85
     &&top.queryCoverage>=0.85
     &&top.targetCoverage>=0.8
     &&(!second||top.score-second.score>=0.2)
   ){
-    return toExactFaqMatch(top,'HIGH_CONFIDENCE');
+    return toExactFaqMatch(top,fullText,'HIGH_CONFIDENCE');
   }
   return null;
 }
@@ -520,13 +589,17 @@ function executeRetrieval(
     for(const row of queryFtsTable(db,'k_terms',ftsQuote(analysis.singleAliasToken),where,args)){
       registerRow(row,'terms',row.bm25_score);
     }
-    const legacySingleRows=db.prepare(`SELECT ${BASE_SELECT}
+    // Legacy compatibility: normalize aliases with stripEdgePunctuation so e.g. "（配）" matches "配".
+    const legacyAliasedRows=db.prepare(`SELECT ${BASE_SELECT}
       FROM k_knowledge k
       JOIN k_sources s ON s.id=k.source_id
       JOIN k_chunks c ON c.entry_id=k.id
-      WHERE ${where} AND EXISTS(SELECT 1 FROM json_each(k.aliases_json) WHERE lower(trim(value))=?)`)
-      .all(...args,analysis.singleCharQuery) as SearchRow[];
-    for(const row of legacySingleRows)registerRow(row,'terms');
+      WHERE ${where} AND k.aliases_json<>'[]'`).all(...args) as SearchRow[];
+    for(const row of legacyAliasedRows){
+      if(parseAliases(row.aliases_json).map(stripEdgePunctuation).includes(analysis.singleCharQuery)){
+        registerRow(row,'terms');
+      }
+    }
   }else if(analysis.queryTerms.length){
     for(const row of queryFtsTable(db,'k_terms',analysis.queryTerms.map(ftsQuote).join(' OR '),where,args)){
       registerRow(row,'terms',row.bm25_score);
@@ -564,7 +637,7 @@ function executeRetrieval(
   if(vectorRows.length>0){
     const lexicalRanked=[...lexicalScored]
       .filter(item=>item.lexicalScore>0)
-      .sort((a,b)=>b.lexicalScore-a.lexicalScore||a.row.id.localeCompare(b.row.id)||a.row.chunk_id.localeCompare(b.row.chunk_id))
+      .sort(compareCandidates)
       .map(item=>({chunkId:item.row.chunk_id,lexicalScore:item.lexicalScore,exactMatch:item.exactMatch}));
     const fused=fuseHybridRankings(lexicalRanked,vectorRows.map(row=>({chunkId:row.chunk_id,vectorScore:row.vectorScore})));
     const fusedByChunk=new Map(fused.map(item=>[item.chunkId,item]));
@@ -574,39 +647,45 @@ function executeRetrieval(
     }
   }
 
-  const sorted=lexicalScored.sort(
-    (a,b)=>b.score-a.score||a.row.id.localeCompare(b.row.id)||a.row.chunk_id.localeCompare(b.row.chunk_id),
-  );
+  // Deduplicate by entry_id (keeping best chunk per entry) BEFORE candidate cutoff and conflict checks
+  // so a single multi-chunk long entry cannot crowd out a conflicting short entry under the same topic.
+  const bestByEntry=new Map<string,ScoredCandidate>();
+  for(const item of lexicalScored){
+    const prev=bestByEntry.get(item.row.id);
+    if(!prev||compareCandidates(item,prev)<0)bestByEntry.set(item.row.id,item);
+  }
+  const sortedEntries=[...bestByEntry.values()].sort(compareCandidates);
 
   const accepted:ScoredCandidate[]=[];
   const rejectedBelowThreshold:RetrievalRejectedCandidate[]=[];
-  const rejectedSeenEntry=new Set<string>();
 
-  for(const item of sorted){
+  for(const item of sortedEntries){
     const reason=item.rejectReason
       ??(item.score<minScore?(analysis.usedStopwordFallback?'STOPWORD_ONLY_WEAK_MATCH':'BELOW_MIN_SCORE'):null);
     if(reason){
-      if(!rejectedSeenEntry.has(item.row.id)){
-        rejectedSeenEntry.add(item.row.id);
-        rejectedBelowThreshold.push({id:item.row.id,title:item.row.title,score:item.score,reason});
-      }
+      rejectedBelowThreshold.push({id:item.row.id,title:item.row.title,score:item.score,reason});
       continue;
     }
     if(accepted.length<knowledgeLimits.candidates)accepted.push(item);
   }
 
-  const entryIds=[...new Set(accepted.map(item=>item.row.id))];
+  const entryIds=accepted.map(item=>item.row.id);
   const topics=[...new Set(accepted.map(item=>item.row.topic))];
   const conflicts:string[]=[];
   const relevant:string[]=[];
 
   // Scope conflict checks to active entries that actually passed retrieval threshold.
   const variants=entryIds.length
-    ?db.prepare(`SELECT k.id,k.text,k.version,k.topic FROM k_knowledge k JOIN k_sources s ON s.id=k.source_id
+    ?db.prepare(`SELECT k.id,k.text,k.version,k.topic,(SELECT count(*) FROM k_chunks c2 WHERE c2.entry_id=k.id) AS chunk_count
+      FROM k_knowledge k JOIN k_sources s ON s.id=k.source_id
       WHERE ${where} AND k.id IN (${entryIds.map(()=>'?').join(',')}) ORDER BY k.id`)
-      .all(...args,...entryIds) as {id:string;text:string;version:number;topic:string}[]
+      .all(...args,...entryIds) as {id:string;text:string;version:number;topic:string;chunk_count:number}[]
     :[];
-  relevant.push(...variants.map(row=>digest([row.id,row.version,row.text])));
+  const entryMetaById=new Map<string,EntryFullMeta>();
+  for(const row of variants){
+    entryMetaById.set(row.id,{id:row.id,fullText:row.text,version:row.version,topic:row.topic,chunkCount:row.chunk_count});
+    relevant.push(digest([row.id,row.version,row.text]));
+  }
   for(const topic of topics){
     if(new Set(variants.filter(row=>row.topic===topic).map(row=>normalized(row.text))).size>1){
       conflicts.push(topic);
@@ -631,7 +710,7 @@ function executeRetrieval(
     debugHits.push({...common,textPreview:previewText(text)});
   }
 
-  const exactFaqMatch=detectExactFaqMatch(accepted,conflicts,analysis);
+  const exactFaqMatch=detectExactFaqMatch(accepted,conflicts,analysis,entryMetaById);
   return {
     knowledge,conflicts,relevant:relevant.sort(),exactFaqMatch,engineMode,
     debug:{

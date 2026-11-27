@@ -112,3 +112,59 @@ test('interrupted analyses offer explicit continuation and known failures give a
   expect(describeKnowledgeError('KNOWLEDGE_MAPPING_PREVIEW_REQUIRED')).toContain('重新预览问答配对');
   expect(describeKnowledgeError('KNOWLEDGE_PARSE_FAILED')).toContain('加密');
 });
+
+test('retrieval debugger state drops stale responses across scope changes and keeps latest embedding status badge',async()=>{
+  const debuggerPath='../../desktop/src/KnowledgeRetrievalDebugger.tsx';
+  const mod=await import(debuggerPath) as {
+    buildDebuggerScopeKey:(channel:'DIRECT_MESSAGE'|'COMMENT_NOTIFICATION',sourceIds:readonly string[])=>string;
+    createInitialDebuggerState:(scopeKey:string)=>{
+      scopeKey:string;debugSeq:number;statusEpoch:number;appliedStatusEpoch:number;
+      debugResult:unknown;embeddingStatus:unknown;error:string;
+    };
+    invalidateDebuggerScope:(prev:any,nextScopeKey:string)=>any;
+    applyDebugResponse:(current:any,req:{seq:number;scopeKey:string;statusEpoch:number},response:any)=>any;
+    applyEmbeddingStatusResponse:(current:any,reqEpoch:number,status:any)=>any;
+    resolveLatestEmbeddingStatus:(state:any)=>any;
+    describeEmbeddingBadge:(status:any)=>{label:string;tone:string};
+  };
+
+  const dmScope=mod.buildDebuggerScopeKey('DIRECT_MESSAGE',[]);
+  const commentScope=mod.buildDebuggerScopeKey('COMMENT_NOTIFICATION',[]);
+  const oldStatus={
+    state:'MISSING_NEEDS_DOWNLOAD',engineMode:'FTS5_ENHANCED',modelId:'m',modelPath:null,
+    expectedSha256:null,actualSha256:null,sizeBytes:null,dims:512,checkedPaths:[],reason:'MISSING',checkedAt:1,
+  };
+  const freshStatus={
+    state:'REUSED_LOCAL',engineMode:'HYBRID_ONNX',modelId:'m',modelPath:null,
+    expectedSha256:null,actualSha256:null,sizeBytes:1024,dims:512,checkedPaths:[],reason:'OK',checkedAt:2,
+  };
+  const makeDebug=(channel:'DIRECT_MESSAGE'|'COMMENT_NOTIFICATION',onnxStatus:unknown)=>({
+    engineMode:'FTS5_ENHANCED',query:'快递',channel,queryTerms:['快递'],wordTerms:['快递'],
+    filteredStopTerms:[],minScore:0.25,hits:[],rejectedBelowThreshold:[],conflicts:[],exactFaqHit:null,onnxStatus,
+  });
+
+  // 1. In-flight preview on DM is discarded after switching channel to COMMENT_NOTIFICATION.
+  let state=mod.createInitialDebuggerState(dmScope);
+  const req1={seq:1,scopeKey:dmScope,statusEpoch:1};
+  state={...state,debugSeq:1,statusEpoch:1};
+  state=mod.invalidateDebuggerScope(state,commentScope);
+  const afterStale=mod.applyDebugResponse(state,req1,makeDebug('DIRECT_MESSAGE',oldStatus));
+  expect(afterStale.debugResult).toBeNull();
+  expect(afterStale.scopeKey).toBe(commentScope);
+
+  // 2. Manual "检查索引状态" refresh overrides older debugResult.onnxStatus and stays visible in badge.
+  const req2={seq:state.debugSeq+1,scopeKey:commentScope,statusEpoch:state.statusEpoch+1};
+  state={...state,debugSeq:req2.seq,statusEpoch:req2.statusEpoch};
+  state=mod.applyDebugResponse(state,req2,makeDebug('COMMENT_NOTIFICATION',oldStatus));
+  expect(mod.resolveLatestEmbeddingStatus(state)?.state).toBe('MISSING_NEEDS_DOWNLOAD');
+
+  const statusReqEpoch=state.statusEpoch+1;
+  state={...state,statusEpoch:statusReqEpoch};
+  state=mod.applyEmbeddingStatusResponse(state,statusReqEpoch,freshStatus);
+  expect(mod.resolveLatestEmbeddingStatus(state)?.state).toBe('REUSED_LOCAL');
+  expect(mod.describeEmbeddingBadge(mod.resolveLatestEmbeddingStatus(state)).tone).toBe('success');
+
+  // 3. Stale older embeddingStatus response cannot overwrite the newer status.
+  const afterOlderStatus=mod.applyEmbeddingStatusResponse(state,1,oldStatus);
+  expect(mod.resolveLatestEmbeddingStatus(afterOlderStatus)?.state).toBe('REUSED_LOCAL');
+});

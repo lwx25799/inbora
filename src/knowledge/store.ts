@@ -16,7 +16,7 @@ interface EntryRow {id:string;source_id:string;title:string;topic:string;text:st
 interface PersonaRow {id:string;text:string;sample_ids_json:string;state:PersonaVersion['state'];created_at:number}
 export interface ContextOptions {personaId?:string|null;sourceIds?:string[];minScore?:number}
 export interface DebugRetrievalOptions {sourceIds?:string[];minScore?:number}
-export type ContextWitness=Pick<ReplyKnowledgeContext,'accountId'|'channel'|'query'|'personaId'|'fingerprint'|'sourceIds'|'accountPersonaOnly'|'personaPinned'>;
+export type ContextWitness=Pick<ReplyKnowledgeContext,'accountId'|'channel'|'query'|'personaId'|'fingerprint'|'sourceIds'|'accountPersonaOnly'|'personaPinned'|'minScore'>;
 const entry=(row:EntryRow):KnowledgeEntry=>({id:row.id,sourceId:row.source_id,title:row.title,topic:row.topic,text:row.text,
   aliases:JSON.parse(row.aliases_json) as string[],channels:JSON.parse(row.channels_json) as Channel[],effectiveAt:row.effective_at,
   expiresAt:row.expires_at,state:row.state,version:row.version,updatedAt:row.updated_at});
@@ -260,6 +260,9 @@ export class ReplyKnowledgeStore {
     const started=this.measure(),ownId=this.own(accountId);requireSafe(query.length<=20000,'KNOWLEDGE_QUERY_TOO_LARGE');
     if(options.sourceIds){requireSafe(options.sourceIds.length<=1000&&new Set(options.sourceIds).size===options.sourceIds.length,'KNOWLEDGE_SOURCE_SELECTION_INVALID');
       for(const id of options.sourceIds)this.requireSource(accountId,id);}
+    if(options.minScore!==undefined){
+      requireSafe(Number.isFinite(options.minScore)&&options.minScore>=0&&options.minScore<=1,'INVALID_COMMAND');
+    }
     const result=retrieveKnowledge(this.store.db,accountId,channel,query,{
       now:this.now(),
       ownId,
@@ -285,10 +288,11 @@ export class ReplyKnowledgeStore {
       const length=Array.from(row.prompt+row.response).length;if(length>budget)continue;budget-=length;
       examples.push({id:row.id,prompt:row.prompt,response:row.response,channel:row.channel});
     }
-    // Keep fingerprint corpus-invariant to unrelated inserts (exclude floating bm25 scores from digest).
+    // Keep fingerprint corpus-invariant to unrelated inserts and preserve minScore in context witness.
     const stableKnowledge=result.knowledge.map(({id,sourceId,title,topic,text,version,chunkId})=>({id,sourceId,title,topic,text,version,chunkId}));
     const stableValue={accountId,channel,query,...(options.sourceIds?{sourceIds:[...options.sourceIds].sort()}:{}),
-      ...(options.personaId===null?{accountPersonaOnly:true}:{}),...(options.personaId?{personaPinned:true}:{}),persona:selected?.text??'',personaId:selected?.id??null,
+      ...(options.personaId===null?{accountPersonaOnly:true}:{}),...(options.personaId?{personaPinned:true}:{}),
+      ...(options.minScore!==undefined?{minScore:options.minScore}:{}),persona:selected?.text??'',personaId:selected?.id??null,
       examples,knowledge:stableKnowledge,conflicts:result.conflicts};
     const fingerprint=digest([ownId,stableValue,result.relevant]);requireSafe(this.measure()-started<=500,'KNOWLEDGE_RETRIEVAL_TIMEOUT');
     return {...stableValue,knowledge:result.knowledge,exactFaqMatch:result.exactFaqMatch,engineMode:result.engineMode,fingerprint};
@@ -315,7 +319,10 @@ export class ReplyKnowledgeStore {
     return this.embeddingManager.inspectStatus();
   }
   isCurrent(snapshot:ContextWitness):boolean{
-    try{return this.context(snapshot.accountId,snapshot.channel,snapshot.query,{...(snapshot.accountPersonaOnly?{personaId:null}:snapshot.personaPinned&&snapshot.personaId?{personaId:snapshot.personaId}:{}),
-      ...(snapshot.sourceIds?{sourceIds:snapshot.sourceIds}:{})}).fingerprint===snapshot.fingerprint;}catch{return false;}
+    try{return this.context(snapshot.accountId,snapshot.channel,snapshot.query,{
+      ...(snapshot.accountPersonaOnly?{personaId:null}:snapshot.personaPinned&&snapshot.personaId?{personaId:snapshot.personaId}:{}),
+      ...(snapshot.sourceIds?{sourceIds:snapshot.sourceIds}:{}),
+      ...(snapshot.minScore!==undefined?{minScore:snapshot.minScore}:{}),
+    }).fingerprint===snapshot.fingerprint;}catch{return false;}
   }
 }

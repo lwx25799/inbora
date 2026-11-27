@@ -9,7 +9,7 @@ import {assertSecurityRevision,securityRevision} from '../storage/security-holds
 import {ReplyKnowledgeStore} from './store.js';
 import {migrateReplyKnowledge} from './migration.js';
 import {KnowledgeImports} from './imports.js';
-import {OnnxEmbeddingManager} from './embedding-engine.js';
+import {OnnxEmbeddingManager,sanitizeEmbeddingStatus} from './embedding-engine.js';
 import {LearningModelService,recoverLearningTasks,type LearningModelContext} from './model-service.js';
 import type {ModelProviderController} from '../app/model-provider-controller.js';
 import {replySettingsFingerprint} from './generation-context.js';
@@ -57,11 +57,14 @@ export class ReplyKnowledgeService {
       case 'importPreviewMapping':return this.imports.previewMapping(command.id,command.mapping);
       case 'importCommit':return this.imports.commit(command.id,this.data,accountId,command.mapping);
       case 'importCancel':await this.imports.cancel(command.id);return{cancelled:true};
-      case 'debugRetrieval':return this.data.debugRetrieval(accountId,command.channel,command.query,{
-        ...(command.sourceIds?{sourceIds:command.sourceIds}:{}),
-        ...(command.minScore!==undefined?{minScore:command.minScore}:{}),
-      });
-      case 'embeddingStatus':return this.data.embeddingStatus();
+      case 'debugRetrieval':{
+        const debug=this.data.debugRetrieval(accountId,command.channel,command.query,{
+          ...(command.sourceIds?{sourceIds:command.sourceIds}:{}),
+          ...(command.minScore!==undefined?{minScore:command.minScore}:{}),
+        });
+        return {...debug,onnxStatus:sanitizeEmbeddingStatus(debug.onnxStatus)};
+      }
+      case 'embeddingStatus':return sanitizeEmbeddingStatus(this.data.embeddingStatus());
       case 'analyze':case 'tryReply':{
         requireSafe(!this.modelBusy,'KNOWLEDGE_MODEL_BUSY');const before=this.state(),auto=before.automation;
         const controller=before.models;

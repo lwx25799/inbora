@@ -1,5 +1,5 @@
 import {afterEach,expect,test} from 'vitest';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {existsSync,mkdirSync,readdirSync,rmSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {EventStore} from '../../src/storage/store.js';
@@ -7,6 +7,7 @@ import {migrateClient} from '../../src/storage/client-migration.js';
 import {migrateReplyKnowledge} from '../../src/knowledge/migration.js';
 import {ReplyKnowledgeStore} from '../../src/knowledge/store.js';
 import {
+  DEFAULT_ONNX_MODEL_SPEC,
   isSafePublicHttpsUrl,
   OnnxEmbeddingManager,
   type EmbeddingRuntime,
@@ -14,6 +15,8 @@ import {
 import {countChunkVectors,hasVectorTable} from '../../src/knowledge/vector-store.js';
 import {ClientService} from '../../src/app/service.js';
 import {BrowserService} from '../../src/app/browser-service.js';
+import {dispatchTrustedServiceCommand,routeSidecarEnvelope} from '../../src/app/protocol-v2-router.js';
+import {PROTOCOL_V2} from '../../src/contracts/protocol-v2.js';
 import {DeepSeekProvider} from '../../src/ai/deepseek.js';
 import {installFixtureKey} from '../model-provider-helpers.js';
 import {candidate,pending,privateTemp} from '../helpers.js';
@@ -137,12 +140,53 @@ test('ONNX local detection reuses verified local models, rejects tampered files,
   const leftoverDir=join(badCacheRoot,spec.modelId);
   expect(existsSync(leftoverDir)?readdirSync(leftoverDir):[]).toEqual([]);
 
-  // 6. SSRF guard rejects non-HTTPS and local/private URLs.
+  // 6. SSRF guard rejects non-HTTPS, non-443 ports, IPv6 private/doc ranges, and DNS resolving to private IPs.
+  expect(DEFAULT_ONNX_MODEL_SPEC.expectedSha256).toBeNull();
   expect(isSafePublicHttpsUrl('http://models.example.invalid/a.onnx')).toBe(false);
+  expect(isSafePublicHttpsUrl('https://models.example.invalid:8443/a.onnx')).toBe(false);
   expect(isSafePublicHttpsUrl('https://localhost/a.onnx')).toBe(false);
   expect(isSafePublicHttpsUrl('https://127.0.0.1/a.onnx')).toBe(false);
   expect(isSafePublicHttpsUrl('https://192.168.1.10/a.onnx')).toBe(false);
+  expect(isSafePublicHttpsUrl('https://[fc00::1]/a.onnx')).toBe(false);
+  expect(isSafePublicHttpsUrl('https://[2001:db8::1]/a.onnx')).toBe(false);
   expect(isSafePublicHttpsUrl('https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/main/onnx/model_quantized.onnx')).toBe(true);
+
+  const dnsBlockedManager=new OnnxEmbeddingManager({
+    spec,
+    configuredModelPath:null,
+    cacheRoot:join(root,'dns-blocked-cache'),
+    sharedSearchDirs:[],
+    lookup:async()=>[{address:'10.0.0.8',family:4}],
+    transport:async()=>new Response(validPayload,{status:200}),
+  });
+  const dnsBlocked=await dnsBlockedManager.ensureReady({allowDownload:true});
+  expect(dnsBlocked.state).toBe('FALLBACK_FTS5');
+  expect(dnsBlocked.reason).toBe('ONNX_DOWNLOAD_DNS_REJECTED');
+
+  // 7. Oversize download cancels stream, removes temp file, and degrades cleanly.
+  const oversizeCache=join(root,'oversize-cache');
+  const oversizeManager=new OnnxEmbeddingManager({
+    spec:{...spec,maxBytes:32},
+    configuredModelPath:null,
+    cacheRoot:oversizeCache,
+    sharedSearchDirs:[],
+    transport:async()=>new Response(Buffer.alloc(256,0x41),{status:200}),
+  });
+  const oversizeResult=await oversizeManager.ensureReady({allowDownload:true});
+  expect(oversizeResult.state).toBe('FALLBACK_FTS5');
+  expect(oversizeResult.reason).toBe('ONNX_DOWNLOAD_TOO_LARGE');
+  const oversizeDir=join(oversizeCache,spec.modelId);
+  expect(existsSync(oversizeDir)?readdirSync(oversizeDir):[]).toEqual([]);
+
+  // 8. Unpinned default spec refuses unverified download safely.
+  const unpinnedManager=new OnnxEmbeddingManager({
+    configuredModelPath:null,
+    cacheRoot:join(root,'unpinned-cache'),
+    sharedSearchDirs:[],
+  });
+  const unpinnedResult=await unpinnedManager.ensureReady({allowDownload:true});
+  expect(unpinnedResult.state).toBe('FALLBACK_FTS5');
+  expect(unpinnedResult.reason).toBe('ONNX_EXPECTED_SHA256_UNCONFIGURED');
 });
 
 test('hybrid ONNX mode lazily initializes k_chunk_vectors, recalls synonym queries via RRF, and cleans vectors on source deletion',async()=>{
@@ -198,6 +242,20 @@ test('hybrid ONNX mode lazily initializes k_chunk_vectors, recalls synonym queri
   expect(debug.hits[0]!.vectorScore).toBeGreaterThan(0.9);
   expect(debug.hits[0]!.lexicalScore).toBe(0);
 
+  // Exact literal title/alias match must always outrank a non-exact hybrid vector match.
+  const exactCourier=data.saveKnowledge(account,{
+    title:'包邮说明',
+    topic:'postage-exact',
+    text:'全场满99元包邮。',
+    aliases:['能便宜点吗'],
+  });
+  data.setKnowledgeState(account,exactCourier.id,'ACTIVE');
+  const exactVsVector=data.debugRetrieval(account,'DIRECT_MESSAGE','能便宜点吗');
+  expect(exactVsVector.hits[0]?.id).toBe(exactCourier.id);
+  expect(exactVsVector.hits[0]?.exactMatch).toBe(true);
+  expect(exactVsVector.exactFaqHit?.id).toBe(exactCourier.id);
+  data.deleteSource(account,exactCourier.sourceId);
+
   // Deleting the source cleans up its chunk vectors with no orphan rows left behind.
   data.deleteSource(account,promo.sourceId);
   expect(countChunkVectors(store.db,'hybrid-test-v1')).toBe(0);
@@ -238,11 +296,14 @@ test('debugRetrieval and embeddingStatus commands consume zero model budget and 
     command:'replyKnowledge',action:'setKnowledgeState',id:saved.id,state:'ACTIVE',
   });
 
-  // Zero model authorization and zero budget consumed for embeddingStatus & debugRetrieval!
+  // Zero model authorization and zero budget consumed for embeddingStatus & debugRetrieval,
+  // and IPC status must be sanitized (no local filesystem paths leaked).
   const status=await service.dispatch(controlToken,{
     command:'replyKnowledge',action:'embeddingStatus',
   }) as OnnxEmbeddingStatus;
   expect(['MISSING_NEEDS_DOWNLOAD','FALLBACK_FTS5','REUSED_LOCAL','DOWNLOAD_READY']).toContain(status.state);
+  expect(status.modelPath).toBeNull();
+  expect(status.checkedPaths).toEqual([]);
 
   const debug=await service.dispatch(controlToken,{
     command:'replyKnowledge',
@@ -255,9 +316,46 @@ test('debugRetrieval and embeddingStatus commands consume zero model budget and 
   expect(debug.hits).toHaveLength(1);
   expect(debug.hits[0]).toMatchObject({id:saved.id,title:'顺丰配送说明'});
   expect(debug.hits[0]!.score).toBeGreaterThan(0.5);
+  expect(debug.onnxStatus.modelPath).toBeNull();
+  expect(debug.onnxStatus.checkedPaths).toEqual([]);
   expect(store.budget('MODEL').used).toBe(0);
   expect(store.db.prepare('SELECT count(*) n FROM model_calls').get()).toEqual({n:0});
   expect(store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});
+
+  // Protocol v2 routing + trusted dispatch classify debugRetrieval & embeddingStatus as read-only
+  // (no commandId needed, zero protocol_v2_commands writes, zero operator_sessions renewal writes).
+  const secret='a'.repeat(64);
+  const sessionsBefore=store.db.prepare('SELECT * FROM operator_sessions ORDER BY rowid').all();
+  const routeContext={
+    accounts:service.accounts,
+    lifecycleCommandIds:new Map<string,string>(),
+    dispatch:async(body:Parameters<typeof dispatchTrustedServiceCommand>[2],scope?:Parameters<typeof dispatchTrustedServiceCommand>[3])=>
+      dispatchTrustedServiceCommand(service,controlToken,body,scope),
+  };
+  const v2StatusRes=await routeSidecarEnvelope(
+    {
+      protocol:PROTOCOL_V2,
+      requestId:randomUUID(),
+      secret,
+      scope:{kind:'ACCOUNT',accountRef:account},
+      body:{command:'replyKnowledge',action:'embeddingStatus'},
+    },
+    routeContext,
+  );
+  expect(v2StatusRes.ok).toBe(true);
+  const v2DebugRes=await routeSidecarEnvelope(
+    {
+      protocol:PROTOCOL_V2,
+      requestId:randomUUID(),
+      secret,
+      scope:{kind:'ACCOUNT',accountRef:account},
+      body:{command:'replyKnowledge',action:'debugRetrieval',channel:'DIRECT_MESSAGE',query:'快递'},
+    },
+    routeContext,
+  );
+  expect(v2DebugRes.ok).toBe(true);
+  expect(store.db.prepare('SELECT * FROM operator_sessions ORDER BY rowid').all()).toEqual(sessionsBefore);
+  expect(store.db.prepare('SELECT count(*) n FROM protocol_v2_commands').get()).toEqual({n:0});
 
   // Now authorize a fixture model key and verify tryReply returns enriched knowledge basis metadata.
   await installFixtureKey(service,controlToken,{key:'synthetic-only',grant:true});
