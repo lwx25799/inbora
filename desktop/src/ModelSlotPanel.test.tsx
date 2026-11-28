@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { DEFAULT_ACCOUNT_ID } from '../../src/contracts/account.js';
 import {
   DEFAULT_ACCOUNT_AI_FEATURES,
@@ -645,7 +644,7 @@ test('ModelSlotPanel preserves unsaved drafts in other optional slots when savin
 test('AiRuntimeFeaturesPanel uses chunked upload for large files and aborts upload on account switch or unmount', async () => {
   const largeBytes = new Uint8Array(40_000);
   largeBytes.fill(0x41);
-  const expectedSha256 = createHash('sha256').update(largeBytes).digest('hex');
+  const expectedSha256 = Array.from(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', largeBytes)), byte => byte.toString(16).padStart(2, '0')).join('');
   const expectedBase64 = Buffer.from(largeBytes).toString('base64');
   expect(expectedBase64.length).toBeGreaterThan(48_000);
 

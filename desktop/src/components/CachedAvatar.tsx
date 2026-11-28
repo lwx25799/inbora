@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type * as React from "react";
-import { cn } from "@/lib/utils";
-import { useAvatarPreview, type AvatarRole } from "@/useAvatarPreview";
+import { cn } from "../lib/utils";
+import { useAvatarPreview, type AvatarRole } from "../useAvatarPreview";
 
 const AVATAR_TONES = [
   "bg-[#e6efe9] text-[#174f43] dark:bg-[#1e3630] dark:text-[#8fd9c9]",

@@ -88,8 +88,8 @@ test.each([{width:900,height:640},{width:1240,height:800}])('compact settings re
     await editor.getByRole('button',{name:'收起编辑器',exact:true}).click();
     await page.screenshot({path:join(root,`settings-${viewport.width}.png`)});
     expect(commands).not.toContain('configureAi');expect(commands).not.toContain('enableReplyPolicy');
-    expect(modelActions.filter(action=>action!=='list')).toEqual([]);
-    expect(commands.filter(command=>!['getStatus','getInbox','modelProviders'].includes(command))).toEqual([]);
+    expect(modelActions.filter(action=>action!=='list'&&action!=='getSlots')).toEqual([]);
+    expect(commands.filter(command=>!['getStatus','getInbox','modelProviders','replyPipeline','accountAiFeatures','mediaAssets'].includes(command))).toEqual([]);
     expect(store.db.prepare('SELECT count(*) n FROM send_intents').get()).toEqual({n:0});
     expect(errors).toEqual([]);
     console.log('SETTINGS_SYNTHETIC_EVIDENCE',root);

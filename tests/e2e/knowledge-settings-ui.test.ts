@@ -39,6 +39,8 @@ test('four knowledge tabs support drafts, explicit imports, interrupted learning
     if(body.command!=='replyKnowledge')throw new Error('UNEXPECTED_BUSINESS_COMMAND');
     switch(body.action){
       case 'overview':overview.page=body.page??overview.page;return structuredClone(overview);
+      case 'embeddingStatus':return{state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelId:'bge-small-zh-v1.5-q8',modelPath:null,expectedSha256:null,actualSha256:null,sizeBytes:null,dims:512,checkedPaths:[],reason:'ONNX_MANAGER_NOT_CONFIGURED',checkedAt:0};
+      case 'listFaqSuggestions':return{items:[]};
       case 'saveKnowledge':overview.knowledge=[{...body.input,id:'entry',sourceId:'source',state:'DISABLED',version:1,
         effectiveAt:null,expiresAt:null,updatedAt:0}];overview.totals.knowledge=1;return overview.knowledge[0];
       case 'setKnowledgeState':overview.knowledge[0]!.state=body.state;return overview.knowledge[0];
@@ -73,7 +75,7 @@ test('four knowledge tabs support drafts, explicit imports, interrupted learning
   const waitIdle=async()=>{await expect.poll(()=>page.getByRole('button',{name:'重新读取',exact:true}).isEnabled()).toBe(true);};
   try{
     await page.goto(`http://127.0.0.1:${(server.httpServer!.address() as {port:number}).port}/knowledge-ui-fixture`);await waitIdle();
-    expect(await page.getByRole('tab').count()).toBe(4);
+    expect(await page.getByRole('tab').count()).toBe(5);
     expect(await page.getByText('第 1 页',{exact:false}).count()).toBe(1);
     expect(await page.getByRole('button',{name:'上一页',exact:true}).isDisabled()).toBe(true);
     expect(await page.getByRole('button',{name:'下一页',exact:true}).isDisabled()).toBe(true);
@@ -132,7 +134,7 @@ test('four knowledge tabs support drafts, explicit imports, interrupted learning
     await visible().getByLabel('我同意将这条模拟来信',{exact:false}).check();
     await visible().getByRole('button',{name:'生成试聊回复并对比',exact:true}).click();await waitIdle();
     expect(await visible().getByText('仅试聊，未发送',{exact:false}).count()).toBe(2);
-    await visible().getByText('本次引用知识',{exact:true}).click();expect(await visible().getByText('合成尺码说明 · v1',{exact:true}).count()).toBe(1);
+    expect(await visible().getByText('本次回复依据',{exact:false}).count()).toBe(1);expect(await visible().getByText('合成尺码说明 · v1',{exact:true}).count()).toBe(1);
     const trial=calls.find(body=>body.action==='tryReply');expect(trial).toMatchObject({personaVersionId:'edited-persona',comparePersonaVersionId:null,confirmed:true});
     expect(calls.find(body=>body.action==='analyze'&&body.taskId)).toMatchObject({sampleIds:[],taskId:'interrupted-task',confirmed:true});
     for(const viewport of [{width:1240,height:800},{width:900,height:640},{width:640,height:640}]){
@@ -168,8 +170,13 @@ test('an outdated native window explains the required restart and reloads forms 
     if(native==='desktop_info')return{runtime:'synthetic',version:'0.3.5',...(supported?{features:{replyKnowledge:true}}:{})};
     if(native!=='client_request')throw new Error('UNEXPECTED_NATIVE_COMMAND');calls.push(args.body);
     if(!supported)throw new Error('INVALID_COMMAND');
-    if(args.body.command!=='replyKnowledge'||args.body.action!=='overview')throw new Error('UNEXPECTED_BUSINESS_COMMAND');
-    return initial();
+    if(args.body.command!=='replyKnowledge')throw new Error('UNEXPECTED_BUSINESS_COMMAND');
+    switch(args.body.action){
+      case 'overview':return initial();
+      case 'embeddingStatus':return{state:'FALLBACK_FTS5',engineMode:'FTS5_ENHANCED',modelId:'bge-small-zh-v1.5-q8',modelPath:null,expectedSha256:null,actualSha256:null,sizeBytes:null,dims:512,checkedPaths:[],reason:'ONNX_MANAGER_NOT_CONFIGURED',checkedAt:0};
+      case 'listFaqSuggestions':return{items:[]};
+      default:throw new Error('UNEXPECTED_BUSINESS_COMMAND');
+    }
   });
   await page.addInitScript(()=>{const bridge=window as unknown as {__TAURI_INTERNALS__:unknown;fixtureInvoke:(command:string,args:unknown)=>Promise<unknown>};
     bridge.__TAURI_INTERNALS__={invoke:(command:string,args:unknown)=>bridge.fixtureInvoke(command,args)};});
@@ -181,7 +188,13 @@ test('an outdated native window explains the required restart and reloads forms 
     expect(await page.getByLabel('知识正文',{exact:true}).count()).toBe(0);
     supported=true;await page.getByRole('button',{name:'重新读取',exact:true}).click();
     await expect.poll(()=>page.getByLabel('知识正文',{exact:true}).isVisible()).toBe(true);
-    expect(await page.getByRole('alert').count()).toBe(0);expect(calls).toEqual([{command:'replyKnowledge',action:'overview',page:0}]);
+    await expect.poll(()=>calls.length).toBe(3);
+    expect(await page.getByRole('alert').count()).toBe(0);
+    expect(calls).toEqual(expect.arrayContaining([
+      {command:'replyKnowledge',action:'overview',page:0},
+      {command:'replyKnowledge',action:'embeddingStatus'},
+      {command:'replyKnowledge',action:'listFaqSuggestions',status:'PENDING'},
+    ]));
     expect(errors).toEqual([]);
   }finally{await browser.close();await server.close();}
 },20_000);
