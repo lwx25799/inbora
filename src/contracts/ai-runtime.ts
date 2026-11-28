@@ -39,6 +39,11 @@ export const accountAiFeaturesCommandSchema = z.discriminatedUnion("action", [
     action: z.literal("save"),
     features: accountAiFeaturesSchema,
   }).strict(),
+  z.object({
+    command: z.literal("accountAiFeatures"),
+    action: z.literal("setSyncCustomerAvatars"),
+    enabled: z.boolean(),
+  }).strict(),
 ]);
 export type AccountAiFeaturesCommand = z.infer<typeof accountAiFeaturesCommandSchema>;
 

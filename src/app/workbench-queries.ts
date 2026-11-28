@@ -64,6 +64,8 @@ export class WorkbenchQueries {
       ...(aiState?{suggestionEligibility:op.permissions.includes('EDIT')?suggestionEligibility(this.store,this.authority,automation,e,aiState):
         {eligible:false,reason:'OPERATOR_PERMISSION_DENIED'}}:{}),
       groupKey:inboxGroupKey(e),
+      targetKey:targetKey(e.payload),
+      avatarKey:e.payload.actorId??targetKey(e.payload),
       timeline:new InboxQueries(this.store,this.browser.root,(id,status)=>this.replyStatus(id,status)).timeline(e,commentThreadGroupKey(e.payload)?undefined:timelineBefore),
       draft,
       followup:new HumanFollowups(this.store,this.authority,this.browser,()=>false,()=>{},()=> 'OPERATION_FAILED_PRIVATE_DIAGNOSTICS').view(eventId),

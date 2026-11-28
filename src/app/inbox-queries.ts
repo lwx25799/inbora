@@ -61,7 +61,9 @@ export class InboxQueries {
       const displayText=payload&&own?previews.displayText(payload,own):null;
       return {
         id:row.selected.id,status:row.selected.status,replyStatus:row.replyStatus,unread:row.unread,channel:row.latest.payload.channel,
-        author:row.latest.payload.actorName,preview:message?.text??row.latest.payload.text,time:message?.occurredAt??row.latest.payload.occurredAt,
+        author:row.latest.payload.actorName,actorId:row.selected.payload.actorId,targetKey:targetKey(row.selected.payload),
+        avatarKey:row.selected.payload.actorId??targetKey(row.selected.payload),
+        preview:message?.text??row.latest.payload.text,time:message?.occurredAt??row.latest.payload.occurredAt,
         ...(message?{previewDirection:message.direction}:{}),
         ...(displayText!==null?{displayText}:{}),
         source:row.latest.payload.discovery??(row.latest.payload.channel==='DIRECT_MESSAGE'?'DIRECT_MESSAGE':'NOTIFICATION'),

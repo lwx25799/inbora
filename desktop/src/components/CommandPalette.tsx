@@ -31,6 +31,7 @@ const PAGE_KEYWORDS: Record<DesktopPageId, string> = {
   knowledge: "知识库 人格 样本 试聊 导入 knowledge",
   models: "模型 key 密钥 deepseek openai claude gemini 供应商 models",
   runtime: "调度 审计 诊断 日志 内存 安全 runtime audit",
+  analytics: "数据 统计 报表 趋势 导出 csv 转人工 analytics",
   settings: "设置 主题 快捷键 急停 故障 助手 mcp 目录 settings",
 };
 

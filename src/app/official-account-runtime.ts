@@ -23,7 +23,10 @@ import { ModelRouteGuard } from './model-route-guard.js';
 import {
   previewSendCommand, reconcileUncertainCommand, sendResultCommand, type DeliveryContext,
 } from './service-delivery.js';
-import { clientError, dismissSuggestion, isReadOnlySidecarCommand, updateModelGrant } from './service-guards.js';
+import {
+  clientError, dismissSuggestion, isReadOnlySidecarCommand,
+  readAccountAvatarPreview, readAnalyticsSummary, updateModelGrant,
+} from './service-guards.js';
 import { handleReplyPipelineCommand, assertPolicyCommandOutboundSafe } from './reply-pipeline-commands.js';
 import { handleAiRuntimeCommand, prepareSendMediaAttachment } from './ai-runtime-commands.js';
 import { AccountAiFeaturesStore } from '../storage/account-ai-features.js';
@@ -77,7 +80,9 @@ export function dispatchOfflineOfficialRead(
     || (command.command === 'replyPipeline' && (command.action === 'getConfig' || command.action === 'dryRun'))
     || (command.command === 'accountAiFeatures' && command.action === 'get')
     || (command.command === 'mediaAssets' && command.action === 'list')
-    || (command.command === 'businessTools' && command.action === 'list');
+    || (command.command === 'businessTools' && command.action === 'list')
+    || command.command === 'getAnalytics'
+    || command.command === 'getAvatarPreview';
   requireSafe(supported, 'OFFICIAL_CHANNEL_NOT_CONNECTED');
 
   const store = new EventStore(dbPath, false, undefined, account.id);
@@ -164,6 +169,12 @@ export function dispatchOfflineOfficialRead(
           })),
         };
       }
+      case 'getAnalytics':
+        readonlyAuthority.operator(token, 'READ');
+        return readAnalyticsSummary(store, command.range, now);
+      case 'getAvatarPreview':
+        readonlyAuthority.operator(token, 'READ');
+        return readAccountAvatarPreview(store, command.role, command.key);
     }
   } finally {
     store.close();
@@ -267,6 +278,16 @@ export class OfficialAccountRuntime {
 
   dispatch(parent: ParentOperator, command: ClientCommand, checkOperator: () => void): Promise<unknown> {
     requireSafe(!this.closing, 'CLIENT_CLOSING');
+    if (command.command === 'getAnalytics' || command.command === 'getAvatarPreview') {
+      requireSafe(parent.expires_at > this.authority.now(), 'OPERATOR_EXPIRED');
+      requireSafe(parent.permissions.includes('READ'), 'OPERATOR_PERMISSION_DENIED');
+      checkOperator();
+      return Promise.resolve(
+        command.command === 'getAnalytics'
+          ? readAnalyticsSummary(this.store, command.range, this.authority.now)
+          : readAccountAvatarPreview(this.store, command.role, command.key),
+      );
+    }
     if (this.session?.parentId !== parent.id || this.session.expiresAt <= this.authority.now()) {
       if (this.session) this.authority.revoke(this.session.token);
       const token = this.authority.issueSession(parent.permissions);
@@ -518,6 +539,10 @@ export class OfficialAccountRuntime {
         return this.status(token);
       case 'getAudit':
         return this.readAudit(store, c.page);
+      case 'getAnalytics':
+        return readAnalyticsSummary(store, c.range, authority.now);
+      case 'getAvatarPreview':
+        return readAccountAvatarPreview(store, c.role, c.key);
       case 'reconcileUncertain':
         store.event(c.eventId);
         return reconcileUncertainCommand(this.deliveryContext(), token, c.eventId);

@@ -3,18 +3,14 @@ import { XIcon } from "lucide-react";
 import { EmergencyStopNotice } from "./EmergencyStopNotice";
 import { InboxList } from "./InboxList";
 import { ReplyDetail } from "./ReplyDetail";
+import { DEFAULT_ACCOUNT_ID } from "../../src/contracts/account.js";
 import { AppSidebar, type DesktopPageId } from "./components/AppSidebar";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConnectScreen } from "./components/ConnectScreen";
 import { TopBar } from "./components/TopBar";
 import { Spinner } from "./components/ui/spinner";
-import { AccountsView } from "./views/AccountsView";
-import { AutomationView } from "./views/AutomationView";
-import { KnowledgePageView } from "./views/KnowledgePageView";
-import { ModelsPageView } from "./views/ModelsPageView";
-import { OverviewView } from "./views/OverviewView";
-import { RuntimeView, type RuntimeTabId } from "./views/RuntimeView";
-import { SystemSettingsView } from "./views/SystemSettingsView";
+import { PageContent } from "./PageContent";
+import type { RuntimeTabId } from "./views/RuntimeView";
 import { cn } from "./lib/utils";
 import { businessPrompts, samePrompts } from "./settings-form-sync";
 import { canContinueReply } from "./reply-editor-draft";
@@ -458,6 +454,7 @@ export function App() {
         busy={busy}
         pendingCount={pendingCount}
         pendingAutoReply={pendingAutoReply}
+        activeAccount={activeAccount}
         onSelectPage={(next) => {
           void navigatePage(next).catch((cause) => setError(explain(cause)));
         }}
@@ -585,6 +582,7 @@ export function App() {
           <div className="inbox-layout flex min-h-0 flex-1 overflow-hidden">
             <InboxList
               inbox={inbox}
+              accountRef={activeAccount?.accountRef ?? DEFAULT_ACCOUNT_ID}
               accountUnreadTotal={unreadCount}
               selected={workspace.selected}
               selectedGroup={
@@ -639,86 +637,46 @@ export function App() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            {page === "overview" && (
-              <OverviewView
-                status={status}
-                inbox={inboxSummary}
-                busy={busy}
-                pendingAutoReply={pendingAutoReply}
-                onNavigate={(next) => {
-                  void navigatePage(next).catch((cause) => setError(explain(cause)));
-                }}
-                onSync={syncInbox}
-                onSelectEvent={(eventId) => {
-                  workspace.choose(eventId);
-                  setPage("inbox");
-                }}
-                onToggleAuto={(enabled) => act("更新自动回复", () => toggleAuto(enabled))}
-              />
-            )}
-            {page === "accounts" && (
-              <AccountsView
-                key={sessionKey}
-                status={status}
-                busy={busy}
-                act={act}
-                update={setStatus}
-                activeAccount={activeAccount}
-                activeAccountRef={activeAccount?.accountRef}
-                onSelectWorkbenchAccount={(account) => {
-                  void selectWorkbenchAccount(account);
-                }}
-              />
-            )}
-            {page === "automation" && (
-              <AutomationView
-                key={sessionKey}
-                status={status}
-                busy={busy}
-                error={error}
-                notice={notice}
-                act={act}
-                update={setStatus}
-                promptsState={promptsState}
-                toggleAuto={toggleAuto}
-                pendingAutoReply={pendingAutoReply}
-              />
-            )}
-            {page === "knowledge" && (
-              <KnowledgePageView key={sessionKey} status={status} busy={busy} />
-            )}
-            {page === "models" && (
-              <ModelsPageView
-                key={sessionKey}
-                status={status}
-                updateProviders={updateProviders}
-              />
-            )}
-            {page === "runtime" && (
-              <RuntimeView
-                status={status}
-                audit={audit}
-                auditPage={auditPage}
-                setAuditPage={setAuditPage}
-                tab={runtimeTab}
-                onTabChange={setRuntimeTab}
-              />
-            )}
-            {page === "settings" && (
-              <SystemSettingsView
-                key={sessionKey}
-                status={status}
-                runtime={runtime}
-                busy={busy}
-                hasUnsavedDraft={workspace.hasUnsavedDraft}
-                theme={theme}
-                onToggleTheme={toggleTheme}
-                act={act}
-                update={setStatus}
-                stop={() => void emergencyStop().catch((cause) => setError(explain(cause)))}
-                reconnect={workspace.reconnect}
-              />
-            )}
+            <PageContent
+              page={page}
+              sessionKey={sessionKey}
+              status={status}
+              runtime={runtime}
+              inboxSummary={inboxSummary}
+              busy={busy}
+              error={error}
+              notice={notice}
+              theme={theme}
+              pendingAutoReply={pendingAutoReply}
+              hasUnsavedDraft={workspace.hasUnsavedDraft}
+              activeAccount={activeAccount}
+              promptsState={promptsState}
+              audit={audit}
+              auditPage={auditPage}
+              setAuditPage={setAuditPage}
+              runtimeTab={runtimeTab}
+              onRuntimeTabChange={setRuntimeTab}
+              act={act}
+              updateStatus={setStatus}
+              updateProviders={updateProviders}
+              onNavigate={(next) => {
+                void navigatePage(next).catch((cause) => setError(explain(cause)));
+              }}
+              onSync={syncInbox}
+              onSelectEvent={(eventId) => {
+                workspace.choose(eventId);
+                setPage("inbox");
+              }}
+              onToggleAuto={toggleAuto}
+              onSelectWorkbenchAccount={(account) => {
+                void selectWorkbenchAccount(account);
+              }}
+              onToggleTheme={toggleTheme}
+              onEmergencyStop={() =>
+                void emergencyStop().catch((cause) => setError(explain(cause)))
+              }
+              onReconnect={workspace.reconnect}
+            />
           </div>
         )}
       </main>

@@ -10,7 +10,10 @@ import {
   ShieldCheckIcon,
 } from 'lucide-react';
 import { AccountPlatformPanel } from '@/AccountPlatformPanel';
+import { AccountAvatarSyncCard } from '@/components/AccountAvatarSyncCard';
+import { CachedAvatar, avatarInitial } from '@/components/CachedAvatar';
 import { PageHeader } from '@/components/PageHeader';
+import { DEFAULT_ACCOUNT_ID } from '../../../src/contracts/account.js';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -158,6 +161,9 @@ export function AccountsView({
   webAccountStatus,
 }: AccountsViewProps): React.ReactElement {
   const resolvedActiveRef = activeAccount?.accountRef ?? activeAccountRef;
+  const targetAccountRef = resolvedActiveRef ?? DEFAULT_ACCOUNT_ID;
+  const targetIdentityKey =
+    status.account?.id === targetAccountRef ? status.account?.identity : undefined;
   const isOfficialChannel = Boolean(activeAccount && isOfficialApiPlatform(activeAccount.platform));
   const isWebChannel = Boolean(activeAccount && isWebBrowserPlatform(activeAccount.platform));
   const officialPlatformName = activeAccount
@@ -278,34 +284,52 @@ export function AccountsView({
               {status.account ? '已绑定' : '待核验'}
             </Badge>
           </div>
-          <div className="mt-2 font-heading text-base font-semibold text-foreground">
-            {(isOfficialChannel || isWebChannel) && activeAccount
-              ? activeAccount.displayLabel
-              : status.account
-                ? '已绑定本地账号'
-                : '尚未核验账号'}
-          </div>
-          <p className="mt-1 truncate text-xs text-muted-foreground">
-            {(isOfficialChannel || isWebChannel) && activeAccount ? (
-              <>
-                <span>{officialPlatformName}</span>
-                {status.account?.identity && (
+          <div className="mt-2 flex items-center gap-3">
+            <CachedAvatar
+              role="ACCOUNT"
+              avatarKey={targetIdentityKey || targetAccountRef}
+              accountRef={targetAccountRef}
+              fallbackText={avatarInitial(
+                (isOfficialChannel || isWebChannel) && activeAccount
+                  ? activeAccount.displayLabel
+                  : targetIdentityKey,
+                status.account ? '本' : '待',
+              )}
+              alt={activeAccount?.displayLabel || '值守账号头像'}
+              className="size-10 rounded-xl text-sm font-semibold ring-1 ring-black/6 dark:ring-white/10"
+              fallbackClassName="bg-primary/12 text-primary"
+            />
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-heading text-base font-semibold text-foreground">
+                {(isOfficialChannel || isWebChannel) && activeAccount
+                  ? activeAccount.displayLabel
+                  : status.account
+                    ? '已绑定本地账号'
+                    : '尚未核验账号'}
+              </div>
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {(isOfficialChannel || isWebChannel) && activeAccount ? (
                   <>
-                    {' · '}
-                    <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
-                      {status.account.identity}
-                    </code>
+                    <span>{officialPlatformName}</span>
+                    {status.account?.identity && (
+                      <>
+                        {' · '}
+                        <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
+                          {status.account.identity}
+                        </code>
+                      </>
+                    )}
                   </>
+                ) : status.account?.identity ? (
+                  <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
+                    {status.account.identity}
+                  </code>
+                ) : (
+                  '完成浏览器登录后将自动绑定本机账号标识'
                 )}
-              </>
-            ) : status.account?.identity ? (
-              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
-                {status.account.identity}
-              </code>
-            ) : (
-              '完成浏览器登录后将自动绑定本机账号标识'
-            )}
-          </p>
+              </p>
+            </div>
+          </div>
         </Card>
 
         {isOfficialChannel ? (
@@ -698,6 +722,13 @@ export function AccountsView({
               </CardFrame>
             </>
           )}
+
+          <AccountAvatarSyncCard
+            accountRef={targetAccountRef}
+            accountLabel={activeAccount?.displayLabel ?? (status.account ? '本地主账号' : null)}
+            disabled={!!busy}
+            offline={isOfficialChannel && officialPresentation.stateLabel !== '已连接'}
+          />
         </div>
       </div>
     </div>

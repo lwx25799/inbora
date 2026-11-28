@@ -78,6 +78,17 @@ export async function handleAiRuntimeCommand(
         return featuresStore.get();
       }
       ctx.authority.requireGuiControl(token, "CONTROL");
+      if (command.action === "setSyncCustomerAvatars") {
+        const saved = featuresStore.setSyncCustomerAvatars(command.enabled);
+        ctx.store.audit("ACCOUNT_AI_FEATURES_SAVED", ctx.store.accountId, {
+          visionEnabled: saved.visionEnabled,
+          mediaReplyEnabled: saved.mediaReplyEnabled,
+          toolsCount: saved.enabledBusinessTools.length,
+          syncCustomerAvatars: saved.syncCustomerAvatars,
+        });
+        ctx.onUpdated?.();
+        return saved;
+      }
       {
         const saved = featuresStore.save(command.features);
         ctx.store.audit("ACCOUNT_AI_FEATURES_SAVED", ctx.store.accountId, {

@@ -5,29 +5,16 @@ import { DirectMessageChat } from './DirectMessageChat';
 import { CommentThreadContext } from './CommentThreadContext';
 import { MessageText } from './MessageText';
 import { BrandTile } from './components/BrandLogo';
+import {
+  CachedAvatar,
+  avatarInitial,
+  avatarTone,
+  resolveCustomerAvatarKey,
+} from './components/CachedAvatar';
 import { completedReply, hasSubmittedReply, submittedReplyText } from './reply-editor-draft';
 import { replyResultPresentation } from './reply-result-presentation';
 import type { ReplyViewProps } from './reply-view-types';
 import { cn } from './lib/utils';
-
-const AVATAR_TONES = [
-  'bg-[#e6efe9] text-[#174f43] dark:bg-[#1e3630] dark:text-[#8fd9c9]',
-  'bg-[#f3eae0] text-[#7c4b1e] dark:bg-[#382b1e] dark:text-[#e8bf8c]',
-  'bg-[#e7ecf4] text-[#284c78] dark:bg-[#202d3d] dark:text-[#98c1f0]',
-  'bg-[#f2e7e7] text-[#7d3330] dark:bg-[#382222] dark:text-[#eba29e]',
-  'bg-[#ecebe4] text-[#4c4d3a] dark:bg-[#2c2d25] dark:text-[#cbcbb6]',
-] as const;
-
-function avatarTone(seed: string): string {
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
-  return AVATAR_TONES[hash % AVATAR_TONES.length]!;
-}
-
-function avatarInitial(name: string | null | undefined): string {
-  const trimmed = (name ?? '').trim();
-  return trimmed ? [...trimmed][0]! : '客';
-}
 
 function commentBadgeClass(replyStatus: ReplyStatus): string {
   if (replyStatus === 'REPLIED') {
@@ -74,15 +61,18 @@ export function ReplyDetail(props: ReplyViewProps) {
         <>
           <header className="detail-heading mx-auto flex w-full max-w-[780px] flex-wrap items-start justify-between gap-3 rounded-2xl border border-border/80 bg-card px-5 py-4 shadow-xs/5">
             <div className="flex min-w-0 items-center gap-3">
-              <span
-                aria-hidden="true"
-                className={cn(
-                  'flex size-10 shrink-0 items-center justify-center rounded-xl text-sm font-semibold ring-1 ring-black/6 dark:ring-white/10',
-                  avatarTone(actorName),
-                )}
-              >
-                {avatarInitial(actorName)}
-              </span>
+              <CachedAvatar
+                role="CUSTOMER"
+                avatarKey={resolveCustomerAvatarKey({
+                  avatarKey: thread.avatarKey,
+                  targetKey: thread.targetKey,
+                  payload: thread.event.payload,
+                })}
+                accountRef={thread.event.payload.accountId}
+                fallbackText={avatarInitial(actorName)}
+                className="size-10 rounded-xl text-sm font-semibold ring-1 ring-black/6 dark:ring-white/10"
+                fallbackClassName={avatarTone(actorName)}
+              />
               <div className="min-w-0">
                 <p className="eyebrow text-[11.5px] font-medium text-warning-foreground">
                   {thread.event.payload.kind === 'REPLY' ? '楼中楼评论' : '作品评论'} ·{' '}

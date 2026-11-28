@@ -211,6 +211,9 @@ export const errorMessages: Record<string, string> = {
   BUSINESS_TOOL_FORBIDDEN: '只读业务工具调用被拒绝：仅允许白名单内的只读查询与公网 HTTPS 地址，严禁写操作或绕过统一发送通道。',
   BUSINESS_TOOL_NOT_CONFIGURED: '该只读业务工具尚未启用或未配置有效的公网 HTTPS 查询地址。',
   BUSINESS_TOOL_FAILED: '只读业务工具查询失败或返回异常，本次未自动重试，请按人工流程核对。',
+  AVATAR_SYNC_DISABLED: '当前账号尚未开启「同步采集客户头像」，已停止缓存客户头像。',
+  AVATAR_INVALID_FORMAT: '头像图片格式无效，仅支持 PNG、JPEG 或 WEBP 格式。',
+  AVATAR_TOO_LARGE: '头像图片体积超过 256 KiB 安全上限，已拒绝缓存。',
 
   // Draft, takeover, followup & send
   PREPARING: '正在后台准备与核验',

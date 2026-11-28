@@ -79,6 +79,8 @@ export function isMutatingClientCommand(body: unknown): boolean {
     case 'getThread':
     case 'getAudit':
     case 'getSendResult':
+    case 'getAnalytics':
+    case 'getAvatarPreview':
       return false;
     case 'getMessagePreview':
       return command.refresh === true;

@@ -270,6 +270,8 @@ fn validate_command(body: &Value) -> Result<(), String> {
         "emergencyStop",
         "setMode",
         "getAudit",
+        "getAnalytics",
+        "getAvatarPreview",
         "browser",
         "securityRecovery",
         "observe",

@@ -29,7 +29,7 @@ import { configureAssistantConnection } from "./local-assistant-connection.js";
 import { readSecurityHold } from "../storage/security-holds.js";
 import { securityRuntime } from "./security-runtime.js";
 import {
-  clientError, closeOtherDialogs, dismissSuggestion,
+  clientError, closeOtherDialogs, dismissSuggestion, readAccountAvatarPreview, readAnalyticsSummary,
   handleConfigWriteCommand,
   handleLifecycleControlCommand,
   knowledgeMutatingActions,
@@ -466,7 +466,7 @@ export class ClientService {
   async dispatch(token: string, raw: unknown, accountRef = this.accountId): Promise<unknown> {
     requireSafe(!this.closing, "CLIENT_CLOSING");
     const c = commandSchema.parse(raw);
-    if (c.command !== "accounts") this.authority.operator(token);
+    if (c.command === "getAnalytics" || c.command === "getAvatarPreview") this.authority.checkReadOnlyOperator(token); else if (c.command !== "accounts") this.authority.operator(token);
     if (accountRef !== this.accountId) return this.accounts.dispatchMock(accountRef, token, c);
     if (c.command === "emergencyStop") {
       this.authority.operator(token, "CONTROL");
@@ -478,7 +478,7 @@ export class ClientService {
       return task;
     }
     if (
-      !["getStatus", "getInbox", "getThread", "getDiagnostics", "getAudit", "getSendResult", "getMessagePreview", "accounts"].includes(
+      !["getStatus", "getInbox", "getThread", "getDiagnostics", "getAudit", "getSendResult", "getMessagePreview", "accounts", "getAnalytics", "getAvatarPreview"].includes(
         c.command,
       )
     ) {
@@ -613,6 +613,8 @@ export class ClientService {
           evidence: this.maintenance.status(),
           browserResources: this.browserResources.snapshot(),
         };
+      case "getAnalytics": return readAnalyticsSummary(this.store, c.range);
+      case "getAvatarPreview": return readAccountAvatarPreview(this.store, c.role, c.key);
       case "getThread":
         return {
           ...this.queries.thread(

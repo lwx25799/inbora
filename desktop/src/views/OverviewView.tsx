@@ -41,15 +41,8 @@ import {
   time,
 } from '@/presentation';
 
-export type DesktopPageId =
-  | 'overview'
-  | 'inbox'
-  | 'accounts'
-  | 'automation'
-  | 'knowledge'
-  | 'models'
-  | 'runtime'
-  | 'settings';
+import type { DesktopPageId } from '@/components/AppSidebar';
+export type { DesktopPageId };
 
 export interface OverviewViewProps {
   status: Status;

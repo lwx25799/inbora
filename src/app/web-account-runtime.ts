@@ -41,6 +41,8 @@ import {
   closeOtherDialogs,
   dismissSuggestion,
   isReadOnlySidecarCommand,
+  readAccountAvatarPreview,
+  readAnalyticsSummary,
   updateModelGrant,
 } from './service-guards.js';
 import type { SuggestionState } from './suggestion-eligibility.js';
@@ -225,6 +227,16 @@ export class WebAccountRuntime {
     checkControl?: () => void,
   ): Promise<unknown> {
     requireSafe(!this.closing, 'CLIENT_CLOSING');
+    if (command.command === 'getAnalytics' || command.command === 'getAvatarPreview') {
+      requireSafe(parent.expires_at > this.authority.now(), 'OPERATOR_EXPIRED');
+      requireSafe(parent.permissions.includes('READ'), 'OPERATOR_PERMISSION_DENIED');
+      checkOperator();
+      return Promise.resolve(
+        command.command === 'getAnalytics'
+          ? readAnalyticsSummary(this.store, command.range, this.authority.now)
+          : readAccountAvatarPreview(this.store, command.role, command.key),
+      );
+    }
     if (this.session?.parentId !== parent.id || this.session.expiresAt <= this.authority.now()) {
       if (this.session) this.authority.revoke(this.session.token);
       const token = this.authority.issueSession(parent.permissions);
@@ -558,6 +570,10 @@ export class WebAccountRuntime {
         return this.status(token);
       case 'getAudit':
         return this.readAudit(store, c.page);
+      case 'getAnalytics':
+        return readAnalyticsSummary(store, c.range, authority.now);
+      case 'getAvatarPreview':
+        return readAccountAvatarPreview(store, c.role, c.key);
       case 'reconcileUncertain':
         store.event(c.eventId);
         return reconcileUncertainCommand(this.deliveryContext(), token, c.eventId);

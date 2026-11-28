@@ -1,5 +1,6 @@
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { readFile, mkdir, writeFile, realpath } from 'node:fs/promises';
-import { join, resolve, relative, isAbsolute } from 'node:path';
+import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { requireSafe } from '../core/contracts.js';
 import { validateMapping, validateObservationMapping, validateDmReplyMapping,
@@ -9,13 +10,38 @@ export const runtimeSchema = z.object({ version: z.literal(1), modelGrant: z.obj
   endpoint: z.url(), model: z.string().min(1), approvedAt: z.iso.datetime() }).nullable(),
   evidenceRetentionDays: z.number().int().min(1).max(365) });
 export type RuntimeConfig = z.infer<typeof runtimeSchema>;
+function assertWithinPrivateRoot(candidate: string): void {
+  const repo = resolve(import.meta.dirname, '../..');
+  const within = relative(repo, candidate);
+  if (!within.startsWith('..') && !isAbsolute(within)) {
+    const local = relative(join(repo, '.local'), candidate);
+    requireSafe(!local.startsWith('..') && !isAbsolute(local), 'RUNTIME_MUST_BE_PRIVATE');
+  }
+}
+
 export function runtimeRoot(requested?: string): string {
   const root = resolve(requested ?? join(process.env.LOCALAPPDATA ?? '', 'inbora'));
   requireSafe(Boolean(requested || process.env.LOCALAPPDATA), 'LOCALAPPDATA_REQUIRED');
-  const repo = resolve(import.meta.dirname, '../..'); const within = relative(repo, root);
-  if (!within.startsWith('..') && !isAbsolute(within)) {
-    const local = relative(join(repo, '.local'), root);
-    requireSafe(!local.startsWith('..') && !isAbsolute(local), 'RUNTIME_MUST_BE_PRIVATE');
+  assertWithinPrivateRoot(root);
+  return root;
+}
+
+/** Validates lexical path and canonical realpath against private-directory rules, blocking Windows junctions. */
+export function assertPrivateRuntimeRoot(requested: string): string {
+  const root = runtimeRoot(requested);
+  requireSafe(root.length > 3, 'INVALID_RUNTIME_DIRECTORY');
+  if (existsSync(root)) {
+    const stats = lstatSync(root);
+    requireSafe(!stats.isSymbolicLink() && stats.isDirectory(), 'INVALID_RUNTIME_DIRECTORY');
+  }
+  let probe = root;
+  while (!existsSync(probe)) {
+    const parent = dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+  if (existsSync(probe)) {
+    assertWithinPrivateRoot(realpathSync(probe));
   }
   return root;
 }

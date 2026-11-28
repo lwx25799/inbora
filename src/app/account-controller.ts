@@ -22,6 +22,7 @@ import {
 } from './isolated-douyin-connector.js';
 import { MockAccountRuntime, type SharedMockModels } from './mock-account-runtime.js';
 import { OfficialChannelManager, type OfficialChannelManagerOptions } from './official-channel-manager.js';
+import { readAccountAvatarPreview, readAnalyticsSummary } from './service-guards.js';
 import { WebAccountRuntime } from './web-account-runtime.js';
 
 export { createRuntimeConnector, createWorkerDispatchLedger, runtimeWorkerMode };
@@ -199,7 +200,33 @@ export class AccountController {
     };
   }
 
+  async dispatchPureRead(
+    accountId: AccountId,
+    parentToken: string,
+    command: Extract<ClientCommand, { command: 'getAnalytics' | 'getAvatarPreview' }>,
+  ): Promise<unknown> {
+    if (accountId === this.primary.accountId) {
+      this.primaryAuthority.checkReadOnlyOperator(parentToken, 'READ');
+    } else {
+      this.primaryAuthority.requirePureReadGuiControl(parentToken, 'READ');
+      const account = this.storage?.getAccount(accountId);
+      requireSafe(account, 'ACCOUNT_NOT_FOUND');
+      requireSafe(account.status === 'ACTIVE', account.status === 'DISCONNECTED' ? 'ACCOUNT_DISCONNECTED' : 'ACCOUNT_NOT_ACTIVE');
+    }
+    const scopedStore = {
+      db: this.events.db,
+      accountId,
+      schemaVersion: () => this.events.schemaVersion(),
+    };
+    return command.command === 'getAnalytics'
+      ? readAnalyticsSummary(scopedStore, command.range, this.now)
+      : readAccountAvatarPreview(scopedStore, command.role, command.key);
+  }
+
   async dispatchMock(accountId: AccountId, parentToken: string, command: ClientCommand): Promise<unknown> {
+    if (command.command === 'getAnalytics' || command.command === 'getAvatarPreview') {
+      return this.dispatchPureRead(accountId, parentToken, command);
+    }
     const account = this.storage?.getAccount(accountId);
     requireSafe(account, 'ACCOUNT_NOT_FOUND');
     requireSafe(account.status === 'ACTIVE', account.status === 'DISCONNECTED' ? 'ACCOUNT_DISCONNECTED' : 'ACCOUNT_NOT_ACTIVE');

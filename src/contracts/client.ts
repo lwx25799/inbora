@@ -10,6 +10,11 @@ import {
   businessToolsCommandSchema,
   mediaAssetsCommandSchema,
 } from "./ai-runtime.js";
+import { getAnalyticsCommandSchema } from "./analytics.js";
+import { getAvatarPreviewCommandSchema } from "./avatar.js";
+
+export type { AnalyticsRange, AnalyticsSummary } from "./analytics.js";
+export type { AvatarPreviewResult, AvatarRole } from "./avatar.js";
 
 export const protocolVersion = 1;
 export const protocolVersionV2 = 2;
@@ -200,6 +205,7 @@ export const commandSchema = z.union([
   ordinaryCommandSchema, browserCommandSchema, manualRecoveryCommandSchema,
   knowledgeCommandSchema, modelProvidersCommandSchema, accountsCommandSchema, replyPipelineCommandSchema,
   accountAiFeaturesCommandSchema, mediaAssetsCommandSchema, businessToolsCommandSchema,
+  getAnalyticsCommandSchema, getAvatarPreviewCommandSchema,
 ]);
 export type ClientCommand = z.infer<typeof commandSchema>;
 export interface ModelProviderStatusFields {

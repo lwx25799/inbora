@@ -5,26 +5,13 @@ import { compactTime, time, replyStatusLabel } from './presentation';
 import { MessageAttachments, isMediaPlaceholder } from './MessageAttachments';
 import { validShare, sharedWorkLabel } from './ShareLink';
 import { MessageText } from './MessageText';
+import {
+  CachedAvatar,
+  avatarInitial,
+  avatarTone,
+  resolveCustomerAvatarKey,
+} from './components/CachedAvatar';
 import { cn } from './lib/utils';
-
-const AVATAR_TONES = [
-  'bg-[#e6efe9] text-[#174f43] dark:bg-[#1e3630] dark:text-[#8fd9c9]',
-  'bg-[#f3eae0] text-[#7c4b1e] dark:bg-[#382b1e] dark:text-[#e8bf8c]',
-  'bg-[#e7ecf4] text-[#284c78] dark:bg-[#202d3d] dark:text-[#98c1f0]',
-  'bg-[#f2e7e7] text-[#7d3330] dark:bg-[#382222] dark:text-[#eba29e]',
-  'bg-[#ecebe4] text-[#4c4d3a] dark:bg-[#2c2d25] dark:text-[#cbcbb6]',
-] as const;
-
-function avatarTone(seed: string): string {
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
-  return AVATAR_TONES[hash % AVATAR_TONES.length]!;
-}
-
-function avatarInitial(name: string | null | undefined): string {
-  const trimmed = (name ?? '').trim();
-  return trimmed ? [...trimmed][0]! : '客';
-}
 
 function statusBadgeClass(replyStatus: Inbox['items'][number]['replyStatus'], status: string): string {
   const isWarn = replyStatus === 'WAITING' && ['UNCERTAIN', 'MANUAL_REVIEW'].includes(status);
@@ -45,6 +32,7 @@ function statusBadgeClass(replyStatus: Inbox['items'][number]['replyStatus'], st
 
 interface InboxListProps {
   inbox: Inbox;
+  accountRef?: string;
   accountUnreadTotal?: number;
   selected: string | null;
   selectedGroup?: string;
@@ -61,6 +49,7 @@ interface InboxListProps {
 
 export function InboxList({
   inbox,
+  accountRef,
   accountUnreadTotal,
   selected,
   selectedGroup,
@@ -256,15 +245,14 @@ export function InboxList({
                 if (selected !== target) choose(target);
               }}
             >
-              <span
-                aria-hidden="true"
-                className={cn(
-                  'mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl text-xs font-semibold ring-1 ring-black/6 dark:ring-white/10',
-                  avatarTone(displayName),
-                )}
-              >
-                {avatarInitial(displayName)}
-              </span>
+              <CachedAvatar
+                role="CUSTOMER"
+                avatarKey={resolveCustomerAvatarKey(item)}
+                accountRef={accountRef}
+                fallbackText={avatarInitial(displayName)}
+                className="mt-0.5 size-9 rounded-xl text-xs font-semibold ring-1 ring-black/6 dark:ring-white/10"
+                fallbackClassName={avatarTone(displayName)}
+              />
 
               <div className="min-w-0 flex-1 space-y-1">
                 <div className="flex items-start justify-between gap-1.5">

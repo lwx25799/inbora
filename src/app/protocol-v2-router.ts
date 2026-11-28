@@ -92,6 +92,13 @@ export async function dispatchTrustedServiceCommand(service: Pick<ClientService,
       return { paused: true, emergencyStopped: true };
     } finally { service.authority.revoke(stopToken); }
   }
+  if (body.command === 'getAnalytics' || body.command === 'getAvatarPreview') {
+    if (scope?.kind === 'ACCOUNT' && service.accounts && 'dispatchPureRead' in service.accounts) {
+      return service.accounts.dispatchPureRead(scope.accountRef, token, body);
+    }
+    service.authority.checkReadOnlyOperator(token, 'READ');
+    return service.dispatch(token, body, scope?.kind === 'ACCOUNT' ? scope.accountRef : undefined);
+  }
   if (body.command === 'securityRecovery' && body.action === 'status') {
     requireSafe(scope?.kind === 'ACCOUNT', 'PROTOCOL_SCOPE_MISMATCH');
     service.authority.renewTrustedSession(token, { readOnly: true });

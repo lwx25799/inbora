@@ -27,6 +27,19 @@ import type { CommentThreadPage, ReplyStatus, TimelineItem } from '../../src/con
 import type {LocalAssistantState} from '../../src/contracts/local-assistant.js';
 import type {SecurityRuntime} from '../../src/contracts/diagnostics.js';
 import {extractErrorCode} from './error-messages.js';
+
+const accountContextListeners = new Set<() => void>();
+
+export function onAccountContextChanged(listener: () => void): () => void {
+  accountContextListeners.add(listener);
+  return () => {
+    accountContextListeners.delete(listener);
+  };
+}
+
+function notifyAccountContextChanged(): void {
+  for (const listener of accountContextListeners) listener();
+}
 import {
   MODEL_PAGE_LIMIT, modelCatalogPageSchema, publicModelStateSchema,
   type ModelPresetId, type ModelProtocol, type PublicModelConnection, type PublicModelState,
@@ -94,6 +107,9 @@ export interface Inbox {
     unread?:boolean;
     channel: string;
     author: string | null;
+    actorId?: string | null;
+    targetKey?: string | null;
+    avatarKey?: string | null;
     preview: string;
     previewDirection?:'INCOMING'|'OUTGOING';
     displayText?: string;
@@ -112,6 +128,8 @@ export interface Inbox {
 }
 export interface Thread {
   groupKey?:string;
+  targetKey?:string|null;
+  avatarKey?:string|null;
   timeline?:{items:TimelineItem[];pageSize:number;hasMore:boolean;before:string|null;projectionRevision?:string};
   replyStatus: ReplyStatus;
   conversationReplyStatus?: ReplyStatus;
@@ -254,9 +272,14 @@ export function getActiveWorkbenchAccount(): ActiveWorkbenchAccount | null {
 }
 
 export function setActiveWorkbenchAccount(next: ActiveWorkbenchAccount | null): void {
+  const previousRef = activeWorkbenchAccount?.accountRef ?? null;
   activeWorkbenchAccount = next && next.accountRef !== DEFAULT_ACCOUNT_ID ? next : null;
   if (!activeWorkbenchAccount && accountRouting) {
     accountRouting.accountRef = DEFAULT_ACCOUNT_ID;
+  }
+  const nextRef = activeWorkbenchAccount?.accountRef ?? null;
+  if (previousRef !== nextRef) {
+    notifyAccountContextChanged();
   }
 }
 
@@ -294,8 +317,10 @@ export async function request<T>(body: DesktopCommand): Promise<T> {
       if (body.command === 'disconnect') {
         accountRouting = null;
         activeWorkbenchAccount = null;
+        notifyAccountContextChanged();
       } else {
         activeWorkbenchAccount = null;
+        notifyAccountContextChanged();
         observeRoutingStatus(result as Status);
       }
       return result;
@@ -303,6 +328,7 @@ export async function request<T>(body: DesktopCommand): Promise<T> {
       if (accountRouting === routing && extractErrorCode(error) === 'CONNECT_RUNTIME_FIRST') {
         accountRouting = null;
         activeWorkbenchAccount = null;
+        notifyAccountContextChanged();
       }
       throw error;
     }
@@ -357,6 +383,19 @@ export function requestV2<T>(
   commandId?: string,
 ): Promise<T> {
   return invoke<T>("client_request_v2", { scope, body, ...(commandId ? { commandId } : {}) });
+}
+
+export function requestForAccount<T>(
+  accountRef: AccountId,
+  body: ClientCommand,
+  commandId?: string,
+): Promise<T> {
+  const mutating = isMutatingClientCommand(body);
+  const effectiveCommandId = mutating ? (commandId ?? crypto.randomUUID()) : undefined;
+  if (accountRef !== DEFAULT_ACCOUNT_ID || accountRouting !== null) {
+    return requestV2<T>({ kind: 'ACCOUNT', accountRef }, body, effectiveCommandId);
+  }
+  return invoke<T>("client_request", { body });
 }
 
 export const platformNames: Record<string, string> = {

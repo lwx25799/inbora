@@ -12,6 +12,8 @@ import { markInboxRead } from "./inbox-read-state.js";
 import type { AiSettings, ClientCommand } from "./contracts.js";
 import type { ModelProviderController } from "./model-provider-controller.js";
 import type { ReplyPolicy } from "./automation-contracts.js";
+export { readAnalyticsSummary } from "./analytics-queries.js";
+export { readAccountAvatarPreview } from "./avatar-cache.js";
 
 export function clientError(error: unknown): string {
   return error instanceof Blocked ? error.code : "OPERATION_FAILED_PRIVATE_DIAGNOSTICS";
@@ -40,6 +42,8 @@ const readOnlyCommands = new Set<string>([
   "getDiagnostics",
   "getAudit",
   "getSendResult",
+  "getAnalytics",
+  "getAvatarPreview",
 ]);
 
 /** Pure read-only IPC calls should not trigger SQLite session renewal writes while comfortably valid. */

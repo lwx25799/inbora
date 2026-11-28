@@ -91,4 +91,36 @@ export class AccountAiFeaturesStore {
     }).immediate();
     return normalized;
   }
+
+  /** Atomically patches only `syncCustomerAvatars`, preserving all other account AI flags. */
+  setSyncCustomerAvatars(enabled: boolean): AccountAiFeatures {
+    const updatedAt = this.now();
+    let saved = cloneDefaults();
+    this.db.transaction(() => {
+      this.db.exec(CREATE_TABLE_SQL);
+      const row = this.db
+        .prepare("SELECT features_json FROM account_ai_features WHERE account_id=?")
+        .get(this.accountId) as { features_json: string } | undefined;
+      let current = cloneDefaults();
+      if (row) {
+        try {
+          const parsed = accountAiFeaturesSchema.safeParse(JSON.parse(row.features_json));
+          if (parsed.success) current = normalizeFeatures(parsed.data);
+        } catch {
+          current = cloneDefaults();
+        }
+      }
+      saved = { ...current, syncCustomerAvatars: Boolean(enabled) };
+      this.db
+        .prepare(
+          `INSERT INTO account_ai_features (account_id, features_json, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(account_id) DO UPDATE SET
+             features_json=excluded.features_json,
+             updated_at=excluded.updated_at`,
+        )
+        .run(this.accountId, JSON.stringify(saved), updatedAt);
+    }).immediate();
+    return saved;
+  }
 }

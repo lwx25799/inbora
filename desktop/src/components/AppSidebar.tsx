@@ -1,6 +1,7 @@
 import * as React from "react";
 import {
   ActivityIcon,
+  BarChart3Icon,
   BookOpenIcon,
   CpuIcon,
   InboxIcon,
@@ -11,9 +12,11 @@ import {
   SlidersHorizontalIcon,
   UsersIcon,
 } from "lucide-react";
-import type { Status } from "@/api";
+import type { ActiveWorkbenchAccount, Status } from "@/api";
+import { DEFAULT_ACCOUNT_ID } from "../../../src/contracts/account.js";
 import { AutoReplySwitch } from "@/components/AutoReplySwitch";
 import { BrandTile, BrandWordmark } from "@/components/BrandLogo";
+import { CachedAvatar } from "@/components/CachedAvatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -27,6 +30,7 @@ export type DesktopPageId =
   | "knowledge"
   | "models"
   | "runtime"
+  | "analytics"
   | "settings";
 
 export interface DesktopNavItem {
@@ -61,6 +65,7 @@ export const DESKTOP_NAV_GROUPS: DesktopNavGroup[] = [
     label: "治理与系统",
     items: [
       { id: "runtime", label: "调度与审计", icon: ActivityIcon },
+      { id: "analytics", label: "数据统计", icon: BarChart3Icon },
       { id: "settings", label: "系统设置", icon: SettingsIcon },
     ],
   },
@@ -74,6 +79,7 @@ export const DESKTOP_PAGE_CRUMBS: Record<DesktopPageId, { group: string; title: 
   knowledge: { group: "资产与智能", title: "知识库与人格" },
   models: { group: "资产与智能", title: "多模型配置" },
   runtime: { group: "治理与系统", title: "调度与审计" },
+  analytics: { group: "治理与系统", title: "数据统计" },
   settings: { group: "治理与系统", title: "系统设置" },
 };
 
@@ -85,6 +91,7 @@ export interface AppSidebarProps {
   busy: string;
   pendingCount: number;
   pendingAutoReply: boolean | null;
+  activeAccount?: ActiveWorkbenchAccount | null | undefined;
   onSelectPage: (page: DesktopPageId) => void;
   onSetCollapsed: (collapsed: boolean) => void;
   onToggleAutoReply: (enabled: boolean) => void;
@@ -121,6 +128,7 @@ export function AppSidebar({
   busy,
   pendingCount,
   pendingAutoReply,
+  activeAccount,
   onSelectPage,
   onSetCollapsed,
   onToggleAutoReply,
@@ -278,12 +286,25 @@ export function AppSidebar({
           >
             <div className="flex items-center justify-between gap-2">
               <div className="flex min-w-0 items-center gap-2">
-                <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/12 text-xs font-semibold text-primary">
-                  {accountBound ? "本" : "待"}
-                </span>
+                {(() => {
+                  const effectiveAccountRef = activeAccount?.accountRef ?? DEFAULT_ACCOUNT_ID;
+                  const identityKey =
+                    status.account?.id === effectiveAccountRef ? status.account?.identity : undefined;
+                  return (
+                    <CachedAvatar
+                      role="ACCOUNT"
+                      avatarKey={identityKey || effectiveAccountRef}
+                      accountRef={effectiveAccountRef}
+                      fallbackText={accountBound ? "本" : "待"}
+                      alt={activeAccount?.displayLabel || "值守账号头像"}
+                      className="size-7 rounded-lg text-xs font-semibold"
+                      fallbackClassName="bg-primary/12 text-primary"
+                    />
+                  );
+                })()}
                 <div className="min-w-0 leading-tight">
                   <p className="truncate text-xs font-semibold text-foreground">
-                    {accountBound ? "本地值守账号" : "本地工作台"}
+                    {activeAccount?.displayLabel || (accountBound ? "本地值守账号" : "本地工作台")}
                   </p>
                   <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
                     <span className={cn("size-1.5 shrink-0 rounded-full", statusDotClass)} />

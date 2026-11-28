@@ -5,30 +5,17 @@ import { ReplyComposer } from './ReplyComposer';
 import { MessageAttachments, isMediaPlaceholder } from './MessageAttachments';
 import { ShareLink, validShare } from './ShareLink';
 import { MessageText } from './MessageText';
+import {
+  CachedAvatar,
+  avatarInitial,
+  avatarTone,
+  resolveCustomerAvatarKey,
+} from './components/CachedAvatar';
 import type { ReplyViewProps } from './reply-view-types';
 import { cn } from './lib/utils';
 
 type Timeline = NonNullable<Thread['timeline']>;
 const empty: Timeline = { items: [], pageSize: 30, hasMore: false, before: null };
-
-const AVATAR_TONES = [
-  'bg-[#e6efe9] text-[#174f43] dark:bg-[#1e3630] dark:text-[#8fd9c9]',
-  'bg-[#f3eae0] text-[#7c4b1e] dark:bg-[#382b1e] dark:text-[#e8bf8c]',
-  'bg-[#e7ecf4] text-[#284c78] dark:bg-[#202d3d] dark:text-[#98c1f0]',
-  'bg-[#f2e7e7] text-[#7d3330] dark:bg-[#382222] dark:text-[#eba29e]',
-  'bg-[#ecebe4] text-[#4c4d3a] dark:bg-[#2c2d25] dark:text-[#cbcbb6]',
-] as const;
-
-function avatarTone(seed: string): string {
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
-  return AVATAR_TONES[hash % AVATAR_TONES.length]!;
-}
-
-function avatarInitial(name: string | null | undefined): string {
-  const trimmed = (name ?? '').trim();
-  return trimmed ? [...trimmed][0]! : '客';
-}
 
 function headerBadgeClass(replyStatus: ReplyStatus): string {
   if (replyStatus === 'REPLIED') {
@@ -211,15 +198,18 @@ export function DirectMessageChat(props: ReplyViewProps & { thread: Thread }) {
       <header className="chat-heading shrink-0 space-y-2 border-b border-border/80 bg-card/80 px-5 py-3 max-[1050px]:px-4">
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <span
-              aria-hidden="true"
-              className={cn(
-                'flex size-9 shrink-0 items-center justify-center rounded-xl text-sm font-semibold ring-1 ring-black/6 dark:ring-white/10',
-                avatarTone(actorName),
-              )}
-            >
-              {avatarInitial(actorName)}
-            </span>
+            <CachedAvatar
+              role="CUSTOMER"
+              avatarKey={resolveCustomerAvatarKey({
+                avatarKey: thread.avatarKey,
+                targetKey: thread.targetKey,
+                payload: thread.event.payload,
+              })}
+              accountRef={thread.event.payload.accountId}
+              fallbackText={avatarInitial(actorName)}
+              className="size-9 rounded-xl text-sm font-semibold ring-1 ring-black/6 dark:ring-white/10"
+              fallbackClassName={avatarTone(actorName)}
+            />
             <div className="min-w-0">
               <p className="eyebrow text-[11px] font-medium text-info-foreground/80">私信会话</p>
               <h2 className="truncate font-heading text-[15px] font-semibold text-info-foreground">{actorName}</h2>
@@ -299,17 +289,27 @@ export function DirectMessageChat(props: ReplyViewProps & { thread: Thread }) {
                   outgoing ? 'outgoing flex-row-reverse' : 'incoming flex-row',
                 )}
               >
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    'mt-5 flex size-8 shrink-0 items-center justify-center rounded-xl text-xs font-semibold ring-1 ring-black/6 dark:ring-white/10',
-                    outgoing
-                      ? 'bg-primary/14 text-primary dark:bg-primary/24 dark:text-primary'
-                      : avatarTone(actorName),
-                  )}
-                >
-                  {outgoing ? '我' : avatarInitial(actorName)}
-                </span>
+                {outgoing ? (
+                  <span
+                    aria-hidden="true"
+                    className="mt-5 flex size-8 shrink-0 items-center justify-center rounded-xl bg-primary/14 text-xs font-semibold text-primary ring-1 ring-black/6 dark:bg-primary/24 dark:text-primary dark:ring-white/10"
+                  >
+                    我
+                  </span>
+                ) : (
+                  <CachedAvatar
+                    role="CUSTOMER"
+                    avatarKey={resolveCustomerAvatarKey({
+                      avatarKey: thread.avatarKey,
+                      targetKey: thread.targetKey,
+                      payload: thread.event.payload,
+                    })}
+                    accountRef={thread.event.payload.accountId}
+                    fallbackText={avatarInitial(actorName)}
+                    className="mt-5 size-8 rounded-xl text-xs font-semibold ring-1 ring-black/6 dark:ring-white/10"
+                    fallbackClassName={avatarTone(actorName)}
+                  />
+                )}
 
                 <div
                   className={cn(

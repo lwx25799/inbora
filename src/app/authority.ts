@@ -107,6 +107,23 @@ export class WorkbenchAuthority {
     requireSafe(this.assistant.session(op.id) === null, errorCode);
     return op;
   }
+  /** Pure read-only operator check without writing OPERATOR_PERMISSION_DENIED audit rows. */
+  checkReadOnlyOperator(token: string, permission: Permission = "READ"): Operator {
+    const row = this.sessionRow(digest(token));
+    requireSafe(row && row.expires_at > this.now(), "OPERATOR_EXPIRED");
+    const result = { ...row, permissions: JSON.parse(row.permissions) as Permission[] };
+    requireSafe(result.permissions.includes(permission), "OPERATOR_PERMISSION_DENIED");
+    return result;
+  }
+  requirePureReadGuiControl(
+    token: string,
+    permission: Permission = "READ",
+    errorCode = "ASSISTANT_PERMISSION_REQUIRED",
+  ): Operator {
+    const op = this.checkReadOnlyOperator(token, permission);
+    requireSafe(this.assistant.session(op.id) === null, errorCode);
+    return op;
+  }
   checkAssistantModel(token: string, event: StoredEvent, checkAllowance = true): void {
     const version = this.assistantVersion(token);
     if (version === null) return;

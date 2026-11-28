@@ -405,8 +405,9 @@ describe('UX polish invariants across the 8 usability principles', () => {
     expect(paletteHtml).toContain('data-command-palette="true"');
     expect(paletteHtml).toContain('快速跳转与操作');
     expect(paletteHtml).toContain('多模型配置');
+    expect(paletteHtml).toContain('数据统计');
     expect(paletteHtml).toContain('同步收件箱');
-    expect((paletteHtml.match(/<button /gu) ?? []).length).toBe(11);
+    expect((paletteHtml.match(/<button /gu) ?? []).length).toBe(12);
   });
 
   test('daily UI copy hides headless/headed, schema3/schema4, DPAPI, and protocol v2 jargon and generalizes origin errors', () => {
